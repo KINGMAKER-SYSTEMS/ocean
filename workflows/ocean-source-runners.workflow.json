@@ -1,0 +1,343 @@
+{
+  "id": "ocean-source-runners",
+  "name": "Ocean Source-Adapter Runners (GitHub + Telegram First)",
+  "version": 1,
+  "status": "draft-ready",
+  "createdAt": "2026-06-14T02:19:17.838Z",
+  "firingOrder": 3,
+  "dependsOnWorkflows": [
+    "ocean-longhouse-router"
+  ],
+  "purpose": "Replace facade source adapters with real server-side fetch/ingest runners, starting with GitHub and Telegram per docs/SOURCE-ADAPTER-PRECEDENTS.md. Each runner fetches remote content, dedupes by content hash, writes objects through the storage router (built in ocean-longhouse-router), records the existing source_instance -> source_stream -> source_sync_run -> source_record lineage plus Ocean Ledger events, persists incremental cursors in longhouse.ledger_source_cursors, and only advertises capabilities (delete_detection/webhook/incremental) that are actually implemented. Stops longhouse.source_adapters from advertising GitHub/Telegram/Slack/Notion/Linear/Drive/R2 capabilities that have no runner behind them.",
+  "canonicalBoundaries": {
+    "oceanDaemon": "Local runtime/body and execution authority. Owns local sessions, events, tools, provider execution, local filesystem/shell/destructive permissions.",
+    "oceanLonghouse": "Hive brain / coordination layer per ocean-os/docs/LONGHOUSE.md. Coordinates skills, SOPs, routines, MCP discovery, memory, subagents, quorum/council logic. Does not bypass daemon permissions.",
+    "oceanBedrock": "Cloud-box support substrate for shared files, context ingest, ledger/event store, Postgres/R2/Vectorize/KV, MCP-facing infrastructure, and coworker bootstrap. Does not redefine Longhouse."
+  },
+  "currentState": "Today only local_folder has a working runner, and even that runs client-side: scripts/ocean-ingest-local.mjs walks the disk and PUTs files, while the server only exposes three thin HTTP coordination handlers (handleLocalFolderPlan ~server.mjs:948, handleLocalFolderRecordsBatch ~1020, handleLocalFolderCommit ~1067) that wrap src/sources.mjs helpers (upsertSourceInstance/upsertSourceStream/createSourceSyncRun/upsertSourceRecord/completeSourceSyncRun). The other 7 adapters are registry rows only: db/003_source_adapters.sql and the DEFAULT_ADAPTERS array in src/sources.mjs (lines 80-315) seed github/telegram/etc with capabilities JSON claiming incremental/webhook/delete_detection that no code delivers. There is NO server-side SourceRunner abstraction, NO remote fetch (no GitHub/Telegram HTTP client anywhere), and NO secret resolver: secret_ref is stored on source_instances (sources.mjs:730, server.mjs:730) but never read by anything. Incremental cursors have two unconnected homes: source_streams.cursor (jsonb, written by local-folder plan) and longhouse.ledger_source_cursors (db/002:91-101, a proper per-source cursor table) which is currently UNUSED by any adapter. Object writes go through putFile/recordObjectWrite against a single hardcoded local disk root (state.filesRoot), which the ocean-longhouse-router wave replaces with a storage router this wave depends on.",
+  "modelRoster": {
+    "strategic_orchestrator": {
+      "model": "chatgpt-5.5",
+      "useFor": [
+        "final plan arbitration",
+        "cross-system architecture",
+        "launch go/no-go",
+        "high-impact review"
+      ]
+    },
+    "architecture_reviewer": {
+      "model": "chatgpt-5.4",
+      "useFor": [
+        "canonical Ocean boundary checks",
+        "API design review",
+        "data model review"
+      ]
+    },
+    "implementation_worker": {
+      "model": "chatgpt-5.4-mini",
+      "useFor": [
+        "small code changes",
+        "scripts",
+        "config edits",
+        "repeatable task execution"
+      ]
+    },
+    "docs_onboarding": {
+      "model": "chatgpt-5.3-spark",
+      "useFor": [
+        "coworker docs",
+        "runbooks",
+        "checklists",
+        "operator summaries"
+      ]
+    },
+    "security_reviewer": {
+      "model": "deepseek-v4-pro",
+      "useFor": [
+        "auth review",
+        "token scope review",
+        "secret-handling review",
+        "destructive action gates"
+      ]
+    },
+    "test_triage": {
+      "model": "deepseek-v4-flash",
+      "useFor": [
+        "smoke tests",
+        "log triage",
+        "fast failure analysis",
+        "regression checks"
+      ]
+    },
+    "integration_engineer": {
+      "model": "kimi-k2.6",
+      "useFor": [
+        "Railway/Cloudflare integration",
+        "MCP wiring",
+        "edge-case implementation review"
+      ]
+    },
+    "mcp_interface_designer": {
+      "model": "minimax-m3",
+      "useFor": [
+        "MCP tool/resource contract",
+        "agent ergonomics",
+        "tool naming and schemas"
+      ]
+    },
+    "ingestion_courier_designer": {
+      "model": "minimax-m2.7",
+      "useFor": [
+        "local-folder bootstrap flow",
+        "courier UX",
+        "lightweight ingest worker drafts"
+      ]
+    }
+  },
+  "phases": [
+    {
+      "id": "phase-0-source-of-truth",
+      "title": "Pin boundaries, runner contract, and honest capabilities",
+      "ownerRole": "architecture_reviewer",
+      "reviewRole": "strategic_orchestrator",
+      "dependsOn": [],
+      "tasks": [
+        "Reaffirm canonical boundary: source runners are ocean-bedrock substrate code that fetch remote bytes/events and record lineage; they do NOT redefine Longhouse coordination or claim Bedrock is the quorum engine.",
+        "Read src/sources.mjs (DEFAULT_ADAPTERS lines 80-315), db/003_source_adapters.sql, db/002_ocean_ledger.sql (ledger_source_cursors), docs/SOURCE-ADAPTER-PRECEDENTS.md, scripts/ocean-ingest-local.mjs, and the local-folder handlers in src/server.mjs (948-1081) before writing any runner.",
+        "Establish the rule that capabilities JSON (snapshot/incremental/webhook/delete_detection) is a CONTRACT: a flag may only be true when a runner implements it. Audit current github (delete_detection:true in db/003 vs false in sources.mjs DEFAULT_ADAPTERS) and telegram (snapshot:false) for the existing drift and record the target honest values.",
+        "Decide and document the precedence between source_streams.cursor and longhouse.ledger_source_cursors: this track uses ledger_source_cursors as the authoritative incremental checkpoint store keyed by source_id='<adapter>:<instance>:<stream>', and treats source_streams.cursor as a denormalized convenience mirror only.",
+        "Define the SourceRunner interface contract on paper (plan() -> fetch()/iterate() -> writeObject() -> recordRecord() -> commit()) paralleling the local_folder plan -> records:batch -> commit HTTP flow, but executed server-side since remote adapters have no local courier."
+      ],
+      "acceptance": [
+        "A short RUNNER-CONTRACT note in docs states runners must keep capabilities honest and never write raw secrets to source_instances.config or manifests.",
+        "Capability-drift table lists current vs target capabilities for local_folder/github/telegram with the db/003-vs-sources.mjs github delete_detection mismatch explicitly called out.",
+        "Decision recorded: ledger_source_cursors is authoritative cursor store; source_streams.cursor is a mirror.",
+        "Note explicitly defers slack/notion/linear/google_drive/r2 runners to a later wave and states their capabilities must be downgraded to facade-honest values until implemented."
+      ]
+    },
+    {
+      "id": "phase-1-runner-interface",
+      "title": "Build the server-side SourceRunner interface and registry",
+      "ownerRole": "ingestion_courier_designer",
+      "reviewRole": "architecture_reviewer",
+      "dependsOn": [
+        "phase-0-source-of-truth"
+      ],
+      "tasks": [
+        "Create src/sources/runner.mjs defining a SourceRunner base contract: async plan(ctx), async *iterate(ctx) yielding normalized document packets ({source_record_id, virtual_path, content, content_type, content_sha256, source_updated_at, metadata}) matching the docs/SOURCE-ADAPTER-PRECEDENTS.md packet shape, and a default commit(ctx, stats).",
+        "Create src/sources/registry.mjs mapping adapter_id -> runner factory, registering only adapters with real runners; getRunner(adapterId) throws a clear 'no runner implemented for <adapter>' error for facade adapters so the server cannot pretend to sync them.",
+        "Implement a shared orchestration helper runSourceSync(db, state, {instance, stream, mode}) in src/sources/runner.mjs that: calls createSourceSyncRun, loads the cursor from ledger_source_cursors, drives the runner's iterate(), writes each packet's bytes through the storage router (from ocean-longhouse-router) under the stream's remote_prefix, dedupes via content_sha256 against existing source_records, calls upsertSourceRecord for lineage, advances the cursor, and calls completeSourceSyncRun/failSourceSyncRun.",
+        "Add a content-hash dedupe guard: before writing an object, look up source_records by (source_instance_id, source_record_id); skip the object write when content_sha256 is unchanged (increment skipped_count), matching the local courier's prior.sha256 check in scripts/ocean-ingest-local.mjs.",
+        "Reuse src/sources.mjs helpers unchanged for all lineage/ledger emission; do not duplicate ledger logic in runners."
+      ],
+      "acceptance": [
+        "src/sources/runner.mjs exports SourceRunner, runSourceSync; src/sources/registry.mjs exports getRunner/listRunnerAdapters.",
+        "getRunner('slack') throws 'no runner implemented'; getRunner('github') and getRunner('telegram') return runner instances.",
+        "A unit/integration test drives runSourceSync with a fake runner yielding 2 packets and asserts source_sync_runs gets one completed row, 2 source_records rows, and matching ledger events (source.sync.started/source.record.ingested/source.sync.completed).",
+        "Re-running the same fake runner with identical content yields skipped_count=2 and uploaded_count=0 (dedupe verified)."
+      ]
+    },
+    {
+      "id": "phase-2-secrets-and-cursors",
+      "title": "Secret-ref resolver and ledger_source_cursors integration",
+      "ownerRole": "security_reviewer",
+      "reviewRole": "architecture_reviewer",
+      "dependsOn": [
+        "phase-1-runner-interface"
+      ],
+      "tasks": [
+        "Create src/sources/secrets.mjs implementing resolveSecret(secret_ref) that maps a secret_ref string (e.g. 'env:GITHUB_TOKEN', 'env:TELEGRAM_BOT_TOKEN') to process.env, returning the raw token only in-memory; NEVER persist resolved tokens to Postgres, manifests, or ledger payloads.",
+        "Define the secret_ref convention: source_instances.secret_ref holds a pointer like 'env:VAR_NAME' (and a documented future 'kv:<key>' form), validated against an allowlist regex; reject any secret_ref that looks like a raw token (length/charset heuristic) at instance-create time in src/server.mjs sourceInstancePayload (~line 719).",
+        "Create src/sources/cursors.mjs with getCursor(db, sourceId)/setCursor(db, sourceId, {cursor_value, source_type, last_event_timestamp, status, error, metadata}) wrapping longhouse.ledger_source_cursors (db/002:91-101) via upsert on source_id PRIMARY KEY.",
+        "Wire runSourceSync to read the incremental cursor before fetch and persist the advanced cursor after a successful commit; on failure, set ledger_source_cursors.status='failed' and error without advancing cursor_value.",
+        "Add redaction: ensure ledger payloads, source_records.metadata, and sync-run metadata never include Authorization headers, tokens, or full webhook secrets (store only a sha256 fingerprint of the webhook secret if needed)."
+      ],
+      "acceptance": [
+        "resolveSecret('env:GITHUB_TOKEN') returns the env value; resolveSecret of a missing var throws a clear error naming the missing env var, not the value.",
+        "Creating a source_instance with secret_ref that matches a raw-token heuristic returns HTTP 400 and is rejected.",
+        "After a sync run, SELECT cursor_value FROM longhouse.ledger_source_cursors WHERE source_id='github:<inst>:<stream>' returns the advanced commit SHA / update_id.",
+        "grep over ledger_events.payload and source_records.metadata for a known test token value returns zero rows."
+      ]
+    },
+    {
+      "id": "phase-3-github-runner",
+      "title": "Implement the GitHub repository-contents runner (poll + incremental)",
+      "ownerRole": "integration_engineer",
+      "reviewRole": "security_reviewer",
+      "dependsOn": [
+        "phase-2-secrets-and-cursors"
+      ],
+      "tasks": [
+        "Create src/sources/github.mjs implementing a SourceRunner for adapter_id 'github', stream_type 'contents': use the GitHub REST API (GET /repos/{owner}/{repo}/git/trees/{branch}?recursive=1 for snapshot; GET /repos/{owner}/{repo}/commits and compare API for incremental) authenticated with the token from resolveSecret(instance.secret_ref).",
+        "Map config {owner, repo, branch, paths} (config_schema in db/003:121) to fetched blobs; for each file blob, fetch raw content, compute content_sha256, and map to virtual_path under the stream remote_prefix (default '/context/github/<owner>/<repo>/<path>' or '/coworkers/...' when owner-scoped), yielding normalized packets.",
+        "Implement incremental sync using the last synced commit SHA stored in ledger_source_cursors: on incremental runs call the compare API (base=lastSha, head=branch) and only re-fetch changed/added files; advance cursor to the new head SHA on commit.",
+        "Respect GitHub rate limits: read X-RateLimit-Remaining/Reset headers, back off (sleep until reset) when remaining is low, set a conservative per-run file cap, and record rate-limit state in sync-run metadata (not secrets).",
+        "Honor capabilities: implement delete_detection via the compare API 'removed' file status (soft-delete by setting source_records.deleted_at), so github delete_detection can be truthfully set true; leave webhook false until phase-5.",
+        "Add a server route POST /api/v1/sources/instances/:id/sync (admin/write + path-scope checked) that resolves the instance's adapter, calls getRunner + runSourceSync, and returns the sync-run summary; register it in the router near the existing /api/v1/sync/local-folder/* block (src/server.mjs ~1615)."
+      ],
+      "acceptance": [
+        "POST /api/v1/sources/instances/<github-id>/sync against a real small public test repo writes files under the stream remote_prefix and creates source_records with content_sha256 + object_id.",
+        "A second sync with no upstream changes returns skipped_count>0, uploaded_count=0, and does not move the cursor backward.",
+        "After pushing one commit upstream, an incremental sync uploads only the changed file(s) and advances ledger_source_cursors.cursor_value to the new head SHA.",
+        "Deleting a file upstream then syncing sets source_records.deleted_at for that record (delete_detection proven before the capability flag is flipped)."
+      ]
+    },
+    {
+      "id": "phase-4-telegram-runner",
+      "title": "Implement the Telegram chat runner (incremental getUpdates)",
+      "ownerRole": "integration_engineer",
+      "reviewRole": "security_reviewer",
+      "dependsOn": [
+        "phase-2-secrets-and-cursors"
+      ],
+      "tasks": [
+        "Create src/sources/telegram.mjs implementing a SourceRunner for adapter_id 'telegram': use the Bot API getUpdates with offset=<last update_id + 1> stored in ledger_source_cursors (matching the precedent 'telegram: chat_id + update_id/message_id' in docs/SOURCE-ADAPTER-PRECEDENTS.md), authenticated with resolveSecret(instance.secret_ref) (TELEGRAM_BOT_TOKEN).",
+        "Filter updates to the configured config.chat_id (db/003:129); for each message render a normalized markdown packet (text + author + timestamp + external metadata) at virtual_path like '/context/telegram/<chat>/<YYYY-MM-DD>/<message_id>.md', compute content_sha256, and yield it.",
+        "For media messages, record media metadata (file_id, mime, size) in source_records.metadata; optionally fetch media bytes via getFile + file download when within size limits and binary_files capability is honored; otherwise skip bytes and keep the metadata record.",
+        "Advance the cursor to max(update_id)+1 on commit; getUpdates is inherently incremental-only, so keep snapshot:false honest and do NOT claim a snapshot capability.",
+        "Respect Telegram rate limits and long-poll timeout bounds; cap updates fetched per run; record next offset and counts in sync-run metadata.",
+        "Route the same POST /api/v1/sources/instances/:id/sync added in phase-3 through the telegram runner via the registry (no new route needed)."
+      ],
+      "acceptance": [
+        "With a test bot + chat, POST /api/v1/sources/instances/<telegram-id>/sync ingests recent messages as objects under the chat remote_prefix with source_records + ledger events.",
+        "A second immediate sync returns 0 new records (offset cursor consumed) and the cursor_value equals the last update_id+1.",
+        "Sending a new message then syncing ingests exactly that message (incremental proven).",
+        "telegram capabilities in the registry keep snapshot:false; no code path claims a full-history snapshot."
+      ]
+    },
+    {
+      "id": "phase-5-webhooks-and-honest-capabilities",
+      "title": "Webhook receivers and capability reconciliation",
+      "ownerRole": "integration_engineer",
+      "reviewRole": "security_reviewer",
+      "dependsOn": [
+        "phase-3-github-runner",
+        "phase-4-telegram-runner"
+      ],
+      "tasks": [
+        "Add a webhook receiver route POST /api/v1/sources/webhooks/:adapter/:instanceId in src/server.mjs that verifies the signature (GitHub X-Hub-Signature-256 HMAC using a per-instance webhook secret resolved via secret_ref; Telegram secret_token header) before processing.",
+        "On a verified GitHub push webhook, enqueue/trigger an incremental sync for the affected branch (reuse runSourceSync); on a verified Telegram update webhook, ingest the single update and advance the cursor. Reject unverified payloads with 401 and emit a ledger security event.",
+        "Update src/sources.mjs DEFAULT_ADAPTERS and write a new db/004_source_capabilities_truth.sql migration that flips capabilities to reflect ONLY what is implemented: github {snapshot:true, incremental:true, webhook:true(after this phase), delete_detection:true, ...}; telegram {snapshot:false, incremental:true, webhook:true(after this phase), delete_detection:false}; and DOWNGRADE slack/notion/linear/google_drive/r2 webhook/incremental/delete_detection flags to false until runners exist, resolving the db/003-vs-sources.mjs drift found in phase-0.",
+        "Make getRunner the single source of truth: add a /api/v1/sources/adapters response field 'runner_implemented' derived from listRunnerAdapters so the registry API never advertises a capability the runner cannot deliver.",
+        "Document env var requirements (GITHUB_TOKEN, TELEGRAM_BOT_TOKEN, per-instance webhook secrets) and the Railway variable names in docs, without putting any secret value in the repo."
+      ],
+      "acceptance": [
+        "A forged GitHub webhook (bad signature) is rejected 401 and logged as a ledger security event; a correctly-signed push triggers an incremental sync.",
+        "GET /api/v1/sources/adapters shows runner_implemented:true only for local_folder/github/telegram and false for the other 5.",
+        "db/004 applied to prod: capabilities.webhook/delete_detection are true ONLY for adapters with implemented behavior; slack/notion/linear/google_drive/r2 incremental+webhook+delete_detection are false.",
+        "No remaining capability flag is true without a corresponding code path (verified by cross-checking registry against listRunnerAdapters)."
+      ]
+    },
+    {
+      "id": "phase-6-security-and-launch-review",
+      "title": "Security and launch review for source runners",
+      "ownerRole": "security_reviewer",
+      "reviewRole": "strategic_orchestrator",
+      "dependsOn": [
+        "phase-5-webhooks-and-honest-capabilities"
+      ],
+      "tasks": [
+        "Audit that no raw GitHub/Telegram token or webhook secret appears in source_instances.config, source_records.metadata, ledger_events.payload, sync-run metadata, manifests, or logs; only secret_ref pointers and sha256 fingerprints are persisted.",
+        "Confirm the new /api/v1/sources/instances/:id/sync and /api/v1/sources/webhooks/* routes enforce requirePermission + requirePathScope + requireClearance consistent with existing source handlers (src/server.mjs handleSourceInstances ~763), and that webhook routes verify signatures before any DB write.",
+        "Verify delete_detection only soft-deletes (sets deleted_at) and never performs destructive remote mirroring, per docs/SOURCE-ADAPTER-PRECEDENTS.md guidance #8.",
+        "Confirm rate-limit backoff prevents runaway API usage and that a single bad instance cannot stall the whole service (per-run caps, failure isolation, ledger_source_cursors.status='failed').",
+        "Produce an operator runbook: how to register a github/telegram instance with secret_ref, set the env var on Railway, trigger a manual sync, register a webhook, and rotate/revoke a secret."
+      ],
+      "acceptance": [
+        "Security checklist passes: zero raw secrets in any persisted artifact (grep-verified for test tokens).",
+        "Both new route families reject unauthorized/unscoped/unsigned requests in tests.",
+        "Capabilities are demonstrably honest: every true flag has a passing acceptance test from phases 3-5 behind it.",
+        "Operator runbook exists and known gaps (slack/notion/linear/drive/r2 still facade) are documented as future, not implied complete."
+      ]
+    }
+  ],
+  "fileTargets": [
+    {
+      "path": "src/sources/runner.mjs",
+      "action": "create",
+      "note": "SourceRunner base contract + runSourceSync orchestration (plan->iterate->writeObject->recordRecord->commit), reusing src/sources.mjs lineage helpers and the storage router from ocean-longhouse-router."
+    },
+    {
+      "path": "src/sources/registry.mjs",
+      "action": "create",
+      "note": "adapter_id -> runner factory map; getRunner throws for facade adapters so the server cannot fake syncs; exposes listRunnerAdapters for honest capability reporting."
+    },
+    {
+      "path": "src/sources/secrets.mjs",
+      "action": "create",
+      "note": "resolveSecret(secret_ref) mapping 'env:VAR' pointers to process.env in-memory only; never persists raw tokens; allowlist + raw-token rejection heuristic."
+    },
+    {
+      "path": "src/sources/cursors.mjs",
+      "action": "create",
+      "note": "getCursor/setCursor wrapping longhouse.ledger_source_cursors (db/002 lines 91-101) as the authoritative incremental checkpoint store."
+    },
+    {
+      "path": "src/sources/github.mjs",
+      "action": "create",
+      "note": "GitHub contents runner: git trees snapshot + commits/compare incremental, delete_detection via removed-file status, rate-limit backoff."
+    },
+    {
+      "path": "src/sources/telegram.mjs",
+      "action": "create",
+      "note": "Telegram runner: Bot API getUpdates with offset cursor (update_id+1), per-message markdown packets, media metadata, incremental-only (snapshot:false)."
+    },
+    {
+      "path": "src/server.mjs",
+      "action": "modify",
+      "note": "Add POST /api/v1/sources/instances/:id/sync and POST /api/v1/sources/webhooks/:adapter/:instanceId routes near the local-folder block (~1615); add secret_ref validation in sourceInstancePayload (~719); add runner_implemented to adapters response."
+    },
+    {
+      "path": "src/sources.mjs",
+      "action": "modify",
+      "note": "Update DEFAULT_ADAPTERS capabilities (lines 104-313) to honest values; resolve github delete_detection drift vs db/003; downgrade unimplemented adapters' webhook/incremental/delete_detection to false."
+    },
+    {
+      "path": "db/004_source_capabilities_truth.sql",
+      "action": "create",
+      "note": "Migration flipping longhouse.source_adapters.capabilities to implemented-only truth for all 8 adapters; idempotent ON CONFLICT update like db/003."
+    },
+    {
+      "path": "scripts/ocean-ingest-local.mjs",
+      "action": "investigate",
+      "note": "Reference precedent for plan->records:batch->commit flow, content-hash dedupe (prior.sha256 check ~line 288), and manifest/ledger emission to mirror in server-side runners."
+    },
+    {
+      "path": "docs/SOURCE-ADAPTER-PRECEDENTS.md",
+      "action": "investigate",
+      "note": "Authoritative design source for packet shape, per-adapter cursor model, secret_ref rule, and non-destructive delete guidance."
+    },
+    {
+      "path": "docs/SOURCE-RUNNERS.md",
+      "action": "create",
+      "note": "Runner contract note, capability-truth table, secret_ref/env var convention, and operator runbook for registering github/telegram instances and webhooks."
+    }
+  ],
+  "launchDefinitionOfDone": [
+    "A server-side SourceRunner interface (src/sources/runner.mjs) drives plan -> iterate -> writeObject -> recordRecord -> commit, reusing src/sources.mjs lineage helpers and the ocean-longhouse-router storage router.",
+    "GitHub runner performs a real snapshot + incremental sync of a test repo: objects written, source_records with content_sha256+object_id created, cursor advanced in ledger_source_cursors, delete_detection soft-deletes via deleted_at.",
+    "Telegram runner performs a real incremental getUpdates sync of a test chat: messages ingested as objects, offset cursor advanced to update_id+1, second sync yields zero new records.",
+    "Credentials are resolved from env via secret_ref (src/sources/secrets.mjs); zero raw tokens or webhook secrets exist in source_instances.config, source_records.metadata, ledger payloads, manifests, or logs.",
+    "Incremental cursors are stored in longhouse.ledger_source_cursors and survive across runs; re-sync of unchanged content yields skipped_count>0 and uploaded_count=0 (dedupe by content hash proven).",
+    "Verified webhook receivers exist for GitHub (HMAC) and Telegram (secret_token); forged payloads are rejected 401 and logged.",
+    "longhouse.source_adapters.capabilities is honest: every true flag (incremental/webhook/delete_detection) maps to an implemented runner behavior; slack/notion/linear/google_drive/r2 unimplemented flags are downgraded to false via db/004, and GET /api/v1/sources/adapters exposes runner_implemented.",
+    "Security review confirms scoped/clearance-checked sync routes, non-destructive delete, rate-limit backoff, and no secret leakage; operator runbook (docs/SOURCE-RUNNERS.md) documents registration, env vars, webhooks, and rotation."
+  ],
+  "openDecisions": [
+    "Sync execution model: synchronous within the HTTP request (simplest, like local-folder commit) vs enqueued into the existing-but-unused worker loop (server.mjs ~line 1187) / longhouse.ingest_jobs. Recommend synchronous-with-per-run-cap for v1, queue later for large repos.",
+    "Whether per-instance webhook secrets live as their own secret_ref env vars or a hashed value column; the schema currently has only one secret_ref per instance, which may be insufficient for instances that need both an API token AND a webhook secret.",
+    "Virtual-path placement policy: remote source content under /context/<adapter>/... (shared knowledge) vs /coworkers/<name>/... (owner-scoped). Needs a convention decision aligned with the path-scope/clearance model before GitHub/Telegram go live.",
+    "This track is assigned firingOrder=3 depending on ocean-longhouse-router (wave 2) for the storage router that writeObject targets. If the router slips, runners could fall back to the current putFile/recordObjectWrite local-disk path as an interim, but that re-couples to state.filesRoot and should be avoided — flagged as a risk.",
+    "Telegram getUpdates and webhook are mutually exclusive in the Bot API (a bot cannot use getUpdates while a webhook is set). The spec must pick poll OR webhook per telegram instance, not both simultaneously.",
+    "Whether to backfill/retry the 9 historical failed longhouse.ingest_jobs as part of this track or leave to a cleanup track (likely out of scope here)."
+  ],
+  "risks": [
+    "Hard dependency on ocean-longhouse-router (wave 2): runners write objects through the storage router. If that router is not ready, writeObject has no honest target except the hardcoded local disk root (state.filesRoot / recordObjectWrite mount_id='managed-local'), which re-introduces the single-mount coupling this track is meant to avoid. This is the primary cross-wave risk — the assigned dependsOnWorkflows=['ocean-longhouse-router'] is correct, do not start runner object-writes before the router lands.",
+    "Capability dishonesty is currently shipping to prod: db/003 and src/sources.mjs DEFAULT_ADAPTERS already disagree (github delete_detection true in db/003 vs false in sources.mjs) and both advertise webhook/incremental for adapters with no runner. Until db/004 lands, the registry actively lies to agents/coworkers about what it can sync.",
+    "Secret handling: secret_ref is stored but never consumed today, so there is no precedent resolver. A sloppy implementation could log tokens or write them into source_records.metadata/ledger payloads; phase-2 and phase-6 must gate this hard.",
+    "GitHub rate limits (5000 req/hr authenticated, lower for trees on large repos) can stall syncs or exhaust quota; without per-run caps and backoff a single large repo instance could degrade the whole single-replica service.",
+    "Telegram getUpdates offset is consume-once: a bug that advances the cursor before objects are durably written would silently drop messages. Cursor advance MUST happen only after a successful commit, with failure leaving cursor_value unmoved and status='failed'.",
+    "Token registry and tokens are single-replica file-based (data/.ocean-bedrock/tokens.json); webhook receivers may be hit by external traffic and must not assume the same auth model as scoped coworker tokens — signature verification, not bearer tokens, secures webhook routes.",
+    "Mapping remote items to virtual paths can collide with existing /context or /coworkers content; without a clear namespacing convention (open decision) a runner could overwrite human-authored objects."
+  ]
+}
