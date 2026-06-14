@@ -1145,6 +1145,7 @@ async function handleOceanContextTriage(req, res, state, principal) {
     correlationId: body.correlationId || body.correlation_id || undefined,
     ledgerLimit: body.ledgerLimit || body.ledger_limit || 25,
     clearance: body.clearance || 'CONFIDENTIAL',
+    force: body.force === true,
   });
   jsonResponse(res, 201, result);
 }

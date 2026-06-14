@@ -131,4 +131,4 @@ Recommended daily loop:
 - Entity extraction is heuristic only.
 - Graph edges are lightweight and local-file centric.
 - Vectorize is the serving index; Postgres stores metadata but not raw vectors.
-- Daily triage is triggerable by endpoint/script; a dedicated Railway cron/service is the next production hardening step.
+- Daily triage runs automatically via the `ocean-bedrock-triage-cron` Railway service (schedule `0 6,18 * * *` UTC). See [docs/OCEAN-TRIAGE-OPS.md](OCEAN-TRIAGE-OPS.md) for the operator runbook.

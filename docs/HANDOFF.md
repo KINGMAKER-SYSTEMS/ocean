@@ -393,14 +393,11 @@ latest live smoke source_instance_id: dfa0db73-61aa-405c-bfcd-10584ac478f7
 
 ## 11. Next work queue
 
-### Priority 1 — Automate daily Ocean Context triage
+### Priority 1 — Automate daily Ocean Context triage (SHIPPED)
 
-Semantic search, graph extraction, MCP/toolbox manifest, and manual triage are deployed. Next harden daily operation:
+Dedicated Railway cron service `ocean-bedrock-triage-cron` runs `npm run ocean:triage` twice daily (`0 6,18 * * *` UTC). Triage is idempotent per slot (key `triage:<day>:<slot>`). Findings route to a slot-stamped alert digest at `/context/ocean-bedrock/triage/_alerts/<day>-<slot>.md`. Thresholds configurable via `OCEAN_TRIAGE_FAILED_ALERT` / `OCEAN_TRIAGE_QUEUE_ALERT`. Failed-job tooling live: `npm run ocean:jobs`. See `docs/OCEAN-TRIAGE-OPS.md` for full runbook.
 
-- create a dedicated Railway cron/service for `npm run ocean:triage`,
-- route triage findings to Telegram/operator dashboard,
-- add cleanup/retry workflow for the 9 historical failed ingest jobs,
-- expand triage to detect stale source streams and missing coworker device heartbeats.
+Remaining: triage the 9 historical failed ingest jobs (list → retry or abandon using `npm run ocean:jobs`). Telegram/webhook notification channels are stubbed OFF; promote to active when ready.
 
 ### Priority 2 — Real coworker rollout prep
 
@@ -483,7 +480,7 @@ curl -fsS https://ocean-bedrock-production.up.railway.app/health
 6. `/api/v1/search` is still plain file text search; semantic search lives at `/api/v1/semantic/search`.
 7. Current graph extracts file/directory/heading/topic/link/source-lineage nodes, but not rich business entities yet.
 8. Source registry currently has V1 local_folder wiring only; GitHub/Telegram/Slack/Notion/Linear/Drive/R2 adapter runners are not implemented yet.
-9. Daily Ocean Context triage is endpoint/script-backed; a dedicated scheduler is not deployed yet.
+9. Daily Ocean Context triage: dedicated Railway cron service deployed (`0 6,18 * * *` UTC). Failed-job tooling live (`npm run ocean:jobs`). **9 historical failed ingest_jobs rows not yet dispositioned** — run `npm run ocean:jobs -- list` and retry/abandon each row, then verify `failedJobs=0` via the next triage report.
 
 ## 14. Acceptance criteria for next handoff
 

@@ -3,9 +3,14 @@ import { promises as fs } from 'node:fs';
 
 import { getPool, recordObjectWrite } from './metadata.mjs';
 import { semanticStatus } from './semantic.mjs';
+import { notifyTriage } from './notify.mjs';
 
 function dayStamp(date = new Date()) {
   return date.toISOString().slice(0, 10);
+}
+
+function slotStamp(date = new Date()) {
+  return date.toISOString().slice(11, 13);
 }
 
 function json(value) {
@@ -19,7 +24,8 @@ async function countRow(db, sql, values = []) {
 
 async function collectDbSnapshot(db) {
   if (!db) return { enabled: false };
-  const [objects, chunks, embeddedChunks, pendingChunks, graphNodes, graphEdges, queuedJobs, failedJobs, failedSyncRuns, sourceRecords] = await Promise.all([
+  const staleJobDays = Number(process.env.OCEAN_TRIAGE_STALE_JOB_DAYS || 3);
+  const [objects, chunks, embeddedChunks, pendingChunks, graphNodes, graphEdges, queuedJobs, failedJobs, staleFailedJobs, failedSyncRuns, sourceRecords] = await Promise.all([
     countRow(db, `SELECT count(*)::int AS count FROM longhouse.objects WHERE deleted_at IS NULL`),
     countRow(db, `SELECT count(*)::int AS count FROM longhouse.embedding_chunks`),
     countRow(db, `SELECT count(*)::int AS count FROM longhouse.embedding_chunks WHERE vectorize_id IS NOT NULL`),
@@ -28,6 +34,7 @@ async function collectDbSnapshot(db) {
     countRow(db, `SELECT count(*)::int AS count FROM longhouse.graph_edges`),
     countRow(db, `SELECT count(*)::int AS count FROM longhouse.ingest_jobs WHERE status = 'queued'`),
     countRow(db, `SELECT count(*)::int AS count FROM longhouse.ingest_jobs WHERE status = 'failed'`),
+    countRow(db, `SELECT count(*)::int AS count FROM longhouse.ingest_jobs WHERE status = 'failed' AND updated_at < now() - ($1 || ' days')::interval`, [staleJobDays]),
     countRow(db, `SELECT count(*)::int AS count FROM longhouse.source_sync_runs WHERE status = 'failed'`),
     countRow(db, `SELECT count(*)::int AS count FROM longhouse.source_records WHERE deleted_at IS NULL`),
   ]);
@@ -48,18 +55,22 @@ async function collectDbSnapshot(db) {
 
   return {
     enabled: true,
-    counts: { objects, chunks, embeddedChunks, pendingChunks, graphNodes, graphEdges, queuedJobs, failedJobs, failedSyncRuns, sourceRecords },
+    counts: { objects, chunks, embeddedChunks, pendingChunks, graphNodes, graphEdges, queuedJobs, failedJobs, staleFailedJobs, failedSyncRuns, sourceRecords },
     recentJobs: recentJobs.rows,
     recentSyncRuns: recentSyncRuns.rows,
   };
 }
 
 function triageFindings(snapshot, ledgerVerify, semantic) {
+  const failedAlert = Number(process.env.OCEAN_TRIAGE_FAILED_ALERT ?? 0);
+  const queueAlert = Number(process.env.OCEAN_TRIAGE_QUEUE_ALERT ?? 50);
+  const staleJobDays = Number(process.env.OCEAN_TRIAGE_STALE_JOB_DAYS || 3);
   const findings = [];
   if (ledgerVerify && ledgerVerify.ok === false) findings.push({ severity: 'high', area: 'ledger', message: 'Ocean Ledger hash-chain verification failed.' });
   if (snapshot.enabled) {
-    if (snapshot.counts.failedJobs > 0) findings.push({ severity: 'medium', area: 'ingest', message: `${snapshot.counts.failedJobs} ingest jobs are failed.` });
-    if (snapshot.counts.queuedJobs > 50) findings.push({ severity: 'medium', area: 'ingest', message: `${snapshot.counts.queuedJobs} ingest jobs are queued.` });
+    if (snapshot.counts.failedJobs > failedAlert) findings.push({ severity: 'medium', area: 'ingest', message: `${snapshot.counts.failedJobs} ingest jobs are failed.` });
+    if (snapshot.counts.staleFailedJobs > 0) findings.push({ severity: 'medium', area: 'ingest', message: `${snapshot.counts.staleFailedJobs} ingest jobs have been failed for >${staleJobDays} days without retry.` });
+    if (snapshot.counts.queuedJobs > queueAlert) findings.push({ severity: 'medium', area: 'ingest', message: `${snapshot.counts.queuedJobs} ingest jobs are queued.` });
     if (snapshot.counts.pendingChunks > 0) findings.push({ severity: 'low', area: 'semantic', message: `${snapshot.counts.pendingChunks} chunks are not embedded/vectorized yet.` });
     if (snapshot.counts.failedSyncRuns > 0) findings.push({ severity: 'medium', area: 'sources', message: `${snapshot.counts.failedSyncRuns} source sync runs have failed.` });
     if (snapshot.counts.graphNodes === 0 && snapshot.counts.objects > 0) findings.push({ severity: 'low', area: 'graph', message: 'Objects exist but graph extraction has not populated nodes yet.' });
@@ -75,7 +86,25 @@ function renderReport({ generatedAt, generatedBy, dbSnapshot, ledgerVerify, sema
 
 export async function runOceanContextTriage(state, principal = {}, options = {}) {
   const generatedAt = new Date().toISOString();
+  const day = dayStamp(new Date(generatedAt));
+  const slot = slotStamp(new Date(generatedAt));
+  const seqKey = `triage:${day}:${slot}`;
+
   const db = getPool();
+
+  if (!options.force && db) {
+    const existing = await db.query(
+      `SELECT id, virtual_path FROM longhouse.ledger_events
+       WHERE source_id = 'ocean-bedrock' AND source_sequence = $1
+       LIMIT 1`,
+      [seqKey],
+    );
+    if (existing.rows.length) {
+      const row = existing.rows[0];
+      return { ok: true, skipped: 'already-ran-this-slot', reportPath: row.virtual_path, eventId: row.id };
+    }
+  }
+
   const [dbSnapshot, ledgerVerify, recentLedgerEvents] = await Promise.all([
     collectDbSnapshot(db),
     state.ledger?.verify ? state.ledger.verify().catch((error) => ({ ok: false, error: error.message })) : Promise.resolve(null),
@@ -83,7 +112,7 @@ export async function runOceanContextTriage(state, principal = {}, options = {})
   ]);
   const semantic = semanticStatus();
   const findings = triageFindings(dbSnapshot, ledgerVerify, semantic);
-  const reportPath = options.reportPath || `/context/ocean-bedrock/triage/${dayStamp(new Date(generatedAt))}.md`;
+  const reportPath = options.reportPath || `/context/ocean-bedrock/triage/${day}.md`;
   const report = renderReport({ generatedAt, generatedBy: principal.name || principal.id || 'system', dbSnapshot, ledgerVerify, semantic, findings, recentLedgerEvents });
 
   const diskPath = path.join(state.filesRoot, reportPath.replace(/^\//, ''));
@@ -94,17 +123,21 @@ export async function runOceanContextTriage(state, principal = {}, options = {})
 
   const event = await state.ledger.append({
     event_type: 'ocean_context.triage.completed',
-    correlation_id: options.correlationId || `cor-ocean-context-triage-${dayStamp(new Date(generatedAt))}`,
+    correlation_id: options.correlationId || `cor-ocean-context-triage-${day}`,
     lab: 'ocean-context',
     actor_type: 'agent',
     actor_id: principal.id || 'ocean-bedrock',
     actor_name: principal.name || 'ocean-bedrock',
     source_id: 'ocean-bedrock',
-    source_sequence: `triage:${dayStamp(new Date(generatedAt))}`,
+    source_sequence: seqKey,
     virtual_path: reportPath,
     payload: { generatedAt, reportPath, findings, dbCounts: dbSnapshot.counts || null, semantic },
     clearance: options.clearance || 'CONFIDENTIAL',
     tags: ['ocean-context', 'triage', 'knowledge-base'],
+  });
+
+  await notifyTriage(state, { day, slot, findings, dbCounts: dbSnapshot.counts || null }, principal).catch((err) => {
+    console.error('[triage] notification failed (non-fatal):', err.message);
   });
 
   return { ok: true, generatedAt, reportPath, findings, dbSnapshot, ledgerVerify, semantic, event };

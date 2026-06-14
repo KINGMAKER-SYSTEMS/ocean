@@ -12,6 +12,7 @@ Options:
   --token <token>      Scoped bearer token. Defaults to OCEAN_BEDROCK_TOKEN.
   --token-file <path>  Read scoped bearer token from a local file.
   --report-path <path> Override report path.
+  --force              Bypass per-slot idempotency guard and re-run even if this slot already ran.
 `);
 }
 
@@ -24,6 +25,7 @@ function parseArgs(argv) {
     else if (arg === '--token') args.token = argv[++i];
     else if (arg === '--token-file') args.tokenFile = argv[++i];
     else if (arg === '--report-path') args.reportPath = argv[++i];
+    else if (arg === '--force') args.force = true;
     else throw new Error(`Unknown argument: ${arg}`);
   }
   return args;
@@ -60,7 +62,7 @@ const response = await fetch(`${url}/api/v1/ocean-context/triage/daily`, {
     Authorization: `Bearer ${token}`,
     'content-type': 'application/json',
   },
-  body: JSON.stringify({ reportPath: args.reportPath || null }),
+  body: JSON.stringify({ reportPath: args.reportPath || null, force: args.force === true }),
 });
 const body = await response.json();
 if (!response.ok) throw new Error(`Triage failed: ${response.status} ${JSON.stringify(body)}`);

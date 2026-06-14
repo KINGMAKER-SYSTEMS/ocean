@@ -13,6 +13,7 @@
     "ocean:app": "node scripts/ocean-local-app.mjs",
     "ocean:worker": "node scripts/ocean-ingest-worker.mjs",
     "ocean:triage": "node scripts/ocean-context-triage.mjs",
+    "ocean:jobs": "node scripts/ocean-failed-jobs.mjs",
     "ocean:semantic:backfill": "node scripts/ocean-semantic-backfill.mjs",
     "mcp": "node scripts/ocean-bedrock-mcp.mjs",
     "db:check": "node scripts/check-postgres.mjs",

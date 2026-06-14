@@ -147,6 +147,56 @@ export async function completeIngestJob(jobId, status, error = null) {
   );
 }
 
+export async function listFailedIngestJobs({ limit = 50 } = {}) {
+  const db = getPool();
+  if (!db) return [];
+  const result = await db.query(
+    `SELECT id, job_type, status, virtual_path, attempts, max_attempts, error, updated_at, payload
+     FROM longhouse.ingest_jobs
+     WHERE status = 'failed'
+     ORDER BY updated_at DESC
+     LIMIT $1`,
+    [limit],
+  );
+  return result.rows;
+}
+
+export async function requeueIngestJob(id, { resetAttempts = false } = {}) {
+  const db = getPool();
+  if (!db) throw new Error('DATABASE_URL required.');
+  const result = await db.query(
+    `UPDATE longhouse.ingest_jobs
+     SET status = 'queued',
+         locked_by = null,
+         locked_at = null,
+         run_after = now(),
+         attempts = CASE WHEN $2 THEN 0 ELSE attempts END,
+         error = null,
+         updated_at = now()
+     WHERE id = $1 AND status = 'failed'
+     RETURNING *`,
+    [id, resetAttempts],
+  );
+  return result.rows[0] || null;
+}
+
+export async function abandonIngestJob(id, reason = 'abandoned by operator') {
+  const db = getPool();
+  if (!db) throw new Error('DATABASE_URL required.');
+  const result = await db.query(
+    `UPDATE longhouse.ingest_jobs
+     SET status = 'cancelled',
+         error = $2,
+         locked_by = null,
+         locked_at = null,
+         updated_at = now()
+     WHERE id = $1 AND status = 'failed'
+     RETURNING *`,
+    [id, reason],
+  );
+  return result.rows[0] || null;
+}
+
 export async function processIngestJob(state, job) {
   if (job.job_type === 'embed_object') {
     if (!job.object_id) return { skipped: true, reason: 'missing object_id' };
