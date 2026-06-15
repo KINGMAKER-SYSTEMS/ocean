@@ -641,7 +641,7 @@ function validateMountConfig(type, config, stateRoot) {
     if (!config.root) throw new HttpError(400, 'Local mount requires config.root.');
     if (!path.isAbsolute(config.root)) throw new HttpError(400, 'Local mount config.root must be an absolute path.');
     if (stateRoot && config.root !== stateRoot && !config.root.startsWith(`${stateRoot}/`)) {
-      throw new HttpError(400, `Local mount config.root must be within the server root (${stateRoot}).`);
+      throw new HttpError(400, `Local mount config.root must be within the managed files root (${stateRoot}).`);
     }
   }
 }
@@ -1689,7 +1689,7 @@ export function createOceanBedrockServer(options = {}) {
       if (!body.prefix || typeof body.prefix !== 'string') throw new HttpError(400, 'Mount prefix is required.');
       const prefix = normalizeApiPath(body.prefix);
       const config = body.config || {};
-      validateMountConfig(body.type, config, state.root);
+      validateMountConfig(body.type, config, state.filesRoot);
       const capabilities = body.capabilities || {};
       const priority = Number(body.priority ?? 100);
       const result = await db.query(
