@@ -83,12 +83,15 @@ Railway cron's built-in overlap-skip (prior Active execution blocks the next) pr
 
 ## Alert surfaces and thresholds
 
-### Primary surface (this wave): digest file
+### Primary surfaces
 
-Alert digest is written only when `high` or `medium` findings exist. No external notifier is provisioned this wave — Telegram/webhook channel stubs are compiled but stay OFF unless their env is set.
+Alert digest is written only when `high` or `medium` findings exist.
 
-Deferred channels (OFF by default, no cred required):
-- `OCEAN_TRIAGE_TELEGRAM_BOT_TOKEN` + `OCEAN_TRIAGE_TELEGRAM_CHAT_ID` → Telegram
+Active:
+- Digest file: `/context/ocean-bedrock/triage/_alerts/<day>-<slot>.md`
+- Telegram: `OCEAN_TRIAGE_TELEGRAM_BOT_TOKEN` + `OCEAN_TRIAGE_TELEGRAM_CHAT_ID` are set on the `ocean-bedrock` service.
+
+Deferred/off by default:
 - `OCEAN_TRIAGE_WEBHOOK_URL` → generic POST
 
 ### Configurable thresholds
@@ -134,14 +137,19 @@ Abandon does **not** delete the underlying object from `longhouse.objects` or di
 
 ### Disposition of the 9 historical failed rows
 
-To be completed after Railway cron service is live. Steps:
+Completed 2026-06-15.
+
+Disposition:
+- All 9 historical failed `index_object` jobs were stale `/docs/smoke/hello.md` file-not-found rows from early smoke runs.
+- They were marked `cancelled`/abandoned rather than retried because the underlying file no longer exists.
+- Forced triage afterward reported `failedJobs=0`, `staleFailedJobs=0`, `queuedJobs=0`, and `pendingChunks=0`.
+
+If new failed jobs appear:
 
 1. `npm run ocean:jobs -- list` — record each job's `virtual_path` and `error`.
 2. For transient errors (fetch retry, embed timeout): `npm run ocean:jobs -- retry <id> --reset-attempts`.
 3. For file-not-found / stale debug paths: `npm run ocean:jobs -- abandon <id> --reason "<explanation>"`.
 4. After dispositioned: verify `failedJobs = 0` via the next triage run's `dbCounts`.
-
-Record final disposition here once complete.
 
 ## Daily operator loop
 

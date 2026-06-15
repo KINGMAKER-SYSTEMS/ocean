@@ -19,7 +19,7 @@ scoped bearer auth:  live
 MCP wrapper:         live
 coworker bootstrap: live
 ingest worker:       live for text chunking
-semantic vectors:    not yet live
+semantic vectors:    live — Workers AI embeddings + Cloudflare Vectorize
 mount registry:      live — /api/v1/mounts (admin-gated), 7 seeded mounts
 data-plane router:   live — all file ops route through StorageAdapter interface
 ```
@@ -30,9 +30,12 @@ The system is usable today for:
 - coworker folder ingest,
 - agent/MCP read/write/search,
 - ledger events and snapshots,
-- text chunk indexing into Postgres.
+- text chunk indexing into Postgres,
+- semantic/vector search,
+- lightweight graph neighborhood lookup,
+- scheduled Ocean Context triage.
 
-It is **not yet** a full vector/semantic knowledge engine because embeddings and Vectorize upserts are not implemented.
+It is **not yet** the full Ocean Longhouse quorum/runtime. Bedrock is the cloud-box support substrate: storage, ingest, semantic/graph context, ledger traces, triage, and operator tooling.
 
 ## 2. Critical guardrails
 
@@ -74,6 +77,9 @@ d04ef61f-3d47-4073-914e-4fedbd387a80   metadata/worker deploy
 54a961eb-4cf8-47cf-8d6b-791f1f324f61   landing route deploy
 202428df-c989-4ec2-b730-6e0598633877   source/sync API deploy
 db04d2f4-e87b-406b-80e5-c4a9c254272a   Ocean Context semantic/graph/toolbox deploy
+cf1c3e9b-866f-4bc9-aa5e-62de169e8724   Wave 1 triage scheduler + failed-job tooling deploy
+bc7f1ca2-2eff-46af-ba63-d3eab80c5832   Wave 2 data-plane mount router deploy
+af2a2949-337f-494c-af95-17285e166c43   Redeploy after enabling Telegram triage env
 ```
 
 Production env vars known to be set:
@@ -91,6 +97,8 @@ OCEAN_VECTORIZE_INDEX=ocean-longhouse-context
 OCEAN_EMBEDDING_MODEL=@cf/baai/bge-base-en-v1.5
 OCEAN_EMBEDDING_DIMENSIONS=768
 OCEAN_EMBEDDING_POOLING=cls
+OCEAN_TRIAGE_TELEGRAM_BOT_TOKEN=<secret>
+OCEAN_TRIAGE_TELEGRAM_CHAT_ID=<set>
 ```
 
 ## 4. Token locations
@@ -413,7 +421,7 @@ New files: `src/mounts/adapter.mjs`, `src/mounts/adapters/local.mjs`, `src/mount
 
 Dedicated Railway cron service `ocean-bedrock-triage-cron` runs `npm run ocean:triage` twice daily (`0 6,18 * * *` UTC). Triage is idempotent per slot (key `triage:<day>:<slot>`). Findings route to a slot-stamped alert digest at `/context/ocean-bedrock/triage/_alerts/<day>-<slot>.md`. Thresholds configurable via `OCEAN_TRIAGE_FAILED_ALERT` / `OCEAN_TRIAGE_QUEUE_ALERT`. Failed-job tooling live: `npm run ocean:jobs`. See `docs/OCEAN-TRIAGE-OPS.md` for full runbook.
 
-Remaining: triage the 9 historical failed ingest jobs (list → retry or abandon using `npm run ocean:jobs`). Telegram/webhook notification channels are stubbed OFF; promote to active when ready.
+Historical failed ingest jobs are dispositioned: 9 stale `/docs/smoke/hello.md` file-not-found rows were abandoned/cancelled. Forced 2026-06-15 triage reported `failedJobs=0`, `staleFailedJobs=0`, `queuedJobs=0`, and `pendingChunks=0`. Telegram triage alerts are active on `ocean-bedrock`; webhook remains deferred/off.
 
 ### Priority 2 — Real coworker rollout prep
 
@@ -490,13 +498,13 @@ curl -fsS https://ocean-bedrock-production.up.railway.app/health
 
 1. Semantic search + Vectorize are live, but graph/entity extraction is still heuristic.
 2. R2 bucket exists but object adapter/keys are not wired.
-3. 9 failed ingest jobs exist from earlier worker attempts; inspect before production cleanup.
+3. Historical failed ingest jobs were abandoned/cancelled; monitor for any new failed rows in triage.
 4. Token registry is volume JSON, not Postgres; okay for one Railway replica, not ideal for multi-replica.
 5. `/vault` is just a folder placeholder, not an encrypted secrets vault.
 6. `/api/v1/search` is still plain file text search; semantic search lives at `/api/v1/semantic/search`.
 7. Current graph extracts file/directory/heading/topic/link/source-lineage nodes, but not rich business entities yet.
 8. Source registry currently has V1 local_folder wiring only; GitHub/Telegram/Slack/Notion/Linear/Drive/R2 adapter runners are not implemented yet.
-9. Daily Ocean Context triage: dedicated Railway cron service deployed (`0 6,18 * * *` UTC). Failed-job tooling live (`npm run ocean:jobs`). Historical failed ingest_jobs rows likely still present — run `npm run ocean:jobs -- list` and retry/abandon, then verify `failedJobs=0` via next triage report.
+9. Daily Ocean Context triage: dedicated Railway cron service deployed (`0 6,18 * * *` UTC). Failed-job tooling live (`npm run ocean:jobs`). Telegram alerts are wired for medium/high findings; webhook remains off.
 
 ## 14. Acceptance criteria for next handoff
 

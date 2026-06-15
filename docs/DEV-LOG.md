@@ -815,6 +815,26 @@ live /api/v1/ocean-context/triage/daily: /context/ocean-bedrock/triage/2026-06-1
 DB after triage: chunks=31 vectorized=31 pending=0 graphNodes=59 graphEdges=57
 ```
 
+## 2026-06-15 — Triage cleanup + Telegram alert wiring
+
+Operational cleanup after the triage scheduler wave:
+
+- Historical failed ingest jobs are resolved: 9 stale `/docs/smoke/hello.md` `index_object` rows were abandoned/cancelled.
+- Forced live triage wrote `/context/ocean-bedrock/triage/2026-06-15.md` and reported no immediate issues.
+- Telegram alert variables are set on `ocean-bedrock`; one-time verification send returned Telegram API 200.
+- `ocean-bedrock` redeployed successfully after env wiring: `af2a2949-337f-494c-af95-17285e166c43`.
+
+Live verification:
+
+```txt
+failedJobs=0
+staleFailedJobs=0
+queuedJobs=0
+pendingChunks=0
+semantic chunks=55 vectorized=55 pending=0
+graphNodes=84 graphEdges=82
+```
+
 ## Known open gaps
 
 ```txt
@@ -822,24 +842,21 @@ no R2 object bytes adapter
 no GitHub/Telegram/Slack/Notion/Linear adapter runners yet
 no automatic local watcher daemon
 no encrypted vault/secrets manager
-failed ingest jobs need inspection/cleanup
 source registry is V1 local_folder HTTP wiring only
 entity/relationship extraction is still heuristic
-daily Ocean Context triage needs a dedicated cron/service for automatic scheduling
 ```
 
 ## Next development sequence
 
 Recommended sequence:
 
-1. Add dedicated daily triage cron/service.
-2. Prepare real coworker rollout checklist and run a small real folder dry-run.
-3. Package/download local companion GUI and one-time invite flow.
-4. Add richer graph/entity extraction and graph/semantic result fusion.
-5. Add GitHub adapter using the source registry.
-6. Add Telegram adapter using the source registry.
-7. Add R2 adapter or decide volume-first remains acceptable for V1.
-8. Perform security review before real coworker rollout.
+1. Continue Wave 2/3 hardening: use the mount router as the stable data-plane boundary.
+2. Add real source runners, starting with GitHub and Telegram.
+3. Prepare real coworker rollout checklist and run a small real folder dry-run.
+4. Package/download local companion GUI and one-time invite flow.
+5. Add richer graph/entity extraction and graph/semantic result fusion.
+6. Add R2 adapter or decide volume-first remains acceptable for V1.
+7. Perform security review before real coworker rollout.
 
 ## Quick command appendix
 
