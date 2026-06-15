@@ -80,6 +80,7 @@ db04d2f4-e87b-406b-80e5-c4a9c254272a   Ocean Context semantic/graph/toolbox depl
 cf1c3e9b-866f-4bc9-aa5e-62de169e8724   Wave 1 triage scheduler + failed-job tooling deploy
 bc7f1ca2-2eff-46af-ba63-d3eab80c5832   Wave 2 data-plane mount router deploy
 af2a2949-337f-494c-af95-17285e166c43   Redeploy after enabling Telegram triage env
+d9984f8a-3d0f-4c98-8da3-3387b2ea32e1   Latest deploy: mount containment fix + triage alert docs
 ```
 
 Production env vars known to be set:

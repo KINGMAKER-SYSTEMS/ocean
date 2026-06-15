@@ -823,6 +823,7 @@ Operational cleanup after the triage scheduler wave:
 - Forced live triage wrote `/context/ocean-bedrock/triage/2026-06-15.md` and reported no immediate issues.
 - Telegram alert variables are set on `ocean-bedrock`; one-time verification send returned Telegram API 200.
 - `ocean-bedrock` redeployed successfully after env wiring: `af2a2949-337f-494c-af95-17285e166c43`.
+- Latest source deploy after mount containment fix/docs: `d9984f8a-3d0f-4c98-8da3-3387b2ea32e1`.
 
 Live verification:
 
