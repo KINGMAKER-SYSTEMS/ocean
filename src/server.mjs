@@ -23,6 +23,9 @@ import {
   recordObjectDelete,
   recordObjectWrite,
 } from './metadata.mjs';
+import { HttpError } from './mounts/adapter.mjs';
+import { invalidateMountRegistry, loadMounts } from './mounts/registry.mjs';
+import { resolveMount } from './mounts/router.mjs';
 import {
   graphNeighborhood,
   listGraphNodes,
@@ -58,14 +61,6 @@ export const VERSION = '0.1.0';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
-class HttpError extends Error {
-  constructor(status, message, details = undefined) {
-    super(message);
-    this.status = status;
-    this.details = details;
-  }
-}
 
 const ROLE_PERMISSIONS = {
   readonly: new Set(['read']),
@@ -148,15 +143,6 @@ function normalizeApiPath(input = '/') {
   return parts.length ? `/${parts.join('/')}` : '/';
 }
 
-function diskPathFor(state, apiPath) {
-  const rel = apiPath.slice(1);
-  const resolved = path.resolve(state.filesRoot, rel);
-  if (resolved !== state.filesRoot && !resolved.startsWith(`${state.filesRoot}${path.sep}`)) {
-    throw new HttpError(400, 'Resolved path escapes the shared filesystem root.');
-  }
-  return resolved;
-}
-
 function pathInScopes(apiPath, scopes = ['/']) {
   return scopes.some((scope) => {
     const normalizedScope = normalizeApiPath(scope);
@@ -236,43 +222,6 @@ async function authenticate(req, url, state) {
   };
 }
 
-function etagFromStat(stat) {
-  return `"${stat.size.toString(16)}-${Math.floor(stat.mtimeMs).toString(16)}"`;
-}
-
-function kindFromStat(stat) {
-  if (stat.isDirectory()) return 'directory';
-  if (stat.isFile()) return 'file';
-  if (stat.isSymbolicLink()) return 'symlink';
-  return 'other';
-}
-
-function fileInfo(apiPath, stat) {
-  return {
-    path: apiPath,
-    name: apiPath === '/' ? '/' : path.posix.basename(apiPath),
-    type: kindFromStat(stat),
-    size: stat.size,
-    mtime: stat.mtime.toISOString(),
-    ctime: stat.ctime.toISOString(),
-    etag: etagFromStat(stat),
-  };
-}
-
-async function lstatNoSymlink(diskPath) {
-  const stat = await fs.lstat(diskPath);
-  if (stat.isSymbolicLink()) throw new HttpError(403, 'Symlinks are not served by Ocean Bedrock.');
-  return stat;
-}
-
-async function exists(diskPath) {
-  try {
-    await fs.access(diskPath);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 async function readJsonBody(req, maxBytes) {
   const chunks = [];
@@ -422,45 +371,20 @@ async function requireNoLockConflict(state, apiPath, principal) {
 }
 
 async function listDirectory(state, apiPath, depth = 1) {
-  const diskPath = diskPathFor(state, apiPath);
-  const stat = await lstatNoSymlink(diskPath);
-  if (!stat.isDirectory()) throw new HttpError(400, `${apiPath} is not a directory.`);
-
-  const entries = [];
-  async function walk(currentApiPath, currentDiskPath, remainingDepth) {
-    const dirents = await fs.readdir(currentDiskPath, { withFileTypes: true });
-    for (const dirent of dirents) {
-      const childApiPath = currentApiPath === '/' ? `/${dirent.name}` : `${currentApiPath}/${dirent.name}`;
-      const childDiskPath = path.join(currentDiskPath, dirent.name);
-      const childStat = await fs.lstat(childDiskPath);
-      if (childStat.isSymbolicLink()) {
-        entries.push(fileInfo(childApiPath, childStat));
-        continue;
-      }
-      const info = fileInfo(childApiPath, childStat);
-      entries.push(info);
-      if (childStat.isDirectory() && remainingDepth > 1) {
-        await walk(childApiPath, childDiskPath, remainingDepth - 1);
-      }
-    }
-  }
-
-  await walk(apiPath, diskPath, depth);
-  return { root: fileInfo(apiPath, stat), entries };
+  const { adapter, relPath } = await resolveMount(state, apiPath);
+  return adapter.list(relPath, apiPath, { depth });
 }
 
 async function statPath(state, apiPath) {
-  const diskPath = diskPathFor(state, apiPath);
-  const stat = await lstatNoSymlink(diskPath);
-  return fileInfo(apiPath, stat);
+  const { adapter, relPath } = await resolveMount(state, apiPath);
+  return adapter.stat(relPath, apiPath);
 }
 
-function ifMatchAllows(req, stat) {
+function ifMatchAllowsEtag(req, etag) {
   const ifMatch = req.headers['if-match'];
   if (!ifMatch) return true;
   if (ifMatch.trim() === '*') return true;
-  const current = etagFromStat(stat);
-  return ifMatch.split(',').map((value) => value.trim()).includes(current);
+  return ifMatch.split(',').map((value) => value.trim()).includes(etag);
 }
 
 async function putFile(req, state, principal, apiPath) {
@@ -468,32 +392,32 @@ async function putFile(req, state, principal, apiPath) {
   requirePathScope(principal, apiPath);
   await requireNoLockConflict(state, apiPath, principal);
 
-  const diskPath = diskPathFor(state, apiPath);
-  const parent = path.dirname(diskPath);
-  await fs.mkdir(parent, { recursive: true });
+  const { mount, adapter, relPath } = await resolveMount(state, apiPath);
+  if (mount.mode === 'readonly') throw new HttpError(403, `Mount "${mount.id}" is read-only.`);
 
   const noneMatch = req.headers['if-none-match'];
-  const targetExists = await exists(diskPath);
-  if (noneMatch === '*' && targetExists) throw new HttpError(412, 'Target already exists.');
-  if (targetExists) {
-    const current = await lstatNoSymlink(diskPath);
-    if (current.isDirectory()) throw new HttpError(409, 'Cannot overwrite a directory with a file.');
-    if (!ifMatchAllows(req, current)) throw new HttpError(412, 'If-Match does not match current file etag.');
+  let existingInfo = null;
+  try { existingInfo = await adapter.stat(relPath, apiPath); } catch (e) { if (!(e instanceof HttpError && e.status === 404)) throw e; }
+
+  if (noneMatch === '*' && existingInfo) throw new HttpError(412, 'Target already exists.');
+  if (existingInfo) {
+    if (existingInfo.type === 'directory') throw new HttpError(409, 'Cannot overwrite a directory with a file.');
+    if (!ifMatchAllowsEtag(req, existingInfo.etag)) throw new HttpError(412, 'If-Match does not match current file etag.');
   }
 
   const tmpPath = path.join(state.tmpRoot, `${Date.now()}-${crypto.randomBytes(8).toString('hex')}.upload`);
   const bytes = await receiveFile(req, tmpPath, state.maxUploadBytes);
-  await fs.rename(tmpPath, diskPath);
-  const info = await statPath(state, apiPath);
+  await adapter.write(relPath, tmpPath);
+  const info = await adapter.stat(relPath, apiPath);
   try {
-    await recordObjectWrite(state, apiPath, info, principal);
+    await recordObjectWrite(state, apiPath, info, principal, mount.id, relPath);
   } catch (error) {
     console.error('[ocean-bedrock] failed to record object metadata', error);
   }
   await appendAudit(state, {
     actor: principal.name,
     actorId: principal.id,
-    action: targetExists ? 'file.update' : 'file.create',
+    action: existingInfo ? 'file.update' : 'file.create',
     path: apiPath,
     bytes,
   });
@@ -506,10 +430,12 @@ async function deletePath(state, principal, apiPath, recursive = false) {
   if (apiPath === '/') throw new HttpError(400, 'Refusing to delete the filesystem root.');
   await requireNoLockConflict(state, apiPath, principal);
 
-  const diskPath = diskPathFor(state, apiPath);
-  const stat = await lstatNoSymlink(diskPath);
-  if (stat.isDirectory() && !recursive) throw new HttpError(400, 'Directory delete requires recursive=true.');
-  await fs.rm(diskPath, { recursive, force: false });
+  const { mount, adapter, relPath } = await resolveMount(state, apiPath);
+  if (mount.mode === 'readonly') throw new HttpError(403, `Mount "${mount.id}" is read-only.`);
+
+  const info = await adapter.stat(relPath, apiPath);
+  if (info.type === 'directory' && !recursive) throw new HttpError(400, 'Directory delete requires recursive=true.');
+  await adapter.delete(relPath, { recursive });
   try {
     await recordObjectDelete(apiPath, principal);
   } catch (error) {
@@ -518,7 +444,7 @@ async function deletePath(state, principal, apiPath, recursive = false) {
   await appendAudit(state, {
     actor: principal.name,
     actorId: principal.id,
-    action: stat.isDirectory() ? 'directory.delete' : 'file.delete',
+    action: info.type === 'directory' ? 'directory.delete' : 'file.delete',
     path: apiPath,
     recursive,
   });
@@ -530,9 +456,9 @@ async function createDirectory(req, state, principal) {
   requirePermission(principal, 'write');
   requirePathScope(principal, apiPath);
   await requireNoLockConflict(state, apiPath, principal);
-  const diskPath = diskPathFor(state, apiPath);
-  await fs.mkdir(diskPath, { recursive: true });
-  const info = await statPath(state, apiPath);
+  const { mount, adapter, relPath } = await resolveMount(state, apiPath);
+  if (mount.mode === 'readonly') throw new HttpError(403, `Mount "${mount.id}" is read-only.`);
+  const info = await adapter.mkdir(relPath, apiPath);
   await appendAudit(state, {
     actor: principal.name,
     actorId: principal.id,
@@ -554,16 +480,15 @@ async function movePath(req, state, principal, copy = false) {
   await requireNoLockConflict(state, from, principal);
   await requireNoLockConflict(state, to, principal);
 
-  const fromDisk = diskPathFor(state, from);
-  const toDisk = diskPathFor(state, to);
-  await lstatNoSymlink(fromDisk);
-  if ((await exists(toDisk)) && !body.overwrite) throw new HttpError(409, 'Destination exists. Pass overwrite=true to replace it.');
-  await fs.mkdir(path.dirname(toDisk), { recursive: true });
+  const { mount: fromMount, adapter: fromAdapter, relPath: fromRel } = await resolveMount(state, from);
+  const { mount: toMount, relPath: toRel } = await resolveMount(state, to);
+  if (fromMount.id !== toMount.id) throw new HttpError(400, 'Cross-mount move/copy is not yet supported.');
+  if (fromMount.mode === 'readonly') throw new HttpError(403, `Mount "${fromMount.id}" is read-only.`);
+
   if (copy) {
-    await fs.cp(fromDisk, toDisk, { recursive: true, force: Boolean(body.overwrite), errorOnExist: !body.overwrite });
+    await fromAdapter.copy(fromRel, toRel, { overwrite: Boolean(body.overwrite) });
   } else {
-    if (body.overwrite && (await exists(toDisk))) await fs.rm(toDisk, { recursive: true, force: true });
-    await fs.rename(fromDisk, toDisk);
+    await fromAdapter.move(fromRel, toRel, { overwrite: Boolean(body.overwrite) });
   }
   await appendAudit(state, {
     actor: principal.name,
@@ -573,7 +498,7 @@ async function movePath(req, state, principal, copy = false) {
     to,
     overwrite: Boolean(body.overwrite),
   });
-  return statPath(state, to);
+  return fromAdapter.stat(toRel, to);
 }
 
 async function createLock(req, state, principal) {
@@ -638,15 +563,21 @@ async function search(state, principal, url) {
   const results = [];
   const lowerQ = q.toLowerCase();
 
-  async function walk(apiPath) {
+  const { adapter, relPath: baseRel } = await resolveMount(state, basePath);
+  if (!adapter.diskRoot) throw new HttpError(501, 'Text search is not yet supported for this mount type.');
+  const baseDisk = path.join(adapter.diskRoot, baseRel);
+
+  async function walk(apiPath, diskPath) {
     if (results.length >= limit) return;
-    const diskPath = diskPathFor(state, apiPath);
     const stat = await fs.lstat(diskPath);
     if (stat.isSymbolicLink()) return;
     if (stat.isDirectory()) {
       const dirents = await fs.readdir(diskPath, { withFileTypes: true });
       for (const dirent of dirents) {
-        await walk(apiPath === '/' ? `/${dirent.name}` : `${apiPath}/${dirent.name}`);
+        await walk(
+          apiPath === '/' ? `/${dirent.name}` : `${apiPath}/${dirent.name}`,
+          path.join(diskPath, dirent.name),
+        );
         if (results.length >= limit) return;
       }
       return;
@@ -666,7 +597,7 @@ async function search(state, principal, url) {
     }
   }
 
-  await walk(basePath);
+  await walk(basePath, baseDisk);
   return { q, path: basePath, limit, results };
 }
 
@@ -674,6 +605,45 @@ function sourceDatabase() {
   const db = getPool();
   if (!db) throw new HttpError(503, 'Source registry requires DATABASE_URL on the Ocean Bedrock server.');
   return db;
+}
+
+function mountPublicView(row) {
+  return {
+    id: row.id,
+    type: row.type,
+    prefix: row.prefix,
+    mode: row.mode,
+    priority: row.priority,
+    capabilities: row.capabilities,
+    enabled: row.enabled,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+const SECRET_CONFIG_KEYS = new Set(['key', 'secret', 'password', 'token', 'credential', 'apikey', 'api_key', 'accesskey', 'access_key', 'privatekey', 'private_key']);
+
+function mountPublicViewWithConfig(row) {
+  const redacted = {};
+  for (const [k, v] of Object.entries(row.config || {})) {
+    redacted[k] = SECRET_CONFIG_KEYS.has(k.toLowerCase()) ? '[redacted]' : v;
+  }
+  return { ...mountPublicView(row), config: redacted };
+}
+
+function validateMountConfig(type, config, stateRoot) {
+  for (const k of Object.keys(config)) {
+    if (SECRET_CONFIG_KEYS.has(k.toLowerCase())) {
+      throw new HttpError(400, `Config key "${k}" looks like a raw secret. Use a secretRef handle instead.`);
+    }
+  }
+  if (type === 'local') {
+    if (!config.root) throw new HttpError(400, 'Local mount requires config.root.');
+    if (!path.isAbsolute(config.root)) throw new HttpError(400, 'Local mount config.root must be an absolute path.');
+    if (stateRoot && config.root !== stateRoot && !config.root.startsWith(`${stateRoot}/`)) {
+      throw new HttpError(400, `Local mount config.root must be within the server root (${stateRoot}).`);
+    }
+  }
 }
 
 function camelOrSnake(body, snake, camel, fallback = undefined) {
@@ -1156,25 +1126,14 @@ async function seedDefaultFolders(state) {
     await fs.mkdir(path.join(state.filesRoot, folder), { recursive: true });
   }
 
-  const docsReadme = path.join(state.filesRoot, 'docs', 'README.md');
-  if (!(await exists(docsReadme))) {
-    await fs.writeFile(docsReadme, '# Company docs\n\nShared, durable documentation for agents and humans.\n');
+  async function writeIfAbsent(filePath, content) {
+    try { await fs.access(filePath); } catch { await fs.writeFile(filePath, content); }
   }
 
-  const contextReadme = path.join(state.filesRoot, 'context', 'README.md');
-  if (!(await exists(contextReadme))) {
-    await fs.writeFile(contextReadme, '# Shared context\n\nUse this folder for reusable agent context, handoff notes, research summaries, and project memory.\n');
-  }
-
-  const sessionsReadme = path.join(state.filesRoot, 'sessions', 'README.md');
-  if (!(await exists(sessionsReadme))) {
-    await fs.writeFile(sessionsReadme, '# Sessions\n\nCreate one folder per durable agent or operator session.\n');
-  }
-
-  const vaultReadme = path.join(state.filesRoot, 'vault', 'README.md');
-  if (!(await exists(vaultReadme))) {
-    await fs.writeFile(vaultReadme, '# Vault\n\nDo not store high-value raw secrets here unless this service is deployed behind appropriate controls. Prefer scoped tokens, encrypted blobs, or an external secrets manager.\n');
-  }
+  await writeIfAbsent(path.join(state.filesRoot, 'docs', 'README.md'), '# Company docs\n\nShared, durable documentation for agents and humans.\n');
+  await writeIfAbsent(path.join(state.filesRoot, 'context', 'README.md'), '# Shared context\n\nUse this folder for reusable agent context, handoff notes, research summaries, and project memory.\n');
+  await writeIfAbsent(path.join(state.filesRoot, 'sessions', 'README.md'), '# Sessions\n\nCreate one folder per durable agent or operator session.\n');
+  await writeIfAbsent(path.join(state.filesRoot, 'vault', 'README.md'), '# Vault\n\nDo not store high-value raw secrets here unless this service is deployed behind appropriate controls. Prefer scoped tokens, encrypted blobs, or an external secrets manager.\n');
 }
 
 function workerEnabled() {
@@ -1323,6 +1282,7 @@ export function createOceanBedrockServer(options = {}) {
           oceanContextTriage: '/api/v1/ocean-context/triage/daily',
           toolbox: '/api/v1/toolbox/manifest',
           localFolderSync: '/api/v1/sync/local-folder/plan',
+          mounts: '/api/v1/mounts',
         },
         note: 'Most /api/v1 routes require Authorization: Bearer <token>.',
       });
@@ -1394,20 +1354,20 @@ export function createOceanBedrockServer(options = {}) {
       requirePermission(principal, 'read');
       const apiPath = normalizeApiPath(url.searchParams.get('path'));
       requirePathScope(principal, apiPath);
-      const diskPath = diskPathFor(state, apiPath);
-      const stat = await lstatNoSymlink(diskPath);
-      if (!stat.isFile()) throw new HttpError(400, `${apiPath} is not a file.`);
-      const etag = etagFromStat(stat);
-      if (req.headers['if-none-match'] === etag) {
-        res.writeHead(304, { etag });
+      const { adapter, relPath } = await resolveMount(state, apiPath);
+      const info = await adapter.stat(relPath, apiPath);
+      if (info.type !== 'file') throw new HttpError(400, `${apiPath} is not a file.`);
+      if (req.headers['if-none-match'] === info.etag) {
+        res.writeHead(304, { etag: info.etag });
         res.end();
         return;
       }
+      const { diskPath } = await adapter.read(relPath);
       res.writeHead(200, {
         'content-type': contentTypeFor(apiPath),
-        'content-length': stat.size,
-        etag,
-        'last-modified': stat.mtime.toUTCString(),
+        'content-length': info.size,
+        etag: info.etag,
+        'last-modified': new Date(info.mtime).toUTCString(),
         'content-disposition': url.searchParams.get('inline') === '1' ? 'inline' : `attachment; filename="${path.basename(apiPath).replace(/"/g, '')}"`,
       });
       createReadStream(diskPath).pipe(res);
@@ -1681,6 +1641,83 @@ export function createOceanBedrockServer(options = {}) {
       requirePermission(principal, 'admin');
       const limit = Math.max(1, Math.min(Number(url.searchParams.get('limit') || 100), 1000));
       jsonResponse(res, 200, { events: await readAudit(state, limit) });
+      return;
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/v1/mounts') {
+      requirePermission(principal, 'admin');
+      const db = getPool();
+      if (!db) {
+        const mounts = await loadMounts(state);
+        jsonResponse(res, 200, { mounts: mounts.map(({ mount }) => mountPublicView(mount)) });
+        return;
+      }
+      const result = await db.query(
+        `SELECT id, type, prefix, mode, priority, capabilities, enabled, created_at, updated_at
+         FROM longhouse.mounts ORDER BY length(prefix) DESC, priority DESC`,
+      );
+      jsonResponse(res, 200, { mounts: result.rows.map(mountPublicView) });
+      return;
+    }
+
+    const mountById = url.pathname.match(/^\/api\/v1\/mounts\/([^/]+)$/);
+
+    if (req.method === 'GET' && mountById) {
+      requirePermission(principal, 'admin');
+      const db = getPool();
+      if (!db) throw new HttpError(503, 'Mount registry requires DATABASE_URL.');
+      const result = await db.query(
+        `SELECT id, type, prefix, mode, priority, config, capabilities, enabled, created_at, updated_at
+         FROM longhouse.mounts WHERE id = $1`,
+        [decodeURIComponent(mountById[1])],
+      );
+      if (!result.rows.length) throw new HttpError(404, 'Mount not found.');
+      jsonResponse(res, 200, { mount: mountPublicViewWithConfig(result.rows[0]) });
+      return;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/v1/mounts') {
+      requirePermission(principal, 'admin');
+      const db = getPool();
+      if (!db) throw new HttpError(503, 'Mount registry requires DATABASE_URL.');
+      const body = await readJsonBody(req, state.maxJsonBytes);
+      const VALID_TYPES = new Set(['local', 'r2', 's3', 'github', 'webdav', 'sftp', 'remote-longhouse']);
+      const VALID_MODES = new Set(['readwrite', 'readonly', 'writeonly']);
+      if (!body.id || typeof body.id !== 'string') throw new HttpError(400, 'Mount id is required.');
+      if (!VALID_TYPES.has(body.type)) throw new HttpError(400, `Invalid mount type. Must be one of: ${[...VALID_TYPES].join(', ')}.`);
+      if (body.mode && !VALID_MODES.has(body.mode)) throw new HttpError(400, `Invalid mode. Must be one of: ${[...VALID_MODES].join(', ')}.`);
+      if (!body.prefix || typeof body.prefix !== 'string') throw new HttpError(400, 'Mount prefix is required.');
+      const prefix = normalizeApiPath(body.prefix);
+      const config = body.config || {};
+      validateMountConfig(body.type, config, state.root);
+      const capabilities = body.capabilities || {};
+      const priority = Number(body.priority ?? 100);
+      const result = await db.query(
+        `INSERT INTO longhouse.mounts (id, type, prefix, mode, priority, config, capabilities)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         RETURNING id, type, prefix, mode, priority, capabilities, enabled, created_at, updated_at`,
+        [body.id, body.type, prefix, body.mode || 'readwrite', priority, JSON.stringify(config), JSON.stringify(capabilities)],
+      );
+      invalidateMountRegistry();
+      await appendAudit(state, { actor: principal.name, actorId: principal.id, action: 'mount.create', mountId: body.id });
+      jsonResponse(res, 201, { mount: mountPublicView(result.rows[0]) });
+      return;
+    }
+
+    if (req.method === 'DELETE' && mountById) {
+      requirePermission(principal, 'admin');
+      const db = getPool();
+      if (!db) throw new HttpError(503, 'Mount registry requires DATABASE_URL.');
+      const mountId = decodeURIComponent(mountById[1]);
+      if (mountId === 'managed-local') throw new HttpError(400, 'The managed-local mount cannot be disabled.');
+      const result = await db.query(
+        `UPDATE longhouse.mounts SET enabled = false, updated_at = now() WHERE id = $1 RETURNING id`,
+        [mountId],
+      );
+      if (!result.rows.length) throw new HttpError(404, 'Mount not found.');
+      invalidateMountRegistry();
+      await appendAudit(state, { actor: principal.name, actorId: principal.id, action: 'mount.disable', mountId });
+      jsonResponse(res, 200, { disabled: mountId });
       return;
     }
 

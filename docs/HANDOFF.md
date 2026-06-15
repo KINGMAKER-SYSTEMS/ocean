@@ -1,6 +1,6 @@
 # Ocean Bedrock Handoff
 
-Generated: 2026-06-11T03:41:35Z  
+Generated: 2026-06-15T00:00:00Z  
 Repo: `/root/rt-nas/rt-nas`  
 Service: `ocean-bedrock`  
 Public URL: <https://ocean-bedrock-production.up.railway.app>
@@ -14,12 +14,14 @@ Current baseline is live:
 ```txt
 health endpoint:     live
 Postgres ledger:     live
-shared file API:     live
+shared file API:     live  (Wave 2: routed via mount adapter)
 scoped bearer auth:  live
 MCP wrapper:         live
 coworker bootstrap: live
 ingest worker:       live for text chunking
 semantic vectors:    not yet live
+mount registry:      live — /api/v1/mounts (admin-gated), 7 seeded mounts
+data-plane router:   live — all file ops route through StorageAdapter interface
 ```
 
 The system is usable today for:
@@ -393,6 +395,20 @@ latest live smoke source_instance_id: dfa0db73-61aa-405c-bfcd-10584ac478f7
 
 ## 11. Next work queue
 
+### Priority 0 — Wave 2 data-plane mount router (SHIPPED)
+
+Mount registry + StorageAdapter interface + path router + admin `/api/v1/mounts` API. All file operations (stat, list, read, write, delete, move, copy, mkdir, search) now route through a duck-typed `StorageAdapter`. Local adapter is `LocalStorageAdapter`; R2/other mounts return a `createUnimplementedAdapter` stub (HTTP 501). No-DB fallback uses a synthetic `managed-local` mount so `npm run smoke` stays green.
+
+Deployment ID: `bc7f1ca2-2eff-46af-ba63-d3eab80c5832`
+
+Verified live:
+- `GET /api/v1/mounts` returns 7 mounts (6 R2 + managed-local)
+- `GET /api/v1/stat?path=/` routes through `LocalStorageAdapter`
+- `GET /api/v1/list?path=/` returns directory entries via adapter
+- `npm run smoke` green
+
+New files: `src/mounts/adapter.mjs`, `src/mounts/adapters/local.mjs`, `src/mounts/registry.mjs`, `src/mounts/router.mjs`
+
 ### Priority 1 — Automate daily Ocean Context triage (SHIPPED)
 
 Dedicated Railway cron service `ocean-bedrock-triage-cron` runs `npm run ocean:triage` twice daily (`0 6,18 * * *` UTC). Triage is idempotent per slot (key `triage:<day>:<slot>`). Findings route to a slot-stamped alert digest at `/context/ocean-bedrock/triage/_alerts/<day>-<slot>.md`. Thresholds configurable via `OCEAN_TRIAGE_FAILED_ALERT` / `OCEAN_TRIAGE_QUEUE_ALERT`. Failed-job tooling live: `npm run ocean:jobs`. See `docs/OCEAN-TRIAGE-OPS.md` for full runbook.
@@ -480,7 +496,7 @@ curl -fsS https://ocean-bedrock-production.up.railway.app/health
 6. `/api/v1/search` is still plain file text search; semantic search lives at `/api/v1/semantic/search`.
 7. Current graph extracts file/directory/heading/topic/link/source-lineage nodes, but not rich business entities yet.
 8. Source registry currently has V1 local_folder wiring only; GitHub/Telegram/Slack/Notion/Linear/Drive/R2 adapter runners are not implemented yet.
-9. Daily Ocean Context triage: dedicated Railway cron service deployed (`0 6,18 * * *` UTC). Failed-job tooling live (`npm run ocean:jobs`). **9 historical failed ingest_jobs rows not yet dispositioned** — run `npm run ocean:jobs -- list` and retry/abandon each row, then verify `failedJobs=0` via the next triage report.
+9. Daily Ocean Context triage: dedicated Railway cron service deployed (`0 6,18 * * *` UTC). Failed-job tooling live (`npm run ocean:jobs`). Historical failed ingest_jobs rows likely still present — run `npm run ocean:jobs -- list` and retry/abandon, then verify `failedJobs=0` via next triage report.
 
 ## 14. Acceptance criteria for next handoff
 

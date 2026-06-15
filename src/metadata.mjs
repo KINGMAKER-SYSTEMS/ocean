@@ -17,16 +17,16 @@ export function getPool() {
   return pool;
 }
 
-export async function recordObjectWrite(state, apiPath, info, principal = {}) {
+export async function recordObjectWrite(state, apiPath, info, principal = {}, mountId = 'managed-local', backendKey = null) {
   const db = getPool();
   if (!db) return null;
 
-  const backendKey = apiPath.replace(/^\//, '');
+  const actualBackendKey = backendKey ?? apiPath.replace(/^\//, '');
   const contentType = contentTypeFromPath(apiPath);
   const result = await db.query(
     `INSERT INTO longhouse.objects (
        virtual_path, mount_id, backend_key, kind, content_type, size_bytes, etag, metadata, updated_at
-     ) VALUES ($1, 'managed-local', $2, $3, $4, $5, $6, $7, now())
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
      ON CONFLICT (virtual_path) DO UPDATE SET
        mount_id = EXCLUDED.mount_id,
        backend_key = EXCLUDED.backend_key,
@@ -40,7 +40,8 @@ export async function recordObjectWrite(state, apiPath, info, principal = {}) {
      RETURNING id`,
     [
       apiPath,
-      backendKey,
+      mountId,
+      actualBackendKey,
       info.type === 'directory' ? 'directory' : 'file',
       contentType,
       info.size ?? null,

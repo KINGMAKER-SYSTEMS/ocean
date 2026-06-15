@@ -243,13 +243,12 @@ Initial Postgres schema drafts:
 
 ## Phased build plan
 
-### Phase 1 — Virtual filesystem router
+### Phase 1 — Virtual filesystem router **(SHIPPED 2026-06-15)**
 
-- Keep this service named `ocean-bedrock` and align its support APIs with canonical `ocean-longhouse` contracts.
-- Add `mounts.json` registry.
-- Refactor current file operations through a `local` adapter.
-- Add `GET/POST/DELETE /api/v1/mounts` for admins.
-- Keep existing file API stable.
+- ~~Add `mounts.json` registry.~~ → Postgres `longhouse.mounts` table (7 seeded rows), 30s TTL cache, no-DB synthetic fallback.
+- ~~Refactor current file operations through a `local` adapter.~~ → `LocalStorageAdapter` in `src/mounts/adapters/local.mjs`; all stat/list/read/write/delete/move/copy/mkdir/search route through it.
+- ~~Add `GET/POST/DELETE /api/v1/mounts` for admins.~~ → Live; admin-gated, config redaction, local root containment validation.
+- ~~Keep existing file API stable.~~ → `npm run smoke` green; no breaking API changes.
 
 ### Phase 2 — First external adapters
 
@@ -276,22 +275,23 @@ Initial Postgres schema drafts:
 
 ## Immediate next implementation step
 
-The cleanest next code change is to introduce a mount registry and local adapter while preserving the current API behavior.
+Phase 1 is shipped. Next: Phase 2 first external adapters.
 
-Target file layout:
+Priority: `s3`/R2 adapter — keys exist in DB (`r2-*` mounts seeded), need Cloudflare R2 S3 access keys in Railway env and an `S3StorageAdapter` in `src/mounts/adapters/s3.mjs`.
+
+Current file layout (live):
 
 ```txt
 src/
   server.mjs
   auth.mjs
+  metadata.mjs
   mounts/
-    registry.mjs
-    router.mjs
+    adapter.mjs       ← HttpError + createUnimplementedAdapter
+    registry.mjs      ← loadMounts, invalidateMountRegistry
+    router.mjs        ← resolveMount
     adapters/
-      local.mjs
-      s3.mjs
-      github.mjs
-      webdav.mjs
+      local.mjs       ← LocalStorageAdapter (LIVE)
   mcp/
     server.mjs
 ```
