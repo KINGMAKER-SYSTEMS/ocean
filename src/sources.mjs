@@ -134,8 +134,8 @@ const DEFAULT_ADAPTERS = [
     capabilities: {
       snapshot: true,
       incremental: true,
-      webhook: true,
-      delete_detection: false,
+      webhook: false,
+      delete_detection: true,
       binary_files: true,
       text_events: true,
     },
@@ -161,9 +161,9 @@ const DEFAULT_ADAPTERS = [
     capabilities: {
       snapshot: false,
       incremental: true,
-      webhook: true,
+      webhook: false,
       delete_detection: false,
-      binary_files: true,
+      binary_files: false,
       text_events: true,
     },
   },
@@ -189,12 +189,12 @@ const DEFAULT_ADAPTERS = [
       },
     },
     capabilities: {
-      snapshot: true,
-      incremental: true,
-      webhook: true,
+      snapshot: false,
+      incremental: false,
+      webhook: false,
       delete_detection: false,
-      binary_files: true,
-      text_events: true,
+      binary_files: false,
+      text_events: false,
     },
   },
   {
@@ -218,12 +218,12 @@ const DEFAULT_ADAPTERS = [
       },
     },
     capabilities: {
-      snapshot: true,
-      incremental: true,
-      webhook: true,
-      delete_detection: true,
+      snapshot: false,
+      incremental: false,
+      webhook: false,
+      delete_detection: false,
       binary_files: false,
-      text_events: true,
+      text_events: false,
     },
   },
   {
@@ -246,12 +246,12 @@ const DEFAULT_ADAPTERS = [
       },
     },
     capabilities: {
-      snapshot: true,
-      incremental: true,
-      webhook: true,
-      delete_detection: true,
+      snapshot: false,
+      incremental: false,
+      webhook: false,
+      delete_detection: false,
       binary_files: false,
-      text_events: true,
+      text_events: false,
     },
   },
   {
@@ -275,12 +275,12 @@ const DEFAULT_ADAPTERS = [
       },
     },
     capabilities: {
-      snapshot: true,
-      incremental: true,
-      webhook: true,
-      delete_detection: true,
-      binary_files: true,
-      text_events: true,
+      snapshot: false,
+      incremental: false,
+      webhook: false,
+      delete_detection: false,
+      binary_files: false,
+      text_events: false,
     },
   },
   {
@@ -304,11 +304,11 @@ const DEFAULT_ADAPTERS = [
       },
     },
     capabilities: {
-      snapshot: true,
-      incremental: true,
+      snapshot: false,
+      incremental: false,
       webhook: false,
-      delete_detection: true,
-      binary_files: true,
+      delete_detection: false,
+      binary_files: false,
       text_events: false,
     },
   },
@@ -706,6 +706,7 @@ export async function completeSourceSyncRun(db, runId, stats = {}) {
 export async function upsertSourceRecord(db, record) {
   if (!db) db = getPool();
   if (!db) throw new Error('DATABASE_URL is required for source adapter operations.');
+  if (!record.source_record_id) throw new Error('source_record_id is required.');
 
   const cId = record.correlationId || correlationId();
   const seenAt = nowIso();
@@ -750,7 +751,7 @@ export async function upsertSourceRecord(db, record) {
     eventType: 'source.record.ingested',
     sourceId: `${instance.adapter_id || '?'}:${instance.name || record.source_instance_id}`,
     virtualPath: record.virtual_path || null,
-    sourceSequence: `${record.source_record_id}:${record.content_sha256 || seenAt}`,
+    sourceSequence: record.sourceSequence || record.source_sequence || `${record.source_record_id}:${record.content_sha256 || seenAt}`,
     payload: {
       source_instance_id: record.source_instance_id,
       stream_id: record.stream_id || null,
@@ -763,6 +764,54 @@ export async function upsertSourceRecord(db, record) {
   });
 
   return { id: row.id, source_instance_id: row.source_instance_id, source_record_id: row.source_record_id };
+}
+
+export async function markSourceRecordDeleted(db, record) {
+  if (!db) db = getPool();
+  if (!db) throw new Error('DATABASE_URL is required for source adapter operations.');
+  if (!record.source_instance_id) throw new Error('source_instance_id is required.');
+  if (!record.source_record_id) throw new Error('source_record_id is required.');
+
+  const deletedAt = record.deleted_at || record.deletedAt || nowIso();
+  const metadata = record.metadata || {};
+  const result = await db.query(
+    `UPDATE longhouse.source_records
+     SET deleted_at = $3::timestamptz,
+         metadata = metadata || $4::jsonb,
+         seen_at = now()
+     WHERE source_instance_id = $1
+       AND source_record_id = $2
+     RETURNING id, source_instance_id, source_record_id, virtual_path, content_sha256`,
+    [record.source_instance_id, record.source_record_id, deletedAt, JSON.stringify(metadata)],
+  );
+
+  if (!result.rows.length) return null;
+  const row = result.rows[0];
+
+  const instResult = await db.query(
+    'SELECT adapter_id, name FROM longhouse.source_instances WHERE id = $1',
+    [record.source_instance_id],
+  );
+  const instance = instResult.rows[0] || {};
+
+  await emitSourceEvent({
+    eventType: 'source.record.deleted',
+    sourceId: `${instance.adapter_id || '?'}:${instance.name || record.source_instance_id}`,
+    virtualPath: record.virtual_path || row.virtual_path || null,
+    sourceSequence: `${record.source_record_id}:deleted:${deletedAt}`,
+    payload: {
+      source_instance_id: record.source_instance_id,
+      stream_id: record.stream_id || null,
+      source_record_id: record.source_record_id,
+      virtual_path: record.virtual_path || row.virtual_path || null,
+      deleted_at: deletedAt,
+    },
+    correlationId: record.correlationId || record.correlation_id || null,
+    clearance: record.clearance || 'CONFIDENTIAL',
+    adapterId: instance.adapter_id || null,
+  });
+
+  return row;
 }
 
 // ---------------------------------------------------------------------------

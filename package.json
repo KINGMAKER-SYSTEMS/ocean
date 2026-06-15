@@ -15,6 +15,7 @@
     "ocean:triage": "node scripts/ocean-context-triage.mjs",
     "ocean:jobs": "node scripts/ocean-failed-jobs.mjs",
     "ocean:semantic:backfill": "node scripts/ocean-semantic-backfill.mjs",
+    "source:check": "node scripts/source-runner-check.mjs",
     "mcp": "node scripts/ocean-bedrock-mcp.mjs",
     "db:check": "node scripts/check-postgres.mjs",
     "db:migrate": "node scripts/migrate.mjs",

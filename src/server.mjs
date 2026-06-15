@@ -56,6 +56,9 @@ import {
   upsertSourceRecord,
   upsertSourceStream,
 } from './sources.mjs';
+import { getRunner, listRunnerAdapters } from './sources/registry.mjs';
+import { runSourceSync } from './sources/runner.mjs';
+import { validateSecretRef } from './sources/secrets.mjs';
 
 export const VERSION = '0.1.0';
 
@@ -652,6 +655,14 @@ function camelOrSnake(body, snake, camel, fallback = undefined) {
   return fallback;
 }
 
+function validatedSecretRef(value) {
+  try {
+    return validateSecretRef(value);
+  } catch (error) {
+    throw new HttpError(400, error.message);
+  }
+}
+
 function filterVisibleSourceRows(rows, principal, prefixKey = 'remote_prefix', clearanceKey = 'clearance') {
   return rows.filter((row) => {
     const prefix = row[prefixKey] || row.source_instance_remote_prefix || row.remotePrefix || '/';
@@ -697,7 +708,7 @@ function sourceInstancePayload(body, principal) {
       : principal.id,
     remote_prefix: remotePrefix,
     config: body.config || {},
-    secret_ref: camelOrSnake(body, 'secret_ref', 'secretRef', null),
+    secret_ref: validatedSecretRef(camelOrSnake(body, 'secret_ref', 'secretRef', null)),
     clearance: body.clearance || 'CONFIDENTIAL',
     correlationId: body.correlationId || body.correlation_id || null,
   };
@@ -727,7 +738,14 @@ async function handleSourceAdapters(req, res, state, principal, url) {
   requirePermission(principal, 'read');
   const db = sourceDatabase();
   const enabled = url.searchParams.has('enabled') ? url.searchParams.get('enabled') === 'true' : undefined;
-  jsonResponse(res, 200, { adapters: await listSourceAdapters(db, { enabled }) });
+  const runnerAdapters = new Set(listRunnerAdapters());
+  const adapters = (await listSourceAdapters(db, { enabled })).map((adapter) => ({
+    ...adapter,
+    runner_implemented: runnerAdapters.has(adapter.id),
+    sync_implemented: runnerAdapters.has(adapter.id) || adapter.id === 'local_folder',
+    sync_mode: runnerAdapters.has(adapter.id) ? 'server_runner' : (adapter.id === 'local_folder' ? 'local_courier' : 'not_implemented'),
+  }));
+  jsonResponse(res, 200, { adapters });
 }
 
 async function handleSourceInstances(req, res, state, principal, url) {
@@ -788,6 +806,10 @@ async function handleSourceInstanceById(req, res, state, principal, id) {
       delete body.remotePrefix;
       requirePathScope(principal, nextPrefix);
     }
+    if (body.secret_ref !== undefined || body.secretRef !== undefined) {
+      body.secret_ref = validatedSecretRef(camelOrSnake(body, 'secret_ref', 'secretRef', null));
+      delete body.secretRef;
+    }
     if (body.clearance) requireClearance(principal, body.clearance);
     const updated = await updateSourceInstance(db, id, body);
     jsonResponse(res, 200, { source: updated });
@@ -795,6 +817,57 @@ async function handleSourceInstanceById(req, res, state, principal, id) {
   }
 
   notFound();
+}
+
+async function handleSourceInstanceSync(req, res, state, principal, id, url) {
+  requirePermission(principal, 'write');
+  const db = sourceDatabase();
+  const source = await getSourceInstance(db, id);
+  requireSourceRowVisible(source, principal);
+  if (!source.enabled || source.status !== 'active') throw new HttpError(409, 'Source instance is not active/enabled.');
+
+  const body = await readJsonBody(req, state.maxJsonBytes);
+  const streamId = camelOrSnake(body, 'stream_id', 'streamId', url.searchParams.get('stream_id') || url.searchParams.get('streamId'));
+  const mode = body.mode || url.searchParams.get('mode') || 'incremental';
+  const maxRecords = body.maxRecords || body.max_records || url.searchParams.get('maxRecords') || url.searchParams.get('max_records') || null;
+  const correlationId = body.correlationId || body.correlation_id || null;
+
+  let runner;
+  try {
+    runner = getRunner(source.adapter_id);
+  } catch (error) {
+    if (error.code === 'NO_SOURCE_RUNNER') throw new HttpError(501, error.message);
+    throw error;
+  }
+
+  let streams;
+  if (streamId) {
+    const stream = await getSourceStream(db, streamId);
+    if (!stream || stream.source_instance_id !== source.id) throw new HttpError(400, 'stream_id must belong to source_instance_id.');
+    requireSourceRowVisible(stream, principal);
+    if (!stream.enabled) throw new HttpError(409, 'Source stream is disabled.');
+    streams = [stream];
+  } else {
+    streams = filterVisibleSourceRows(await listSourceStreams(db, { source_instance_id: source.id, enabled: true, limit: 100 }), principal);
+    if (!streams.length) streams = [null];
+  }
+
+  const syncRuns = [];
+  for (const stream of streams) {
+    if (stream) requireSourceRowVisible(stream, principal);
+    const result = await runSourceSync(db, state, {
+      instance: source,
+      stream,
+      runner,
+      principal,
+      mode,
+      maxRecords,
+      correlationId,
+    });
+    syncRuns.push(result);
+  }
+
+  jsonResponse(res, 201, { source_instance_id: source.id, adapter_id: source.adapter_id, syncRuns });
 }
 
 async function handleSourceStreams(req, res, state, principal, url) {
@@ -1282,6 +1355,7 @@ export function createOceanBedrockServer(options = {}) {
           oceanContextTriage: '/api/v1/ocean-context/triage/daily',
           toolbox: '/api/v1/toolbox/manifest',
           localFolderSync: '/api/v1/sync/local-folder/plan',
+          sourceRunnerSync: '/api/v1/sources/instances/{id}/sync',
           mounts: '/api/v1/mounts',
         },
         note: 'Most /api/v1 routes require Authorization: Bearer <token>.',
@@ -1536,6 +1610,12 @@ export function createOceanBedrockServer(options = {}) {
 
     if ((req.method === 'GET' || req.method === 'POST') && url.pathname === '/api/v1/sources/instances') {
       await handleSourceInstances(req, res, state, principal, url);
+      return;
+    }
+
+    const sourceInstanceSyncMatch = url.pathname.match(/^\/api\/v1\/sources\/instances\/([^/]+)\/sync$/);
+    if (req.method === 'POST' && sourceInstanceSyncMatch) {
+      await handleSourceInstanceSync(req, res, state, principal, decodeURIComponent(sourceInstanceSyncMatch[1]), url);
       return;
     }
 
