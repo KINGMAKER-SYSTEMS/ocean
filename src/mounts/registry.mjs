@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { getPool } from '../metadata.mjs';
 import { LocalStorageAdapter } from './adapters/local.mjs';
+import { R2StorageAdapter } from './adapters/r2.mjs';
 import { createUnimplementedAdapter } from './adapter.mjs';
 
 let _cache = null;
@@ -23,6 +24,14 @@ function buildAdapter(mount, state) {
       absRoot = path.resolve(state.root, mount.config?.root || '');
     }
     return new LocalStorageAdapter(mount, absRoot);
+  }
+  if (mount.type === 'r2' || mount.type === 's3') {
+    try {
+      return new R2StorageAdapter(mount);
+    } catch (err) {
+      console.warn(`[ocean-bedrock] R2 adapter unavailable for mount "${mount.id}": ${err.message}`);
+      return createUnimplementedAdapter(mount);
+    }
   }
   return createUnimplementedAdapter(mount);
 }

@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promises as fs } from 'node:fs';
 import { createReadStream, createWriteStream } from 'node:fs';
+import { Readable } from 'node:stream';
 import crypto from 'node:crypto';
 
 import {
@@ -1436,15 +1437,19 @@ export function createOceanBedrockServer(options = {}) {
         res.end();
         return;
       }
-      const { diskPath } = await adapter.read(relPath);
+      const readResult = await adapter.read(relPath);
       res.writeHead(200, {
         'content-type': contentTypeFor(apiPath),
         'content-length': info.size,
         etag: info.etag,
-        'last-modified': new Date(info.mtime).toUTCString(),
+        ...(info.mtime ? { 'last-modified': new Date(info.mtime).toUTCString() } : {}),
         'content-disposition': url.searchParams.get('inline') === '1' ? 'inline' : `attachment; filename="${path.basename(apiPath).replace(/"/g, '')}"`,
       });
-      createReadStream(diskPath).pipe(res);
+      if (readResult.diskPath) {
+        createReadStream(readResult.diskPath).pipe(res);
+      } else {
+        Readable.fromWeb(readResult.stream).pipe(res);
+      }
       return;
     }
 
