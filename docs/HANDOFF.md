@@ -453,22 +453,25 @@ Current graph extraction is heuristic. Next add:
 - graph-backed context packs for agents,
 - graph/semantic result fusion.
 
-### Priority 4 — R2 object adapter
+### Priority 4 — R2 object adapter (SHIPPED)
 
-Existing Cloudflare R2 bucket:
+`R2StorageAdapter` in `src/mounts/adapters/r2.mjs`. Uses Cloudflare REST API (`api.cloudflare.com/client/v4`) with the existing `CLOUDFLARE_API_TOKEN` bearer auth — no S3 credentials, no new npm packages (native `fetch`, Node 22). Replaces 501 stubs for all `r2`/`s3`-type mounts in the registry.
 
-```txt
-ocean-longhouse
-```
+Key implementation notes:
+- `stat()` uses list endpoint with `prefix=<key>&limit=2` (CF REST does not support HEAD)
+- `list()` uses `delimiter=/` for depth=1 (immediate children); follows cursor pagination up to 20 pages
+- `read()` returns `{stream: res.body}` (Web ReadableStream); server converts via `Readable.fromWeb()`
+- `write()` streams upload via `Readable.toWeb(createReadStream(tmpPath))` with `duplex: 'half'`
+- `mkdir()` is a no-op (R2 has no real directories); `delete({recursive})` walks cursor pages
+- `diskRoot = null` → text search returns 501 (handled in server.mjs)
 
-Need:
+Deployment commit: `367b346`
 
-```txt
-R2 S3 access keys
-Railway env vars
-adapter for canonical object bytes
-backfill/migration strategy from volume to R2 if desired
-```
+Verified live against `content-posting-lab` bucket:
+- `GET /api/v1/stat?path=/assets/content-posting-lab` → `{type: "directory"}`
+- `GET /api/v1/list?path=/assets/content-posting-lab` → 4 directory entries (agenticnews, clips, gallery, uploads)
+- `GET /api/v1/stat?path=/assets/content-posting-lab/agenticnews/episodes/ep_005854f3_episode.mp4` → `{type: "file", size: 113472529, etag: "5fe0...-14", contentType: "video/mp4"}`
+- `npm run smoke` green
 
 ## 12. Railway deploy runbook
 
@@ -498,7 +501,7 @@ curl -fsS https://ocean-bedrock-production.up.railway.app/health
 ## 13. Known issues
 
 1. Semantic search + Vectorize are live, but graph/entity extraction is still heuristic.
-2. R2 bucket exists but object adapter/keys are not wired.
+2. R2 object adapter is live (read/write/delete/move/copy). Recursive delete uses concurrent Promise.all with no per-request status check — fine for current use, revisit if bulk-delete on large prefixes becomes a use case.
 3. Historical failed ingest jobs were abandoned/cancelled; monitor for any new failed rows in triage.
 4. Token registry is volume JSON, not Postgres; okay for one Railway replica, not ideal for multi-replica.
 5. `/vault` is just a folder placeholder, not an encrypted secrets vault.
