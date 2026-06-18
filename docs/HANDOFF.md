@@ -1,52 +1,42 @@
 # Ocean Bedrock Handoff
 
-Generated: 2026-06-15T00:00:00Z  
+Generated: 2026-06-17  
 Repo: `/root/rt-nas/rt-nas`  
 Service: `ocean-bedrock`  
 Public URL: <https://ocean-bedrock-production.up.railway.app>
 
-## 1. Handoff summary
-
-Ocean Bedrock has been built and deployed as the cloud-box substrate for Ocean Longhouse support.
-
-Current baseline is live:
+## 1. What is live
 
 ```txt
-health endpoint:     live
-Postgres ledger:     live
-shared file API:     live  (Wave 2: routed via mount adapter)
-scoped bearer auth:  live
-MCP wrapper:         live
-coworker bootstrap: live
-ingest worker:       live for text chunking
-semantic vectors:    live — Workers AI embeddings + Cloudflare Vectorize
-mount registry:      live — /api/v1/mounts (admin-gated), 7 seeded mounts
-data-plane router:   live — all file ops route through StorageAdapter interface
+health endpoint:       live
+Postgres ledger:       live
+scoped bearer auth:    live
+file API:              live — routed through StorageAdapter
+local mount:           live — managed-local → /data/files
+R2 mounts:             live — 6 buckets, read/write/delete/move/copy
+mount registry API:    live — GET /api/v1/mounts (admin-gated)
+MCP wrapper:           live — 10 tools
+coworker bootstrap:    live
+ingest worker:         live — text chunk → embed → graph pipeline
+semantic vectors:      live — Workers AI bge-base-en-v1.5 + Cloudflare Vectorize
+semantic search:       live — GET /api/v1/semantic/search
+graph extraction:      live — nodes: 108, edges: 106
+scheduled triage:      live — ocean-bedrock-triage-cron, 06:00 + 18:00 UTC
+Telegram alerts:       live — medium/high triage findings
+source adapter tables: live — 8 adapters seeded
+server-side runners:   live — local_folder runner wired; other adapters stubbed
 ```
 
-The system is usable today for:
-
-- scoped file storage,
-- coworker folder ingest,
-- agent/MCP read/write/search,
-- ledger events and snapshots,
-- text chunk indexing into Postgres,
-- semantic/vector search,
-- lightweight graph neighborhood lookup,
-- scheduled Ocean Context triage.
-
-It is **not yet** the full Ocean Longhouse quorum/runtime. Bedrock is the cloud-box support substrate: storage, ingest, semantic/graph context, ledger traces, triage, and operator tooling.
+Ocean Bedrock is **not** the full Ocean Longhouse quorum/runtime. It is the cloud-box support substrate: storage, ingest, semantic/graph context, ledger traces, triage, and operator tooling.
 
 ## 2. Critical guardrails
-
-Do not violate these:
 
 1. Do not redefine Ocean Longhouse in Bedrock docs.
 2. Canonical split:
    - `ocean-daemon` = local runtime/body/execution authority.
    - `ocean-longhouse` = hive brain/coordination layer.
    - `ocean-bedrock` = cloud-box support substrate.
-3. Do not hallucinate Ocean docs. Use canonical docs when discussing Ocean:
+3. Do not hallucinate Ocean docs. Use canonical docs:
    - `ocean-os/docs/LONGHOUSE.md`
    - `ocean-os/docs/LONGHOUSE_ORCHESTRATION.md`
    - relevant `ocean-surface` docs for Surface-specific claims.
@@ -54,6 +44,9 @@ Do not violate these:
 5. Coworker ingest must remain opt-in folder selection.
 6. Coworker/agent tokens should be scoped bearer/MCP tokens, not admin tokens.
 7. Avoid ingesting secrets by default.
+8. `DATABASE_URL` is Railway-internal (`postgres.railway.internal:5432`) — does not resolve off-Railway.
+9. Token files at `/root/.config/ocean-bedrock/` are gitignored; never commit or log them.
+10. Default to the contributor token for testing, not the admin token.
 
 ## 3. Deployment facts
 
@@ -68,32 +61,34 @@ Node package:          ocean-bedrock@0.1.0
 Runtime:               node src/server.mjs
 ```
 
-Important deployment IDs:
+Deployment history (key IDs):
 
 ```txt
-4116f466-af55-4e70-b3d1-0c2600e763fb   initial successful service deploy
-d04ef61f-3d47-4073-914e-4fedbd387a80   metadata/worker deploy
-5d31071a-0634-4c41-a261-c95bca5feba9   contributor role deploy
-54a961eb-4cf8-47cf-8d6b-791f1f324f61   landing route deploy
-202428df-c989-4ec2-b730-6e0598633877   source/sync API deploy
-db04d2f4-e87b-406b-80e5-c4a9c254272a   Ocean Context semantic/graph/toolbox deploy
-cf1c3e9b-866f-4bc9-aa5e-62de169e8724   Wave 1 triage scheduler + failed-job tooling deploy
-bc7f1ca2-2eff-46af-ba63-d3eab80c5832   Wave 2 data-plane mount router deploy
-af2a2949-337f-494c-af95-17285e166c43   Redeploy after enabling Telegram triage env
-d9984f8a-3d0f-4c98-8da3-3387b2ea32e1   Latest deploy: mount containment fix + triage alert docs
+4116f466   initial successful service deploy
+d04ef61f   metadata/worker deploy
+5d31071a   contributor role deploy
+54a961eb   landing route deploy
+202428df   source/sync API deploy
+db04d2f4   Ocean Context semantic/graph/toolbox deploy
+cf1c3e9b   Wave 1 triage scheduler + failed-job tooling
+bc7f1ca2   Wave 2 data-plane mount router
+af2a2949   Telegram triage env enable
+d9984f8a   mount containment fix + triage alert docs
+           (commit 738818b — latest before R2 adapter)
+367b346    R2 object adapter — current HEAD on Railway
 ```
 
-Production env vars known to be set:
+Production env vars:
 
 ```txt
 OCEAN_BEDROCK_ROOT=/data
 OCEAN_BEDROCK_INSTANCE=ocean-bedrock
 OCEAN_LEDGER_STORE=postgres
 OCEAN_BEDROCK_WORKER_ENABLED=true
-DATABASE_URL=<Railway Postgres URL>
+DATABASE_URL=<Railway Postgres URL — internal only>
 OCEAN_BEDROCK_BOOTSTRAP_TOKEN=<secret>
 CLOUDFLARE_ACCOUNT_ID=<set>
-CLOUDFLARE_API_TOKEN=<secret>
+CLOUDFLARE_API_TOKEN=<secret — has R2 object read/write/delete>
 OCEAN_VECTORIZE_INDEX=ocean-longhouse-context
 OCEAN_EMBEDDING_MODEL=@cf/baai/bge-base-en-v1.5
 OCEAN_EMBEDDING_DIMENSIONS=768
@@ -104,139 +99,92 @@ OCEAN_TRIAGE_TELEGRAM_CHAT_ID=<set>
 
 ## 4. Token locations
 
-Local token files on Lennox:
+```txt
+/root/.config/ocean-bedrock/railway-admin-token.txt      — admin, all paths
+/root/.config/ocean-bedrock/operator-test-token.txt      — test role
+/root/.config/ocean-bedrock/operator-contributor-token.txt — use this for testing
+```
+
+Contributor token scopes:
 
 ```txt
-/root/.config/ocean-bedrock/railway-admin-token.txt
-/root/.config/ocean-bedrock/operator-test-token.txt
-/root/.config/ocean-bedrock/operator-contributor-token.txt
+paths:   /coworkers/operator-contributor, /sessions/operator-contributor, /context/ocean-bedrock
+can:     read, write, lock
+cannot:  delete, admin token ops
 ```
 
-Do not commit these files. Do not copy the admin token into docs.
+## 5. Storage mounts
 
-Normal operator/coworker testing should use:
+Live mounts (from `GET /api/v1/mounts`):
 
 ```txt
-/root/.config/ocean-bedrock/operator-contributor-token.txt
+type    id                           prefix
+local   managed-local                /               → /data/files
+r2      r2-content-posting-lab       /assets/content-posting-lab
+r2      r2-pi-video-gallery          /assets/video-gallery
+r2      r2-pi-backups                /archive/pi-backups
+r2      r2-sales-pitch-pdfs          /sales/pitch-pdfs
+r2      r2-financial-invoices        /finance/invoices
+r2      r2-rt-html-previews          /previews/html
 ```
 
-That token role is `contributor`:
+R2 adapter (`src/mounts/adapters/r2.mjs`) uses Cloudflare REST API with the existing `CLOUDFLARE_API_TOKEN` bearer auth — no S3 credentials, no new npm packages.
+
+Implementation notes:
+- `stat()` — list endpoint with `prefix=<key>&limit=2`; CF REST does not support HEAD
+- `list()` — `delimiter=/` for depth=1 (immediate children); cursor pagination up to 20 pages
+- `read()` — returns `{stream: res.body}` (Web ReadableStream); server pipes via `Readable.fromWeb()`
+- `write()` — streams upload via `Readable.toWeb(createReadStream(tmpPath))` with `duplex: 'half'`
+- `mkdir()` — no-op (R2 has no real directories)
+- `delete({recursive})` — walks cursor pages; Promise.all concurrent (revisit if bulk-deleting large prefixes)
+- `diskRoot = null` → text search returns 501
+
+## 6. Database state
+
+Schema tables (all present in `longhouse` schema):
 
 ```txt
-can:    read, write, lock
-cannot: delete, admin token ops
+mounts, ledger_events, context_snapshots
+source_adapters, source_instances, source_streams, source_sync_runs, source_records
+embedding_chunks, graph_nodes, graph_edges, ingest_jobs
 ```
 
-Scopes:
+Current counts (as of 2026-06-17):
 
 ```txt
-/coworkers/operator-contributor
-/sessions/operator-contributor
-/context/ocean-bedrock
+embedding chunks:   90 (90 vectorized, 0 pending)
+graph nodes:        108
+graph edges:        106
+ingest jobs done:   76
+ingest jobs cancelled: 9 (stale smoke runs, already dispositioned)
+source adapters:    8 seeded
 ```
 
-## 5. Current repo state
+## 7. Ingest pipeline
 
-Git state at handoff:
+Path: file write → `ingest_jobs` queue → worker loop → chunk → embed → graph extract
 
-```txt
-Baseline committed: a4e3133 Build and deploy Ocean Bedrock baseline
-Source helper committed: 288cda2 feat(sources): add source adapter helper module
-Source registry/local app committed: 639491b Add Ocean Bedrock source registry and local sync app
-Source/sync HTTP API committed: b526d02 Add Ocean Bedrock source sync API
-```
+Worker runs in the same process as the HTTP server (`OCEAN_BEDROCK_WORKER_ENABLED=true`). Jobs are picked up in order: `chunk_object` → `embed_object` → `extract_graph`. All three are required for a path to appear in semantic/graph search.
 
-Important source-registry paths:
+Semantic search: `GET /api/v1/semantic/search?q=<query>&limit=<n>&threshold=<0-1>`
 
-```txt
-db/003_source_adapters.sql
-src/sources.mjs
-scripts/migrate.mjs
-scripts/check-postgres.mjs
-scripts/ocean-bootstrap.mjs
-scripts/ocean-ingest-local.mjs
-scripts/ocean-local-app.mjs
-scripts/smoke-test.mjs
-docs/LOCAL-GUI-APP.md
-docs/WIKI.md
-docs/HANDOFF.md
-docs/DEV-LOG.md
-```
+Graph neighborhood: `GET /api/v1/graph/neighborhood?path=<path>&depth=<n>`
 
-Recommended next operator action:
+## 8. Scheduled triage
 
-```bash
-# Source/sync API is committed, pushed, deployed, and live-smoked.
-# Next: build embeddings/vector search or prepare a real coworker rollout checklist.
-git status --short
-```
+Service: `ocean-bedrock-triage-cron` (separate Railway service, same project)  
+Schedule: `0 6,18 * * *` UTC (06:00 and 18:00)  
+Script: `npm run ocean:triage`  
+Idempotency key: `triage:<YYYY-MM-DD>:<am|pm>`
 
-## 6. Verification commands
+Findings stored at: `/context/ocean-bedrock/triage/_alerts/<date>-<slot>.md`  
+Thresholds: `OCEAN_TRIAGE_FAILED_ALERT` (default 1) / `OCEAN_TRIAGE_QUEUE_ALERT` (default 50)  
+Telegram alerts: active for medium/high severity; webhook remains off.
 
-Set env:
+Failed job tooling: `npm run ocean:jobs`  
+Full runbook: `docs/OCEAN-TRIAGE-OPS.md`
 
-```bash
-export OCEAN_BEDROCK_URL='https://ocean-bedrock-production.up.railway.app'
-export OCEAN_BEDROCK_TOKEN="$(cat /root/.config/ocean-bedrock/operator-contributor-token.txt)"
-```
-
-Public route index:
-
-```bash
-curl "$OCEAN_BEDROCK_URL/"
-```
-
-Health:
-
-```bash
-curl "$OCEAN_BEDROCK_URL/health"
-```
-
-Authenticated info:
-
-```bash
-curl -H "Authorization: Bearer $OCEAN_BEDROCK_TOKEN" \
-  "$OCEAN_BEDROCK_URL/api/v1/info"
-```
-
-List scoped workspace:
-
-```bash
-curl -H "Authorization: Bearer $OCEAN_BEDROCK_TOKEN" \
-  "$OCEAN_BEDROCK_URL/api/v1/tree?path=/coworkers/operator-contributor&depth=5"
-```
-
-Write a file:
-
-```bash
-echo "handoff smoke" | curl -X PUT \
-  -H "Authorization: Bearer $OCEAN_BEDROCK_TOKEN" \
-  --data-binary @- \
-  "$OCEAN_BEDROCK_URL/api/v1/file?path=/coworkers/operator-contributor/handoff-smoke.md"
-```
-
-Search:
-
-```bash
-curl -H "Authorization: Bearer $OCEAN_BEDROCK_TOKEN" \
-  "$OCEAN_BEDROCK_URL/api/v1/search?q=handoff&path=/coworkers/operator-contributor&limit=10"
-```
-
-Delete should fail for contributor:
-
-```bash
-curl -i -X DELETE \
-  -H "Authorization: Bearer $OCEAN_BEDROCK_TOKEN" \
-  "$OCEAN_BEDROCK_URL/api/v1/file?path=/coworkers/operator-contributor/handoff-smoke.md"
-```
-
-Expected:
-
-```txt
-403 Token role "contributor" does not allow delete.
-```
-
-## 7. MCP verification
+## 9. MCP wrapper
 
 ```bash
 export OCEAN_BEDROCK_URL='https://ocean-bedrock-production.up.railway.app'
@@ -244,281 +192,122 @@ export OCEAN_BEDROCK_TOKEN="$(cat /root/.config/ocean-bedrock/operator-contribut
 npm run mcp
 ```
 
-Already smoke-tested successfully:
+Tools (10):
 
 ```txt
-initialize OK
-tools/list OK, 10 tools
-bedrock_list OK
-bedrock_snapshot OK
+bedrock_info, bedrock_list, bedrock_read, bedrock_write, bedrock_mkdir,
+bedrock_search, bedrock_lock, bedrock_unlock, bedrock_trace, bedrock_snapshot
 ```
 
-MCP tools:
+## 10. Source adapter registry
+
+8 adapters seeded. Server-side runner dispatch is live (`src/sources/runners/`):
+- `local_folder` — fully implemented
+- `github`, `telegram`, `slack`, `notion`, `linear`, `google_drive`, `r2` — stubbed (return 501 / not-implemented)
+
+Source API:
 
 ```txt
-bedrock_info
-bedrock_list
-bedrock_read
-bedrock_write
-bedrock_mkdir
-bedrock_search
-bedrock_lock
-bedrock_unlock
-bedrock_trace
-bedrock_snapshot
+GET  /api/v1/sources/adapters
+GET  /api/v1/sources/instances
+GET  /api/v1/sources/instances/:id
+GET  /api/v1/sync/runs
+GET  /api/v1/sync/runs/:id
+GET  /api/v1/sync/records/:runId
+POST /api/v1/sync/run (triggers a local_folder sync run)
 ```
 
-## 8. Database verification
-
-Schema check:
+## 11. Verification commands
 
 ```bash
-npm run db:check
+export BASE='https://ocean-bedrock-production.up.railway.app'
+export TOKEN="$(cat /root/.config/ocean-bedrock/operator-contributor-token.txt)"
+export ADMIN="$(cat /root/.config/ocean-bedrock/railway-admin-token.txt)"
+
+# Health
+curl "$BASE/health"
+
+# Mounts (admin)
+curl -H "x-ocean-bedrock-token: $ADMIN" "$BASE/api/v1/mounts"
+
+# Stat an R2 path
+curl -H "x-ocean-bedrock-token: $ADMIN" \
+  "$BASE/api/v1/stat?path=/assets/content-posting-lab"
+
+# List an R2 directory
+curl -H "x-ocean-bedrock-token: $ADMIN" \
+  "$BASE/api/v1/list?path=/assets/content-posting-lab"
+
+# Write a file (contributor)
+echo "test" | curl -X PUT \
+  -H "x-ocean-bedrock-token: $TOKEN" --data-binary @- \
+  "$BASE/api/v1/file?path=/coworkers/operator-contributor/test.md"
+
+# Semantic search
+curl -H "x-ocean-bedrock-token: $TOKEN" \
+  "$BASE/api/v1/semantic/search?q=triage&limit=5"
+
+# DB check (local, requires Railway-internal DATABASE_URL)
+node scripts/check-postgres.mjs
 ```
 
-Expected:
-
-```json
-{
-  "schemaReady": true,
-  "tables": {
-    "mounts": "longhouse.mounts",
-    "ledgerEvents": "longhouse.ledger_events",
-    "contextSnapshots": "longhouse.context_snapshots",
-    "sourceAdapters": "longhouse.source_adapters",
-    "sourceInstances": "longhouse.source_instances",
-    "sourceStreams": "longhouse.source_streams",
-    "sourceSyncRuns": "longhouse.source_sync_runs",
-    "sourceRecords": "longhouse.source_records"
-  },
-  "sourceAdaptersSeeded": 8
-}
-```
-
-Current DB state from last check:
-
-```txt
-objects:       19 files
-chunks:        17
-jobs done:     17
-jobs failed:   9
-ledgerEvents: 89
-graphNodes:   17 file nodes
-sourceAdapters: 8 seeded
-sourceInstances: 6
-sourceStreams: 6
-sourceSyncRuns: 2 completed, 3 cancelled debug runs
-sourceRecords: 2
-```
-
-Chunk status:
-
-```txt
-embedding_provider=none
-embedding_model=text-chunk-v1
-dimensions=0
-vectorized=0
-```
-
-This confirms chunk indexing exists, but semantic vector search does not.
-
-## 9. Current data inventory
-
-Global tree snapshot:
-
-```txt
-/context/README.md
-/context/ocean-bedrock/manifests/operator-contributor-workflow-smoke-1781141239331.json
-/context/ocean-bedrock/manifests/operator-test-workflow-smoke-1781140704660.json
-/context/ocean-bedrock/sources/operator-contributor-workflow-smoke.json
-/context/ocean-bedrock/sources/operator-test-workflow-smoke.json
-/coworkers/operator-contributor/security/delete-check.md
-/coworkers/operator-contributor/workflow-smoke/contrib-notes/README.md
-/coworkers/operator-test/workflow-smoke/local-notes/README.md
-/coworkers/operator-test/workflow-smoke/local-notes/context.json
-/coworkers/operator-test/workflow-smoke/local-notes/indexed-smoke.md
-/docs/README.md
-/sessions/README.md
-/vault/README.md
-```
-
-Empty/present directories:
-
-```txt
-/handoffs
-/shared
-/sessions/operator-contributor
-```
-
-## 10. Source adapter registry status
-
-Research doc created:
-
-```txt
-docs/SOURCE-ADAPTER-PRECEDENTS.md
-```
-
-Precedents reviewed:
-
-```txt
-Airbyte: connector spec + catalog + state
-Singer/Meltano: config + catalog + state
-Kafka Connect/Debezium: connector config + offsets + schema history
-Dagster: configurable external resources
-LangChain/LlamaIndex: loaders/readers -> document + metadata
-Unstructured: source connectors + standardized metadata
-```
-
-Implemented live tables:
-
-```txt
-longhouse.source_adapters
-longhouse.source_instances
-longhouse.source_streams
-longhouse.source_sync_runs
-longhouse.source_records
-```
-
-Implementation status:
-
-```txt
-db/003_source_adapters.sql applied to Railway Postgres
-8 adapter definitions seeded
-src/sources.mjs helper module added
-server exposes /api/v1/sources/* and /api/v1/sync/* lineage endpoints
-scripts/ocean-bootstrap.mjs writes/redacts source manifests and can directly seed registry when run by operator
-scripts/ocean-ingest-local.mjs writes source_sync_run/source_record lineage through HTTP, no local DATABASE_URL required
-```
-
-Verified smoke:
-
-```txt
-local checks: node --check, npm run smoke, npm run db:check
-live health: https://ocean-bedrock-production.up.railway.app/health ok
-live adapters endpoint: 8 adapters returned
-operator-contributor local_folder ingest through HTTP source/sync endpoints: enabled
-source_record created and linked to longhouse.objects.id
-latest live smoke sync_run_id: 86ed8bdd-d108-4340-a65c-6d6af4831cd8
-latest live smoke source_instance_id: dfa0db73-61aa-405c-bfcd-10584ac478f7
-```
-
-## 11. Next work queue
-
-### Priority 0 — Wave 2 data-plane mount router (SHIPPED)
-
-Mount registry + StorageAdapter interface + path router + admin `/api/v1/mounts` API. All file operations (stat, list, read, write, delete, move, copy, mkdir, search) now route through a duck-typed `StorageAdapter`. Local adapter is `LocalStorageAdapter`; R2/other mounts return a `createUnimplementedAdapter` stub (HTTP 501). No-DB fallback uses a synthetic `managed-local` mount so `npm run smoke` stays green.
-
-Deployment ID: `bc7f1ca2-2eff-46af-ba63-d3eab80c5832`
-
-Verified live:
-- `GET /api/v1/mounts` returns 7 mounts (6 R2 + managed-local)
-- `GET /api/v1/stat?path=/` routes through `LocalStorageAdapter`
-- `GET /api/v1/list?path=/` returns directory entries via adapter
-- `npm run smoke` green
-
-New files: `src/mounts/adapter.mjs`, `src/mounts/adapters/local.mjs`, `src/mounts/registry.mjs`, `src/mounts/router.mjs`
-
-### Priority 1 — Automate daily Ocean Context triage (SHIPPED)
-
-Dedicated Railway cron service `ocean-bedrock-triage-cron` runs `npm run ocean:triage` twice daily (`0 6,18 * * *` UTC). Triage is idempotent per slot (key `triage:<day>:<slot>`). Findings route to a slot-stamped alert digest at `/context/ocean-bedrock/triage/_alerts/<day>-<slot>.md`. Thresholds configurable via `OCEAN_TRIAGE_FAILED_ALERT` / `OCEAN_TRIAGE_QUEUE_ALERT`. Failed-job tooling live: `npm run ocean:jobs`. See `docs/OCEAN-TRIAGE-OPS.md` for full runbook.
-
-Historical failed ingest jobs are dispositioned: 9 stale `/docs/smoke/hello.md` file-not-found rows were abandoned/cancelled. Forced 2026-06-15 triage reported `failedJobs=0`, `staleFailedJobs=0`, `queuedJobs=0`, and `pendingChunks=0`. Telegram triage alerts are active on `ocean-bedrock`; webhook remains deferred/off.
-
-### Priority 2 — Real coworker rollout prep
-
-A V0 local GUI app exists:
+## 12. Deploy runbook
 
 ```bash
-npm run ocean:app
-```
+# From repo root
+railway up --service ocean-bedrock
 
-Before issuing real coworker tokens:
-
-- confirm path scopes,
-- document install instructions,
-- package the GUI/download flow,
-- add one-time invite exchange instead of raw token paste,
-- run a small real folder dry-run,
-- inspect skipped files,
-- verify secrets are ignored,
-- issue contributor-only tokens,
-- confirm delete is blocked.
-
-### Priority 3 — Richer graph/entity extraction
-
-Current graph extraction is heuristic. Next add:
-
-- people/project/client/task entities,
-- stronger source-record to ledger correlation,
-- graph-backed context packs for agents,
-- graph/semantic result fusion.
-
-### Priority 4 — R2 object adapter (SHIPPED)
-
-`R2StorageAdapter` in `src/mounts/adapters/r2.mjs`. Uses Cloudflare REST API (`api.cloudflare.com/client/v4`) with the existing `CLOUDFLARE_API_TOKEN` bearer auth — no S3 credentials, no new npm packages (native `fetch`, Node 22). Replaces 501 stubs for all `r2`/`s3`-type mounts in the registry.
-
-Key implementation notes:
-- `stat()` uses list endpoint with `prefix=<key>&limit=2` (CF REST does not support HEAD)
-- `list()` uses `delimiter=/` for depth=1 (immediate children); follows cursor pagination up to 20 pages
-- `read()` returns `{stream: res.body}` (Web ReadableStream); server converts via `Readable.fromWeb()`
-- `write()` streams upload via `Readable.toWeb(createReadStream(tmpPath))` with `duplex: 'half'`
-- `mkdir()` is a no-op (R2 has no real directories); `delete({recursive})` walks cursor pages
-- `diskRoot = null` → text search returns 501 (handled in server.mjs)
-
-Deployment commit: `367b346`
-
-Verified live against `content-posting-lab` bucket:
-- `GET /api/v1/stat?path=/assets/content-posting-lab` → `{type: "directory"}`
-- `GET /api/v1/list?path=/assets/content-posting-lab` → 4 directory entries (agenticnews, clips, gallery, uploads)
-- `GET /api/v1/stat?path=/assets/content-posting-lab/agenticnews/episodes/ep_005854f3_episode.mp4` → `{type: "file", size: 113472529, etag: "5fe0...-14", contentType: "video/mp4"}`
-- `npm run smoke` green
-
-## 12. Railway deploy runbook
-
-Use Railway skill practices. From repo root:
-
-```bash
-export RAILWAY_CALLER="skill:use-railway@1.2.1"
-export RAILWAY_AGENT_SESSION="railway-skill-$(date -u +%Y%m%d)-ocean-bedrock"
-env -u RAILWAY_SERVICE_ID -u RAILWAY_SERVICE_NAME \
-  railway up --service ocean-bedrock --environment production --detach \
-  -m "Deploy Ocean Bedrock changes"
-```
-
-Check status:
-
-```bash
-env -u RAILWAY_SERVICE_ID -u RAILWAY_SERVICE_NAME \
-  railway service status --service ocean-bedrock --json
-```
-
-After deploy:
-
-```bash
+# Verify
 curl -fsS https://ocean-bedrock-production.up.railway.app/health
+```
+
+Smoke test (local, no Railway required):
+
+```bash
+npm run smoke
 ```
 
 ## 13. Known issues
 
-1. Semantic search + Vectorize are live, but graph/entity extraction is still heuristic.
-2. R2 object adapter is live (read/write/delete/move/copy). Recursive delete uses concurrent Promise.all with no per-request status check — fine for current use, revisit if bulk-delete on large prefixes becomes a use case.
-3. Historical failed ingest jobs were abandoned/cancelled; monitor for any new failed rows in triage.
-4. Token registry is volume JSON, not Postgres; okay for one Railway replica, not ideal for multi-replica.
-5. `/vault` is just a folder placeholder, not an encrypted secrets vault.
-6. `/api/v1/search` is still plain file text search; semantic search lives at `/api/v1/semantic/search`.
-7. Current graph extracts file/directory/heading/topic/link/source-lineage nodes, but not rich business entities yet.
-8. Source registry currently has V1 local_folder wiring only; GitHub/Telegram/Slack/Notion/Linear/Drive/R2 adapter runners are not implemented yet.
-9. Daily Ocean Context triage: dedicated Railway cron service deployed (`0 6,18 * * *` UTC). Failed-job tooling live (`npm run ocean:jobs`). Telegram alerts are wired for medium/high findings; webhook remains off.
+1. Recursive R2 delete uses concurrent `Promise.all` with no per-request status check — fine for current use, revisit for bulk-delete on large prefixes.
+2. Token registry is volume JSON (`/data/.ocean-bedrock/tokens.json`), not Postgres — fine for one Railway replica, not multi-replica safe.
+3. `/vault` is a folder placeholder, not an encrypted secrets vault.
+4. `/api/v1/search` is plain file text search; semantic search lives at `/api/v1/semantic/search`. R2 paths return 501 for text search (`diskRoot = null`).
+5. Graph extraction is heuristic (file/dir/heading/topic/link/source-lineage nodes); rich business entities (people, projects, clients) not yet extracted.
+6. Source adapter runners for github/telegram/slack/notion/linear/google_drive/r2 are stubbed at 501.
+7. Coworker real rollout prep is incomplete: no invite-exchange flow, no GUI packaging, no dry-run tooling.
 
-## 14. Acceptance criteria for next handoff
+## 14. Next work queue
 
-The next handoff should include:
+### Priority 1 — Real coworker rollout prep
 
-- commit hash,
-- latest Railway deployment ID,
-- current live health output,
-- DB counts,
+Before issuing tokens to real coworkers:
+
+- Confirm path scopes and document install instructions.
+- Package the local GUI/download flow (`npm run ocean:app`).
+- Add one-time invite exchange instead of raw token paste.
+- Run a real folder dry-run; inspect skipped files and verify secrets are ignored.
+- Issue contributor-only tokens, confirm delete is blocked.
+
+### Priority 2 — Source adapter runners
+
+Wire real sync runners for the other 7 adapter types (github, telegram, slack, notion, linear, google_drive, r2). The runner dispatch layer is already in place in `src/sources/runners/`.
+
+### Priority 3 — Richer graph/entity extraction
+
+Add people/project/client/task entity extraction. Wire graph-backed context packs for agents. Fuse graph + semantic results in search.
+
+### Priority 4 — Vault
+
+Replace `/vault` folder placeholder with an actual encrypted secrets vault (age/sops or a KV-backed store).
+
+## 15. Acceptance criteria for next handoff
+
+Include in the next handoff:
+
+- commit hash and Railway deployment ID,
+- current `curl /health` output,
+- `node scripts/check-postgres.mjs` output,
 - exact migration status,
-- whether embeddings/vectorize are live,
-- source adapter tables status,
-- any issued coworker tokens by name/scope, not raw token values.
+- any new issued coworker tokens by name/scope (not raw values),
+- whether source adapter runners beyond local_folder are wired.
