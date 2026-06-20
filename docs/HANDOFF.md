@@ -75,7 +75,8 @@ bc7f1ca2   Wave 2 data-plane mount router
 af2a2949   Telegram triage env enable
 d9984f8a   mount containment fix + triage alert docs
            (commit 738818b — latest before R2 adapter)
-367b346    R2 object adapter — current HEAD on Railway
+367b346    R2 object adapter
+c0ec37fe   Epoch 01 P1 coworker onboarding deploy — current Railway deployment
 ```
 
 Production env vars:
@@ -275,7 +276,7 @@ npm run smoke
 4. `/api/v1/search` is plain file text search; semantic search lives at `/api/v1/semantic/search`. R2 paths return 501 for text search (`diskRoot = null`).
 5. Graph extraction is heuristic (file/dir/heading/topic/link/source-lineage nodes); rich business entities (people, projects, clients) not yet extracted.
 6. Source adapter runners for github/telegram/slack/notion/linear/google_drive/r2 are stubbed at 501.
-7. Coworker real rollout prep is incomplete: no invite-exchange flow, no GUI packaging, no dry-run tooling.
+7. Coworker real rollout prep is partially complete: one-time invite exchange, shared secret exclusions, dry-run skipped/sensitive reporting, and local GUI preview are live. Remaining: packaged GUI, hard acknowledgement gate before first sync, Postgres-backed token/invite registry, and broader rollout docs polish.
 
 ## 14. Next work queue
 
@@ -285,7 +286,7 @@ Before issuing tokens to real coworkers:
 
 - Confirm path scopes and document install instructions.
 - Package the local GUI/download flow (`npm run ocean:app`).
-- Add one-time invite exchange instead of raw token paste.
+- Use the one-time invite exchange instead of raw token paste.
 - Run a real folder dry-run; inspect skipped files and verify secrets are ignored.
 - Issue contributor-only tokens, confirm delete is blocked.
 
