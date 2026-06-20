@@ -367,6 +367,42 @@ function parseLastJson(stdout) {
   }
 }
 
+async function runPreview() {
+  const config = await loadConfig();
+  requireConfigured(config);
+  if (!config.sources.some((source) => source.enabled)) throw new Error('Add at least one enabled folder before previewing.');
+
+  const startedAt = new Date().toISOString();
+  logLine('Preview started (dry-run)');
+  const result = await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [ingestScript, '--config', configPath, '--state', ingestStatePath, '--dry-run', '--report'], {
+      cwd: repoRoot,
+      env: { ...process.env },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
+    child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      const parsed = parseLastJson(stdout);
+      if (code === 0) resolve({ ok: true, code, stdout: stdout.slice(-20000), stderr: stderr.slice(-20000), result: parsed });
+      else reject(new Error(`Preview failed with exit code ${code}: ${stderr || stdout}`));
+    });
+  });
+
+  const state = await loadAppState();
+  state.lastPreview = {
+    ...result,
+    startedAt,
+    completedAt: new Date().toISOString(),
+  };
+  await saveAppState(state);
+  logLine('Preview finished (dry-run)');
+  return state.lastPreview;
+}
+
 async function runSync(reason = 'manual') {
   if (activeSync) return activeSync;
   const config = await loadConfig();
@@ -485,6 +521,7 @@ async function handle(req, res) {
     if (req.method === 'POST' && url.pathname === '/api/folder-dialog') return send(res, 200, { ok: true, path: await chooseFolderDialog() });
     if (req.method === 'POST' && url.pathname === '/api/folders') return send(res, 200, { ok: true, ...(await addFolder(await readBody(req))), state: await currentState() });
     if (req.method === 'POST' && url.pathname === '/api/schedule') return send(res, 200, { ok: true, schedule: await setSchedule(await readBody(req)), state: await currentState() });
+    if (req.method === 'POST' && url.pathname === '/api/preview') return send(res, 200, { ok: true, preview: await runPreview(), state: await currentState() });
     if (req.method === 'POST' && url.pathname === '/api/sync') return send(res, 200, { ok: true, run: await runSync('manual'), state: await currentState() });
     if (req.method === 'POST' && url.pathname === '/api/manifest') {
       const config = await loadConfig();
@@ -551,6 +588,8 @@ const INDEX_HTML = `<!doctype html>
     .integration small { color: #91aac2; }
     pre { white-space: pre-wrap; word-break: break-word; max-height: 360px; overflow: auto; background: #020811; border: 1px solid #1e3a55; border-radius: 18px; padding: 14px; color: #bde5ff; }
     .status { min-height: 22px; margin-top: 12px; color: #bde5ff; }
+    .preview { margin-top: 14px; padding: 12px; border-radius: 16px; border: 1px solid #284d6d; background: #071724; color: #cfeeff; }
+    .preview.warning { border-color: #a85d3a; background: rgba(91, 37, 20, .35); }
     .ok { color: #78f0b2; } .bad { color: #ff9da8; }
     @media (max-width: 760px) { .card { grid-column: span 12; } .row { grid-template-columns: 1fr; } .hero { display: block; } }
   </style>
@@ -618,9 +657,11 @@ const INDEX_HTML = `<!doctype html>
         <select id="intervalMinutes"><option value="15">15 minutes</option><option value="30">30 minutes</option><option value="60">1 hour</option><option value="180">3 hours</option><option value="360">6 hours</option><option value="1440">1 day</option></select>
         <div class="actions">
           <button onclick="saveSchedule()">Save schedule</button>
+          <button class="secondary" onclick="runPreview()">Dry-run preview</button>
           <button class="secondary" onclick="runSync()">Sync now</button>
         </div>
         <div class="status" id="scheduleStatus"></div>
+        <div id="previewPanel" class="preview"></div>
       </div>
 
       <div class="card">
@@ -668,8 +709,10 @@ const INDEX_HTML = `<!doctype html>
       $('intervalMinutes').value = String((c.schedule && c.schedule.intervalMinutes) || 60);
       $('sync-pill').textContent = state.activeSync ? 'Sync running...' : (state.scheduleNextAt ? 'Next sync: ' + new Date(state.scheduleNextAt).toLocaleString() : 'Manual sync');
       $('sources').innerHTML = (c.sources || []).length ? c.sources.map((s) => '<div class="source"><div><strong>' + escapeHtml(s.label) + '</strong><small>' + escapeHtml(s.localPath) + '<br>' + escapeHtml(s.remotePrefix) + '</small></div><div>' + (s.enabled ? '✅' : '⏸️') + '</div></div>').join('') : '<p>No folders yet. Add one above.</p>';
+      renderPreview(state.appState && state.appState.lastPreview);
+      const lastPreview = state.appState && state.appState.lastPreview ? '\n\nLast preview:\n' + JSON.stringify(state.appState.lastPreview.result || state.appState.lastPreview, null, 2) : '';
       const last = state.appState && state.appState.lastRun ? '\n\nLast run:\n' + JSON.stringify(state.appState.lastRun.result || state.appState.lastRun, null, 2) : '';
-      $('activity').textContent = (state.logs || []).join('\n') + last;
+      $('activity').textContent = (state.logs || []).join('\n') + lastPreview + last;
     }
 
     async function refresh() {
@@ -730,12 +773,45 @@ const INDEX_HTML = `<!doctype html>
       } catch (e) { setStatus('folderStatus', e.message, false); }
     }
 
+    function renderPreview(preview) {
+      const panel = $('previewPanel');
+      if (!panel) return;
+      const result = preview && preview.result;
+      if (!result) {
+        panel.className = 'preview';
+        panel.innerHTML = 'Run a dry-run preview before first sync to review changed and skipped files.';
+        return;
+      }
+      const totals = result.totals || {};
+      const sensitive = [];
+      for (const source of result.sources || []) {
+        for (const skipped of source.skippedFiles || []) {
+          if (skipped.reason === 'sensitive') sensitive.push((source.label || source.id) + ': ' + skipped.rel + ' (' + skipped.matchedPattern + ')');
+        }
+      }
+      panel.className = 'preview' + (sensitive.length ? ' warning' : '');
+      panel.innerHTML = '<strong>Dry-run preview</strong><br>'
+        + 'Changed: ' + escapeHtml(totals.changed || 0)
+        + ' · Skipped: ' + escapeHtml(totals.skipped || 0)
+        + ' · Sensitive excluded: ' + escapeHtml(sensitive.length)
+        + (sensitive.length ? '<br><br><strong>Sensitive files excluded:</strong><br>' + sensitive.slice(0, 20).map(escapeHtml).join('<br>') : '');
+    }
+
     async function saveSchedule() {
       try {
         await api('/api/schedule', { enabled: $('scheduleEnabled').value === 'true', intervalMinutes: Number($('intervalMinutes').value) });
         setStatus('scheduleStatus', 'Schedule saved.');
         await refresh();
       } catch (e) { setStatus('scheduleStatus', e.message, false); }
+    }
+
+    async function runPreview() {
+      try {
+        setStatus('scheduleStatus', 'Previewing...');
+        await api('/api/preview', {});
+        setStatus('scheduleStatus', 'Preview complete. Review sensitive exclusions before syncing.');
+        await refresh();
+      } catch (e) { setStatus('scheduleStatus', e.message, false); await refresh(); }
     }
 
     async function runSync() {

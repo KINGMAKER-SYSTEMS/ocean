@@ -17,6 +17,7 @@ Owner: Navigator
   - `scripts/check-secret-globs.mjs`
   - `npm run secret:globs:check`
 - Updated coworker/local GUI docs with secret exclusion and scope guidance.
+- Added local GUI `/api/preview` dry-run endpoint and a preview panel that surfaces changed/skipped counts plus sensitive exclusions before sync.
 
 ## Verification
 
@@ -94,6 +95,6 @@ Results:
 
 ## Remaining P1 gaps
 
-- GUI still needs a first-class preview/review panel and acknowledgement gate.
+- GUI now has a first dry-run preview panel, but still needs a hard acknowledgement gate before first real sync when sensitive files are detected.
 - One-time invite exchange is not implemented yet.
 - Token registry remains volume JSON unless/until the Postgres auth-token phase is implemented.
