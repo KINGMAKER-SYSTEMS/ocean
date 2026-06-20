@@ -10,8 +10,8 @@ data/**
 !data/.gitkeep
 .pi/*
 !.pi/themes/
-!.pi/themes/ocean-barnacle.json
+!.pi/themes/ocean-bedrock.json
 !.pi/extensions/
-!.pi/extensions/ocean-barnacle-mode.ts
+!.pi/extensions/ocean-bedrock-mode.ts
 .wrangler/
 .worktrees/
