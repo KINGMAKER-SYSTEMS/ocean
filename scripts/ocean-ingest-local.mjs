@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import crypto from 'node:crypto';
+import { DEFAULT_IGNORES, classifySensitivePath, classifySkip } from '../src/ingest-filters.mjs';
 
 const DEFAULT_CONFIG_FILE = path.join(os.homedir(), '.config', 'ocean-bedrock', 'bootstrap.json');
 const DEFAULT_STATE_FILE = path.join(os.homedir(), '.local', 'state', 'ocean-bedrock', 'ingest-state.json');
@@ -17,7 +18,9 @@ Options:
   --state <path>       Local ingest state path.
   --source <id>        Only ingest one source id. Can be repeated.
   --dry-run            Scan and report without uploading.
-  --all                Override config and allow all extensions.
+  --all                Override config and allow all extensions, but still exclude secrets.
+  --include-secrets    Explicitly include secret-pattern files. Avoid unless supervised.
+  --report             Include detailed skippedFiles in output/manifest.
   --max-files <n>      Stop after n changed files.
   --max-file-mb <n>    Override max file size.
 `);
@@ -32,7 +35,9 @@ function parseArgs(argv) {
     else if (arg === '--state') args.state = argv[++i];
     else if (arg === '--source') args.sources.push(argv[++i]);
     else if (arg === '--dry-run') args.dryRun = true;
+    else if (arg === '--report') args.report = true;
     else if (arg === '--all') args.all = true;
+    else if (arg === '--include-secrets') args.includeSecrets = true;
     else if (arg === '--max-files') args.maxFiles = Number(argv[++i]);
     else if (arg === '--max-file-mb') args.maxFileMb = Number(argv[++i]);
     else throw new Error(`Unknown argument: ${arg}`);
@@ -63,14 +68,21 @@ function remoteJoin(prefix, rel) {
   return `${prefix.replace(/\/$/, '')}/${toPosix(rel).replace(/^\/+/, '')}`;
 }
 
-function shouldIgnoreName(name, ignores = []) {
-  return ignores.includes(name);
-}
-
 function shouldIncludeFile(filePath, config, args) {
+  if (!args.includeSecrets && classifySensitivePath(filePath).sensitive) return false;
   if (args.all || config.feedMode === 'all-files' || config.allowedExtensions === null) return true;
   const ext = path.extname(filePath).toLowerCase();
   return (config.allowedExtensions || []).includes(ext);
+}
+
+function skipReasonForFile(filePath, config, args, stat = null) {
+  if (!args.includeSecrets) {
+    const sensitive = classifySensitivePath(filePath);
+    if (sensitive.sensitive) return { reason: 'sensitive', matchedPattern: sensitive.matchedPattern };
+  }
+  if (stat && stat.size > Number(config.maxFileBytes || Infinity)) return { reason: 'size', matchedPattern: null };
+  if (!shouldIncludeFile(filePath, config, args)) return { reason: 'extension', matchedPattern: null };
+  return null;
 }
 
 async function readJson(file, fallback) {
@@ -99,7 +111,7 @@ async function sha256File(filePath) {
   }
 }
 
-async function* walk(root, ignores) {
+async function* walk(root, ignores, options = {}) {
   const stack = [''];
   while (stack.length) {
     const rel = stack.pop();
@@ -112,9 +124,13 @@ async function* walk(root, ignores) {
     }
     entries.sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries) {
-      if (shouldIgnoreName(entry.name, ignores)) continue;
       const childRel = path.join(rel, entry.name);
       const childPath = path.join(root, childRel);
+      const skip = classifySkip(toPosix(childRel), entry.name, ignores);
+      if (skip.skipped) {
+        options.onSkip?.({ rel: childRel, path: childPath, reason: skip.reason, matchedPattern: skip.matchedPattern, isDirectory: entry.isDirectory() });
+        continue;
+      }
       if (entry.isSymbolicLink()) continue;
       if (entry.isDirectory()) stack.push(childRel);
       else if (entry.isFile()) yield { rel: childRel, path: childPath };
@@ -238,6 +254,7 @@ async function main() {
   const sourceRegistry = await startSourceRegistryRun(config, args);
   if (sourceRegistry.error) console.warn(`Source registry skipped: ${sourceRegistry.error}`);
 
+  const detailedSkipped = Boolean(args.dryRun || args.report);
   const manifest = {
     version: 1,
     ownerName: config.ownerName,
@@ -246,9 +263,18 @@ async function main() {
     startedAt,
     completedAt: null,
     dryRun: Boolean(args.dryRun),
+    includeSecrets: Boolean(args.includeSecrets),
     sources: [],
-    totals: { scanned: 0, skipped: 0, unchanged: 0, changed: 0, uploaded: 0, bytesUploaded: 0, errors: 0 },
+    totals: { scanned: 0, skipped: 0, skippedByReason: {}, unchanged: 0, changed: 0, uploaded: 0, bytesUploaded: 0, errors: 0 },
   };
+
+  function recordSkip(sourceSummary, rel, reason, matchedPattern = null) {
+    manifest.totals.skipped += 1;
+    manifest.totals.skippedByReason[reason] = (manifest.totals.skippedByReason[reason] || 0) + 1;
+    sourceSummary.skipped += 1;
+    sourceSummary.skippedByReason[reason] = (sourceSummary.skippedByReason[reason] || 0) + 1;
+    if (detailedSkipped) sourceSummary.skippedFiles.push({ rel: toPosix(rel), reason, ...(matchedPattern ? { matchedPattern } : {}) });
+  }
 
   for (const source of config.sources || []) {
     if (!source.enabled) continue;
@@ -264,20 +290,28 @@ async function main() {
       sourceStreamId: stream?.id || source.sourceStreamId || null,
       files: [],
       skipped: 0,
+      skippedByReason: {},
+      skippedFiles: detailedSkipped ? [] : undefined,
       unchanged: 0,
       errors: [],
     };
     manifest.sources.push(sourceSummary);
 
-    for await (const item of walk(root, config.defaultIgnores || [])) {
+    for await (const item of walk(root, config.defaultIgnores || DEFAULT_IGNORES, {
+      onSkip: (skipped) => recordSkip(sourceSummary, skipped.rel, skipped.reason, skipped.matchedPattern),
+    })) {
       if (manifest.totals.changed >= maxFiles) break;
       manifest.totals.scanned += 1;
 
       try {
         const stat = await fs.stat(item.path);
-        if (stat.size > maxFileBytes || !shouldIncludeFile(item.path, config, args)) {
-          manifest.totals.skipped += 1;
-          sourceSummary.skipped += 1;
+        if (stat.size > maxFileBytes) {
+          recordSkip(sourceSummary, item.rel, 'size');
+          continue;
+        }
+        const fileSkip = skipReasonForFile(item.path, { ...config, maxFileBytes }, args, stat);
+        if (fileSkip) {
+          recordSkip(sourceSummary, item.rel, fileSkip.reason, fileSkip.matchedPattern);
           continue;
         }
 

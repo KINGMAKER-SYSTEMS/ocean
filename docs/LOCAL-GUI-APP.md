@@ -33,6 +33,7 @@ npm run ocean:app -- --port 8766 --no-open
 - Lets the user choose local folders using a native folder picker when available.
 - Writes/refreshes a redacted source manifest in `/context/ocean-bedrock/sources`.
 - Runs `scripts/ocean-ingest-local.mjs` in the background for manual sync.
+- Uses the shared ingest secret-exclusion filters, so `.env`, SSH keys, credential files, password vaults, and similar paths are excluded by default.
 - Uses server-side source/sync endpoints for lineage; coworker devices only need `serverUrl` + scoped bearer token.
 - Can run scheduled sync while the app is open.
 - Shows selected folders, latest run output, and recent app activity.
@@ -98,7 +99,7 @@ The coworker should set their app name to `alice`, so uploaded files land under:
 /coworkers/alice/<device>/<folder-label>
 ```
 
-Do not give coworker devices admin tokens.
+Do not give coworker devices admin tokens. Contributor tokens should be scoped to the coworker's own `/coworkers/<name>`, `/sessions/<name>`, and shared `/context/ocean-bedrock` paths.
 
 ## V0 limitations
 
@@ -106,6 +107,7 @@ Do not give coworker devices admin tokens.
 - Scheduling only works while the app is open.
 - Non-local integrations are UI placeholders for now.
 - The server still owns the Postgres `DATABASE_URL`; if the server lacks it, lineage endpoints return unavailable while byte sync can still use the file API.
+- There is not yet a full GUI preview/review panel for skipped sensitive files, but the underlying ingest dry-run now reports `skippedByReason` and `skippedFiles` with matched patterns.
 
 ## Next improvements
 

@@ -6,6 +6,7 @@ import crypto from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { spawn, execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { DEFAULT_IGNORES } from '../src/ingest-filters.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -17,10 +18,6 @@ const DEFAULT_CONFIG_FILE = path.join(DEFAULT_CONFIG_DIR, 'bootstrap.json');
 const DEFAULT_APP_STATE_FILE = path.join(os.homedir(), '.local', 'state', 'ocean-bedrock', 'local-app-state.json');
 const DEFAULT_INGEST_STATE_FILE = path.join(os.homedir(), '.local', 'state', 'ocean-bedrock', 'ingest-state.json');
 const DEFAULT_SERVER_URL = 'https://ocean-bedrock-production.up.railway.app';
-const DEFAULT_IGNORES = [
-  '.git', '.hg', '.svn', 'node_modules', '.venv', 'venv', 'target', 'dist', 'build',
-  '.next', '.turbo', '.cache', '__pycache__', '.DS_Store', 'Thumbs.db',
-];
 const DEFAULT_EXTENSIONS = [
   '.md', '.mdx', '.txt', '.rst', '.json', '.jsonl', '.yaml', '.yml', '.toml', '.ini',
   '.csv', '.tsv', '.html', '.htm', '.css', '.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx',
@@ -180,7 +177,7 @@ function logLine(message) {
 
 function requireConfigured(config) {
   if (!config.serverUrl) throw new Error('Set the Ocean Bedrock URL first.');
-  if (!config.token) throw new Error('Paste and save your invite/token first.');
+  if (!config.token) throw new Error('Paste and save your invite/token first. Secret-pattern files are excluded by default during ingest.');
   if (!config.ownerName) throw new Error('Set your name first.');
   if (!config.deviceName) throw new Error('Set this device name first.');
 }

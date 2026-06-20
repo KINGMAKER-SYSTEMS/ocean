@@ -5,6 +5,7 @@ import { promises as fs } from 'node:fs';
 import readline from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import crypto from 'node:crypto';
+import { DEFAULT_IGNORES } from '../src/ingest-filters.mjs';
 import {
   ensureSourceAdapters,
   upsertSourceInstance,
@@ -13,10 +14,6 @@ import {
 
 const DEFAULT_CONFIG_DIR = path.join(os.homedir(), '.config', 'ocean-bedrock');
 const DEFAULT_CONFIG_FILE = path.join(DEFAULT_CONFIG_DIR, 'bootstrap.json');
-const DEFAULT_IGNORES = [
-  '.git', '.hg', '.svn', 'node_modules', '.venv', 'venv', 'target', 'dist', 'build',
-  '.next', '.turbo', '.cache', '__pycache__', '.DS_Store', 'Thumbs.db',
-];
 const DEFAULT_EXTENSIONS = [
   '.md', '.mdx', '.txt', '.rst', '.json', '.jsonl', '.yaml', '.yml', '.toml', '.ini',
   '.csv', '.tsv', '.html', '.htm', '.css', '.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx',
@@ -39,7 +36,7 @@ Options:
   --folder <path>      Local folder to feed. Can be repeated.
   --remote-prefix <p>  Virtual root. Default: /coworkers/<name>/<device>
   --config <path>      Config output path. Default: ~/.config/ocean-bedrock/bootstrap.json
-  --all-files          Feed all files under max size, not just knowledge-document extensions.
+  --all-files          Feed all files under max size, not just knowledge-document extensions. Secret patterns remain excluded by ingest.
   --max-file-mb <n>    Max file size for ingest. Default: 10.
   --yes                Non-interactive; requires server, token, name, and at least one folder.
 `);

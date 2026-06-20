@@ -74,15 +74,33 @@ It skips common noisy folders/files:
 .git node_modules .venv target dist build .next .cache __pycache__ .DS_Store
 ```
 
+It also blocks common secret-bearing paths by default, including:
+
+```txt
+.env .env.* *.pem *.key *.p12 *.pfx id_rsa id_dsa id_ecdsa id_ed25519
+.aws/ .ssh/ .gnupg/ .npmrc .pypirc .netrc .htpasswd *.tfstate *.kdbx
+*secret* *credential* service-account*.json
+```
+
+Dry-run output includes `skippedByReason` and, for dry-run/report mode, `skippedFiles` with paths and matched patterns. It reports paths/reasons only, never file contents.
+
 Max file size defaults to `10 MB`.
 
-To feed all file types under the max size:
+To feed all non-secret file types under the max size:
 
 ```bash
 npm run ocean:bootstrap -- --all-files ...
 # or just for one ingest run:
 npm run ocean:ingest -- --all
 ```
+
+`--all` does **not** include secret-pattern files. Secret-pattern files require the explicit supervised override:
+
+```bash
+npm run ocean:ingest -- --include-secrets
+```
+
+Do not use `--include-secrets` for coworker rollout unless a human operator has approved the exact folder and paths.
 
 ## Where your files land
 
@@ -109,4 +127,6 @@ Each ingest run writes a manifest to:
 - Only choose folders you want shared with the company knowledge layer.
 - Do not select password manager exports, SSH key folders, raw credential folders, or private personal directories.
 - Your token should be scoped; it should not be an admin token.
+- Standard coworker scopes should be limited to `/coworkers/<name>/<device>`, `/sessions/<name>`, and `/context/ocean-bedrock` unless an operator explicitly grants more.
+- Contributor tokens can read/write/lock within scope, but should not be able to delete.
 - If a token leaks, ask an admin to revoke it and issue a new one.
