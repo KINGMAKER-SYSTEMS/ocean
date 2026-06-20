@@ -8,8 +8,10 @@ Owner: Navigator
 Railway service: `ocean-bedrock`  
 Project: `rising-tides-agents`  
 Environment: `production`  
-Deployment ID: `c0ec37fe-f874-4bb8-aa99-d3cc38432819`  
-Message: `Deploy Epoch 01 P1 coworker onboarding`
+Deployment ID: `0a92750a-2d83-435a-8990-82173f6824a8`  
+Message: `Deploy local sync preview acknowledgement gate`
+
+Previous P1 deployment: `c0ec37fe-f874-4bb8-aa99-d3cc38432819` (`Deploy Epoch 01 P1 coworker onboarding`)
 
 Status from `railway deployment list --service ocean-bedrock --json`: `SUCCESS`
 
@@ -55,7 +57,9 @@ No raw invite code or token value was printed or committed.
 
 ## Pre-deploy checks run locally
 
+- `npm run local-app:ack:check` — pass
 - `npm run secret:scan` — pass
 - `npm run secret:globs:check` — pass
 - `npm run smoke` — pass
 - `npm run db:check` — pass
+- `npm run source:check` — pass
