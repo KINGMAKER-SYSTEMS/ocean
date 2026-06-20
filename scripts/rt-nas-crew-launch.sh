@@ -36,7 +36,7 @@ start_agent() {
   local prompt
   prompt="$(agent_prompt "$name" "$callsign" "$file")"
 
-  tmux new-window -t "$SESSION" -n "$window" "cd '$ROOT' && export PI_CODING_AGENT_SESSION_DIR='$SESSION_DIR' && export RT_NAS_AGENT_NAME='$name' && export RT_NAS_AGENT_CALLSIGN='$callsign' && $PI_BIN --model '$MODEL' --append-system-prompt '$file' \"$prompt\" 2>&1 | tee -a '$LOG_DIR/${callsign}.log'"
+  tmux new-window -t "$SESSION" -n "$window" "cd '$ROOT' && export PI_CODING_AGENT_SESSION_DIR='$SESSION_DIR' && export RT_NAS_AGENT_NAME='$name' && export RT_NAS_AGENT_CALLSIGN='$callsign' && export OCEAN_BARNACLE_MODE=1 && $PI_BIN --model '$MODEL' --append-system-prompt '$file' \"$prompt\" 2>&1 | tee -a '$LOG_DIR/${callsign}.log'"
 }
 
 if tmux has-session -t "$SESSION" 2>/dev/null; then
@@ -53,6 +53,10 @@ start_agent "ANK" "Anchor" "ANK" "docs/agents/ANK.md"
 start_agent "KEL" "Keel" "KEL" "docs/agents/KEL.md"
 start_agent "SNR" "Sonar" "SNR" "docs/agents/SNR.md"
 start_agent "BCN" "Beacon" "BCN" "docs/agents/BCN.md"
+
+if [[ -x "$ROOT/scripts/ocean-barnacle-chrome.sh" ]]; then
+  "$ROOT/scripts/ocean-barnacle-chrome.sh" "$SESSION" >/dev/null || true
+fi
 
 tmux select-window -t "$SESSION:NAV"
 
