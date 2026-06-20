@@ -2,7 +2,7 @@
 
 Status: V0 companion app.
 
-Purpose: make coworker onboarding simple. A coworker opens one local app, pastes a scoped invite/sync token once, chooses folders, and picks a sync schedule.
+Purpose: make coworker onboarding simple. A coworker opens one local app, redeems a one-time invite code or pastes a scoped sync token fallback once, chooses folders, previews excluded files, and picks a sync schedule.
 
 ## Run
 
@@ -28,7 +28,7 @@ npm run ocean:app -- --port 8766 --no-open
 ## What the app does
 
 - Stores local config at `~/.config/ocean-bedrock/bootstrap.json` with file mode `0600`.
-- Uses existing scoped bearer tokens; no admin token belongs on coworker devices.
+- Redeems one-time invite codes through `/api/v1/invites/redeem`, or uses existing scoped bearer tokens as an admin/operator fallback; no admin token belongs on coworker devices.
 - Lets the user test the token against `/health` and `/api/v1/info`.
 - Lets the user choose local folders using a native folder picker when available.
 - Writes/refreshes a redacted source manifest in `/context/ocean-bedrock/sources`.
@@ -83,7 +83,7 @@ This is intentional for V0 because it is easy to reason about and safer for earl
 
 ## Token model
 
-Create a contributor token on the operator machine and give the coworker only that token.
+Preferred flow: create a one-time contributor invite on the operator machine and give the coworker only that invite code. Fallback flow: create a contributor token on the operator machine and give the coworker only that token.
 
 Example scopes for a coworker named `alice`:
 
@@ -112,7 +112,7 @@ Do not give coworker devices admin tokens. Contributor tokens should be scoped t
 ## Next improvements
 
 1. Package as a double-click desktop app using Electron/Tauri or a native wrapper.
-2. Add one-time invite links so coworkers never see raw long tokens.
+2. Package invite creation into an operator UI/CLI so coworkers never see raw long tokens.
 3. Add OS login/background scheduling for trusted devices.
 4. Add GitHub and Telegram integration cards backed by real adapter runners.
 5. Add record delete/tombstone reporting for removed local files.

@@ -8,9 +8,12 @@ import crypto from 'node:crypto';
 
 import {
   addToken,
+  createInvite,
   findToken,
   loadAuthFile,
+  publicInviteRecord,
   publicTokenRecord,
+  redeemInvite,
   revokeToken,
 } from './auth.mjs';
 import {
@@ -1284,6 +1287,47 @@ async function handleTokenCreate(req, state, principal) {
   return created;
 }
 
+async function handleInviteCreate(req, state, principal) {
+  requirePermission(principal, 'admin');
+  const body = await readJsonBody(req, state.maxJsonBytes);
+  const created = await createInvite(state.authFile, {
+    name: body.name,
+    role: body.role || 'contributor',
+    scopes: body.scopes || ['/'],
+    ttlMinutes: body.ttlMinutes || 60,
+    createdBy: principal.id,
+  });
+  await appendAudit(state, {
+    actor: principal.name,
+    actorId: principal.id,
+    action: 'invite.create',
+    inviteId: created.invite.id,
+    inviteName: created.invite.name,
+    role: created.invite.role,
+    scopes: created.invite.scopes,
+    expiresAt: created.invite.expiresAt,
+  });
+  return created;
+}
+
+async function handleInviteRedeem(req, state) {
+  const body = await readJsonBody(req, state.maxJsonBytes);
+  if (!body.code) throw new HttpError(400, 'Missing invite code.');
+  const redeemed = await redeemInvite(state.authFile, String(body.code).trim());
+  if (!redeemed) throw new HttpError(403, 'Invalid, expired, or already redeemed invite.');
+  await appendAudit(state, {
+    actor: redeemed.record.name,
+    actorId: redeemed.record.id,
+    action: 'invite.redeem',
+    inviteId: redeemed.invite.id,
+    tokenId: redeemed.record.id,
+    tokenName: redeemed.record.name,
+    role: redeemed.record.role,
+    scopes: redeemed.record.scopes,
+  });
+  return redeemed;
+}
+
 function notFound() {
   throw new HttpError(404, 'Route not found.');
 }
@@ -1377,6 +1421,11 @@ export function createOceanBedrockServer(options = {}) {
     }
 
     if (!url.pathname.startsWith('/api/v1/')) notFound();
+
+    if (req.method === 'POST' && url.pathname === '/api/v1/invites/redeem') {
+      jsonResponse(res, 201, await handleInviteRedeem(req, state));
+      return;
+    }
 
     const principal = await authenticate(req, url, state);
 
@@ -1704,6 +1753,18 @@ export function createOceanBedrockServer(options = {}) {
 
     if (req.method === 'POST' && url.pathname === '/api/v1/tokens') {
       jsonResponse(res, 201, await handleTokenCreate(req, state, principal));
+      return;
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/v1/invites') {
+      requirePermission(principal, 'admin');
+      const auth = await loadAuthFile(state.authFile);
+      jsonResponse(res, 200, { invites: (auth.invites || []).map(publicInviteRecord) });
+      return;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/v1/invites') {
+      jsonResponse(res, 201, await handleInviteCreate(req, state, principal));
       return;
     }
 

@@ -56,6 +56,7 @@ export async function loadAuthFile(authFile) {
   const raw = await fs.readFile(authFile, 'utf8');
   const parsed = raw.trim() ? JSON.parse(raw) : { version: AUTH_VERSION, tokens: [] };
   if (!Array.isArray(parsed.tokens)) parsed.tokens = [];
+  if (!Array.isArray(parsed.invites)) parsed.invites = [];
   parsed.version = parsed.version || AUTH_VERSION;
   return parsed;
 }
@@ -124,4 +125,69 @@ export async function revokeToken(authFile, tokenId, revokedBy = null) {
   record.revokedBy = revokedBy;
   await saveAuthFile(authFile, auth);
   return publicTokenRecord(record);
+}
+
+export function publicInviteRecord(record) {
+  const { hash, ...safe } = record;
+  return safe;
+}
+
+export async function createInvite(authFile, options = {}) {
+  const auth = await loadAuthFile(authFile);
+  const code = options.code || generateToken(24);
+  const hash = hashToken(code);
+  if (auth.invites.some((record) => record.hash && timingSafeEqualString(record.hash, hash))) {
+    throw new Error('An invite with this code already exists.');
+  }
+
+  const role = options.role || 'contributor';
+  if (!VALID_ROLES.has(role)) throw new Error(`Invalid role "${role}". Use one of: ${[...VALID_ROLES].join(', ')}`);
+  if (role === 'admin' && !options.allowAdminInvite) throw new Error('Admin invites are not allowed by default.');
+
+  const ttlMinutes = Math.max(1, Number(options.ttlMinutes || 60));
+  const id = `inv_${crypto.createHash('sha256').update(`${hash}:${Date.now()}:${Math.random()}`).digest('hex').slice(0, 12)}`;
+  const record = {
+    id,
+    name: options.name || id,
+    hash,
+    role,
+    scopes: normalizeScopes(options.scopes || ['/']),
+    createdAt: nowIso(),
+    createdBy: options.createdBy || null,
+    expiresAt: options.expiresAt || new Date(Date.now() + ttlMinutes * 60 * 1000).toISOString(),
+    consumedAt: null,
+    consumedByTokenId: null,
+  };
+  auth.invites.push(record);
+  await saveAuthFile(authFile, auth);
+  return { code, invite: publicInviteRecord(record) };
+}
+
+export async function redeemInvite(authFile, code, options = {}) {
+  const auth = await loadAuthFile(authFile);
+  const wanted = hashToken(code || '');
+  const invite = auth.invites.find((record) => record.hash && timingSafeEqualString(record.hash, wanted));
+  if (!invite || invite.consumedAt || isTokenExpired(invite)) return null;
+
+  const token = options.token || generateToken();
+  const tokenHash = hashToken(token);
+  if (auth.tokens.some((record) => record.hash && timingSafeEqualString(record.hash, tokenHash))) {
+    throw new Error('A token with this secret already exists.');
+  }
+  const tokenRecord = {
+    id: `tok_${crypto.createHash('sha256').update(`${tokenHash}:${Date.now()}:${Math.random()}`).digest('hex').slice(0, 12)}`,
+    name: invite.name,
+    hash: tokenHash,
+    role: invite.role,
+    scopes: normalizeScopes(invite.scopes || ['/']),
+    createdAt: nowIso(),
+    createdBy: invite.id,
+    expiresAt: options.expiresAt || null,
+    revokedAt: null,
+  };
+  auth.tokens.push(tokenRecord);
+  invite.consumedAt = nowIso();
+  invite.consumedByTokenId = tokenRecord.id;
+  await saveAuthFile(authFile, auth);
+  return { token, invite: publicInviteRecord(invite), record: publicTokenRecord(tokenRecord) };
 }

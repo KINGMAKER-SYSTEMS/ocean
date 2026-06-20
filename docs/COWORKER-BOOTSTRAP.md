@@ -8,7 +8,7 @@ You choose exactly which folders are active. The bootstrapper saves a local conf
 
 - Node.js 22+
 - Bedrock/Longhouse URL
-- Your MCP/Bearer token
+- Your one-time invite code, or a scoped MCP/Bearer token fallback
 - The folders you want to feed, e.g. `~/Documents/RisingTides`, `~/Projects/ocean-notes`
 
 ## Bootstrap
@@ -39,6 +39,8 @@ This creates:
 ```
 
 The token is stored locally with file mode `0600`. Do not commit or share this file.
+
+For GUI onboarding, prefer a one-time invite code. The local app redeems the code with `/api/v1/invites/redeem`, stores the returned scoped token locally, and the invite cannot be reused.
 
 ## Ingest selected folders
 

@@ -146,6 +146,25 @@ try {
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ name: 'smoke-agent', role: 'agent', scopes: ['/docs'], ttlDays: 1 }),
   });
+  const invite = await api('/api/v1/invites', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'smoke-coworker', role: 'contributor', scopes: ['/docs'], ttlMinutes: 5 }),
+  });
+  if (!invite.body.code || invite.body.invite?.hash) throw new Error('invite create did not return safe one-time code payload');
+  const redeemedResponse = await fetch(`${base}/api/v1/invites/redeem`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ code: invite.body.code }),
+  });
+  const redeemed = await redeemedResponse.json();
+  if (!redeemedResponse.ok || !redeemed.token || redeemed.record?.role !== 'contributor') throw new Error(`invite redeem failed: ${JSON.stringify(redeemed)}`);
+  const reused = await fetch(`${base}/api/v1/invites/redeem`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ code: invite.body.code }),
+  });
+  if (reused.status !== 403) throw new Error(`expected invite reuse to fail with 403, got ${reused.status}`);
   const sourceRegistry = await verifySourceAdapterTables(sourceRegistryDatabaseUrl);
   if (sourceRegistry && (!sourceRegistry.ready || sourceRegistry.adapters !== 8)) {
     throw new Error(`source adapter schema check failed: ${JSON.stringify(sourceRegistry)}`);

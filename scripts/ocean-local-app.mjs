@@ -228,6 +228,33 @@ async function writePublicSourceManifest(config) {
   return manifestPath;
 }
 
+async function redeemInviteCode(body) {
+  const current = await loadConfig();
+  const serverUrl = normalizeServer(body.serverUrl || current.serverUrl || DEFAULT_SERVER_URL);
+  const code = String(body.code || '').trim();
+  if (!code) throw new Error('Paste an invite code first.');
+  const response = await fetch(`${serverUrl}/api/v1/invites/redeem`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ code }),
+  });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.error || `Invite redeem failed: ${response.status}`);
+  const next = {
+    ...current,
+    serverUrl,
+    token: result.token,
+    tokenKind: 'invite-redeemed-bearer',
+    ownerName: body.ownerName || current.ownerName || result.record?.name || '',
+    deviceName: body.deviceName || current.deviceName || os.hostname(),
+  };
+  next.ownerSlug = slugify(next.ownerSlug || next.ownerName);
+  next.deviceSlug = slugify(next.deviceSlug || next.deviceName);
+  next.remoteRoot = next.remoteRoot || `/coworkers/${next.ownerSlug}/${next.deviceSlug}`;
+  await saveConfig(next);
+  return { invite: result.invite, token: '[saved]', record: result.record, config: redactConfig(next) };
+}
+
 async function saveBasicConfig(body) {
   const current = await loadConfig();
   const token = body.token && body.token !== '[saved]' ? String(body.token).trim() : current.token;
@@ -512,6 +539,7 @@ async function handle(req, res) {
     if (req.method === 'GET' && url.pathname === '/') return send(res, 200, INDEX_HTML);
     if (req.method === 'GET' && url.pathname === '/api/state') return send(res, 200, await currentState());
     if (req.method === 'POST' && url.pathname === '/api/config') return send(res, 200, { ok: true, config: redactConfig(await saveBasicConfig(await readBody(req))) });
+    if (req.method === 'POST' && url.pathname === '/api/invite/redeem') return send(res, 200, { ok: true, ...(await redeemInviteCode(await readBody(req))), state: await currentState() });
     if (req.method === 'POST' && url.pathname === '/api/test') {
       const config = await loadConfig();
       const health = await fetch(`${config.serverUrl}/health`).then((r) => r.json());
@@ -610,8 +638,9 @@ const INDEX_HTML = `<!doctype html>
         <h2>1. Connect</h2>
         <label>Ocean Bedrock URL</label>
         <input id="serverUrl" placeholder="https://ocean-bedrock-production.up.railway.app" />
-        <label>Invite / sync token</label>
-        <input id="token" type="password" placeholder="Paste token once" />
+        <label>Invite code or sync token</label>
+        <input id="inviteCode" type="password" placeholder="Paste invite code for first-time setup" />
+        <input id="token" type="password" placeholder="Fallback: paste sync token once" />
         <div class="row">
           <div><label>Your name</label><input id="ownerName" placeholder="operator-contributor" /></div>
           <div><label>This device</label><input id="deviceName" placeholder="macbook" /></div>
@@ -621,7 +650,8 @@ const INDEX_HTML = `<!doctype html>
           <div><label>Max file MB</label><input id="maxFileMb" type="number" min="1" max="250" value="10" /></div>
         </div>
         <div class="actions">
-          <button onclick="saveConfig()">Save connection</button>
+          <button onclick="redeemInvite()">Redeem invite</button>
+          <button class="secondary" onclick="saveConfig()">Save raw token fallback</button>
           <button class="secondary" onclick="testConnection()">Test</button>
         </div>
         <div class="status" id="connectStatus"></div>
@@ -718,6 +748,22 @@ const INDEX_HTML = `<!doctype html>
     async function refresh() {
       state = await api('/api/state');
       render();
+    }
+
+    async function redeemInvite() {
+      try {
+        setStatus('connectStatus', 'Redeeming invite...');
+        const data = await api('/api/invite/redeem', {
+          serverUrl: $('serverUrl').value,
+          code: $('inviteCode').value,
+          ownerName: $('ownerName').value,
+          deviceName: $('deviceName').value,
+        });
+        $('inviteCode').value = '';
+        state = data.state;
+        setStatus('connectStatus', 'Invite redeemed. Scoped token saved locally.');
+        await refresh();
+      } catch (e) { setStatus('connectStatus', e.message, false); }
     }
 
     async function saveConfig() {
