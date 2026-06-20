@@ -11,6 +11,21 @@ You choose exactly which folders are active. The bootstrapper saves a local conf
 - Your one-time invite code, or a scoped MCP/Bearer token fallback
 - The folders you want to feed, e.g. `~/Documents/RisingTides`, `~/Projects/ocean-notes`
 
+## Create a one-time invite (operator)
+
+Preferred operator flow:
+
+```bash
+npm run invite:create -- \
+  --name alice \
+  --scope /coworkers/alice \
+  --scope /sessions/alice \
+  --scope /context/ocean-bedrock \
+  --ttl-minutes 60
+```
+
+The command prints a single-use invite code once. Share that code through a secure channel. Do not commit or log the code.
+
 ## Bootstrap
 
 Interactive:

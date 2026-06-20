@@ -8,6 +8,7 @@
     "start": "node src/server.mjs",
     "dev": "OCEAN_BEDROCK_BOOTSTRAP_TOKEN=dev-token-change-me node src/server.mjs",
     "token:create": "node scripts/issue-token.mjs",
+    "invite:create": "node scripts/issue-invite.mjs",
     "ocean:bootstrap": "node scripts/ocean-bootstrap.mjs",
     "ocean:ingest": "node scripts/ocean-ingest-local.mjs",
     "ocean:app": "node scripts/ocean-local-app.mjs",

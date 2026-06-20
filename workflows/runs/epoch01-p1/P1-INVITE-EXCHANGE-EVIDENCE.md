@@ -19,6 +19,7 @@ Owner: Navigator
   - redeemed token stored in local config with existing 0600 config behavior
 - Updated smoke test to cover invite create, redeem, and reuse rejection.
 - Updated coworker/local app docs.
+- Added operator CLI: `scripts/issue-invite.mjs` / `npm run invite:create`.
 
 ## Safety behavior
 
@@ -63,4 +64,4 @@ Smoke now verifies:
 ## Remaining gaps
 
 - Token/invite registry is still backed by the auth JSON file. Postgres-backed token/invite registry remains a later hardening phase.
-- Operator-facing invite creation UX/CLI is still needed.
+- Operator-facing invite creation CLI exists; richer UI/Linear workflow integration can still be added later.

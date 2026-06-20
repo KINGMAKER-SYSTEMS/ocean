@@ -83,7 +83,13 @@ This is intentional for V0 because it is easy to reason about and safer for earl
 
 ## Token model
 
-Preferred flow: create a one-time contributor invite on the operator machine and give the coworker only that invite code. Fallback flow: create a contributor token on the operator machine and give the coworker only that token.
+Preferred flow: create a one-time contributor invite on the operator machine and give the coworker only that invite code.
+
+```bash
+npm run invite:create -- --name alice --scope /coworkers/alice --scope /sessions/alice --scope /context/ocean-bedrock
+```
+
+Fallback flow: create a contributor token on the operator machine and give the coworker only that token.
 
 Example scopes for a coworker named `alice`:
 
