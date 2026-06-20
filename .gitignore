@@ -5,7 +5,9 @@ npm-debug.log*
 .env.*
 !.env.example
 
+# Local/runtime tool state
 data/**
 !data/.gitkeep
-
 .pi/
+.wrangler/
+.worktrees/
