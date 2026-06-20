@@ -32,11 +32,13 @@ npm run ocean:app -- --port 8766 --no-open
 - Lets the user test the token against `/health` and `/api/v1/info`.
 - Lets the user choose local folders using a native folder picker when available.
 - Writes/refreshes a redacted source manifest in `/context/ocean-bedrock/sources`.
+- Runs a dry-run preview before real sync.
+- Requires the user to acknowledge the latest dry-run preview before manual or scheduled sync unlocks for the current folders/settings.
 - Runs `scripts/ocean-ingest-local.mjs` in the background for manual sync.
 - Uses the shared ingest secret-exclusion filters, so `.env`, SSH keys, credential files, password vaults, and similar paths are excluded by default.
 - Uses server-side source/sync endpoints for lineage; coworker devices only need `serverUrl` + scoped bearer token.
-- Can run scheduled sync while the app is open.
-- Shows selected folders, latest run output, and recent app activity.
+- Can run scheduled sync while the app is open, but only after the current preview has been acknowledged.
+- Shows selected folders, preview status, latest run output, and recent app activity.
 
 ## Current integrations
 
@@ -113,7 +115,7 @@ Do not give coworker devices admin tokens. Contributor tokens should be scoped t
 - Scheduling only works while the app is open.
 - Non-local integrations are UI placeholders for now.
 - The server still owns the Postgres `DATABASE_URL`; if the server lacks it, lineage endpoints return unavailable while byte sync can still use the file API.
-- There is not yet a full GUI preview/review panel for skipped sensitive files, but the underlying ingest dry-run now reports `skippedByReason` and `skippedFiles` with matched patterns.
+- The preview acknowledgement is local app state, not a server-side approval record yet.
 
 ## Next improvements
 

@@ -19,6 +19,7 @@
     "source:check": "node scripts/source-runner-check.mjs",
     "secret:scan": "node scripts/secret-scan.mjs",
     "secret:globs:check": "node scripts/check-secret-globs.mjs",
+    "local-app:ack:check": "node scripts/check-local-app-ack.mjs",
     "mcp": "node scripts/ocean-bedrock-mcp.mjs",
     "db:check": "node scripts/check-postgres.mjs",
     "db:migrate": "node scripts/migrate.mjs",

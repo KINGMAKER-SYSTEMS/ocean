@@ -329,10 +329,15 @@ async function addFolder(body) {
 
 async function setSchedule(body) {
   const config = await loadConfig();
-  config.schedule = {
+  const nextSchedule = {
     enabled: Boolean(body.enabled),
     intervalMinutes: Math.max(5, Number(body.intervalMinutes || 60)),
   };
+  if (nextSchedule.enabled) {
+    const appState = await loadAppState();
+    requirePreviewAcknowledgement(config, appState, 'schedule');
+  }
+  config.schedule = nextSchedule;
   await saveConfig(config);
   await reschedule(config);
   return config.schedule;
@@ -394,12 +399,55 @@ function parseLastJson(stdout) {
   }
 }
 
+function syncPlanFingerprint(config) {
+  const normalized = {
+    serverUrl: config.serverUrl,
+    ownerSlug: config.ownerSlug,
+    deviceSlug: config.deviceSlug,
+    remoteRoot: config.remoteRoot,
+    feedMode: config.feedMode,
+    maxFileBytes: config.maxFileBytes,
+    allowedExtensions: config.allowedExtensions,
+    defaultIgnores: config.defaultIgnores,
+    sources: (config.sources || [])
+      .filter((source) => source.enabled)
+      .map((source) => ({
+        id: source.id,
+        label: source.label,
+        localPath: source.localPath,
+        remotePrefix: source.remotePrefix,
+      }))
+      .sort((a, b) => String(a.id).localeCompare(String(b.id))),
+  };
+  return crypto.createHash('sha256').update(JSON.stringify(normalized)).digest('hex');
+}
+
+function requirePreviewAcknowledgement(config, appState, reason) {
+  const fingerprint = syncPlanFingerprint(config);
+  const preview = appState.lastPreview;
+  const ack = appState.previewAcknowledgement;
+  const valid = preview?.ok
+    && preview.planFingerprint === fingerprint
+    && ack?.planFingerprint === fingerprint
+    && ack?.previewCompletedAt === preview.completedAt
+    && ack?.acknowledgedAt;
+  if (!valid) {
+    const error = new Error(reason === 'schedule'
+      ? 'Scheduled sync is locked until you run a dry-run preview and click “I reviewed this preview — unlock sync”.'
+      : 'Sync is locked until you run a dry-run preview and click “I reviewed this preview — unlock sync”.');
+    error.statusCode = 409;
+    error.code = 'PREVIEW_ACK_REQUIRED';
+    throw error;
+  }
+}
+
 async function runPreview() {
   const config = await loadConfig();
   requireConfigured(config);
   if (!config.sources.some((source) => source.enabled)) throw new Error('Add at least one enabled folder before previewing.');
 
   const startedAt = new Date().toISOString();
+  const planFingerprint = syncPlanFingerprint(config);
   logLine('Preview started (dry-run)');
   const result = await new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [ingestScript, '--config', configPath, '--state', ingestStatePath, '--dry-run', '--report'], {
@@ -424,10 +472,33 @@ async function runPreview() {
     ...result,
     startedAt,
     completedAt: new Date().toISOString(),
+    planFingerprint,
+  };
+  state.previewAcknowledgement = null;
+  await saveAppState(state);
+  logLine('Preview finished (dry-run); acknowledgement required before real sync');
+  return state.lastPreview;
+}
+
+async function acknowledgePreview() {
+  const config = await loadConfig();
+  requireConfigured(config);
+  const state = await loadAppState();
+  const fingerprint = syncPlanFingerprint(config);
+  if (!state.lastPreview?.ok || state.lastPreview.planFingerprint !== fingerprint) {
+    const error = new Error('Run a fresh dry-run preview for the current folders/settings before unlocking sync.');
+    error.statusCode = 409;
+    error.code = 'FRESH_PREVIEW_REQUIRED';
+    throw error;
+  }
+  state.previewAcknowledgement = {
+    planFingerprint: fingerprint,
+    previewCompletedAt: state.lastPreview.completedAt,
+    acknowledgedAt: new Date().toISOString(),
   };
   await saveAppState(state);
-  logLine('Preview finished (dry-run)');
-  return state.lastPreview;
+  logLine('Dry-run preview acknowledged; real sync unlocked for current folders/settings');
+  return state.previewAcknowledgement;
 }
 
 async function runSync(reason = 'manual') {
@@ -435,6 +506,8 @@ async function runSync(reason = 'manual') {
   const config = await loadConfig();
   requireConfigured(config);
   if (!config.sources.some((source) => source.enabled)) throw new Error('Add at least one enabled folder before syncing.');
+  const preflightState = await loadAppState();
+  requirePreviewAcknowledgement(config, preflightState, reason);
 
   activeSync = new Promise((resolve, reject) => {
     const startedAt = new Date().toISOString();
@@ -523,11 +596,21 @@ function send(res, status, body, headers = {}) {
 async function currentState() {
   const config = await loadConfig();
   const appState = await loadAppState();
+  const planFingerprint = syncPlanFingerprint(config);
+  const preview = appState.lastPreview;
+  const ack = appState.previewAcknowledgement;
+  const syncUnlocked = Boolean(preview?.ok
+    && preview.planFingerprint === planFingerprint
+    && ack?.planFingerprint === planFingerprint
+    && ack?.previewCompletedAt === preview.completedAt
+    && ack?.acknowledgedAt);
   return {
     ok: true,
     activeSync: Boolean(activeSync),
     scheduleNextAt,
     logs: recentLogs.slice(-50),
+    syncPlanFingerprint: planFingerprint,
+    syncUnlocked,
     config: redactConfig(config),
     appState,
   };
@@ -550,6 +633,7 @@ async function handle(req, res) {
     if (req.method === 'POST' && url.pathname === '/api/folders') return send(res, 200, { ok: true, ...(await addFolder(await readBody(req))), state: await currentState() });
     if (req.method === 'POST' && url.pathname === '/api/schedule') return send(res, 200, { ok: true, schedule: await setSchedule(await readBody(req)), state: await currentState() });
     if (req.method === 'POST' && url.pathname === '/api/preview') return send(res, 200, { ok: true, preview: await runPreview(), state: await currentState() });
+    if (req.method === 'POST' && url.pathname === '/api/preview/ack') return send(res, 200, { ok: true, acknowledgement: await acknowledgePreview(), state: await currentState() });
     if (req.method === 'POST' && url.pathname === '/api/sync') return send(res, 200, { ok: true, run: await runSync('manual'), state: await currentState() });
     if (req.method === 'POST' && url.pathname === '/api/manifest') {
       const config = await loadConfig();
@@ -557,7 +641,7 @@ async function handle(req, res) {
     }
     return send(res, 404, { ok: false, error: 'Not found' });
   } catch (error) {
-    return send(res, 500, { ok: false, error: error.message, stack: process.env.NODE_ENV === 'development' ? error.stack : undefined });
+    return send(res, error.statusCode || 500, { ok: false, error: error.message, code: error.code, stack: process.env.NODE_ENV === 'development' ? error.stack : undefined });
   }
 }
 
@@ -688,6 +772,7 @@ const INDEX_HTML = `<!doctype html>
         <div class="actions">
           <button onclick="saveSchedule()">Save schedule</button>
           <button class="secondary" onclick="runPreview()">Dry-run preview</button>
+          <button onclick="ackPreview()">I reviewed this preview — unlock sync</button>
           <button class="secondary" onclick="runSync()">Sync now</button>
         </div>
         <div class="status" id="scheduleStatus"></div>
@@ -823,11 +908,13 @@ const INDEX_HTML = `<!doctype html>
       const panel = $('previewPanel');
       if (!panel) return;
       const result = preview && preview.result;
+      const ack = state.appState && state.appState.previewAcknowledgement;
       if (!result) {
-        panel.className = 'preview';
-        panel.innerHTML = 'Run a dry-run preview before first sync to review changed and skipped files.';
+        panel.className = 'preview warning';
+        panel.innerHTML = 'Real sync is locked. Run a dry-run preview, review changed/skipped/sensitive exclusions, then click “I reviewed this preview — unlock sync”.';
         return;
       }
+      const stale = preview.planFingerprint !== state.syncPlanFingerprint;
       const totals = result.totals || {};
       const sensitive = [];
       for (const source of result.sources || []) {
@@ -835,12 +922,23 @@ const INDEX_HTML = `<!doctype html>
           if (skipped.reason === 'sensitive') sensitive.push((source.label || source.id) + ': ' + skipped.rel + ' (' + skipped.matchedPattern + ')');
         }
       }
-      panel.className = 'preview' + (sensitive.length ? ' warning' : '');
+      const unlocked = !stale && ack && ack.planFingerprint === preview.planFingerprint && ack.previewCompletedAt === preview.completedAt;
+      panel.className = 'preview' + ((sensitive.length || stale || !unlocked) ? ' warning' : '');
       panel.innerHTML = '<strong>Dry-run preview</strong><br>'
         + 'Changed: ' + escapeHtml(totals.changed || 0)
         + ' · Skipped: ' + escapeHtml(totals.skipped || 0)
         + ' · Sensitive excluded: ' + escapeHtml(sensitive.length)
+        + '<br>Status: ' + (stale ? '<span class="bad">stale — folders/settings changed; run preview again</span>' : (unlocked ? '<span class="ok">acknowledged — sync unlocked</span>' : '<span class="bad">awaiting acknowledgement</span>'))
         + (sensitive.length ? '<br><br><strong>Sensitive files excluded:</strong><br>' + sensitive.slice(0, 20).map(escapeHtml).join('<br>') : '');
+    }
+
+    async function ackPreview() {
+      try {
+        setStatus('scheduleStatus', 'Saving acknowledgement...');
+        await api('/api/preview/ack', {});
+        setStatus('scheduleStatus', 'Preview acknowledged. Sync is unlocked for these folders/settings.');
+        await refresh();
+      } catch (e) { setStatus('scheduleStatus', e.message, false); await refresh(); }
     }
 
     async function saveSchedule() {

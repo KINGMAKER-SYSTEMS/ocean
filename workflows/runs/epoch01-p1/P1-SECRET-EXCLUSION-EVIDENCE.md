@@ -18,6 +18,8 @@ Owner: Navigator
   - `npm run secret:globs:check`
 - Updated coworker/local GUI docs with secret exclusion and scope guidance.
 - Added local GUI `/api/preview` dry-run endpoint and a preview panel that surfaces changed/skipped counts plus sensitive exclusions before sync.
+- Added a hard local acknowledgement gate: manual/scheduled sync now requires the latest dry-run preview to be acknowledged for the current folders/settings fingerprint.
+- Added repeatable gate check: `scripts/check-local-app-ack.mjs` / `npm run local-app:ack:check`.
 
 ## Verification
 
@@ -82,6 +84,7 @@ Result summary:
 ### Regression checks
 
 ```txt
+npm run local-app:ack:check
 npm run secret:scan
 npm run smoke
 npm run db:check
@@ -89,12 +92,12 @@ npm run db:check
 
 Results:
 
-- secret scan: pass, 94 tracked files scanned
+- local app ack check: pass; sync blocked before preview, blocked before acknowledgement, unlocked after acknowledgement.
+- secret scan: pass.
 - smoke: `ocean-bedrock smoke test passed`
-- db check: ok, schemaReady true, sourceAdaptersSeeded 8, Vectorize chunks 102/102, graph 116 nodes / 114 edges
+- db check: ok, schemaReady true, sourceAdaptersSeeded 8.
 
 ## Remaining P1 gaps
 
-- GUI now has a first dry-run preview panel, but still needs a hard acknowledgement gate before first real sync when sensitive files are detected.
-- One-time invite exchange is not implemented yet.
 - Token registry remains volume JSON unless/until the Postgres auth-token phase is implemented.
+- Local preview acknowledgement is not yet written to a server-side approval/audit table.
