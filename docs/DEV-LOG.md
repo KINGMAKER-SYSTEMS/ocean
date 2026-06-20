@@ -4,6 +4,8 @@ Generated: 2026-06-11T03:41:35Z
 Repo: `/root/rt-nas/rt-nas`  
 Service URL: <https://ocean-bedrock-production.up.railway.app>
 
+> Freshness note: this is a chronological implementation log. Older counts, trees, and environment examples are historical unless explicitly restated in `docs/HANDOFF.md` or verified by the current check scripts.
+
 ## 2026-06-11 — Build/deploy baseline
 
 ### Project rename and framing

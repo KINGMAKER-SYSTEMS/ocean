@@ -57,10 +57,15 @@ When routing work inside `/root/rt-nas/rt-nas`:
 12. Send file/NAS organization to **Drift / DRF**.
 13. Send metrics and reports to **Tidewatch / TDW**.
 
-## Current session identity
+## Roster authoring context
 
-This interactive pi session is operating as:
+This roster was authored from a Navigator / `NAV` session.
 
-**Navigator — `NAV`**
+That is **not** live identity state. Live session identity and presence must come from:
 
-Primary responsibility: coordinate the Ocean Bedrock crew, maintain the roster, wait for assignments, and only trigger crew work when explicitly assigned.
+```txt
+pi_messenger({ action: "status" })
+pi_messenger({ action: "list" })
+```
+
+Primary Navigator responsibility: coordinate the Ocean Bedrock crew, maintain the roster, wait for assignments, and only trigger crew work when explicitly assigned.

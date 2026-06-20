@@ -49,9 +49,13 @@ The current `ocean-bedrock` service is the **Bedrock cloud-box prototype**:
 - lock leases
 - audit/Ocean Ledger-style events
 - Postgres schema drafts
+Historical/conceptual examples used during early design included:
+
 - Cloudflare R2 bucket: `ocean-longhouse`
 - Cloudflare Vectorize index: `ocean-longhouse-context`
 - Cloudflare KV namespace: `OCEAN_LONGHOUSE_CACHE`
+
+These names are not automatically live deployment facts. Current live mounts, buckets, and runtime configuration belong in `docs/HANDOFF.md` and should be verified before implementation work.
 
 It should not claim to be the canonical Longhouse quorum engine unless/until it is aligned with `ocean-os/crates/ocean-longhouse` and `ocean-os/docs/LONGHOUSE.md`.
 

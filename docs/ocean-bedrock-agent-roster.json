@@ -6,10 +6,11 @@
     "global": false,
     "note": "Project-scoped roster only. Does not rename agents in other mesh directories."
   },
-  "currentSession": {
+  "authoredFromSession": {
     "agent": "Navigator",
     "callsign": "NAV",
-    "expertise": "Orchestration, routing, assignment management, cross-agent coordination"
+    "expertise": "Orchestration, routing, assignment management, cross-agent coordination",
+    "note": "Authoring context only. Live session identity comes from pi_messenger status/list."
   },
   "agents": [
     { "agent": "Navigator", "callsign": "NAV", "expertise": "Orchestration, routing, assignment management, cross-agent coordination" },

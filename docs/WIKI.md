@@ -4,6 +4,8 @@ Generated: 2026-06-11T03:41:35Z
 Service: `ocean-bedrock`  
 Public URL: <https://ocean-bedrock-production.up.railway.app>
 
+> Freshness note: this wiki is a generated/historical snapshot. Use `docs/HANDOFF.md` plus live verification commands for current deployment facts and counts.
+
 ## 1. What Ocean Bedrock is
 
 Ocean Bedrock is the **cloud-box support substrate** for Ocean Longhouse.
@@ -62,7 +64,7 @@ curl -H "Authorization: Bearer $OCEAN_BEDROCK_TOKEN" \
 
 ## 3. What is currently on the shared filesystem
 
-Current global tree snapshot, depth 5:
+Historical global tree snapshot, depth 5. This is not guaranteed to match the current repo or live filesystem:
 
 ```txt
 /context
@@ -336,7 +338,7 @@ file write
   -> ledger/audit activity records the action
 ```
 
-Current verified index state:
+Historical verified index state from the original snapshot:
 
 ```txt
 objects recorded:      19 files
@@ -344,7 +346,7 @@ indexed chunks:        17
 graph file nodes:      17
 ledger events:         89
 ingest jobs done:      17
-ingest jobs failed:    9
+ingest jobs failed:    9 (historical rows later dispositioned; see docs/OCEAN-TRIAGE-OPS.md and docs/HANDOFF.md for current state)
 source adapters:       8 seeded
 source instances:      6
 source streams:        6
