@@ -116,6 +116,7 @@ Do not give coworker devices admin tokens. Contributor tokens should be scoped t
 - Non-local integrations are UI placeholders for now.
 - The server still owns the Postgres `DATABASE_URL`; if the server lacks it, lineage endpoints return unavailable while byte sync can still use the file API.
 - The preview acknowledgement is local app state, not a server-side approval record yet.
+- The server has a Postgres auth registry implementation, but production auth authority remains file-backed until the explicit auth-store cutover flag is enabled.
 
 ## Next improvements
 

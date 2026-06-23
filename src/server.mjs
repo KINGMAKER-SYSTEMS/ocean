@@ -7,15 +7,10 @@ import { Readable } from 'node:stream';
 import crypto from 'node:crypto';
 
 import {
-  addToken,
-  createInvite,
-  findToken,
-  loadAuthFile,
   publicInviteRecord,
   publicTokenRecord,
-  redeemInvite,
-  revokeToken,
 } from './auth.mjs';
+import { createAuthStore } from './auth-store.mjs';
 import {
   createLedgerStore,
 } from './ledger.mjs';
@@ -218,8 +213,7 @@ function extractToken(req, url) {
 async function authenticate(req, url, state) {
   const token = extractToken(req, url);
   if (!token) throw new HttpError(401, 'Missing token. Use Authorization: Bearer <token>.');
-  const auth = await loadAuthFile(state.authFile);
-  const record = findToken(auth, token);
+  const record = await state.auth.findToken(token);
   if (!record) throw new HttpError(403, 'Invalid, revoked, or expired token.');
   return {
     id: record.id,
@@ -1249,17 +1243,17 @@ function startIngestWorker(state) {
 }
 
 async function bootstrapAuth(state) {
-  const auth = await loadAuthFile(state.authFile);
+  const auth = await state.auth.load();
   const bootstrapToken = envValue('OCEAN_BEDROCK_BOOTSTRAP_TOKEN', 'RT_NAS_BOOTSTRAP_TOKEN');
   if (auth.tokens.length === 0 && bootstrapToken) {
-    await addToken(state.authFile, {
+    await state.auth.addToken({
       token: bootstrapToken,
       name: envValue('OCEAN_BEDROCK_BOOTSTRAP_NAME', 'RT_NAS_BOOTSTRAP_NAME', 'bootstrap-admin'),
       role: 'admin',
       scopes: ['/'],
       createdBy: process.env.OCEAN_BEDROCK_BOOTSTRAP_TOKEN ? 'OCEAN_BEDROCK_BOOTSTRAP_TOKEN' : 'RT_NAS_BOOTSTRAP_TOKEN',
     });
-    console.warn('[ocean-bedrock] bootstrapped admin token from bootstrap env');
+    console.warn(`[ocean-bedrock] bootstrapped admin token from bootstrap env (${state.auth.kind} auth store)`);
   }
 }
 
@@ -1268,7 +1262,7 @@ async function handleTokenCreate(req, state, principal) {
   const body = await readJsonBody(req, state.maxJsonBytes);
   const ttlDays = body.ttlDays ? Number(body.ttlDays) : null;
   const expiresAt = ttlDays ? new Date(Date.now() + ttlDays * 24 * 60 * 60 * 1000).toISOString() : body.expiresAt || null;
-  const created = await addToken(state.authFile, {
+  const created = await state.auth.addToken({
     name: body.name,
     role: body.role || 'contributor',
     scopes: body.scopes || ['/'],
@@ -1290,7 +1284,7 @@ async function handleTokenCreate(req, state, principal) {
 async function handleInviteCreate(req, state, principal) {
   requirePermission(principal, 'admin');
   const body = await readJsonBody(req, state.maxJsonBytes);
-  const created = await createInvite(state.authFile, {
+  const created = await state.auth.createInvite({
     name: body.name,
     role: body.role || 'contributor',
     scopes: body.scopes || ['/'],
@@ -1313,7 +1307,7 @@ async function handleInviteCreate(req, state, principal) {
 async function handleInviteRedeem(req, state) {
   const body = await readJsonBody(req, state.maxJsonBytes);
   if (!body.code) throw new HttpError(400, 'Missing invite code.');
-  const redeemed = await redeemInvite(state.authFile, String(body.code).trim());
+  const redeemed = await state.auth.redeemInvite(String(body.code).trim());
   if (!redeemed) throw new HttpError(403, 'Invalid, expired, or already redeemed invite.');
   await appendAudit(state, {
     actor: redeemed.record.name,
@@ -1345,6 +1339,8 @@ export function createOceanBedrockServer(options = {}) {
     filesRoot: path.join(root, 'files'),
     metaRoot,
     authFile: path.resolve(options.authFile || envValue('OCEAN_BEDROCK_AUTH_FILE', 'RT_NAS_AUTH_FILE', path.join(metaRoot, 'tokens.json'))),
+    authStore: options.authStore || process.env.OCEAN_AUTH_STORE || process.env.OCEAN_BEDROCK_AUTH_STORE || 'file',
+    authDatabaseUrl: options.authDatabaseUrl || process.env.OCEAN_AUTH_DATABASE_URL || process.env.DATABASE_URL || null,
     locksFile: path.resolve(options.locksFile || envValue('OCEAN_BEDROCK_LOCKS_FILE', 'RT_NAS_LOCKS_FILE', path.join(metaRoot, 'locks.json'))),
     auditFile: path.resolve(options.auditFile || envValue('OCEAN_BEDROCK_AUDIT_FILE', 'RT_NAS_AUDIT_FILE', path.join(metaRoot, 'audit.jsonl'))),
     ledgerFile: path.resolve(options.ledgerFile || process.env.OCEAN_LEDGER_FILE || process.env.LONGHOUSE_LEDGER_FILE || process.env.RT_NAS_LEDGER_FILE || path.join(metaRoot, 'ocean-ledger.jsonl')),
@@ -1354,6 +1350,12 @@ export function createOceanBedrockServer(options = {}) {
     maxJsonBytes: parseSize(options.maxJsonBytes || envValue('OCEAN_BEDROCK_MAX_JSON', 'RT_NAS_MAX_JSON'), 1024 * 1024),
     startedAt: new Date().toISOString(),
   };
+
+  state.auth = createAuthStore({
+    authFile: state.authFile,
+    databaseUrl: state.authDatabaseUrl,
+    store: state.authStore,
+  });
 
   state.ledger = createLedgerStore({
     store: state.ledgerStore,
@@ -1746,8 +1748,8 @@ export function createOceanBedrockServer(options = {}) {
 
     if (req.method === 'GET' && url.pathname === '/api/v1/tokens') {
       requirePermission(principal, 'admin');
-      const auth = await loadAuthFile(state.authFile);
-      jsonResponse(res, 200, { tokens: auth.tokens.map(publicTokenRecord) });
+      const auth = await state.auth.load();
+      jsonResponse(res, 200, { tokens: auth.tokens.map(publicTokenRecord), store: state.auth.kind });
       return;
     }
 
@@ -1758,8 +1760,8 @@ export function createOceanBedrockServer(options = {}) {
 
     if (req.method === 'GET' && url.pathname === '/api/v1/invites') {
       requirePermission(principal, 'admin');
-      const auth = await loadAuthFile(state.authFile);
-      jsonResponse(res, 200, { invites: (auth.invites || []).map(publicInviteRecord) });
+      const auth = await state.auth.load();
+      jsonResponse(res, 200, { invites: (auth.invites || []).map(publicInviteRecord), store: state.auth.kind });
       return;
     }
 
@@ -1771,7 +1773,7 @@ export function createOceanBedrockServer(options = {}) {
     const tokenDelete = url.pathname.match(/^\/api\/v1\/tokens\/([^/]+)$/);
     if (req.method === 'DELETE' && tokenDelete) {
       requirePermission(principal, 'admin');
-      const revoked = await revokeToken(state.authFile, decodeURIComponent(tokenDelete[1]), principal.id);
+      const revoked = await state.auth.revokeToken(decodeURIComponent(tokenDelete[1]), principal.id);
       if (!revoked) throw new HttpError(404, 'Token not found.');
       await appendAudit(state, {
         actor: principal.name,

@@ -24,7 +24,9 @@ try {
       to_regclass('longhouse.embedding_chunks') AS embedding_chunks_table,
       to_regclass('longhouse.graph_nodes') AS graph_nodes_table,
       to_regclass('longhouse.graph_edges') AS graph_edges_table,
-      to_regclass('longhouse.ingest_jobs') AS ingest_jobs_table
+      to_regclass('longhouse.ingest_jobs') AS ingest_jobs_table,
+      to_regclass('longhouse.auth_tokens') AS auth_tokens_table,
+      to_regclass('longhouse.auth_invites') AS auth_invites_table
   `);
   const row = result.rows[0];
   let sourceAdaptersSeeded = 0;
@@ -75,6 +77,7 @@ try {
     database: row.database,
     user: row.user,
     schemaReady: Boolean(row.mounts_table && row.ledger_events_table && row.context_snapshots_table && sourceAdapterTablesReady),
+    authRegistryReady: Boolean(row.auth_tokens_table && row.auth_invites_table),
     tables: {
       mounts: row.mounts_table,
       ledgerEvents: row.ledger_events_table,
@@ -88,6 +91,8 @@ try {
       graphNodes: row.graph_nodes_table,
       graphEdges: row.graph_edges_table,
       ingestJobs: row.ingest_jobs_table,
+      authTokens: row.auth_tokens_table,
+      authInvites: row.auth_invites_table,
     },
     sourceAdaptersSeeded,
     semantic: semanticCounts,

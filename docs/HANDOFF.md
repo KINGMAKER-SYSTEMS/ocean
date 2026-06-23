@@ -271,12 +271,12 @@ npm run smoke
 ## 13. Known issues
 
 1. Recursive R2 delete uses concurrent `Promise.all` with no per-request status check — fine for current use, revisit for bulk-delete on large prefixes.
-2. Token registry is volume JSON (`/data/.ocean-bedrock/tokens.json`), not Postgres — fine for one Railway replica, not multi-replica safe.
+2. Token/invite registry now has a Postgres-backed implementation and production tables (`longhouse.auth_tokens`, `longhouse.auth_invites`) are migrated. The service default remains volume JSON until `OCEAN_AUTH_STORE=postgres` / `OCEAN_BEDROCK_AUTH_STORE=postgres` is explicitly enabled for auth cutover.
 3. `/vault` is a folder placeholder, not an encrypted secrets vault.
 4. `/api/v1/search` is plain file text search; semantic search lives at `/api/v1/semantic/search`. R2 paths return 501 for text search (`diskRoot = null`).
 5. Graph extraction is heuristic (file/dir/heading/topic/link/source-lineage nodes); rich business entities (people, projects, clients) not yet extracted.
 6. Source adapter runners for github/telegram/slack/notion/linear/google_drive/r2 are stubbed at 501.
-7. Coworker real rollout prep is partially complete: one-time invite exchange, shared secret exclusions, dry-run skipped/sensitive reporting, and local GUI preview are live. Remaining: packaged GUI, hard acknowledgement gate before first sync, Postgres-backed token/invite registry, and broader rollout docs polish.
+7. Coworker real rollout prep is partially complete: one-time invite exchange, shared secret exclusions, dry-run skipped/sensitive reporting, local GUI preview, hard acknowledgement gate, and Postgres-backed token/invite registry code/tables are done. Remaining: auth-store cutover flag deployment, packaged GUI, and broader rollout docs polish.
 
 ## 14. Next work queue
 
