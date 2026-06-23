@@ -72,3 +72,19 @@ Results: pass.
 ## Activation note
 
 The code path exists and DB tables are ready, but the server default remains file auth unless `OCEAN_AUTH_STORE=postgres` or `OCEAN_BEDROCK_AUTH_STORE=postgres` is set. This avoids changing production auth authority without an explicit deployment/config cutover.
+
+## Deployment note
+
+Attempted deploy with:
+
+```txt
+railway up --service ocean-bedrock --detach -m "Deploy Postgres auth registry support"
+```
+
+Blocked by expired Railway OAuth on this operator session:
+
+```txt
+Unauthorized. Please run `railway login` again.
+```
+
+No production deploy was performed for commit `680d252` during this pass.
