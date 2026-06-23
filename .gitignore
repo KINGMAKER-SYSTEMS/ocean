@@ -8,10 +8,6 @@ npm-debug.log*
 # Local/runtime tool state
 data/**
 !data/.gitkeep
-.pi/*
-!.pi/themes/
-!.pi/themes/ocean-barnacle.json
-!.pi/extensions/
-!.pi/extensions/ocean-barnacle-mode.ts
+.pi/
 .wrangler/
 .worktrees/
