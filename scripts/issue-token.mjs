@@ -1,6 +1,28 @@
 #!/usr/bin/env node
 import path from 'node:path';
+import { promises as fs } from 'node:fs';
 import { addToken, loadAuthFile, publicTokenRecord } from '../src/auth.mjs';
+
+// Append a token-lifecycle event to the bedrock audit log so a token issued via
+// this CLI leaves the same trail as the HTTP route (which audits `token.create`)
+// and the README's "audit log for token changes" promise holds for the
+// documented onboarding path. The audit file is a sibling of the auth file (the
+// server's metaRoot layout), honoring the same env override. File-append only
+// and fail-soft — the ledger half of the server's appendAudit needs a live DB,
+// and an audit failure must never sink a successful token issuance.
+async function appendTokenAudit(authFile, event) {
+  const auditFile = path.resolve(
+    process.env.OCEAN_BEDROCK_AUDIT_FILE
+      || process.env.RT_NAS_AUDIT_FILE
+      || path.join(path.dirname(authFile), 'audit.jsonl'),
+  );
+  try {
+    await fs.mkdir(path.dirname(auditFile), { recursive: true });
+    await fs.appendFile(auditFile, `${JSON.stringify({ ts: new Date().toISOString(), ...event })}\n`);
+  } catch (error) {
+    console.error('[ocean-bedrock] failed to write token audit event:', error.message);
+  }
+}
 
 function usage() {
   console.log(`Usage:
@@ -58,13 +80,24 @@ if (!args.name) {
   process.exit(1);
 }
 
+const role = args.role || 'contributor';
+const scopes = args.scopes.length ? args.scopes : ['/'];
 const created = await addToken(authFile, {
   name: args.name,
-  role: args.role || 'contributor',
-  scopes: args.scopes.length ? args.scopes : ['/'],
+  role,
+  scopes,
   token: args.token,
   expiresAt: args.expiresAt || null,
   createdBy: 'local-cli',
+});
+
+await appendTokenAudit(authFile, {
+  action: 'token.create',
+  actor: 'local-cli',
+  name: args.name,
+  role,
+  scopes,
+  tokenId: created.record?.id || null,
 });
 
 console.log(JSON.stringify({ authFile, ...created }, null, 2));
