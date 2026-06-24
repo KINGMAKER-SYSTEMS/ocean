@@ -61,7 +61,7 @@ async function collectDbSnapshot(db) {
   };
 }
 
-function triageFindings(snapshot, ledgerVerify, semantic) {
+export function triageFindings(snapshot, ledgerVerify, semantic) {
   const failedAlert = Number(process.env.OCEAN_TRIAGE_FAILED_ALERT ?? 0);
   const queueAlert = Number(process.env.OCEAN_TRIAGE_QUEUE_ALERT ?? 50);
   const staleJobDays = Number(process.env.OCEAN_TRIAGE_STALE_JOB_DAYS || 3);
