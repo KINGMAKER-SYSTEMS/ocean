@@ -66,7 +66,7 @@ async function cloudflareFetch(config, path, options = {}) {
   return body;
 }
 
-function prepareText(value, maxChars) {
+export function prepareText(value, maxChars) {
   const text = String(value || '').replace(/\s+/g, ' ').trim();
   if (text.length <= maxChars) return text;
   return text.slice(0, maxChars);
@@ -86,11 +86,11 @@ export async function embedTexts(texts, config = semanticConfig()) {
   return embeddings;
 }
 
-function toNdjson(items) {
+export function toNdjson(items) {
   return `${items.map((item) => JSON.stringify(item)).join('\n')}\n`;
 }
 
-function compactMetadata(metadata = {}) {
+export function compactMetadata(metadata = {}) {
   const result = {};
   for (const [key, value] of Object.entries(metadata)) {
     if (value === undefined || value === null) continue;
