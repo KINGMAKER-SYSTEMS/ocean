@@ -1,7 +1,7 @@
 import path from 'node:path';
 import crypto from 'node:crypto';
 
-function slugify(value) {
+export function slugify(value) {
   return String(value || '')
     .trim()
     .toLowerCase()
@@ -9,7 +9,7 @@ function slugify(value) {
     .replace(/^-+|-+$/g, '') || 'node';
 }
 
-function stableRef(prefix, value) {
+export function stableRef(prefix, value) {
   return `${prefix}:${crypto.createHash('sha256').update(String(value)).digest('hex')}`;
 }
 
@@ -44,7 +44,7 @@ export async function upsertGraphEdge(db, edge) {
   return result.rows[0];
 }
 
-function extractHeadings(text, limit = 80) {
+export function extractHeadings(text, limit = 80) {
   const headings = [];
   const lines = String(text || '').split(/\r?\n/);
   for (const line of lines) {
@@ -56,7 +56,7 @@ function extractHeadings(text, limit = 80) {
   return headings;
 }
 
-function extractTags(text, limit = 80) {
+export function extractTags(text, limit = 80) {
   const tags = new Set();
   const regex = /(^|\s)#([a-zA-Z][a-zA-Z0-9_-]{2,50})\b/g;
   let match;
@@ -64,7 +64,7 @@ function extractTags(text, limit = 80) {
   return [...tags];
 }
 
-function extractLinks(text, limit = 80) {
+export function extractLinks(text, limit = 80) {
   const links = [];
   const regex = /\[[^\]]+\]\(([^)\s]+)(?:\s+"[^"]+")?\)/g;
   let match;
@@ -72,7 +72,7 @@ function extractLinks(text, limit = 80) {
   return links;
 }
 
-function pathPrefixes(virtualPath) {
+export function pathPrefixes(virtualPath) {
   const parts = String(virtualPath || '').split('/').filter(Boolean);
   const prefixes = [];
   for (let i = 1; i < parts.length; i += 1) prefixes.push(`/${parts.slice(0, i).join('/')}`);
