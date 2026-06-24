@@ -73,18 +73,44 @@ Results: pass.
 
 The code path exists and DB tables are ready, but the server default remains file auth unless `OCEAN_AUTH_STORE=postgres` or `OCEAN_BEDROCK_AUTH_STORE=postgres` is set. This avoids changing production auth authority without an explicit deployment/config cutover.
 
-## Deployment note
+## Deployment
 
-Attempted deploy with:
+After operator re-authentication, deployed with:
 
 ```txt
 railway up --service ocean-bedrock --detach -m "Deploy Postgres auth registry support"
 ```
 
-Blocked by expired Railway OAuth on this operator session:
+Deployment result:
 
-```txt
-Unauthorized. Please run `railway login` again.
+```json
+{
+  "id": "040ca711-b91d-427e-ba18-95c4a82e01c0",
+  "status": "SUCCESS",
+  "message": "Deploy Postgres auth registry support"
+}
 ```
 
-No production deploy was performed for commit `680d252` during this pass.
+Production health passed:
+
+```json
+{
+  "ok": true,
+  "instance": "ocean-bedrock",
+  "version": "0.1.0"
+}
+```
+
+Production auth smoke passed against the default file auth store: token list returned safe public token records, invite create/redeem worked, invite reuse returned 403, and the minted test token was revoked.
+
+```json
+{
+  "ok": true,
+  "authStore": "file",
+  "inviteCreated": "inv_2503e93aedff",
+  "tokenRevoked": "tok_1299b9bf783d",
+  "reuseStatus": 403
+}
+```
+
+No raw invite code or token value was printed or committed.
