@@ -89,7 +89,7 @@ export async function enqueueIngestJob(jobType, virtualPath, objectId = null, pa
   return result.rows[0]?.id || null;
 }
 
-function contentTypeFromPath(filePath) {
+export function contentTypeFromPath(filePath) {
   const ext = path.extname(filePath).toLowerCase();
   if (['.md', '.mdx'].includes(ext)) return 'text/markdown; charset=utf-8';
   if (['.txt', '.log', '.rst'].includes(ext)) return 'text/plain; charset=utf-8';
@@ -107,7 +107,7 @@ function contentTypeFromPath(filePath) {
   return 'application/octet-stream';
 }
 
-function looksTextual(filePath, contentType) {
+export function looksTextual(filePath, contentType) {
   if (contentType && (contentType.startsWith('text/') || contentType.includes('json') || contentType.includes('yaml') || contentType.includes('sql'))) return true;
   return [
     '.md', '.mdx', '.txt', '.rst', '.json', '.jsonl', '.yaml', '.yml', '.csv', '.tsv',
@@ -271,7 +271,7 @@ export async function processIngestJob(state, job) {
   return { indexed: true, chunks: chunks.length, bytes: stat.size, queued: ['embed_object', 'extract_graph'] };
 }
 
-function chunkText(text, maxChars = Number(process.env.OCEAN_BEDROCK_CHUNK_CHARS || 4000), overlap = Number(process.env.OCEAN_BEDROCK_CHUNK_OVERLAP || 400)) {
+export function chunkText(text, maxChars = Number(process.env.OCEAN_BEDROCK_CHUNK_CHARS || 4000), overlap = Number(process.env.OCEAN_BEDROCK_CHUNK_OVERLAP || 400)) {
   const normalized = text.replace(/\r\n/g, '\n');
   if (normalized.length <= maxChars) return [normalized];
   const chunks = [];

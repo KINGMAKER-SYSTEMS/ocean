@@ -23,7 +23,8 @@
     "mcp": "node scripts/ocean-bedrock-mcp.mjs",
     "db:check": "node scripts/check-postgres.mjs",
     "db:migrate": "node scripts/migrate.mjs",
-    "smoke": "node scripts/smoke-test.mjs"
+    "smoke": "node scripts/smoke-test.mjs",
+    "test": "node --test test/*.test.mjs"
   },
   "engines": {
     "node": ">=22"
