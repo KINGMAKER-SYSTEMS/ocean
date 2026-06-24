@@ -25,6 +25,25 @@ function fileInfo(apiPath, stat) {
   };
 }
 
+// realpath the deepest EXISTING ancestor of `p` (the target itself may not
+// exist yet, e.g. a write/mkdir). Resolves every symlink along the existing
+// portion of the path, so an intermediate symlink can't hide an escape.
+async function realpathOfNearestExisting(p) {
+  let cur = p;
+  // The mount root always exists, so this terminates.
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    try {
+      return await fs.realpath(cur);
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      const parent = path.dirname(cur);
+      if (parent === cur) throw error; // reached fs root without an existing path
+      cur = parent;
+    }
+  }
+}
+
 async function lstatNoSymlink(diskPath) {
   let stat;
   try {
@@ -45,22 +64,33 @@ export class LocalStorageAdapter {
     this.diskRoot = absRoot;
   }
 
-  _diskPath(relPath) {
+  async _diskPath(relPath) {
     const resolved = relPath ? path.resolve(this.absRoot, relPath) : this.absRoot;
+    // Lexical guard first (cheap; rejects `..` that escapes textually).
     if (resolved !== this.absRoot && !resolved.startsWith(`${this.absRoot}${path.sep}`)) {
       throw new HttpError(400, 'Resolved path escapes the mount root.');
+    }
+    // Symlink-safe containment: a symlink in an INTERMEDIATE directory can make a
+    // lexically-contained path resolve OUTSIDE the root (the leaf-only
+    // `lstatNoSymlink` check misses it). realpath the deepest existing path
+    // component and re-assert it sits under the (realpath'd) root, so a
+    // planted/synced symlink can't escape the mount jail or a token's path scope.
+    const realRoot = await fs.realpath(this.absRoot);
+    const realProbe = await realpathOfNearestExisting(resolved);
+    if (realProbe !== realRoot && !realProbe.startsWith(`${realRoot}${path.sep}`)) {
+      throw new HttpError(403, 'Resolved path escapes the mount root via a symlink.');
     }
     return resolved;
   }
 
   async stat(relPath, apiPath) {
-    const diskPath = this._diskPath(relPath);
+    const diskPath = await this._diskPath(relPath);
     const stat = await lstatNoSymlink(diskPath);
     return fileInfo(apiPath, stat);
   }
 
   async list(relPath, apiPath, { depth = 1 } = {}) {
-    const diskPath = this._diskPath(relPath);
+    const diskPath = await this._diskPath(relPath);
     const stat = await lstatNoSymlink(diskPath);
     if (!stat.isDirectory()) throw new HttpError(400, `${apiPath} is not a directory.`);
 
@@ -83,24 +113,24 @@ export class LocalStorageAdapter {
   }
 
   async read(relPath) {
-    const diskPath = this._diskPath(relPath);
+    const diskPath = await this._diskPath(relPath);
     return { diskPath };
   }
 
   async write(relPath, tmpPath) {
-    const diskPath = this._diskPath(relPath);
+    const diskPath = await this._diskPath(relPath);
     await fs.mkdir(path.dirname(diskPath), { recursive: true });
     await fs.rename(tmpPath, diskPath);
   }
 
   async delete(relPath, { recursive = false } = {}) {
-    const diskPath = this._diskPath(relPath);
+    const diskPath = await this._diskPath(relPath);
     await fs.rm(diskPath, { recursive, force: false });
   }
 
   async move(from, to, { overwrite = false } = {}) {
-    const fromDisk = this._diskPath(from);
-    const toDisk = this._diskPath(to);
+    const fromDisk = await this._diskPath(from);
+    const toDisk = await this._diskPath(to);
     await lstatNoSymlink(fromDisk);
     let toExists = false;
     try { await fs.access(toDisk); toExists = true; } catch {}
@@ -111,8 +141,8 @@ export class LocalStorageAdapter {
   }
 
   async copy(from, to, { overwrite = false } = {}) {
-    const fromDisk = this._diskPath(from);
-    const toDisk = this._diskPath(to);
+    const fromDisk = await this._diskPath(from);
+    const toDisk = await this._diskPath(to);
     await lstatNoSymlink(fromDisk);
     let toExists = false;
     try { await fs.access(toDisk); toExists = true; } catch {}
@@ -122,7 +152,7 @@ export class LocalStorageAdapter {
   }
 
   async mkdir(relPath, apiPath) {
-    const diskPath = this._diskPath(relPath);
+    const diskPath = await this._diskPath(relPath);
     await fs.mkdir(diskPath, { recursive: true });
     return this.stat(relPath, apiPath);
   }
