@@ -5,6 +5,8 @@ Repo: `/root/rt-nas/rt-nas`
 Service: `ocean-bedrock`  
 Public URL: <https://ocean-bedrock-production.up.railway.app>
 
+> **See "Update — 2026-07-01" at the bottom of this file for the current post-P0 state.** The body below is the 2026-06-17 snapshot and is now stale in places (test suite, MCP tool count, audit trail).
+
 ## 1. What is live
 
 ```txt
@@ -312,3 +314,78 @@ Include in the next handoff:
 - exact migration status,
 - any new issued coworker tokens by name/scope (not raw values),
 - whether source adapter runners beyond local_folder are wired.
+
+## Update — 2026-07-01
+
+Phase-0 stabilization pass on top of the 2026-06-17 snapshot above. Everything
+in sections 1–15 still describes the deployed shape; this section layers on
+what changed since, verified against `git log` and the actual test/source
+files rather than copied from memory.
+
+**First test suite landed (commits #3–#6).** 27/27 passing via `node --test
+test/*.test.mjs` across 5 files:
+
+```txt
+test/information-layer.test.mjs      chunking + content-type detection,
+                                      including a PINNED "known gap" test for
+                                      binary PDF/DOCX/Office uploads (see below)
+test/graph-extractors.test.mjs       graph-extraction core (merge-into-graph half)
+test/semantic-prep.test.mjs          embed->vectorize prep (migrate-into-index half)
+test/triage.test.mjs                 triageFindings — the daily-triage decision core
+test/local-adapter-security.test.mjs local-adapter security (see P0 fix below)
+```
+
+**P0 security fix (#8, `2407fc5`).** `LocalStorageAdapter._diskPath()` in
+`src/mounts/adapters/local.mjs` used a purely lexical `startsWith(absRoot)`
+containment check, and only the leaf path component was checked for symlinks.
+A symlink planted in an *intermediate* directory (e.g.
+`<root>/docs/escape -> /outside`) was followed by the kernel and never
+inspected, letting a token scoped to `/docs` read/write/delete/move/copy files
+outside the mount root and outside its own path scope. Fixed by making
+`_diskPath()` realpath-resolve the deepest existing ancestor of the target
+(so it still works for not-yet-created write/mkdir targets) and re-assert
+containment under the realpath'd root before any fs op; all 10 call sites are
+now async/awaited. 4 regression tests added in
+`test/local-adapter-security.test.mjs` (legit in-root paths still resolve;
+read through an intermediate symlink is blocked; write through an
+intermediate symlink is blocked; lexical `../` escape is still rejected).
+
+**Audit-trail fix (#7, `31f354e`).** `scripts/issue-token.mjs` — the
+documented onboarding path (`npm run token:create`) — called `addToken()`
+directly and left no audit record, even though the HTTP route
+`POST /api/v1/tokens` audits `token.create` and the README promises an audit
+log for token changes. Fixed with a fail-soft `appendTokenAudit()` that
+appends a `token.create` event to the sibling `audit.jsonl` (honoring
+`OCEAN_BEDROCK_AUDIT_FILE`) on every CLI-issued token; an audit failure never
+sinks a successful issuance.
+
+**Still open / known gaps:**
+
+- **PDF/DOCX/Office silent-skip.** Uploads of binary office/PDF documents are
+  stored but never indexed for search/embedding — this is now a
+  test-pinned decision point (`information-layer.test.mjs`, "KNOWN GAP: binary
+  office/pdf docs upload but are not indexable"), not just an unverified
+  assumption. Still a real data-loss gap for anyone expecting those files to
+  be searchable.
+- **MCP doc-count drift, corrected.** `docs/MCP.md` and `docs/WIKI.md` already
+  correctly list all 14 tools exported by `scripts/ocean-bedrock-mcp.mjs`
+  (`bedrock_info`, `bedrock_list`, `bedrock_read`, `bedrock_write`,
+  `bedrock_mkdir`, `bedrock_search`, `bedrock_semantic_search`,
+  `bedrock_graph_neighborhood`, `bedrock_toolbox_manifest`,
+  `bedrock_triage_daily`, `bedrock_lock`, `bedrock_unlock`, `bedrock_trace`,
+  `bedrock_snapshot`) — no drift there. The actual drift was in *this* file
+  (section 1 and section 9 above still say "10 tools" and list only 10),
+  which this update section supersedes. Separately, `toolboxManifest()` in
+  `src/ocean-context.mjs` (code, not docs) hardcodes an 11-tool list missing
+  `bedrock_toolbox_manifest`, `bedrock_lock`, and `bedrock_unlock` — left
+  as-is since this pass is docs-only; worth a follow-up code fix.
+- **Auth-store Postgres cutover still not flipped in prod.** Postgres-backed
+  token/invite registry code and tables (`longhouse.auth_tokens`,
+  `longhouse.auth_invites`) exist and are migrated, but the service default
+  remains volume JSON until `OCEAN_AUTH_STORE=postgres` (or
+  `OCEAN_BEDROCK_AUTH_STORE=postgres`) is explicitly set — matches known issue
+  #2 in section 13, unchanged.
+- **7 of 8 source adapters still stubbed.** Only `local_folder` is fully
+  implemented in `src/sources/runner.mjs`; `github`, `telegram`, `slack`,
+  `notion`, `linear`, `google_drive`, `r2` remain 501 stubs — matches known
+  issue #6 in section 13, unchanged.

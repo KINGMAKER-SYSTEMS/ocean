@@ -4,6 +4,8 @@ Ocean Bedrock is the cloud-box substrate for Ocean Longhouse support: authentica
 
 This started from a “NAS” idea, but the canonical name for this service is now **ocean-bedrock**. It is a stateful shared directory with a declared API so agents and coworkers can exchange files, session context, documentation, handoff notes, and collaboration artifacts.
 
+Cross-repo routing and ownership map: [`docs/OCEAN_PROJECT_MAP.md`](docs/OCEAN_PROJECT_MAP.md).
+
 The canonical Ocean Bedrock agent naming and responsibility map lives in [`docs/OCEAN-BEDROCK-AGENT-ROSTER.md`](docs/OCEAN-BEDROCK-AGENT-ROSTER.md). Project-scoped crew boot notes live in [`docs/RT-NAS-CREW-BOOT.md`](docs/RT-NAS-CREW-BOOT.md).
 
 ## V1 model
