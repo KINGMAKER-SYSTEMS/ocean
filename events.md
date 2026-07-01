@@ -81,3 +81,18 @@ bedrock_toolbox_manifest/lock/unlock), pinned by a new grep-based set-equality
 test. 37/37 tests, smoke/secret/source checks green. PR open against master,
 not merged; ledger entry rides the PR branch to avoid touching master.
 _________________________________________________________________________________
+
+time: [7:45pm] [07-01-26]
+agent: [claude] [fable 5]
+type: [merge]: Phase-1 binary extractor landed
+area: [backend]: Ingest pipeline
+
+Squash-merged PR #9 (feat/binary-doc-extraction) into master as 1d4f502 and
+deleted the branch. Review verdict was approve; this repo has no CI workflow
+gating PRs (gh pr checks reported none), so the gate was the review plus a
+green local suite. The phase-1 extractor is now live on master: src/extract.mjs
+(unpdf/mammoth) wired into processIngestJob so PDF/DOCX flow through
+chunk -> embed -> graph instead of silently skipping, plus the binary backfill
+script and the 14-tool toolboxManifest sync. Post-merge npm test on master:
+37/37 passing.
+_________________________________________________________________________________
