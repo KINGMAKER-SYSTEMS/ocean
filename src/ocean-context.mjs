@@ -160,7 +160,9 @@ export function toolboxManifest({ baseUrl = 'https://ocean-bedrock-production.up
       serverName: 'ocean-bedrock',
       command: 'npm run mcp',
       env: { OCEAN_BEDROCK_URL: baseUrl, OCEAN_BEDROCK_TOKEN: '<scoped-token>' },
-      tools: ['bedrock_info', 'bedrock_list', 'bedrock_read', 'bedrock_write', 'bedrock_mkdir', 'bedrock_search', 'bedrock_semantic_search', 'bedrock_graph_neighborhood', 'bedrock_trace', 'bedrock_snapshot', 'bedrock_triage_daily'],
+      // Keep in sync with the `tools` array in scripts/ocean-bedrock-mcp.mjs
+      // (pinned by test/toolbox-manifest.test.mjs).
+      tools: ['bedrock_info', 'bedrock_list', 'bedrock_read', 'bedrock_write', 'bedrock_mkdir', 'bedrock_search', 'bedrock_semantic_search', 'bedrock_graph_neighborhood', 'bedrock_toolbox_manifest', 'bedrock_triage_daily', 'bedrock_lock', 'bedrock_unlock', 'bedrock_trace', 'bedrock_snapshot'],
       resources: ['ocean-bedrock://docs', 'ocean-bedrock://context', 'ocean-bedrock://coworkers', 'ocean-bedrock://sessions', 'ocean-bedrock://handoffs'],
     },
     localCompanion: {

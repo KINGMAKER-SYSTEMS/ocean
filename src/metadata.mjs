@@ -4,6 +4,7 @@ import { promises as fs } from 'node:fs';
 import { Pool } from 'pg';
 import { embedObjectChunks } from './semantic.mjs';
 import { extractGraphForObject } from './graph.mjs';
+import { extractableBinary, extractText } from './extract.mjs';
 
 let pool = null;
 
@@ -218,9 +219,17 @@ export async function processIngestJob(state, job) {
 
   if (!stat.isFile()) return { skipped: true, reason: 'not a file' };
   if (stat.size > maxBytes) return { skipped: true, reason: `too large (${stat.size} > ${maxBytes})` };
-  if (!looksTextual(job.virtual_path, contentType)) return { skipped: true, reason: `non-text content type ${contentType}` };
 
-  const text = await fs.readFile(diskPath, 'utf8');
+  // Gate: textual files read as utf8; extractable binary docs (.pdf/.docx) go
+  // through extractText() and then the SAME chunk -> embed -> graph pipeline
+  // below. extractText throws on unparseable/empty input — that throw fails
+  // the job (visible in ocean:jobs), never a silent skip. Everything else
+  // (.pptx/.xlsx/.rtf, images, ...) keeps the explicit skip.
+  const textual = looksTextual(job.virtual_path, contentType);
+  const binaryKind = textual ? null : extractableBinary(job.virtual_path);
+  if (!textual && !binaryKind) return { skipped: true, reason: `non-text content type ${contentType}` };
+
+  const text = textual ? await fs.readFile(diskPath, 'utf8') : await extractText(diskPath, binaryKind);
   const chunks = chunkText(text);
   await db.query('DELETE FROM longhouse.embedding_chunks WHERE object_id = $1', [job.object_id]);
 
@@ -241,7 +250,7 @@ export async function processIngestJob(state, job) {
         'none',
         'text-chunk-v1',
         0,
-        { indexedAt: new Date().toISOString(), contentType },
+        { indexedAt: new Date().toISOString(), contentType, ...(binaryKind ? { extractedFrom: binaryKind } : {}) },
       ],
     );
   }
@@ -262,13 +271,13 @@ export async function processIngestJob(state, job) {
     `UPDATE longhouse.objects
      SET metadata = metadata || $2::jsonb, updated_at = now()
      WHERE id = $1`,
-    [job.object_id, JSON.stringify({ indexedAt: new Date().toISOString(), chunks: chunks.length, indexModel: 'text-chunk-v1' })],
+    [job.object_id, JSON.stringify({ indexedAt: new Date().toISOString(), chunks: chunks.length, indexModel: 'text-chunk-v1', ...(binaryKind ? { extractedFrom: binaryKind } : {}) })],
   );
 
   await enqueueIngestJob('embed_object', job.virtual_path, job.object_id, { reason: 'index_object', force: true });
   await enqueueIngestJob('extract_graph', job.virtual_path, job.object_id, { reason: 'index_object' });
 
-  return { indexed: true, chunks: chunks.length, bytes: stat.size, queued: ['embed_object', 'extract_graph'] };
+  return { indexed: true, chunks: chunks.length, bytes: stat.size, queued: ['embed_object', 'extract_graph'], ...(binaryKind ? { extractedFrom: binaryKind } : {}) };
 }
 
 export function chunkText(text, maxChars = Number(process.env.OCEAN_BEDROCK_CHUNK_CHARS || 4000), overlap = Number(process.env.OCEAN_BEDROCK_CHUNK_OVERLAP || 400)) {

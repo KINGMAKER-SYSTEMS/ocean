@@ -10,6 +10,7 @@ import {
   contentTypeFromPath,
   looksTextual,
 } from '../src/metadata.mjs';
+import { extractableBinary } from '../src/extract.mjs';
 
 test('chunkText: short text is a single chunk, CRLF normalized', () => {
   assert.deepEqual(chunkText('hello world', 4000, 400), ['hello world']);
@@ -63,20 +64,36 @@ test('looksTextual: text formats index, binaries do not', () => {
   assert.equal(looksTextual('a.png'), false);
 });
 
-// KNOWN GAP (flagged for John, not silently changed): bootstrap's
-// DEFAULT_EXTENSIONS advertises .pdf/.docx/.pptx/.xlsx as knowledge-document
-// extensions, the ingest client uploads them (with application/pdf etc.), but
-// looksTextual() returns false for them — so they land in longhouse.objects and
-// are NEVER chunked/embedded/indexed into Ocean Context. Either bootstrap should
-// stop advertising them, or the pipeline needs a binary-doc text extractor.
-// This test PINS the current behavior so the decision is explicit and a future
-// extractor has a failing test to flip.
-test('KNOWN GAP: binary office/pdf docs upload but are not indexable', () => {
-  for (const ext of ['.pdf', '.docx', '.pptx', '.xlsx']) {
+// GAP CLOSED for .pdf/.docx (this is the flip of the old "KNOWN GAP: binary
+// office/pdf docs upload but are not indexable" pin): processIngestJob's gate
+// is now `looksTextual(path, contentType) || extractableBinary(path)`. PDF and
+// DOCX stay non-textual (no utf8 read) but route through src/extract.mjs into
+// the same chunk -> embed -> graph pipeline as text files. The full job needs
+// a DB, so this asserts at the decision level — the exact gate expression the
+// worker runs; extraction-to-chunks itself is covered end-to-end in
+// test/binary-extraction.test.mjs.
+test('binary doc gate: pdf/docx are extractable and pass processIngestJob gate', () => {
+  for (const [ext, kind] of [['.pdf', 'pdf'], ['.docx', 'docx']]) {
+    const virtualPath = `report${ext}`;
+    assert.equal(looksTextual(virtualPath), false, `${ext} is still not utf8-readable text`);
+    assert.equal(extractableBinary(virtualPath), kind, `${ext} routes to the ${kind} extractor`);
+    const gateAdmits = looksTextual(virtualPath) || extractableBinary(virtualPath) !== null;
+    assert.equal(gateAdmits, true, `${ext} is no longer silently dropped from the knowledge layer`);
+  }
+});
+
+// KNOWN GAP (narrowed, not closed): bootstrap's DEFAULT_EXTENSIONS still
+// advertises .pptx/.xlsx (and coworkers may upload .rtf), but there is no
+// extractor for them — they land in longhouse.objects and are NEVER
+// chunked/embedded/indexed into Ocean Context. This PINS the remaining gap so
+// the decision stays explicit and a future extractor has a failing test to flip.
+test('KNOWN GAP: pptx/xlsx/rtf upload but are not indexable', () => {
+  for (const ext of ['.pptx', '.xlsx', '.rtf']) {
+    assert.equal(looksTextual(`report${ext}`), false, `${ext} is not utf8-readable text`);
     assert.equal(
-      looksTextual(`report${ext}`),
-      false,
-      `${ext} is uploaded by bootstrap but skipped at index time — silent drop from the knowledge layer`,
+      extractableBinary(`report${ext}`),
+      null,
+      `${ext} has no extractor — still a silent drop from the knowledge layer`,
     );
   }
 });

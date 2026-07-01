@@ -59,3 +59,25 @@ checks, since this repo's branches are squash-merged and left dangling);
 all 6 were provably shipped and were deleted from origin. Full triage
 detail recorded at
 ../ocean-discovery/08-branch-triage-ocean-bedrock.md.
+
+time: [7:38pm] [07-01-26]
+agent: [claude] [fable 5]
+worktree: [feat/binary-doc-extraction]
+type: [feature-request]: Binary-doc extraction
+area: [backend]: Ingest pipeline
+
+Closed the test-pinned PDF/DOCX silent-skip gap: new src/extract.mjs
+(extractableBinary extension gate + extractText via unpdf/mammoth, chosen over
+pdf-parse's 33MB unmaintained bundle) wired into processIngestJob so
+extractable binaries flow through the same chunk -> embed -> graph pipeline as
+text files, with unparseable/empty documents failing the job visibly in
+ocean:jobs instead of skipping. Flipped the KNOWN-GAP pin to assert pdf/docx
+pass the gate and narrowed it to a new pin for pptx/xlsx/rtf. Added
+scripts/ocean-binary-backfill.mjs (npm run ocean:backfill:binary, --dry-run
+/--limit, dedupes queued jobs) for pre-extractor uploads — code-verified only,
+no live DB locally. Same PR syncs toolboxManifest() in src/ocean-context.mjs
+from 11 to the 14 tools the MCP script exports (was missing
+bedrock_toolbox_manifest/lock/unlock), pinned by a new grep-based set-equality
+test. 37/37 tests, smoke/secret/source checks green. PR open against master,
+not merged; ledger entry rides the PR branch to avoid touching master.
+_________________________________________________________________________________

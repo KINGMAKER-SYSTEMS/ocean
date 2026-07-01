@@ -389,3 +389,27 @@ sinks a successful issuance.
   implemented in `src/sources/runner.mjs`; `github`, `telegram`, `slack`,
   `notion`, `linear`, `google_drive`, `r2` remain 501 stubs — matches known
   issue #6 in section 13, unchanged.
+
+## Update — 2026-07-01 (PR: binary-doc extraction)
+
+Closes the top two items from the "Still open / known gaps" list above:
+
+- **PDF/DOCX silent-skip → extracted and indexed.** New `src/extract.mjs`
+  (`extractableBinary()` extension gate + `extractText()` via `unpdf` for PDF
+  and `mammoth` for DOCX). `processIngestJob` in `src/metadata.mjs` now routes
+  non-textual but extractable files through extraction into the same
+  chunk → embed → graph pipeline as text files. Unparseable/empty documents
+  THROW, so the job fails visibly in `npm run ocean:jobs` — never a silent
+  skip. `.pptx`/`.xlsx`/`.rtf` remain unindexable and are pinned as the
+  narrowed KNOWN GAP in `test/information-layer.test.mjs`. Backfill for
+  pre-extractor uploads: `npm run ocean:backfill:binary -- --dry-run --limit 100`
+  (enqueues `index_object` jobs for pdf/docx objects with no chunks), then run
+  the worker.
+- **`toolboxManifest()` 11-tool drift → fixed.** The hardcoded list in
+  `src/ocean-context.mjs` now matches the 14 tools exported by
+  `scripts/ocean-bedrock-mcp.mjs`, pinned by `test/toolbox-manifest.test.mjs`
+  so the two cannot drift apart silently again.
+
+Test suite: 37/37 passing (`npm test`), including in-test-generated PDF and
+checked-in `test/fixtures/minimal.docx` fixtures plus corrupt-file
+failure-path coverage.
