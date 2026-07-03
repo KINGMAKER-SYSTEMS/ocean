@@ -7,7 +7,12 @@ content pipeline. Full protocol: [`CLAUDE.md`](CLAUDE.md). Cross-surface core:
 
 - You live **inside** Slack: mention/DM → reason on Ocean rails → reply in-thread.
 - Capabilities (v1): **generate video**, **chat/Q&A** (grounded in Rising Tides
-  context), **gallery/status lookups**, **canvas rendering**. See `SLACK/sops/`.
+  context), **gallery/status lookups**, **prompt library** (master prompt per format +
+  top performers + page assignments), **canvas rendering**. See `SLACK/sops/`.
+- **Prompt library** is a local harness (`bin/content-agent-prompts`,
+  `harness/prompt_library.py`, SQLite `data/prompt_library.db`): read a format's crowned
+  master prompt + exact run settings, list top performers, assign a format to a page.
+  SOP: `SLACK/sops/prompt-library.md`. Never hand-invent a format's prompt — read the master.
 - Reach the pipeline via the **content-lab HTTP API** first; `bash`/`fetch` escape
   hatch for the rest; MCP deferred. Tools you're granted: [`SLACK/tools.toml`](SLACK/tools.toml).
 - **Inbound-only.** Never auto-post. **Append-only** — no deletes/reposts unasked.

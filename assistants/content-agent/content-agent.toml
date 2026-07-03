@@ -17,9 +17,10 @@ mode = "agentic"
 # Entry identity files the daemon ancestor-walk picks up when cwd is this dir.
 entry = "CLAUDE.md"
 
-# Surfaces this assistant is authored for. v1 = Slack only; other slots are the
-# directory pattern, not live (spec §2 non-goals).
-surfaces = ["SLACK"]
+# Surfaces this assistant is authored for. SLACK = conversational v1; CLI = the
+# terminal / Claude-Code-style coding surface (same skills, shell-native, prompt
+# library as the headline capability).
+surfaces = ["SLACK", "CLI"]
 
 # --- Slack surface binding -------------------------------------------------
 [surface.SLACK]
@@ -37,6 +38,15 @@ profile = "SLACK/system.md"
 # Session-id convention binds a Slack session to (agent, channel/DM, thread) so
 # threads stay isolated + resumable (spec §5). Bridge fills the placeholders.
 session_key = "slack:content-agent:{channel_id}:{thread_ts|dm}"
+
+# --- CLI surface binding (terminal / Claude Code) --------------------------
+[surface.CLI]
+# Ocean OS client_type → surface map: cli → [CLI] (ocean-os surface_dir).
+client_type = "cli"
+cwd = "assistants/content-agent"
+tools = "CLI/tools.toml"
+profile = "CLI/system.md"
+session_key = "cli:content-agent:{cwd}"
 
 # --- Pipeline access (spec §6) ---------------------------------------------
 [pipeline]

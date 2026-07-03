@@ -1,0 +1,40 @@
+# content-agent — CLI surface tool configuration.
+#
+# Grants content-agent's tools on the [CLI] surface (terminal / Claude-Code-style
+# clients). Same self-learning contract as SLACK/tools.toml: this is DATA — an
+# operator grants a capability by editing it and resetting the agent (fresh
+# session_id), no rebuild. The prompt library is the headline CLI skill.
+
+[agent]
+name = "content-agent"
+surface = "CLI"
+reset = "new-session"
+
+# Built-in runtime tools allowed on the CLI surface.
+[builtin]
+bash  = true   # run the prompt-library harness + content-lab calls directly
+fetch = true   # HTTP to the content-lab API
+
+# Prompt library — the deterministic local harness (headline CLI skill).
+[tool.prompt_library]
+kind    = "harness"
+bin     = "bin/content-agent-prompts"
+harness = "harness/prompt_library.py"
+db      = "data/prompt_library.db"
+seed    = "data/prompt_library.seed.json"
+sop     = "sops/prompt-library.md"
+summary = "Read a format's master prompt + run settings, list top performers, assign a prompt to a page."
+commands = [
+  "formats",
+  "master <format>",
+  "top <format> [--n 15]",
+  "assign <page> <format> [--prompt-id ID]",
+  "page <page>",
+  "add-winner <format> --json '{...}'",
+  "export [--format md|json]",
+]
+
+# content-posting-lab HTTP API — same primary pipeline path as Slack.
+[api.content_lab]
+base_url_env = "CONTENT_LAB_API_URL"
+api_key_env  = "CONTENT_LAB_API_KEY"

@@ -68,6 +68,31 @@ summary = "Report pipeline / queue status."
 sop     = "sops/status.md"
 
 # ---------------------------------------------------------------------------
+# Prompt library — deterministic local harness (the crowned MASTER prompt per
+# content format + top production performers + page assignments). Driven over the
+# `bash` builtin; owns the *what to generate*, feeding proven prompts + exact run
+# settings into the generate flow. Self-contained: local SQLite, no network.
+# SOP: sops/prompt-library.md.
+# ---------------------------------------------------------------------------
+[tool.prompt_library]
+kind    = "harness"
+bin     = "bin/content-agent-prompts"
+harness = "harness/prompt_library.py"
+db      = "data/prompt_library.db"
+seed    = "data/prompt_library.seed.json"
+sop     = "sops/prompt-library.md"
+summary = "Read a format's master prompt + run settings, list top performers, assign a prompt to a page."
+commands = [
+  "formats",                                   # list formats + crowned masters
+  "master <format>",                           # master prompt + copy-paste run settings
+  "top <format> [--n 15]",                     # top production performers
+  "assign <page> <format> [--prompt-id ID]",   # bind a format's prompt to a page
+  "page <page>",                               # a page's full run-ready kit
+  "add-winner <format> --json '{...}'",        # promote a new winner / master
+  "export [--format md|json]",                 # dump the library
+]
+
+# ---------------------------------------------------------------------------
 # Deferred: a typed content-pipeline MCP (spec §6.3). Not wired in v1 — listed
 # here so the upgrade path is explicit. Enable by editing + reset, once it exists.
 # ---------------------------------------------------------------------------

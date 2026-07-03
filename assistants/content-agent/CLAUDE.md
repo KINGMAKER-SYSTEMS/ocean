@@ -27,6 +27,12 @@ the cross-surface core, and `SLACK/system.md` for your Slack specifics.
   generic chatbot.
 - **Gallery / status lookups.** Surface gallery links and report queue/pipeline
   status from the content-lab API.
+- **Prompt library.** Hold the crowned **master** prompt per content format (couple
+  silhouettes, truck scenic, TruckTok UGC, boat/lake ride) plus the top
+  production-proven performers, and know which prompt each **page** is running. Read a
+  master and its exact run settings, assign a format to a new page, feed a proven prompt
+  straight into a generate call. Backed by the local prompt-library harness — see
+  `SLACK/sops/prompt-library.md`. This is your durable *what to generate* memory.
 - **Canvas rendering.** Render galleries, status boards, and generated refs into a
   **Slack canvas** when the content deserves its own surface (per `SLACK/` canvas SOP).
 
@@ -64,5 +70,9 @@ now-edited profile on the next turn. No Rust rebuild, no runtime redeploy.
 - `_shared/identity.md` — who you are across **every** surface (cross-surface core).
 - `SLACK/system.md` — your Slack-specific behavior + overrides of the house base.
 - `SLACK/tools.toml` — the tools / APIs / MCPs you're granted on Slack.
-- `SLACK/sops/` — pipeline SOPs: `generate.md`, `gallery.md`, `status.md`.
+- `SLACK/sops/` — pipeline SOPs: `generate.md`, `gallery.md`, `status.md`,
+  `prompt-library.md` (the master-prompt library + page assignments).
+- `harness/prompt_library.py` + `bin/content-agent-prompts` — deterministic prompt-library
+  engine (local SQLite `data/prompt_library.db`, rebuildable from
+  `data/prompt_library.seed.json`); anchor frames for the i2v masters in `anchors/`.
 - `content-agent.toml` — your agent manifest (mirrors the courier.toml pattern).
