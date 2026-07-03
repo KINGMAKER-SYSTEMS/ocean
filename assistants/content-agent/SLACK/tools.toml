@@ -90,7 +90,14 @@ commands = [
   "page <page>",                               # a page's full run-ready kit
   "add-winner <format> --json '{...}'",        # promote a new winner / master
   "export [--format md|json]",                 # dump the library
+  "publish-bedrock [--dry-run]",               # mirror to ocean-bedrock /context (org-wide reuse)
 ]
+# Org-wide publish target: ocean-bedrock /context/content-prompts. Env-gated
+# (OCEAN_BEDROCK_URL + OCEAN_BEDROCK_TOKEN, write scope on /context); the in-repo
+# SQLite stays source of truth, bedrock is the readable/searchable mirror.
+bedrock_url_env   = "OCEAN_BEDROCK_URL"
+bedrock_token_env = "OCEAN_BEDROCK_TOKEN"
+bedrock_dest      = "/context/content-prompts"
 
 # ---------------------------------------------------------------------------
 # Deferred: a typed content-pipeline MCP (spec §6.3). Not wired in v1 — listed

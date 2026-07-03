@@ -28,11 +28,19 @@ Subcommands:
   add-winner <format> --json '{...}'
                             → add/promote a new winning prompt (e.g. a fresh bake-off master)
   export  [--format md|json]→ dump the whole library (md = human-readable cards)
+  publish-bedrock [--dry-run] [--dest /context/content-prompts]
+                            → publish per-format cards + index + library.json to
+                              ocean-bedrock (/context) for org-wide reuse. Env:
+                              OCEAN_BEDROCK_URL + OCEAN_BEDROCK_TOKEN.
 """
 import argparse
 import json
+import os
 import sqlite3
 import sys
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -269,6 +277,101 @@ def cmd_export(args):
         print()
 
 
+def _library():
+    con = connect()
+    formats = [dict(r) for r in con.execute("SELECT * FROM formats ORDER BY slug")]
+    prompts = [dict(r) for r in con.execute("SELECT * FROM prompts ORDER BY format_slug, rank")]
+    con.close()
+    return formats, prompts
+
+
+def _bedrock_cards(formats, prompts):
+    """Build {api_path: (content_bytes, mime)} for the bedrock publish set."""
+    files = {}
+    # one markdown card per format (semantic-search-friendly)
+    for f in formats:
+        ps = [p for p in prompts if p["format_slug"] == f["slug"]]
+        m = next((p for p in ps if p["tier"] == "master"), None)
+        lines = [f"# {f['title']}  (`{f['slug']}`)",
+                 f"*{f['niche']}*\n", f"{f['description']}\n"]
+        if m:
+            lines += ["## ★ Master prompt", "",
+                      "```", m["prompt"], "```", "",
+                      f"- **method**: {m['method']}   **provider**: {m['provider']}   "
+                      f"**resolution**: {m['resolution']}   **aspect**: {m['aspect_ratio']}   "
+                      f"**duration**: {m['duration']}s",
+                      f"- **council score**: {m['council_score']}   **source**: {m['source']}"]
+            if m["anchor_image"]:
+                lines.append(f"- **anchor image (i2v)**: `{m['anchor_image']}` — upload this to the "
+                             f"generate call; the motion prompt alone won't reproduce the look")
+            if m["extra_json"]:
+                lines.append(f"- **provider args**: `{m['extra_json']}`")
+            if m["notes"]:
+                lines += ["", f"> {m['notes']}"]
+        lines += ["", "## Top production-proven performers", ""]
+        for p in [x for x in ps if x["tier"] != "master"]:
+            sig = f"council {p['council_score']}" if p["council_score"] else f"{p['videos_generated']} vids"
+            lines.append(f"{p['rank']}. ({sig}, `{p['provider']}`) {p['prompt']}")
+        body = ("\n".join(lines) + "\n").encode("utf-8")
+        files[f"{f['slug']}.md"] = (body, "text/markdown")
+    # machine-readable library
+    files["library.json"] = (
+        (json.dumps({"generated_at": now(), "formats": formats, "prompts": prompts}, indent=1) + "\n").encode("utf-8"),
+        "application/json")
+    # index README
+    idx = ["# Rising Tides — Content Prompt Library",
+           "", "Reusable, proven video prompts per content format — the crowned **master** "
+           "plus top production performers. Source of truth: the `content-agent` package in "
+           "ocean-agents (local SQLite); this is the org-wide-readable mirror, refreshed on publish.",
+           "", "| Format | Master method | Council | Card |", "|---|---|---|---|"]
+    for f in formats:
+        m = next((p for p in prompts if p["id"] == f["master_prompt_id"]), None)
+        idx.append(f"| **{f['title']}** (`{f['slug']}`) | {m['method'] if m else '?'} | "
+                   f"{m['council_score'] if m else '—'} | [`{f['slug']}.md`]({f['slug']}.md) |")
+    idx += ["", f"_Published {now()} · machine-readable: `library.json`_"]
+    files["README.md"] = (("\n".join(idx) + "\n").encode("utf-8"), "text/markdown")
+    return files
+
+
+def cmd_publish_bedrock(args):
+    formats, prompts = _library()
+    files = _bedrock_cards(formats, prompts)
+    dest = args.dest.rstrip("/")
+    if args.dry_run:
+        print(f"# DRY RUN — would publish {len(files)} files to {dest}/ on ocean-bedrock:\n")
+        for name, (body, mime) in sorted(files.items()):
+            print(f"  {dest}/{name}   ({len(body)} bytes, {mime})")
+        return
+    url = os.environ.get("OCEAN_BEDROCK_URL")
+    tok = os.environ.get("OCEAN_BEDROCK_TOKEN")
+    if not url or not tok:
+        sys.exit("set OCEAN_BEDROCK_URL and OCEAN_BEDROCK_TOKEN to publish (see content-agent.env.example)")
+    url = url.rstrip("/")
+    # ensure the destination folder exists (idempotent)
+    try:
+        req = urllib.request.Request(
+            f"{url}/api/v1/mkdir", method="POST",
+            data=json.dumps({"path": dest}).encode(),
+            headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=30)
+    except urllib.error.HTTPError as e:
+        if e.code not in (200, 201, 409):   # 409 = already exists
+            sys.exit(f"mkdir {dest} failed: {e.code} {e.read().decode()[:200]}")
+    ok = 0
+    for name, (body, mime) in sorted(files.items()):
+        path = f"{dest}/{name}"
+        req = urllib.request.Request(
+            f"{url}/api/v1/file?path={urllib.parse.quote(path)}", method="PUT",
+            data=body, headers={"Authorization": f"Bearer {tok}", "Content-Type": mime})
+        try:
+            urllib.request.urlopen(req, timeout=60)
+            ok += 1
+            print(f"  published {path}  ({len(body)} bytes)")
+        except urllib.error.HTTPError as e:
+            print(f"  FAILED {path}: {e.code} {e.read().decode()[:200]}")
+    print(f"\npublished {ok}/{len(files)} files to {dest}/ on ocean-bedrock")
+
+
 def main():
     ap = argparse.ArgumentParser(description="content-agent prompt library")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -282,6 +385,10 @@ def main():
     s = sub.add_parser("page"); s.add_argument("page"); s.set_defaults(fn=cmd_page)
     s = sub.add_parser("add-winner"); s.add_argument("format"); s.add_argument("--json", required=True); s.set_defaults(fn=cmd_add_winner)
     s = sub.add_parser("export"); s.add_argument("--format", choices=["md", "json"], default="md"); s.set_defaults(fn=cmd_export)
+    s = sub.add_parser("publish-bedrock")
+    s.add_argument("--dry-run", action="store_true")
+    s.add_argument("--dest", default="/context/content-prompts")
+    s.set_defaults(fn=cmd_publish_bedrock)
     args = ap.parse_args()
     args.fn(args)
 

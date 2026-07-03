@@ -51,6 +51,15 @@ a legible-FORD-grille lock. Anchor frames ship in `anchors/`.
   `data/prompt_library.db` **and** update `data/prompt_library.seed.json` so the seed
   stays the source of truth (the DB is rebuilt from it).
 
+**"Publish the library so every agent/page can reuse it."**
+- `bin/content-agent-prompts publish-bedrock` mirrors the library to **ocean-bedrock**
+  `/context/content-prompts/` — one markdown card per format (semantic-search-friendly),
+  an index `README.md`, and a machine-readable `library.json`. Any Ocean agent org-wide
+  can then read or semantically search the masters. Needs `OCEAN_BEDROCK_URL` +
+  `OCEAN_BEDROCK_TOKEN` (write scope on `/context`); `--dry-run` previews. The in-repo
+  SQLite stays the source of truth — re-run publish after any `add-winner`/seed change to
+  refresh the mirror.
+
 ## Rules
 
 - **Never invent a format's prompt when a master exists** — read it from the library and

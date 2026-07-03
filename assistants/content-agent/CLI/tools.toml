@@ -32,7 +32,12 @@ commands = [
   "page <page>",
   "add-winner <format> --json '{...}'",
   "export [--format md|json]",
+  "publish-bedrock [--dry-run]",
 ]
+# Org-wide publish to ocean-bedrock /context (env-gated; local SQLite stays source of truth).
+bedrock_url_env   = "OCEAN_BEDROCK_URL"
+bedrock_token_env = "OCEAN_BEDROCK_TOKEN"
+bedrock_dest      = "/context/content-prompts"
 
 # content-posting-lab HTTP API — same primary pipeline path as Slack.
 [api.content_lab]
