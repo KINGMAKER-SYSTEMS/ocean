@@ -12,10 +12,11 @@ The mug/crema/framing changes every scene; the crowned look + motion recipe do n
 Env: GEMINI_API_KEY (anchor minting); CONTENT_LAB_API_URL (+ CONTENT_LAB_API_KEY if required).
 Usage: modular_i2v_batch.py <format> <num_scenes> [clips_per_anchor] [out_dir]
 """
-import base64, json, os, subprocess, sys, time
+import base64, io, json, os, subprocess, sys, time
 from pathlib import Path
 
 import requests
+from PIL import Image
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
@@ -72,6 +73,81 @@ def i2v(anchor: Path, motion_prompt: str, provider: str, count: int) -> list[str
     return urls
 
 
+# Enforces Eric's spec on every clip: pure #000000 backdrop (crush dark bg to true black),
+# saucer edge-to-edge, cup dead-center, AND trim any end-of-clip intruder (wan sometimes
+# hallucinates a hand/pitcher creeping in near the end). Prompt guards don't stop these.
+CRUSH = "curves=all='0/0 0.14/0 1/1'"
+
+
+def _gray_frame(path: Path, t: float, w: int = 200):
+    raw = subprocess.run(["ffmpeg", "-v", "quiet", "-ss", f"{t}", "-i", str(path), "-frames:v", "1",
+                          "-vf", f"{CRUSH},scale={w}:-2", "-f", "image2pipe", "-vcodec", "png", "-"],
+                         capture_output=True).stdout
+    return Image.open(io.BytesIO(raw)).convert("L") if raw else None
+
+
+def _clean_end(path: Path, dur: float):
+    """Return the timestamp to trim to if an intruder enters (bright pixels appear OUTSIDE the
+    stable cup, against the pure-black bg), else None. Cup+bg must be crushed first."""
+    base = _gray_frame(path, min(0.5, dur / 3))
+    if base is None:
+        return None
+    W, H = base.size
+    bb = base.point(lambda p: 255 if p > 60 else 0).getbbox()
+    if not bb:
+        return None
+    x0, y0, x1, y1 = bb
+    mx, my = int(W * .03), int(H * .03)
+    dx0, dy0, dx1, dy1 = x0 - mx, y0 - my, x1 + mx, y1 + my
+    t = 1.0
+    while t < dur:
+        f = _gray_frame(path, t)
+        if f is None:
+            break
+        px = f.point(lambda p: 255 if p > 60 else 0).load()
+        out = sum(1 for yy in range(0, H, 2) for xx in range(0, W, 2)
+                  if px[xx, yy] and not (dx0 <= xx <= dx1 and dy0 <= yy <= dy1))
+        if out > 12:                      # an intruder appeared outside the cup
+            return max(round(t - 0.3, 2), 2.0)
+        t += 0.1
+    return None
+
+
+def frame_clip(path: Path):
+    """Trim any end intruder, crush bg to pure black, crop to the cup, scale saucer to full
+    width, pad to 9:16 dead-center. No-op if the cup bbox can't be found."""
+    dur = float(subprocess.run(["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+                                "-of", "csv=p=0", str(path)], capture_output=True, text=True).stdout or 0)
+    ce = _clean_end(path, dur) if dur else None
+    raw = subprocess.run(["ffmpeg", "-v", "quiet", "-ss", "0.1", "-i", str(path),
+                          "-frames:v", "1", "-vf", CRUSH, "-f", "image2pipe", "-vcodec", "png", "-"],
+                         capture_output=True).stdout
+    im = Image.open(io.BytesIO(raw)).convert("L")
+    W, H = im.size
+    bb = im.point(lambda p: 255 if p > 22 else 0).getbbox()
+    if not bb:
+        return
+    x0, y0, x1, y1 = bb
+    bw, bh = x1 - x0, y1 - y0
+    sh = round(bh * W / bw / 2) * 2
+    if sh > H:
+        vf = f"{CRUSH},crop={bw}:{bh}:{x0}:{y0},scale=-2:{H},pad={W}:{H}:({W}-iw)/2:0:black"
+    else:
+        vf = f"{CRUSH},crop={bw}:{bh}:{x0}:{y0},scale={W}:{sh},pad={W}:{H}:0:({H}-ih)/2:black"
+    # min length 5s: if trimming an intruder drops the clip under 5s, slow it just enough to
+    # push it back over 5 (~10% nudge, imperceptible on a gentle loop).
+    eff = ce if ce else dur
+    if eff and eff < 5.0:
+        vf += f",setpts={5.1 / eff:.4f}*PTS"
+    tmp = path.with_suffix(".framed.mp4")
+    cmd = ["ffmpeg", "-y", "-v", "quiet"]
+    if ce:
+        cmd += ["-t", str(ce)]            # input trim (before -i) so setpts can then re-stretch
+    cmd += ["-i", str(path), "-vf", vf, "-c:v", "libx264", "-pix_fmt", "yuv420p", "-an", str(tmp)]
+    subprocess.run(cmd, check=True)
+    tmp.replace(path)
+
+
 def main():
     requests.post(f"{BASE}/api/projects/", json={"name": project}, headers=HDR, timeout=30)
     recs = json.loads(subprocess.run(
@@ -96,7 +172,12 @@ def main():
             continue
         for ci, u in enumerate(urls, 1):
             raw = requests.get(BASE + u, headers=HDR, timeout=180).content
-            (out / f"{fmt}_s{si:02d}_c{ci}.mp4").write_bytes(raw)
+            clip = out / f"{fmt}_s{si:02d}_c{ci}.mp4"
+            clip.write_bytes(raw)
+            try:
+                frame_clip(clip)   # pure-black bg + saucer edge-to-edge + dead-center
+            except Exception as e:
+                print(f"  frame_clip warn {clip.name}: {e}", flush=True)
             total += 1
         print(f"  scene {si}: {len(urls)} clips (total {total})", flush=True)
     print(f"\nDONE: {total} clips in {out}/ , anchor bank in {bank}/", flush=True)
