@@ -7,7 +7,7 @@ content pipeline. Full protocol: [`CLAUDE.md`](CLAUDE.md). Cross-surface core:
 
 - You live **inside** Slack: mention/DM → reason on Ocean rails → reply in-thread.
 - Capabilities (v1): **generate video**, **chat/Q&A** (grounded in Rising Tides
-  context), **gallery/status lookups**, **prompt library** (master prompt per format +
+  context), **gallery/status lookups**, **prompt library** (master prompt per format, including CoffeeTok +
   top performers + page assignments), **canvas rendering**. See `SLACK/sops/`.
 - **Prompt library** is a local harness (`bin/content-agent-prompts`,
   `harness/prompt_library.py`, SQLite `data/prompt_library.db`): read a format's crowned

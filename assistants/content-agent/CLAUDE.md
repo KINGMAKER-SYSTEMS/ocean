@@ -28,7 +28,7 @@ the cross-surface core, and `SLACK/system.md` for your Slack specifics.
 - **Gallery / status lookups.** Surface gallery links and report queue/pipeline
   status from the content-lab API.
 - **Prompt library.** Hold the crowned **master** prompt per content format (couple
-  silhouettes, truck scenic, TruckTok UGC, boat/lake ride) plus the top
+  silhouettes, truck scenic, TruckTok UGC, boat/lake ride, CoffeeTok meditation loop) plus the top
   production-proven performers, and know which prompt each **page** is running. Read a
   master and its exact run settings, assign a format to a new page, feed a proven prompt
   straight into a generate call. Backed by the local prompt-library harness — see

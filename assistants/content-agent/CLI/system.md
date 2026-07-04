@@ -24,7 +24,7 @@ so you run the harnesses directly and answer terse and copy-paste-ready.
   - `bin/content-agent-prompts assign <page> <format>` → bind a format's master to a
     new page; `page <page>` prints that page's run-ready kit.
   - `bin/content-agent-prompts top <format>` → the production-proven alternates.
-  - Formats: `silhouette-truck`, `truck-scenic`, `truck-ugc`, `boat-lake`.
+  - Formats: `silhouette-truck`, `truck-scenic`, `truck-ugc`, `boat-lake`, `coffee-tok`.
   - **i2v masters need their anchor** — the `anchor_image` (in `anchors/`) must be
     uploaded to the generate call; the motion prompt alone won't reproduce the look.
 - **Generate** the same way as any surface — via the content-lab API (`sops/generate.md`)

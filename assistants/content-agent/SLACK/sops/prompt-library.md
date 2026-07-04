@@ -18,9 +18,10 @@ stdlib, local SQLite (`data/prompt_library.db`), rebuildable from
 | `truck-scenic` | Parked black F-150, golden hour, no people (TruckTok) | i2v anchor | 8.57 |
 | `truck-ugc` | Handheld creator walkaround of a lifted F-150 (TruckTok) | hailuo t2v | 8.35 |
 | `boat-lake` | Summer golden-hour lake-ride POV | i2v anchor | 8.47 |
+| `coffee-tok` | Top-down coffee meditation loop on pure black, no generated text | i2v anchor | 8.32 |
 
-**The core method finding:** batch consistency (same truck/couple/boat every clip) is
-NOT promptable — the generator can't see its own other outputs. 3 of 4 masters are
+**The core method finding:** batch consistency (same truck/couple/boat/coffee cup every clip) is
+NOT promptable — the generator can't see its own other outputs. 4 of 5 masters are
 **image-to-video**: upload a clean anchor frame, run a short motion prompt, and every
 clip in the batch inherits the anchor. UGC is the exception — hailuo text-to-video with
 a legible-FORD-grille lock. Anchor frames ship in `anchors/`.
