@@ -36,22 +36,41 @@ bank.mkdir(parents=True, exist_ok=True)
 project = f"modular-{fmt}"
 
 
-def mint_anchor(prompt: str, path: Path):
-    """Mint a fresh on-brand anchor with gemini-3-pro-image (9:16)."""
+def _bg_is_black(path: Path) -> bool:
+    """True if the 4 corners are dark — rejects gemini's occasional white-bg glitch
+    (the black-crush only fixes dark->black, not white)."""
+    im = Image.open(path).convert("L")
+    W, H = im.size
+    s = 30
+    corners = [(0, 0), (W - s, 0), (0, H - s), (W - s, H - s)]
+    for cx, cy in corners:
+        crop = im.crop((cx, cy, cx + s, cy + s))
+        if sum(crop.getdata()) / (s * s) > 45:      # a corner is bright => not a black bg
+            return False
+    return True
+
+
+def mint_anchor(prompt: str, path: Path, tries: int = 3):
+    """Mint a fresh on-brand anchor with gemini-3-pro-image (9:16). Retries if the background
+    comes back non-black (a known gemini glitch that the crush can't fix)."""
     if not GEMINI_KEY:
         sys.exit("GEMINI_API_KEY not set — needed to mint anchors")
     body = {"contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {"responseModalities": ["IMAGE"], "imageConfig": {"aspectRatio": "9:16"}}}
-    r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent",
-                      headers={"x-goog-api-key": GEMINI_KEY, "Content-Type": "application/json"},
-                      json=body, timeout=180)
-    r.raise_for_status()
-    for p in r.json()["candidates"][0]["content"]["parts"]:
-        blob = p.get("inlineData") or p.get("inline_data")
-        if blob:
-            path.write_bytes(base64.b64decode(blob["data"]))
+    for attempt in range(tries):
+        r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent",
+                          headers={"x-goog-api-key": GEMINI_KEY, "Content-Type": "application/json"},
+                          json=body, timeout=180)
+        r.raise_for_status()
+        blob = next((p.get("inlineData") or p.get("inline_data")
+                     for p in r.json()["candidates"][0]["content"]["parts"]
+                     if p.get("inlineData") or p.get("inline_data")), None)
+        if not blob:
+            raise RuntimeError(f"no image in gemini response: {json.dumps(r.json())[:200]}")
+        path.write_bytes(base64.b64decode(blob["data"]))
+        if _bg_is_black(path) or attempt == tries - 1:
             return path
-    raise RuntimeError(f"no image in gemini response: {json.dumps(r.json())[:200]}")
+    return path
 
 
 def i2v(anchor: Path, motion_prompt: str, provider: str, count: int) -> list[str]:
