@@ -51,6 +51,19 @@ The `truck` format is the flagship of the modular approach:
 `harness/modular_batch.py` does the whole loop for a t2v-crop format (compose → generate →
 download every crop) — `python3 harness/modular_batch.py truck 10`.
 
+## QA filter — MANDATORY before posting (never skip)
+
+A modular batch is not postable until it's filtered. Generators drift within a format:
+- **truck (hailuo):** renders a garbled flank decal on ~25-30% of side-shot clips no matter
+  the wording ("murdered-out / blacked-out" positive framing beats "no badges" but only
+  gets ~73% clean — law 21). So **generate ~1.5× the target and drop the gibberish ones.**
+- **i2v (silhouette/scenic/boat):** the anchor can occasionally break a guard (faces leak in,
+  couple not fully featureless, floating artifact). Filter the clips (and eyeball anchors).
+
+Run a cheap Gemini pass per clip for the format's failure modes (garbled lettering / wheels
+rotating / people / featureless-broken), keep only clean, top up to target. Yield ≈ 65-75%,
+so plan the generation count accordingly. A page never receives an unfiltered batch.
+
 ## Adding / editing a modular format
 Edit `data/prompt_library.seed.json` under `"modular"` (spine, template, slot menus), then
 `harness/prompt_library.py seed --force` and commit the seed + rebuilt DB together. Keep slot
