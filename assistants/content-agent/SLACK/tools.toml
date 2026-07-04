@@ -81,10 +81,11 @@ harness = "harness/prompt_library.py"
 db      = "data/prompt_library.db"
 seed    = "data/prompt_library.seed.json"
 sop     = "sops/prompt-library.md"
-summary = "Read a format's master prompt + run settings, list top performers, assign a prompt to a page."
+summary = "Read a format's master prompt, compose modular rotated scenes (CANON), list top performers, assign to a page."
 commands = [
   "formats",                                   # list formats + crowned masters
   "master <format>",                           # master prompt + copy-paste run settings
+  "compose <format> [--n 10] [--json]",        # CANON: modular scenes (fixed spine + rotated slots, no repeats)
   "top <format> [--n 15]",                     # top production performers
   "assign <page> <format> [--prompt-id ID]",   # bind a format's prompt to a page
   "page <page>",                               # a page's full run-ready kit
@@ -92,6 +93,11 @@ commands = [
   "export [--format md|json]",                 # dump the library
   "publish-bedrock [--dry-run]",               # mirror to ocean-bedrock /context (org-wide reuse)
 ]
+# Modular prompting is CANON (SOP: sops/modular-prompting.md). Never run one prompt N times
+# — compose rotated scenes off a fixed spine. Truck format = MiniMax hailuo + crop_mode 'both'
+# (5-way crop → 5 clips/gen, ~$0.056/clip). Batch loop: harness/modular_batch.py <format> <n>.
+modular_sop     = "sops/modular-prompting.md"
+modular_harness = "harness/modular_batch.py"
 # Org-wide publish target: ocean-bedrock /context/content-prompts. Env-gated
 # (OCEAN_BEDROCK_URL + OCEAN_BEDROCK_TOKEN, write scope on /context); the in-repo
 # SQLite stays source of truth, bedrock is the readable/searchable mirror.

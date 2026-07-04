@@ -85,6 +85,29 @@ CREATE TABLE IF NOT EXISTS page_assignments (
     note         TEXT,
     PRIMARY KEY (page, format_slug)          -- one prompt per (page, format)
 );
+-- Modular prompting framework (CANON). A winning prompt split into an immutable SPINE
+-- (subject + quality guards, verbatim every time) and rotating SCENE SLOTS, so the truck
+-- stays solid while every clip is a new scene (law 0: rotate or TikTok flags unoriginal).
+CREATE TABLE IF NOT EXISTS modular_formats (
+    format_slug     TEXT PRIMARY KEY,
+    method          TEXT NOT NULL,           -- 'i2v' | 't2v'
+    provider        TEXT NOT NULL,           -- e.g. 'hailuo' (MiniMax, crispier + 5-way crop)
+    fixed_subject   TEXT NOT NULL,           -- the immutable subject/brand identity
+    quality_guards  TEXT NOT NULL,           -- the immutable quality/consistency guards
+    template        TEXT NOT NULL,           -- prompt/anchor template with {slot} placeholders
+    motion_prompt   TEXT,                    -- i2v only: fixed motion prompt for the anchor
+    base_anchor     TEXT,                    -- i2v only: subject/style reference frame
+    extra_json      TEXT,                    -- provider extras (crop_mode 'both' = 5-way, ...)
+    clips_per_gen   INTEGER DEFAULT 1,       -- 5 when crop_mode='both' (the cost multiplier)
+    note            TEXT,
+    created_at      TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS modular_slots (
+    format_slug  TEXT NOT NULL,
+    slot         TEXT NOT NULL,              -- 'angle' | 'setting' | 'light' | 'composition' | ...
+    values_json  TEXT NOT NULL,             -- JSON array of on-brand menu values
+    PRIMARY KEY (format_slug, slot)
+);
 """
 
 
@@ -123,11 +146,76 @@ def cmd_seed(args):
              p.get("resolution"), p.get("aspect_ratio"), p.get("duration"), p["prompt"],
              p.get("anchor_image"), p.get("extra_json"), p.get("council_score"),
              p.get("videos_generated"), p.get("notes"), p["source"], p.get("created_at", now())))
+    for slug, m in (data.get("modular") or {}).items():
+        con.execute(
+            """INSERT INTO modular_formats(format_slug,method,provider,fixed_subject,quality_guards,
+               template,motion_prompt,base_anchor,extra_json,clips_per_gen,note,created_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (slug, m["method"], m["provider"], m["fixed_subject"], m["quality_guards"],
+             m["template"], m.get("motion_prompt"), m.get("base_anchor"),
+             json.dumps(m["extra"]) if m.get("extra") else None,
+             m.get("clips_per_gen", 1), m.get("note"), now()))
+        for slot, values in m["slots"].items():
+            con.execute("INSERT INTO modular_slots(format_slug,slot,values_json) VALUES(?,?,?)",
+                        (slug, slot, json.dumps(values)))
     con.commit()
     nf = con.execute("SELECT count(*) FROM formats").fetchone()[0]
     npr = con.execute("SELECT count(*) FROM prompts").fetchone()[0]
+    nm = con.execute("SELECT count(*) FROM modular_formats").fetchone()[0]
     con.close()
-    print(f"seeded {DB} — {nf} formats, {npr} prompts")
+    print(f"seeded {DB} — {nf} formats, {npr} prompts, {nm} modular formats")
+
+
+def _rotate_combos(slots, n):
+    """Evenly-spread, non-repeating slot combinations (each slot strided by a distinct step)."""
+    names = list(slots)
+    sizes = [len(slots[k]) for k in names]
+    total = 1
+    for s in sizes:
+        total *= s
+    steps = [1, 3, 5, 7, 11, 13][: len(names)] or [1]
+    out, seen, i = [], set(), 0
+    while len(out) < n and len(seen) < total:
+        pick = tuple((i * steps[j]) % sizes[j] for j in range(len(names)))
+        if pick not in seen:
+            seen.add(pick)
+            out.append({names[j]: slots[names[j]][pick[j]] for j in range(len(names))})
+        i += 1
+    while len(out) < n and out:
+        out.append(out[len(out) % len(seen)])
+    return out[:n]
+
+
+def cmd_compose(args):
+    """Compose N modular scenes for a format: fixed spine + rotated slots, no repeats."""
+    con = connect()
+    m = con.execute("SELECT * FROM modular_formats WHERE format_slug=?", (args.format,)).fetchone()
+    if not m:
+        con.close()
+        sys.exit(f"no modular template for '{args.format}' — try: prompt_library.py compose <format>")
+    slots = {r["slot"]: json.loads(r["values_json"])
+             for r in con.execute("SELECT * FROM modular_slots WHERE format_slug=?", (args.format,))}
+    con.close()
+    fields = dict(subject=m["fixed_subject"], guards=m["quality_guards"], subject_state=m["quality_guards"])
+    recs = []
+    for combo in _rotate_combos(slots, args.n):
+        text = m["template"].format(**fields, **combo)
+        rec = {"format": args.format, "method": m["method"], "provider": m["provider"], "combo": combo}
+        if m["method"] == "i2v":
+            rec.update(anchor_prompt=text, motion_prompt=m["motion_prompt"], base_anchor=m["base_anchor"])
+        else:
+            rec.update(prompt=text, extra=json.loads(m["extra_json"]) if m["extra_json"] else {})
+        recs.append(rec)
+    if args.json:
+        print(json.dumps(recs, indent=1))
+        return
+    cpg = m["clips_per_gen"] or 1
+    print(f"# {args.format} — {args.n} modular scenes  ({m['provider']} {m['method']}"
+          + (f", {cpg}-way crop → {args.n * cpg} clips" if cpg > 1 else "") + ")")
+    print(f"# SPINE (in every scene): {m['fixed_subject']}")
+    for i, r in enumerate(recs, 1):
+        print(f"\n[{i}] " + " · ".join(f"{k}={v}" for k, v in r["combo"].items()))
+        print("   " + (r.get("anchor_prompt") or r.get("prompt")))
 
 
 def _run_block(p):
@@ -314,9 +402,33 @@ def _bedrock_cards(formats, prompts):
             lines.append(f"{p['rank']}. ({sig}, `{p['provider']}`) {p['prompt']}")
         body = ("\n".join(lines) + "\n").encode("utf-8")
         files[f"{f['slug']}.md"] = (body, "text/markdown")
+    # modular bible (CANON) — per-format spine + slots, published for org-wide reuse
+    con = connect()
+    mfs = [dict(r) for r in con.execute("SELECT * FROM modular_formats ORDER BY format_slug")]
+    mslots = [dict(r) for r in con.execute("SELECT * FROM modular_slots ORDER BY format_slug, slot")]
+    con.close()
+    if mfs:
+        mb = ["# Modular Prompt Bible (CANON)", "",
+              "Never run one prompt N times (TikTok flags near-identical uploads). Compose "
+              "rotated scenes off a fixed spine: subject stays solid, scene changes every clip.", ""]
+        for m in mfs:
+            cpg = m.get("clips_per_gen") or 1
+            mb.append(f"## `{m['format_slug']}` — {m['provider']} {m['method']}"
+                      + (f" · {cpg}-way crop ({cpg} clips/gen)" if cpg > 1 else ""))
+            mb.append(f"- **spine (immutable):** {m['fixed_subject']}")
+            mb.append(f"- **guards:** {m['quality_guards']}")
+            if m.get("extra_json"):
+                mb.append(f"- **provider args:** `{m['extra_json']}`")
+            mb.append(f"- **template:** {m['template']}")
+            for s in [x for x in mslots if x["format_slug"] == m["format_slug"]]:
+                vals = json.loads(s["values_json"])
+                mb.append(f"- **slot `{s['slot']}`** ({len(vals)}): {' · '.join(vals)}")
+            mb.append("")
+        files["modular-bible.md"] = (("\n".join(mb) + "\n").encode("utf-8"), "text/markdown")
     # machine-readable library
     files["library.json"] = (
-        (json.dumps({"generated_at": now(), "formats": formats, "prompts": prompts}, indent=1) + "\n").encode("utf-8"),
+        (json.dumps({"generated_at": now(), "formats": formats, "prompts": prompts,
+                     "modular_formats": mfs, "modular_slots": mslots}, indent=1) + "\n").encode("utf-8"),
         "application/json")
     # index README
     idx = ["# Rising Tides — Content Prompt Library",
@@ -384,6 +496,8 @@ def main():
     s.add_argument("--prompt-id"); s.add_argument("--note"); s.set_defaults(fn=cmd_assign)
     s = sub.add_parser("page"); s.add_argument("page"); s.set_defaults(fn=cmd_page)
     s = sub.add_parser("add-winner"); s.add_argument("format"); s.add_argument("--json", required=True); s.set_defaults(fn=cmd_add_winner)
+    s = sub.add_parser("compose"); s.add_argument("format"); s.add_argument("--n", type=int, default=10)
+    s.add_argument("--json", action="store_true"); s.set_defaults(fn=cmd_compose)
     s = sub.add_parser("export"); s.add_argument("--format", choices=["md", "json"], default="md"); s.set_defaults(fn=cmd_export)
     s = sub.add_parser("publish-bedrock")
     s.add_argument("--dry-run", action="store_true")

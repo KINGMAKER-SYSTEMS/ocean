@@ -1450,5 +1450,214 @@
    "notes": "Round 8 anti-warp conserved-sheet prompt. Useful when outputs over-morph and need a volume-conservation guard.",
    "prompt": "The crema behaves like real liquid, not a morphing graphic: the existing tan ribbon keeps its volume and softly shears clockwise along the coffee surface. Tiny rim bubbles stay the same size, the cup rim and handle stay perfectly fixed, reflections slide gently, pure black background, locked overhead camera, no text, no logo, no hands, no spoon, no steam, seamless loop."
   }
- ]
+ ],
+ "modular": {
+  "truck": {
+   "method": "t2v",
+   "provider": "hailuo",
+   "fixed_subject": "a clean glossy black Ford F-150 crew cab, factory black wheels, completely debadged with no lettering, badges, or license plates anywhere",
+   "quality_guards": "the truck is parked and completely stationary with its wheels and tires not rotating, no people, no on-screen text, photorealistic, sharp and crisp",
+   "template": "Extreme wide side-on shot of {subject} filling the ENTIRE width of the frame edge to edge \u2014 front bumper at the far left edge, tailgate at the far right edge, the truck large and close so it dominates the whole horizontal frame \u2014 parked {setting}, {light}, {atmosphere}, slow subtle camera pan along the flank, {subject_state}",
+   "motion_prompt": null,
+   "base_anchor": null,
+   "extra": {
+    "crop_mode": "both",
+    "optimize_prompt": false
+   },
+   "clips_per_gen": 5,
+   "note": "PRIMARY truck bible (Eric pref 2026-07-03): MiniMax/hailuo t2v, crispier consistency, 5-way crop for cost. One wide SIDE-PROFILE generation -> 5 standalone 9:16 clips (grille/front-wheel, front-cab, cab, bed, tailgate). ~$0.28/gen = ~$0.056/clip. Side-shot composition is what makes the 5-crop work in-algo.",
+   "slots": {
+    "setting": [
+     "on a gravel country backroad through golden wheat fields",
+     "in a dirt farmyard by a weathered red barn",
+     "on a mountain pullout with a hazy range behind",
+     "on a gravel riverbank beside a calm river",
+     "on cracked desert scrub with distant buttes",
+     "on a damp forest two-track among tall pines",
+     "on a grassy hilltop",
+     "along a wooden ranch fence line in open pasture",
+     "on coastal sand dunes near the water",
+     "on a country dirt road at the edge of a field"
+    ],
+    "light": [
+     "warm golden-hour sun raking low with long shadows",
+     "cool blue-hour dusk just after sunset",
+     "soft pink-gold sunrise mist",
+     "harsh warm late-afternoon sun",
+     "soft overcast diffused light, moody",
+     "a dramatic cloudy sunset with warm rim light on the flank"
+    ],
+    "atmosphere": [
+     "faint dust drifting in the air",
+     "crisp and clear",
+     "damp after rain with wet reflections on the paint",
+     "dry and dusty golden haze"
+    ]
+   }
+  },
+  "scenic": {
+   "method": "i2v",
+   "provider": "wan-i2v-fast",
+   "fixed_subject": "the same clean debadged glossy black Ford F-150 crew cab with factory wheels, no lettering or license plates anywhere on the truck",
+   "quality_guards": "photorealistic phone photo, vertical 9:16, no lettering, no plates, keep the truck identical to the reference",
+   "template": "Reframe {subject} as a {angle}, parked at {setting}, {light}, {composition}. {guards}.",
+   "motion_prompt": "Faint dust drifts through the warm sunlight, grass sways gently, long shadows creep very slowly, the truck stays perfectly still with its wheels and tires completely stationary and not rotating and nothing else on the truck moving, static camera, no people appear, photorealistic golden hour",
+   "base_anchor": "anchors/scenic-v2.jpg",
+   "extra": null,
+   "clips_per_gen": 1,
+   "note": null,
+   "slots": {
+    "angle": [
+     "front three-quarter view",
+     "full side profile",
+     "rear three-quarter angle",
+     "low dramatic hero angle looking up",
+     "straight-on front view",
+     "high wide establishing angle"
+    ],
+    "setting": [
+     "a gravel country backroad through golden wheat fields",
+     "a dirt farmyard by a weathered red barn",
+     "a mountain pullout with a hazy range behind",
+     "a gravel riverbank beside a calm river",
+     "cracked desert scrub with distant buttes",
+     "a damp forest two-track among tall pines",
+     "a grassy hilltop",
+     "a wooden ranch fence line in open pasture",
+     "coastal sand dunes near the water",
+     "a country dirt road at the edge of a field"
+    ],
+    "light": [
+     "warm golden-hour sun raking low with long shadows",
+     "cool blue-hour dusk just after sunset",
+     "soft pink-gold sunrise mist",
+     "harsh warm late-afternoon sun with dust in the air",
+     "soft overcast diffused light, moody and cool",
+     "a huge dramatic cloudy sunset sky with warm rim light"
+    ],
+    "composition": [
+     "the truck filling most of the frame",
+     "the truck in the lower third under a big sky",
+     "the truck off-center with foreground grass"
+    ]
+   }
+  },
+  "silhouette": {
+   "method": "i2v",
+   "provider": "wan-i2v-fast",
+   "fixed_subject": "the same pure black featureless silhouettes of a man and woman embracing, and a clean debadged black Ford F-150, no readable faces or clothing detail, no lettering anywhere",
+   "quality_guards": "photorealistic dusk photo, vertical 9:16, couple stays fully featureless black silhouettes, clean caption sky in the upper frame, keep the couple and truck identical to the reference",
+   "template": "Reframe {subject} with a {sky} sky, in {setting}, {pose}, {composition}. {guards}.",
+   "motion_prompt": "Gentle breeze moves the tall grass and her hair, the couple holds the same embrace from first frame to last, clouds drift very slowly, the truck stays still, static camera, no new people appear, cinematic low light realism",
+   "base_anchor": "anchors/silhouette-v3.jpg",
+   "extra": null,
+   "clips_per_gen": 1,
+   "note": null,
+   "slots": {
+    "sky": [
+     "vast purple-orange-red dusk gradient",
+     "deep pink and lavender twilight",
+     "fiery orange sunset with streaked clouds",
+     "soft golden afterglow fading to blue",
+     "moody violet dusk with a low sun ember",
+     "warm amber horizon under a clearing sky"
+    ],
+    "setting": [
+     "an open dusk field of tall grass",
+     "a wheat field at last light",
+     "a lakeside meadow at dusk",
+     "a country hilltop",
+     "a dirt pullout beside a fence line",
+     "a coastal bluff at sunset"
+    ],
+    "pose": [
+     "foreheads touching",
+     "her head on his shoulder",
+     "a slow embrace facing the sky",
+     "holding each other close, side-on",
+     "a gentle sway together"
+    ],
+    "composition": [
+     "couple lower-left, truck right, big sky above",
+     "couple mid-ground large, truck behind",
+     "wide, couple and truck small under an enormous sky"
+    ]
+   }
+  },
+  "ugc": {
+   "method": "t2v",
+   "provider": "hailuo",
+   "fixed_subject": "lifted black Ford F-150 crew cab on 35-inch mud tires, factory grille with clean legible FORD block letters, no other lettering anywhere",
+   "quality_guards": "the truck is completely stationary with its wheels and tires not rotating, no people visible, no on-screen text, vertical 9:16",
+   "template": "Smartphone UGC clip filmed handheld with gentle phone drift: {subject}, parked {angle} on {setting} at {light}, {atmosphere}, truck fills most of the frame, {subject_state}.",
+   "motion_prompt": null,
+   "base_anchor": null,
+   "extra": {
+    "crop_mode": "dual",
+    "optimize_prompt": false
+   },
+   "clips_per_gen": 1,
+   "note": null,
+   "slots": {
+    "angle": [
+     "three-quarter front",
+     "low front three-quarter emphasizing the lift",
+     "side profile",
+     "front-on"
+    ],
+    "setting": [
+     "a gravel farm drive with a wooden fence and pasture behind",
+     "a muddy backroad at the field's edge",
+     "a gravel lot by a metal gate",
+     "a dirt turnout in front of a treeline",
+     "a ranch driveway with hay bales behind"
+    ],
+    "light": [
+     "golden hour with the low sun flaring softly in the lens",
+     "warm late afternoon",
+     "overcast soft daylight",
+     "early-morning golden light"
+    ],
+    "atmosphere": [
+     "faint dust in the air",
+     "damp after rain with reflections",
+     "dry and dusty",
+     "crisp and clear"
+    ]
+   }
+  },
+  "boat": {
+   "method": "i2v",
+   "provider": "wan-i2v-fast",
+   "fixed_subject": "the same white open-hull boat bow, no lettering anywhere",
+   "quality_guards": "realistic action-camera phone footage, vertical 9:16, no people, keep the boat identical to the reference",
+   "template": "Reframe {subject} cruising toward {setting}, {light}, {water}. {guards}.",
+   "motion_prompt": "The boat cruises forward across the lake, gentle rocking, small ripples flowing past the hull, warm sun reflections shimmering on the moving water, shoreline drifting past, realistic phone video motion",
+   "base_anchor": "anchors/boat.jpg",
+   "extra": null,
+   "clips_per_gen": 1,
+   "note": null,
+   "slots": {
+    "setting": [
+     "a pine-lined lake shore",
+     "an open glassy lake with distant hills",
+     "a river bend with overhanging trees",
+     "a wide bay with a far treeline",
+     "a cove with rocky banks"
+    ],
+    "light": [
+     "golden-hour sun low with a starburst",
+     "warm sunset reflections",
+     "soft morning gold",
+     "bright summer afternoon"
+    ],
+    "water": [
+     "light chop with sparkling ripples",
+     "calm water with long light reflections",
+     "gentle wake spreading behind",
+     "small waves catching the sun"
+    ]
+   }
+  }
+ }
 }
