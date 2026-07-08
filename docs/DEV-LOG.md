@@ -924,3 +924,20 @@ Smoke:
 ```bash
 npm run smoke
 ```
+
+## 2026-07-08 — Onboarding E2E real; OceanOrb + design system extracted
+
+- Finished and hardened the real-scan ceremony conductor
+  (`scripts/ocean-ceremony-scan.mjs`): true de-duplicated source counts, sync
+  POST gated on confirmed human ack, honest timeout narration (ack/sync frames
+  dropped when no human acked). Live E2E verified against a throwaway app
+  instance: full arc streamed, gate genuinely blocked, sync skipped on timeout.
+- Extracted the OceanOrb (water-surface sphere, voice states, logo absorption)
+  to `design/orb/ocean-orb.js` as the canonical reusable module; onboarding
+  mounts it via a thin facade. Design tokens + self-hosted InterVariable +
+  glass UI landed under `design/`; `assets/integrations/omp.svg` added so all
+  four detected sources have absorption marks.
+- Rebuilt the operator panel at `ui/app/index.html` (root route) after the
+  cleanup wave deleted the never-committed inline GUI; ceremony now lives only
+  at `/onboarding`. Panel verified in-browser against real config (sources,
+  preview state, ack gate, schedule; zero console errors, Inter live).

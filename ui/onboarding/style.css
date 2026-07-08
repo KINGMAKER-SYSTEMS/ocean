@@ -1,0 +1,23 @@
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+html, body {
+  margin: 0; height: 100%; width: 100%;
+  background: var(--ocean-bg-base); color: var(--ocean-text);
+  font-family: var(--ocean-font);
+  overflow: hidden; -webkit-font-smoothing: antialiased;
+}
+#ocean {
+  position: fixed; inset: 0; display: block; width: 100vw; height: 100vh;
+  background: var(--ocean-bg-radial);
+}
+#stage { position: fixed; inset: 0; pointer-events: none; }
+.wordmark {
+  position: absolute; top: 30px; left: 34px;
+  font-weight: 800; letter-spacing: 0.44em; font-size: 12px;
+  color: var(--ocean-accent); opacity: 0.82;
+}
+.hint {
+  position: absolute; bottom: 26px; left: 0; right: 0; text-align: center;
+  font-size: 12px; letter-spacing: var(--ocean-track-label); text-transform: uppercase;
+  color: var(--ocean-text-muted); opacity: 0.7;
+}

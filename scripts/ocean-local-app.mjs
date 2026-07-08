@@ -7,6 +7,7 @@ import { promises as fs } from 'node:fs';
 import { spawn, execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { DEFAULT_IGNORES } from '../src/ingest-filters.mjs';
+import { WebSocketServer } from 'ws';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -593,6 +594,51 @@ function send(res, status, body, headers = {}) {
   res.end(payload);
 }
 
+
+const STATIC_TYPES = new Map([
+  ['.html', 'text/html; charset=utf-8'],
+  ['.js', 'text/javascript; charset=utf-8'],
+  ['.css', 'text/css; charset=utf-8'],
+  ['.wasm', 'application/wasm'],
+  ['.svg', 'image/svg+xml; charset=utf-8'],
+  ['.png', 'image/png'],
+]);
+
+function staticType(file) {
+  return STATIC_TYPES.get(path.extname(file)) || 'application/octet-stream';
+}
+
+async function fileReadable(file) {
+  try { await fs.access(file); return true; } catch { return false; }
+}
+
+async function sendStatic(res, file) {
+  const bytes = await fs.readFile(file);
+  res.writeHead(200, {
+    'content-type': staticType(file),
+    'cache-control': 'no-store',
+    'content-length': bytes.length,
+  });
+  res.end(bytes);
+}
+
+// Serves the operator app (ui/app/**), the onboarding stage assets
+// (ui/onboarding/**), vendored libraries (assets/vendor/**,
+// assets/integrations/**), and the canonical design system (design/**)
+// with path containment.
+async function serveStatic(req, res, url) {
+  if (req.method !== 'GET') return false;
+  const prefixes = ['/ui/app/', '/ui/onboarding/', '/assets/vendor/', '/assets/integrations/', '/design/'];
+  const match = prefixes.find((p) => url.pathname === p || url.pathname.startsWith(p));
+  if (!match) return false;
+  const root = path.resolve(repoRoot);
+  const target = path.resolve(repoRoot, '.' + url.pathname);
+  if (!target.startsWith(root + path.sep)) { send(res, 403, { ok: false, error: 'Forbidden' }); return true; }
+  if (!await fileReadable(target)) return false;
+  await sendStatic(res, target);
+  return true;
+}
+
 async function currentState() {
   const config = await loadConfig();
   const appState = await loadAppState();
@@ -616,10 +662,296 @@ async function currentState() {
   };
 }
 
+// --- Ceremony protocol (Build Lane 1) -------------------------------------
+// Standardized skill-driven onboarding ceremony. The conductor is any
+// skill-capable agent; it creates a run, streams events over REST, and the
+// browser UI subscribes over WebSocket. See
+// docs/superpowers/plans/2026-07-07-ocean-skill-onboarding-ceremony.md.
+const CEREMONY_EVENT_SCHEMA = 'ocean.ceremony.event.v1';
+const CEREMONY_WS_SCHEMA = 'ocean.ceremony.ws.v1';
+const CEREMONY_BUFFER_CAP = 1000;
+const CEREMONY_HEARTBEAT_MS = 15_000;
+const ALLOWED_RUNTIMES = new Set(['claude-code', 'codex', 'pi', 'omp', 'other']);
+const ALLOWED_VISIBILITY = new Set(['public', 'private', 'redacted']);
+// Safe label/count keys that may render for visibility=redacted events.
+// Anything not in this set is dropped before the event reaches a renderer.
+const REDACT_SAFE_PAYLOAD_KEYS = new Set([
+  'sourceId', 'label', 'logo', 'root', 'displayName', 'relPath', 'reason',
+  'name', 'scene', 'focus', 'tone', 'gate', 'target', 'instructions',
+  'counts', 'totals', 'progress', 'total', 'indeterminate', 'text',
+]);
+// Persisted alongside the app state so `--state` test isolation also isolates
+// ceremony run metadata. Private payloads are never persisted (see below).
+const ceremonyRunsPath = path.join(path.dirname(appStatePath), 'ceremony-runs.json');
+// runId -> { runId, createdAt, status, runner, ownerName, mode, events, nextSeq, subscribers }
+const ceremonyRuns = new Map();
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function generateRunId() {
+  const d = new Date();
+  const date = `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, '0')}${String(d.getUTCDate()).padStart(2, '0')}`;
+  return `cer_${date}_${crypto.randomBytes(6).toString('hex')}`;
+}
+
+function isRenderableVisibility(visibility) {
+  // visibility=private events are kept in the run buffer but never rendered.
+  return visibility !== 'private';
+}
+
+function redactPayloadForRender(payload, visibility) {
+  if (visibility === 'redacted') {
+    const safe = {};
+    if (payload && typeof payload === 'object') {
+      for (const [key, value] of Object.entries(payload)) {
+        if (REDACT_SAFE_PAYLOAD_KEYS.has(key)) safe[key] = value;
+      }
+    }
+    safe.redacted = true;
+    return safe;
+  }
+  return payload && typeof payload === 'object' ? payload : {};
+}
+
+// Build a render-safe copy of a stored event for WS broadcast / REST replay.
+// Private events are filtered out by callers; this never leaks their payload.
+function renderableCeremonyEvent(event) {
+  const visibility = ALLOWED_VISIBILITY.has(event.visibility) ? event.visibility : 'public';
+  return {
+    schema: CEREMONY_EVENT_SCHEMA,
+    runId: event.runId,
+    seq: event.seq,
+    ts: event.ts,
+    runner: event.runner,
+    phase: event.phase,
+    type: event.type,
+    status: event.status,
+    message: event.message,
+    visibility,
+    payload: redactPayloadForRender(event.payload, visibility),
+  };
+}
+
+function createCeremonyRun({ runner, ownerName, mode } = {}) {
+  const runtime = runner && typeof runner === 'object' ? runner.runtime : undefined;
+  if (!ALLOWED_RUNTIMES.has(runtime)) {
+    const err = new Error(`runner.runtime must be one of: ${[...ALLOWED_RUNTIMES].join(', ')}`);
+    err.statusCode = 400;
+    throw err;
+  }
+  const run = {
+    runId: generateRunId(),
+    createdAt: nowIso(),
+    status: 'running',
+    runner: {
+      kind: 'skill-runner',
+      runtime,
+      name: typeof runner.name === 'string' ? runner.name : undefined,
+    },
+    ownerName: typeof ownerName === 'string' ? ownerName : undefined,
+    mode: typeof mode === 'string' ? mode : 'onboarding-import-v1',
+    events: [],
+    nextSeq: 1,
+    subscribers: new Set(),
+  };
+  ceremonyRuns.set(run.runId, run);
+  return run;
+}
+
+function broadcastCeremonyEvent(run, event) {
+  if (!isRenderableVisibility(event.visibility)) return;
+  const frame = { kind: 'event', runId: run.runId, event: renderableCeremonyEvent(event) };
+  for (const ws of run.subscribers) {
+    if (ws.readyState === 1) ws.send(JSON.stringify(frame));
+  }
+}
+
+function appendCeremonyEvents(run, incoming) {
+  const list = Array.isArray(incoming) ? incoming : [incoming];
+  const accepted = [];
+  for (const raw of list) {
+    if (!raw || typeof raw !== 'object') continue;
+    if (typeof raw.type !== 'string' || !raw.type) continue;
+    const visibility = ALLOWED_VISIBILITY.has(raw.visibility) ? raw.visibility : 'public';
+    // Server owns seq and ts. A runner-supplied ts is preserved only as
+    // payload.runnerTs; a runner-supplied seq is ignored entirely.
+    const payload = raw.payload && typeof raw.payload === 'object' ? { ...raw.payload } : {};
+    if (typeof raw.ts === 'string' && payload.runnerTs === undefined) payload.runnerTs = raw.ts;
+    const event = {
+      schema: CEREMONY_EVENT_SCHEMA,
+      runId: run.runId,
+      seq: run.nextSeq,
+      ts: nowIso(),
+      runner: run.runner,
+      phase: typeof raw.phase === 'string' ? raw.phase : undefined,
+      type: raw.type,
+      status: typeof raw.status === 'string' ? raw.status : undefined,
+      message: typeof raw.message === 'string' ? raw.message : undefined,
+      visibility,
+      payload,
+    };
+    run.nextSeq += 1;
+    run.events.push(event);
+    accepted.push(event);
+    broadcastCeremonyEvent(run, event);
+  }
+  // Bound the per-run buffer to the latest CEREMONY_BUFFER_CAP events.
+  if (run.events.length > CEREMONY_BUFFER_CAP) {
+    run.events.splice(0, run.events.length - CEREMONY_BUFFER_CAP);
+  }
+  return accepted;
+}
+
+function completeCeremonyRun(run) {
+  run.status = 'completed';
+  const alreadyCompleted = run.events.some((e) => e.type === 'ceremony.run_completed');
+  let broadcast = false;
+  if (!alreadyCompleted) {
+    const event = {
+      schema: CEREMONY_EVENT_SCHEMA,
+      runId: run.runId,
+      seq: run.nextSeq,
+      ts: nowIso(),
+      runner: run.runner,
+      phase: 'complete',
+      type: 'ceremony.run_completed',
+      status: 'complete',
+      message: 'Ceremony completed',
+      visibility: 'public',
+      payload: {},
+    };
+    run.nextSeq += 1;
+    run.events.push(event);
+    if (run.events.length > CEREMONY_BUFFER_CAP) {
+      run.events.splice(0, run.events.length - CEREMONY_BUFFER_CAP);
+    }
+    broadcastCeremonyEvent(run, event);
+    broadcast = true;
+  }
+  persistCeremonyRuns().catch((error) => logLine(`Ceremony runs persist failed: ${error.message}`));
+  return { run, broadcast };
+}
+
+// Persist completed-run metadata with private payloads stripped. Best-effort:
+// never lets a disk write break the ceremony flow.
+async function persistCeremonyRuns() {
+  const runs = [];
+  for (const run of ceremonyRuns.values()) {
+    if (run.status !== 'completed') continue;
+    runs.push({
+      runId: run.runId,
+      createdAt: run.createdAt,
+      status: run.status,
+      runner: run.runner,
+      ownerName: run.ownerName,
+      mode: run.mode,
+      lastSeq: run.nextSeq - 1,
+      events: run.events.filter((e) => isRenderableVisibility(e.visibility)).map(renderableCeremonyEvent),
+    });
+  }
+  await writeJson(ceremonyRunsPath, { version: 1, schema: CEREMONY_EVENT_SCHEMA, updatedAt: nowIso(), runs }, 0o600);
+}
+
+function ceremonyRunSummary(run) {
+  return {
+    runId: run.runId,
+    createdAt: run.createdAt,
+    status: run.status,
+    ownerName: run.ownerName,
+    mode: run.mode,
+    runner: run.runner,
+    lastSeq: run.nextSeq - 1,
+    events: run.events.filter((e) => isRenderableVisibility(e.visibility)).length,
+  };
+}
+
+function isLoopbackSocket(socket) {
+  const addr = socket.remoteAddress;
+  if (!addr) return false;
+  return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
+}
+
+// Same-origin browser clients only. Non-browser clients (no Origin) are
+// permitted so skill runners and check scripts can connect directly.
+function ceremonyOriginAllowed(req) {
+  const origin = req.headers.origin;
+  if (!origin) return true;
+  let parsed;
+  try { parsed = new URL(origin); } catch { return false; }
+  return parsed.hostname === '127.0.0.1' || parsed.hostname === 'localhost' || parsed.hostname === '::1';
+}
+
+function sendWsFrame(ws, frame) {
+  if (ws.readyState === 1) ws.send(JSON.stringify(frame));
+}
+
+// Routes a ceremony WebSocket upgrade. Returns true if the upgrade was
+// claimed (accepted or rejected); false if it is not a ceremony path.
+function handleCeremonyUpgrade(req, socket, head, wss) {
+  const url = new URL(req.url, `http://${req.headers.host || `${host}:${requestedPort}`}`);
+  if (url.pathname !== '/api/ceremony/ws') return false;
+  if (!isLoopbackSocket(socket)) {
+    socket.destroy();
+    return true;
+  }
+  if (!ceremonyOriginAllowed(req)) {
+    socket.destroy();
+    return true;
+  }
+  const runId = url.searchParams.get('runId');
+  const afterRaw = url.searchParams.get('after');
+  const after = Number.isInteger(Number(afterRaw)) && Number(afterRaw) >= 0 ? Number(afterRaw) : 0;
+  let run = runId ? ceremonyRuns.get(runId) : undefined;
+  wss.handleUpgrade(req, socket, head, (ws) => {
+    if (!run) {
+      sendWsFrame(ws, { kind: 'error', error: 'run not found', runId: runId || null });
+      ws.close(4404, 'run not found');
+      return;
+    }
+    sendWsFrame(ws, { kind: 'hello', schema: CEREMONY_WS_SCHEMA, runId: run.runId });
+    const snapshotEvents = run.events
+      .filter((e) => isRenderableVisibility(e.visibility) && e.seq > after)
+      .map(renderableCeremonyEvent);
+    sendWsFrame(ws, {
+      kind: 'snapshot',
+      runId: run.runId,
+      lastSeq: run.nextSeq - 1,
+      events: snapshotEvents,
+    });
+    run.subscribers.add(ws);
+    ws.on('message', (data) => {
+      // V1 ignores all client frames except ping; no mutation over WS.
+      try {
+        const msg = JSON.parse(data.toString());
+        if (msg && msg.kind === 'ping') sendWsFrame(ws, { kind: 'heartbeat', ts: nowIso() });
+      } catch {
+        // Ignore malformed client frames.
+      }
+    });
+    const detach = () => run.subscribers.delete(ws);
+    ws.on('close', detach);
+    ws.on('error', detach);
+  });
+  return true;
+}
+
+// --- End ceremony protocol ------------------------------------------------
 async function handle(req, res) {
   try {
     const url = new URL(req.url, `http://${req.headers.host || `${host}:${requestedPort}`}`);
-    if (req.method === 'GET' && url.pathname === '/') return send(res, 200, INDEX_HTML);
+    if (await serveStatic(req, res, url)) return;
+    if (req.method === 'GET' && url.pathname === '/') {
+      const appIndex = path.join(repoRoot, 'ui', 'app', 'index.html');
+      if (await fileReadable(appIndex)) { await sendStatic(res, appIndex); return; }
+      return send(res, 404, { ok: false, error: 'App page not found' });
+    }
+    if (req.method === 'GET' && (url.pathname === '/onboarding' || url.pathname === '/onboarding/')) {
+      const indexPath = path.join(repoRoot, 'ui', 'onboarding', 'index.html');
+      if (await fileReadable(indexPath)) { await sendStatic(res, indexPath); return; }
+      return send(res, 404, { ok: false, error: 'Onboarding page not found' });
+    }
     if (req.method === 'GET' && url.pathname === '/api/state') return send(res, 200, await currentState());
     if (req.method === 'POST' && url.pathname === '/api/config') return send(res, 200, { ok: true, config: redactConfig(await saveBasicConfig(await readBody(req))) });
     if (req.method === 'POST' && url.pathname === '/api/invite/redeem') return send(res, 200, { ok: true, ...(await redeemInviteCode(await readBody(req))), state: await currentState() });
@@ -638,6 +970,39 @@ async function handle(req, res) {
     if (req.method === 'POST' && url.pathname === '/api/manifest') {
       const config = await loadConfig();
       return send(res, 200, { ok: true, manifestPath: await writePublicSourceManifest(config), state: await currentState() });
+    }
+    // --- Ceremony REST endpoints (Build Lane 1) ---
+    if (req.method === 'POST' && url.pathname === '/api/ceremony/runs') {
+      const run = createCeremonyRun(await readBody(req));
+      return send(res, 200, { ok: true, run: ceremonyRunSummary(run) });
+    }
+    if (req.method === 'POST' && /^\/api\/ceremony\/runs\/[^/]+\/events$/.test(url.pathname)) {
+      const runId = decodeURIComponent(url.pathname.split('/')[4]);
+      const run = ceremonyRuns.get(runId);
+      if (!run) return send(res, 404, { ok: false, error: 'run not found', runId });
+      const body = await readBody(req);
+      const incoming = Array.isArray(body && body.events)
+        ? body.events
+        : (body && typeof body.type === 'string' ? [body] : []);
+      const accepted = appendCeremonyEvents(run, incoming);
+      return send(res, 200, { ok: true, runId: run.runId, accepted: accepted.length, nextSeq: run.nextSeq });
+    }
+    if (req.method === 'GET' && /^\/api\/ceremony\/runs\/[^/]+$/.test(url.pathname)) {
+      const runId = decodeURIComponent(url.pathname.split('/')[4]);
+      const run = ceremonyRuns.get(runId);
+      if (!run) return send(res, 404, { ok: false, error: 'run not found', runId });
+      const events = run.events.filter((e) => isRenderableVisibility(e.visibility)).map(renderableCeremonyEvent);
+      return send(res, 200, { ok: true, run: ceremonyRunSummary(run), events });
+    }
+    if (req.method === 'POST' && /^\/api\/ceremony\/runs\/[^/]+\/complete$/.test(url.pathname)) {
+      const runId = decodeURIComponent(url.pathname.split('/')[4]);
+      const run = ceremonyRuns.get(runId);
+      if (!run) return send(res, 404, { ok: false, error: 'run not found', runId });
+      const { run: completed, broadcast } = completeCeremonyRun(run);
+      return send(res, 200, { ok: true, run: ceremonyRunSummary(completed), broadcast });
+    }
+    if (req.method === 'GET' && url.pathname === '/api/ceremony/ws') {
+      return send(res, 426, { ok: false, error: 'Upgrade Required' });
     }
     return send(res, 404, { ok: false, error: 'Not found' });
   } catch (error) {
@@ -662,317 +1027,6 @@ function openUrl(url) {
   }
 }
 
-const INDEX_HTML = `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Ocean Bedrock Local Sync</title>
-  <style>
-    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #07111f; color: #edf6ff; }
-    body { margin: 0; min-height: 100vh; background: radial-gradient(circle at top left, #123a5f 0, #07111f 38%, #050914 100%); }
-    main { width: min(1120px, calc(100vw - 32px)); margin: 0 auto; padding: 32px 0 48px; }
-    h1 { font-size: clamp(32px, 5vw, 56px); margin: 0 0 8px; letter-spacing: -0.05em; }
-    h2 { margin: 0 0 16px; font-size: 20px; }
-    p { color: #a9bdd1; line-height: 1.55; }
-    .hero { display: flex; gap: 20px; justify-content: space-between; align-items: end; margin-bottom: 24px; }
-    .pill { display: inline-flex; align-items: center; gap: 8px; padding: 8px 12px; border: 1px solid #244b73; border-radius: 999px; background: rgba(15, 37, 64, 0.72); color: #bfe4ff; font-size: 13px; }
-    .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 16px; }
-    .card { grid-column: span 6; background: rgba(8, 20, 36, 0.82); border: 1px solid rgba(98, 157, 207, 0.22); box-shadow: 0 22px 80px rgba(0,0,0,.28); border-radius: 24px; padding: 22px; backdrop-filter: blur(16px); }
-    .wide { grid-column: span 12; }
-    label { display: block; font-size: 12px; color: #91aac2; margin: 12px 0 6px; text-transform: uppercase; letter-spacing: .08em; }
-    input, select { width: 100%; box-sizing: border-box; border: 1px solid #254965; border-radius: 14px; padding: 12px 13px; background: #071422; color: #f4fbff; font-size: 15px; outline: none; }
-    input:focus, select:focus { border-color: #57b5ff; box-shadow: 0 0 0 3px rgba(87,181,255,.16); }
-    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-    .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
-    button { border: 0; border-radius: 999px; padding: 11px 16px; font-weight: 800; cursor: pointer; color: #03101f; background: #7fd1ff; }
-    button.secondary { color: #dcefff; background: #15334f; border: 1px solid #2a577c; }
-    button.danger { color: #ffecec; background: #5b2530; border: 1px solid #9c4655; }
-    button:disabled { opacity: .55; cursor: wait; }
-    .sources { display: grid; gap: 10px; margin-top: 14px; }
-    .source { display: flex; justify-content: space-between; gap: 12px; padding: 12px; border: 1px solid #213f59; border-radius: 16px; background: #071724; }
-    .source strong { display: block; }
-    .source small { color: #9fb5c8; word-break: break-all; }
-    .integration-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }
-    .integration { padding: 14px; border-radius: 18px; border: 1px solid #22445f; background: #071724; }
-    .integration.live { border-color: #2db783; }
-    .integration span { display: block; font-weight: 800; }
-    .integration small { color: #91aac2; }
-    pre { white-space: pre-wrap; word-break: break-word; max-height: 360px; overflow: auto; background: #020811; border: 1px solid #1e3a55; border-radius: 18px; padding: 14px; color: #bde5ff; }
-    .status { min-height: 22px; margin-top: 12px; color: #bde5ff; }
-    .preview { margin-top: 14px; padding: 12px; border-radius: 16px; border: 1px solid #284d6d; background: #071724; color: #cfeeff; }
-    .preview.warning { border-color: #a85d3a; background: rgba(91, 37, 20, .35); }
-    .ok { color: #78f0b2; } .bad { color: #ff9da8; }
-    @media (max-width: 760px) { .card { grid-column: span 12; } .row { grid-template-columns: 1fr; } .hero { display: block; } }
-  </style>
-</head>
-<body>
-  <main>
-    <section class="hero">
-      <div>
-        <div class="pill">🌊 Ocean Bedrock Local Sync</div>
-        <h1>Pick folders. Pick schedule. Done.</h1>
-        <p>No terminal required after this is running. Paste the invite token once, choose folders, and sync while this app is open.</p>
-      </div>
-      <div class="pill" id="sync-pill">Checking...</div>
-    </section>
-
-    <section class="grid">
-      <div class="card">
-        <h2>1. Connect</h2>
-        <label>Ocean Bedrock URL</label>
-        <input id="serverUrl" placeholder="https://ocean-bedrock-production.up.railway.app" />
-        <label>Invite code or sync token</label>
-        <input id="inviteCode" type="password" placeholder="Paste invite code for first-time setup" />
-        <input id="token" type="password" placeholder="Fallback: paste sync token once" />
-        <div class="row">
-          <div><label>Your name</label><input id="ownerName" placeholder="operator-contributor" /></div>
-          <div><label>This device</label><input id="deviceName" placeholder="macbook" /></div>
-        </div>
-        <div class="row">
-          <div><label>Mode</label><select id="feedMode"><option value="knowledge-docs">Docs/code only</option><option value="all-files">All files under size limit</option></select></div>
-          <div><label>Max file MB</label><input id="maxFileMb" type="number" min="1" max="250" value="10" /></div>
-        </div>
-        <div class="actions">
-          <button onclick="redeemInvite()">Redeem invite</button>
-          <button class="secondary" onclick="saveConfig()">Save raw token fallback</button>
-          <button class="secondary" onclick="testConnection()">Test</button>
-        </div>
-        <div class="status" id="connectStatus"></div>
-      </div>
-
-      <div class="card">
-        <h2>2. Choose integrations</h2>
-        <div class="integration-grid">
-          <div class="integration live"><span>Local folders</span><small>Live now</small></div>
-          <div class="integration"><span>GitHub</span><small>Next</small></div>
-          <div class="integration"><span>Telegram</span><small>Next</small></div>
-          <div class="integration"><span>Notion</span><small>Coming soon</small></div>
-          <div class="integration"><span>Slack</span><small>Coming soon</small></div>
-          <div class="integration"><span>Linear</span><small>Coming soon</small></div>
-        </div>
-        <label>Folder path</label>
-        <input id="folderPath" placeholder="Click Choose Folder or paste a path" />
-        <label>Folder label (optional)</label>
-        <input id="folderLabel" placeholder="documents, projects, notes" />
-        <div class="actions">
-          <button class="secondary" onclick="chooseFolder()">Choose folder</button>
-          <button onclick="addFolder()">Add folder</button>
-          <button class="secondary" onclick="writeManifest()">Refresh manifest</button>
-        </div>
-        <div class="status" id="folderStatus"></div>
-      </div>
-
-      <div class="card">
-        <h2>3. Schedule</h2>
-        <label>Auto sync</label>
-        <select id="scheduleEnabled"><option value="false">Manual only</option><option value="true">On a schedule while app is open</option></select>
-        <label>Every</label>
-        <select id="intervalMinutes"><option value="15">15 minutes</option><option value="30">30 minutes</option><option value="60">1 hour</option><option value="180">3 hours</option><option value="360">6 hours</option><option value="1440">1 day</option></select>
-        <div class="actions">
-          <button onclick="saveSchedule()">Save schedule</button>
-          <button class="secondary" onclick="runPreview()">Dry-run preview</button>
-          <button onclick="ackPreview()">I reviewed this preview — unlock sync</button>
-          <button class="secondary" onclick="runSync()">Sync now</button>
-        </div>
-        <div class="status" id="scheduleStatus"></div>
-        <div id="previewPanel" class="preview"></div>
-      </div>
-
-      <div class="card">
-        <h2>Selected folders</h2>
-        <div class="sources" id="sources"></div>
-      </div>
-
-      <div class="card wide">
-        <h2>Activity</h2>
-        <pre id="activity">Loading...</pre>
-      </div>
-    </section>
-  </main>
-
-  <script>
-    let state = null;
-    const $ = (id) => document.getElementById(id);
-
-    async function api(path, body = undefined) {
-      const options = body === undefined ? {} : { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) };
-      const res = await fetch(path, options);
-      const data = await res.json();
-      if (!res.ok || data.ok === false) throw new Error(data.error || 'Request failed');
-      return data;
-    }
-
-    function setStatus(id, text, ok = true) {
-      $(id).innerHTML = text ? '<span class="' + (ok ? 'ok' : 'bad') + '">' + escapeHtml(text) + '</span>' : '';
-    }
-
-    function escapeHtml(value) {
-      return String(value).replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[ch]));
-    }
-
-    function render() {
-      if (!state) return;
-      const c = state.config;
-      $('serverUrl').value = c.serverUrl || '';
-      $('token').value = c.tokenPresent ? '[saved]' : '';
-      $('ownerName').value = c.ownerName || '';
-      $('deviceName').value = c.deviceName || '';
-      $('feedMode').value = c.feedMode || 'knowledge-docs';
-      $('maxFileMb').value = Math.round((c.maxFileBytes || 10485760) / 1024 / 1024);
-      $('scheduleEnabled').value = String(Boolean(c.schedule && c.schedule.enabled));
-      $('intervalMinutes').value = String((c.schedule && c.schedule.intervalMinutes) || 60);
-      $('sync-pill').textContent = state.activeSync ? 'Sync running...' : (state.scheduleNextAt ? 'Next sync: ' + new Date(state.scheduleNextAt).toLocaleString() : 'Manual sync');
-      $('sources').innerHTML = (c.sources || []).length ? c.sources.map((s) => '<div class="source"><div><strong>' + escapeHtml(s.label) + '</strong><small>' + escapeHtml(s.localPath) + '<br>' + escapeHtml(s.remotePrefix) + '</small></div><div>' + (s.enabled ? '✅' : '⏸️') + '</div></div>').join('') : '<p>No folders yet. Add one above.</p>';
-      renderPreview(state.appState && state.appState.lastPreview);
-      const lastPreview = state.appState && state.appState.lastPreview ? '\n\nLast preview:\n' + JSON.stringify(state.appState.lastPreview.result || state.appState.lastPreview, null, 2) : '';
-      const last = state.appState && state.appState.lastRun ? '\n\nLast run:\n' + JSON.stringify(state.appState.lastRun.result || state.appState.lastRun, null, 2) : '';
-      $('activity').textContent = (state.logs || []).join('\n') + lastPreview + last;
-    }
-
-    async function refresh() {
-      state = await api('/api/state');
-      render();
-    }
-
-    async function redeemInvite() {
-      try {
-        setStatus('connectStatus', 'Redeeming invite...');
-        const data = await api('/api/invite/redeem', {
-          serverUrl: $('serverUrl').value,
-          code: $('inviteCode').value,
-          ownerName: $('ownerName').value,
-          deviceName: $('deviceName').value,
-        });
-        $('inviteCode').value = '';
-        state = data.state;
-        setStatus('connectStatus', 'Invite redeemed. Scoped token saved locally.');
-        await refresh();
-      } catch (e) { setStatus('connectStatus', e.message, false); }
-    }
-
-    async function saveConfig() {
-      try {
-        const data = await api('/api/config', {
-          serverUrl: $('serverUrl').value,
-          token: $('token').value,
-          ownerName: $('ownerName').value,
-          deviceName: $('deviceName').value,
-          feedMode: $('feedMode').value,
-          maxFileMb: $('maxFileMb').value,
-        });
-        state.config = data.config;
-        setStatus('connectStatus', 'Saved.');
-        await refresh();
-      } catch (e) { setStatus('connectStatus', e.message, false); }
-    }
-
-    async function testConnection() {
-      try {
-        setStatus('connectStatus', 'Testing...');
-        const data = await api('/api/test', {});
-        setStatus('connectStatus', 'Connected as ' + (data.principal && data.principal.name ? data.principal.name : 'token user'));
-      } catch (e) { setStatus('connectStatus', e.message, false); }
-    }
-
-    async function chooseFolder() {
-      try {
-        setStatus('folderStatus', 'Opening folder picker...');
-        const data = await api('/api/folder-dialog', {});
-        $('folderPath').value = data.path;
-        setStatus('folderStatus', 'Folder selected.');
-      } catch (e) { setStatus('folderStatus', e.message, false); }
-    }
-
-    async function addFolder() {
-      try {
-        setStatus('folderStatus', 'Adding folder...');
-        await api('/api/folders', { path: $('folderPath').value, label: $('folderLabel').value });
-        $('folderPath').value = '';
-        $('folderLabel').value = '';
-        setStatus('folderStatus', 'Folder added.');
-        await refresh();
-      } catch (e) { setStatus('folderStatus', e.message, false); }
-    }
-
-    async function writeManifest() {
-      try {
-        setStatus('folderStatus', 'Refreshing manifest...');
-        const data = await api('/api/manifest', {});
-        setStatus('folderStatus', 'Manifest saved to ' + data.manifestPath);
-        await refresh();
-      } catch (e) { setStatus('folderStatus', e.message, false); }
-    }
-
-    function renderPreview(preview) {
-      const panel = $('previewPanel');
-      if (!panel) return;
-      const result = preview && preview.result;
-      const ack = state.appState && state.appState.previewAcknowledgement;
-      if (!result) {
-        panel.className = 'preview warning';
-        panel.innerHTML = 'Real sync is locked. Run a dry-run preview, review changed/skipped/sensitive exclusions, then click “I reviewed this preview — unlock sync”.';
-        return;
-      }
-      const stale = preview.planFingerprint !== state.syncPlanFingerprint;
-      const totals = result.totals || {};
-      const sensitive = [];
-      for (const source of result.sources || []) {
-        for (const skipped of source.skippedFiles || []) {
-          if (skipped.reason === 'sensitive') sensitive.push((source.label || source.id) + ': ' + skipped.rel + ' (' + skipped.matchedPattern + ')');
-        }
-      }
-      const unlocked = !stale && ack && ack.planFingerprint === preview.planFingerprint && ack.previewCompletedAt === preview.completedAt;
-      panel.className = 'preview' + ((sensitive.length || stale || !unlocked) ? ' warning' : '');
-      panel.innerHTML = '<strong>Dry-run preview</strong><br>'
-        + 'Changed: ' + escapeHtml(totals.changed || 0)
-        + ' · Skipped: ' + escapeHtml(totals.skipped || 0)
-        + ' · Sensitive excluded: ' + escapeHtml(sensitive.length)
-        + '<br>Status: ' + (stale ? '<span class="bad">stale — folders/settings changed; run preview again</span>' : (unlocked ? '<span class="ok">acknowledged — sync unlocked</span>' : '<span class="bad">awaiting acknowledgement</span>'))
-        + (sensitive.length ? '<br><br><strong>Sensitive files excluded:</strong><br>' + sensitive.slice(0, 20).map(escapeHtml).join('<br>') : '');
-    }
-
-    async function ackPreview() {
-      try {
-        setStatus('scheduleStatus', 'Saving acknowledgement...');
-        await api('/api/preview/ack', {});
-        setStatus('scheduleStatus', 'Preview acknowledged. Sync is unlocked for these folders/settings.');
-        await refresh();
-      } catch (e) { setStatus('scheduleStatus', e.message, false); await refresh(); }
-    }
-
-    async function saveSchedule() {
-      try {
-        await api('/api/schedule', { enabled: $('scheduleEnabled').value === 'true', intervalMinutes: Number($('intervalMinutes').value) });
-        setStatus('scheduleStatus', 'Schedule saved.');
-        await refresh();
-      } catch (e) { setStatus('scheduleStatus', e.message, false); }
-    }
-
-    async function runPreview() {
-      try {
-        setStatus('scheduleStatus', 'Previewing...');
-        await api('/api/preview', {});
-        setStatus('scheduleStatus', 'Preview complete. Review sensitive exclusions before syncing.');
-        await refresh();
-      } catch (e) { setStatus('scheduleStatus', e.message, false); await refresh(); }
-    }
-
-    async function runSync() {
-      try {
-        setStatus('scheduleStatus', 'Syncing... keep this window open.');
-        await api('/api/sync', {});
-        setStatus('scheduleStatus', 'Sync complete.');
-        await refresh();
-      } catch (e) { setStatus('scheduleStatus', e.message, false); await refresh(); }
-    }
-
-    refresh();
-    setInterval(refresh, 5000);
-  </script>
-</body>
-</html>`;
-
 if (args.help) {
   usage();
   process.exit(0);
@@ -991,3 +1045,22 @@ server.listen(requestedPort, host, () => {
   logLine(`Config: ${configPath}`);
   if (!args.noOpen) openUrl(url);
 });
+
+// --- Ceremony WebSocket wiring (Build Lane 1) -----------------------------
+const ceremonyWss = new WebSocketServer({ noServer: true });
+server.on('upgrade', (req, socket, head) => {
+  try {
+    const claimed = handleCeremonyUpgrade(req, socket, head, ceremonyWss);
+    if (!claimed) socket.destroy(); // no other upgrade paths in V1
+  } catch (error) {
+    logLine(`Ceremony WS upgrade failed: ${error.message}`);
+    socket.destroy();
+  }
+});
+const ceremonyHeartbeat = setInterval(() => {
+  const ts = nowIso();
+  for (const run of ceremonyRuns.values()) {
+    for (const ws of run.subscribers) sendWsFrame(ws, { kind: 'heartbeat', ts });
+  }
+}, CEREMONY_HEARTBEAT_MS);
+ceremonyHeartbeat.unref?.();

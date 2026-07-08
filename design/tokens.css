@@ -1,0 +1,42 @@
+/*
+ * Ocean design tokens — the canonical, single source of truth.
+ *
+ * Every Ocean surface (onboarding, the Leptos web surface, the Tauri desktop
+ * app) consumes these custom properties. Never re-derive colors, radii, blur,
+ * or type per component. See design/DESIGN-PRINCIPLES.md for the language.
+ */
+
+:root {
+  /* Deep ocean palette. */
+  --ocean-bg-base: #050914;
+  --ocean-bg-radial: radial-gradient(circle at 32% 22%, #123a5f 0%, #07111f 42%, #050914 100%);
+  --ocean-text: #edf6ff;
+  --ocean-text-muted: #6f8aa3;
+  --ocean-accent: #7fd1ff;
+  --ocean-focus: #57b5ff;
+
+  /* Glass surfaces — translucent depth, hairline borders, never opaque boxes. */
+  --ocean-glass-fill: rgba(8, 20, 36, 0.82);
+  --ocean-glass-border: rgba(98, 157, 207, 0.22);
+  --ocean-glass-blur: 18px;
+
+  /* Radii. */
+  --ocean-radius-card: 24px;
+  --ocean-radius-pill: 999px;
+
+  /* Typography — Inter, self-hosted, identical on every machine. */
+  --ocean-font: 'InterVariable', Inter, ui-sans-serif, system-ui, sans-serif;
+  --ocean-track-label: 0.16em;
+}
+
+/*
+ * Inter variable, self-hosted. The woff2 is local (design/fonts/) so the
+ * typeface is identical across machines — never assume a system install.
+ */
+@font-face {
+  font-family: 'InterVariable';
+  src: url('/design/fonts/InterVariable.woff2') format('woff2');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}

@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark" />
+  <title>Ocean</title>
+  <link rel="preload" href="/design/fonts/InterVariable.woff2" as="font" type="font/woff2" crossorigin />
+  <link rel="stylesheet" href="/design/tokens.css" />
+  <link rel="stylesheet" href="/ui/onboarding/style.css" />
+  <script type="importmap">{ "imports": { "three": "/assets/vendor/three.module.min.js" } }</script>
+</head>
+<body>
+  <canvas id="ocean"></canvas>
+  <div id="stage">
+    <div class="wordmark">OCEAN</div>
+    <div id="phase" class="phase" aria-live="polite"></div>
+    <div id="rail" class="rail" aria-label="Detected agent context"></div>
+    <div id="dock" class="dock is-hidden" aria-label="Import preview and sync gate"></div>
+  </div>
+  <script type="module" src="/ui/onboarding/ocean-app.js"></script>
+</body>
+</html>

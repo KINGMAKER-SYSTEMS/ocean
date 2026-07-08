@@ -96,3 +96,53 @@ chunk -> embed -> graph instead of silently skipping, plus the binary backfill
 script and the 14-tool toolboxManifest sync. Post-merge npm test on master:
 37/37 passing.
 _________________________________________________________________________________
+
+time: [07:07pm] [07-07-26]
+agent: [codex] [gpt-5.5]
+worktree: [master]
+type: [plan]: Skill-driven onboarding ceremony
+area: [design]: Coworker onboarding
+
+Wrote `docs/superpowers/plans/2026-07-07-ocean-skill-onboarding-ceremony.md`, locking the coworker onboarding reframe around a standardized skill as conductor: any skill-capable agent can open the Ocean local site, drive setup through localhost calls, stream ceremony events, and perform a safe one-time import of Claude Code, Codex, and Pi configs. The plan defines the V1 ceremony event schema, REST + WebSocket protocol, high-level page-tool events, import safety rules, and three independent build lanes for local app protocol endpoints, Leptos/WASM stage UI, and the onboarding skill rewrite.
+_________________________________________________________________________________
+
+time: [07:29pm] [07-07-26]
+agent: [codex] [gpt-5.5]
+worktree: [master]
+type: [feature-request]: Skill-driven onboarding ceremony
+area: [frontend/backend]: Coworker onboarding
+
+Implemented the Ocean skill-driven onboarding ceremony V1. Added local-only ceremony run/event REST endpoints and WebSocket fan-out to `scripts/ocean-local-app.mjs`; added a protocol check script; created a Leptos 0.8 CSR/WASM ceremony stage under `ui/onboarding-ceremony` with oceanic globe, real event rendering, reconnect/replay, and reduced-motion fallback; rewrote/created the standardized onboarding skill plus fixture/replay scripts; added license-safe local monogram placeholders for Claude, Codex, and Pi. Verified node syntax, ceremony protocol, ack gate, fixture dry-run, wasm cargo check, Trunk release build, smoke, source check, secret scan, and secret glob check.
+_________________________________________________________________________________
+
+time: [2:53pm] [07-07-26]
+agent: [omp] [glm-5.2]
+worktree: [master]
+type: [refactor]: Ocean onboarding clean rebuild -- wave 2 cleanup
+area: [frontend/infra]: Coworker onboarding
+
+Clean-rebuild wave 2, cleanup lane. Deleted the entire diverged Leptos/WASM/Trunk ceremony app at `ui/onboarding-ceremony/` and stripped the dead slop from `scripts/ocean-local-app.mjs`: the inline `INDEX_HTML` button-wall admin panel (and its emoji-laden markup), the `/admin` route, the `serveCeremony` handler plus its `ceremonyDistPath` const, and the fixture-replay demo driver (`DEMO_RUN_ID` / `buildDemoRun` / `playDemoWalkthrough`) along with the now-unused `buildFixtureFrames` import. Kept the ceremony REST + WebSocket protocol spine intact (POST `/api/ceremony/runs`, `/events`, `/complete`; GET `/api/ceremony/runs/:id`; `/api/ceremony/ws`) and the `/` route serving the new `ui/onboarding/index.html` shell, plus `serveStatic` / `sendStatic` / `STATIC_TYPES`. Verified `node --check`, then restarted the app: GET `/` -> 200 serving the new `Ocean` page (467-byte shell loading `ocean-three.js`, emoji-free), GET `/admin` -> 404, GET `/ceremony` -> 404, GET `/api/state` -> 200. All four repo gates pass: smoke, source:check, secret:scan (109 files), secret:globs:check. Sibling lanes in flight this wave: three.js centerpiece (landed), anime.js frontend (`ui/onboarding/*`), real-scan skill (`scripts/ocean-ceremony-scan.mjs` + `skills/.../SKILL.md`).
+_________________________________________________________________________________
+
+time: [12:45am] [07-08-26]
+agent: [claude] [fable-5]
+worktree: [master]
+type: [feature-request]: Onboarding E2E + design system landing
+area: [frontend/backend]: Coworker onboarding
+
+Orchestrated the final onboarding wave: three parallel lanes (scan E2E, orb
+packaging, design tokens/UI) landed their code, then verification and repair
+ran here. Scanner fixes: de-duplicated true source counts (Claude 98 / Codex
+631 skills, was capped at 50), `POST /api/sync` now gated on a confirmed human
+ack (timeout can no longer fire a production sync), and timeout runs drop the
+ack/sync narration frames instead of lying. Restored the operator app at `/`
+(`ui/app/index.html`, rebuilt; the old inline GUI was deleted uncommitted) and
+moved the ceremony to `/onboarding` after the orb wrongly owned root. Freed
+port 8790 (ocean-surface-proxy) after a test instance squatted it; test
+instances now use 18xxx. Canonical design system at `design/` (tokens,
+self-hosted Inter, principles, README, OceanOrb module); onboarding page wired
+via import map + tokens link. Live E2E: real scan drove the stage with zero
+console errors, orb intensity 28 = 12+4x4 sources; gates green (smoke,
+source:check, secret:scan, secret:globs:check, ceremony protocol, node --check,
+no emoji).
+_________________________________________________________________________________

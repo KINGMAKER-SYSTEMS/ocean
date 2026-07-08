@@ -413,3 +413,32 @@ Closes the top two items from the "Still open / known gaps" list above:
 Test suite: 37/37 passing (`npm test`), including in-test-generated PDF and
 checked-in `test/fixtures/minimal.docx` fixtures plus corrupt-file
 failure-path coverage.
+
+## Update — 2026-07-08: onboarding runs real end-to-end; design system canonical
+
+- **Coworker onboarding is real now, not a demo.** `scripts/ocean-ceremony-scan.mjs`
+  scans the actual machine (`~/.claude`, `~/.codex`, `~/.pi`, `~/.omp`), streams
+  the ceremony arc to `POST /api/ceremony/runs/:id/events`, drives the real
+  `POST /api/preview`, then BLOCKS at the human ack gate (polls `/api/state`
+  `syncUnlocked`; never auto-acks) and only POSTs `/api/sync` after a confirmed
+  human ack. Fixed this session: source counts report true de-duplicated totals
+  (Claude 98 / Codex 631 skills; previously pinned at the display cap 50), the
+  sync POST is gated on a confirmed ack (an unattended timeout can no longer
+  fire a real sync at production), and on timeout the ack/sync narration frames
+  are dropped instead of lying. E2E verified live: real scan drove the stage
+  with zero console errors; orb intensity matched `12 + 4×sources = 28`.
+- **Routing contract:** `/` on the local app serves the operator panel
+  (`ui/app/index.html`, rebuilt this session — the original inline GUI was
+  deleted during cleanup and had never been committed). The ceremony/orb lives
+  ONLY at `/onboarding`. The orb must never own `/`.
+- **Design system is canonical at `design/`:** `tokens.css` (all `--ocean-*`
+  custom properties + self-hosted InterVariable `@font-face`), `tokens.json`,
+  `fonts/InterVariable.woff2` (SIL OFL), `DESIGN-PRINCIPLES.md`, `README.md`
+  (vendoring guide), and `orb/ocean-orb.js` — the reusable OceanOrb class
+  (voice states idle/listening/thinking/speaking, logo absorption).
+  `ui/onboarding/ocean-three.js` is now a thin mount facade over it.
+- **Port etiquette (hard rule):** `8790` belongs to `ocean-surface-proxy` and
+  `8765` to the operator's long-running app instance. Test/verification
+  instances of the local app use distant ports (`18xxx`).
+- Gates green: smoke, source:check, secret:scan, secret:globs:check,
+  check-ceremony-protocol, `node --check` on all touched files, zero emoji.
