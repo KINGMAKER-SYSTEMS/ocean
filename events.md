@@ -123,3 +123,18 @@ is runtime-supplied, not prompt prose — required before deployment). Mirrored
 into AGENT_FILESYSTEM_ARCHITECTURE.md §9.2. content-agent named the reference
 package pattern. TOML parses (13 builds, 5 runtime deps); make assistants-check
 green.
+
+time: [7:42pm] [07-10-26]
+agent: [claude] [opus]
+worktree: [main]
+type: [workflow]: Mirrored map update for daemon-owned voice routes
+area: [docs]: Cross-repo documentation
+
+Mirrored the voice phase 4 connection-contract change (2026-07-10) into
+docs/OCEAN_PROJECT_MAP.md so the map stays byte-identical across the four
+Ocean repos. The daemon now owns all voice provider calls: the core daemon
+routes block gains POST /v1/voice/stt, POST /v1/voice/tts, and
+POST /v1/voice/realtime/client-secret, with a note that the surface proxy's
+/api/stt and /api/tts forward to the daemon and the browser Realtime client
+mints its ephemeral secret via the daemon; provider keys resolve only inside
+ocean-os.
