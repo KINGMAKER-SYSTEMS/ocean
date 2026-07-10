@@ -146,3 +146,12 @@ console errors, orb intensity 28 = 12+4x4 sources; gates green (smoke,
 source:check, secret:scan, secret:globs:check, ceremony protocol, node --check,
 no emoji).
 _________________________________________________________________________________
+
+time: [07:33pm] [07-10-26]
+agent: [omp] [glm-5.2]
+worktree: [master]
+type: [workflow]: Mirrored map update for daemon-owned voice routes
+area: [docs]: Cross-repo documentation
+
+Mirrored the daemon-owned voice contract (voice phase 4, 2026-07-10) into docs/OCEAN_PROJECT_MAP.md so the four Ocean repos stay byte-identical. The core daemon routes block now lists POST /v1/voice/stt, /v1/voice/tts, and POST /v1/voice/realtime/client-secret, followed by a phase-4 note that the surface proxy forwards /api/stt and /api/tts to the daemon and that provider keys (xAI, OpenAI) resolve only inside ocean-os. Docs-only change; map kept in sync across repos.
+_________________________________________________________________________________
