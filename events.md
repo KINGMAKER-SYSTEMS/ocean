@@ -102,3 +102,24 @@ OCEAN-327 (6b4c362); and the registry table still labeled content-agent
 (Slack bridge; OCEAN-112/244/375)". Branch design/content-agent-slack-assistant
 is fully merged and safe to delete. `make assistants-check` green; pushed to
 origin/main.
+
+time: [12:30am] [07-10-26]
+agent: [claude] [ocean tui]
+worktree: [main]
+type: [plan]: Knowledge-first repositioning
+area: [docs]: Build register + architecture doc
+
+Committed the repositioning of ocean-agents as the deployment layer for Rising
+Tides' agents (interactive assistants + workflow-invoked automation agents),
+with baked-in company knowledge as the differentiator. Build register
+(docs/ocean-agents-builds.toml, v2) gains a [positioning] block, five runtime
+dependencies (R1 ocean-memory, R2 ingest bridge, R3 portable-db mount, R4 typed
+agent traits, R5 workflow engine — all ocean-os), and three new package builds:
+A11 bedrock-context-mounts (agents declare bedrock namespaces; runtime injects
+at turn time), A12 automation-agent-retyping (courier framing retired; /ship
+and /say demoted to tool grants; typed Contracts replace the Python router),
+A13 knowledge-parity-gate (fixture suite proving each agent's company knowledge
+is runtime-supplied, not prompt prose — required before deployment). Mirrored
+into AGENT_FILESYSTEM_ARCHITECTURE.md §9.2. content-agent named the reference
+package pattern. TOML parses (13 builds, 5 runtime deps); make assistants-check
+green.

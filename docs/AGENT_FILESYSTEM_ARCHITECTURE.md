@@ -400,6 +400,18 @@ primitive implementation and enforcement happen in `ocean-os`.
 | **A8. Workflow contract fixtures** | `PROPOSED` | per-agent/per-courier JSON Schema fixtures or manifest stanzas | Workflow-invoked steps can call a courier or assistant through a typed `Contract` instead of a free prompt; fixtures are testable without a live workflow run. |
 | **A9. Verification gates** | `TRANSITIONAL_HARNESS` | `Makefile`, bridge tests, router list checks, future manifest linter | Existing checks stay green (`make assistants-check`, bridge unit tests). Add a manifest/schema linter before deleting Python discovery. |
 | **A10. Pure-content cutover** | `PROPOSED` | deletion gates tracked by `PYTHON_TO_RUST_MIGRATION.md` | After Rust replacements are live, remove Python bridge/router/harness code and leave this repo as manifests, profiles, skills, SOPs, and test fixtures only. |
+| **A11. Bedrock context mounts** | `PROPOSED` | `assistants/*/context.toml`, future `[context]` manifest stanzas | Every agent declares the bedrock namespaces it mounts (`/context`, `/handoffs`, `/docs`, prompt-library, ledger); the runtime resolves the mounts at turn time and injects the results as first-class context. Knowledge access is a manifest fact, not prompt prose. |
+| **A12. Automation-agent retyping** | `PROPOSED` | `couriers/*` migration, `agent.toml` class + contract stanzas | The courier framing is retired: `/ship`/`/say`/`/resolve` become tool grants; each automation agent declares a typed `Contract` invoked by workflows through the daemon. No new couriers after this lands. |
+| **A13. Knowledge-parity gate** | `PROPOSED` | per-agent knowledge fixture suites, future Makefile gate | Each deployed agent must answer a company-operations fixture suite using ONLY its declared bedrock mounts + accumulated memory (answers absent from `system.md`). No agent registers as deployed until its suite passes. |
+
+> **Knowledge-first repositioning (decided 2026-07-10).** `ocean-agents` is the
+> deployment layer for Rising Tides' agents: interactive **assistants** and
+> workflow-invoked **automation agents**. The differentiator is baked-in company
+> knowledge — bedrock mounts resolved by the runtime at turn time (A11) plus
+> continuously accumulated typed memory (R1/R2) — never hand-maintained prompt
+> prose. `content-agent` (prompt library + canon SOPs + bedrock publishing) is
+> the reference package pattern. North star: staff interacting with any deployed
+> agent find it already knows the company's operational underpinnings.
 
 Dependency order from the package side:
 
@@ -412,6 +424,9 @@ Dependency order from the package side:
 5. Layer A6/A7/A8 once the runtime has typed `Skill`, `Memory`, and `Contract`
    readers.
 6. Do A10 last; no Python deletion before a verified Rust replacement.
+7. A11 (bedrock mounts) can start as manifest data now and go live when the
+   runtime grows a `ContextMount` reader; A12 waits on typed `Contract` (R5);
+   A13 gates every deployment once A11 mounts resolve live.
 
 ---
 

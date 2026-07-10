@@ -2,7 +2,7 @@
 # Filesystem direction. The architecture doc may summarize this, but this file
 # is the source of truth for package-side builds.
 
-version = 1
+version = 2
 repo = "ocean-agents"
 runtime_repo = "ocean-os"
 architecture_doc = "docs/AGENT_FILESYSTEM_ARCHITECTURE.md"
@@ -155,3 +155,99 @@ acceptance = [
   "ocean-agents contains manifests, profiles, skills, SOPs, and test fixtures only.",
 ]
 depends_on = ["A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8", "A9"]
+
+# ---------------------------------------------------------------------------
+# Knowledge-first repositioning — decided 2026-07-10.
+#
+# ocean-agents is the DEPLOYMENT LAYER for Rising Tides' agents, not a demo
+# folder. Two agent classes:
+#   - interactive assistants  (operator-invoked, brain-in-the-loop, surface-bound)
+#   - automation agents       (workflow-invoked, non-interactive, typed Contract)
+# The differentiator is baked-in company knowledge: bedrock mounts resolved by
+# the runtime at turn time + continuously accumulated typed memory — never
+# hand-maintained prompt prose. The courier framing (/ship, /say as "agents")
+# is retired: transport actions become tool grants; the courier class is
+# re-typed as automation agents.
+
+[positioning]
+decided = "2026-07-10"
+north_star = "Any Rising Tides staff member interacting with a deployed agent finds it already knows the company's operational underpinnings — because the runtime injects bedrock knowledge and accumulated typed memory at turn time, not because someone maintained a prompt."
+reference_package = "assistants/content-agent"  # prompt library (sqlite) + canon SOPs + bedrock publishing = the pattern every new agent copies
+
+# Runtime foundation this plan depends on. These land in ocean-os (see
+# AGENT_FILESYSTEM_ARCHITECTURE.md §9.1); tracked here only as dependencies —
+# this repo does not grow a second runtime.
+
+[[runtime_dependency]]
+id = "R1"
+name = "ocean-memory"
+repo = "ocean-os"
+provides = ["Memory", "MemoryScope", "MemoryAccess", "SqliteMemoryStore (MVCC)"]
+
+[[runtime_dependency]]
+id = "R2"
+name = "memory-ingest-bridge"
+repo = "ocean-os"
+provides = ["extract->cheap-model->sqlite pipeline", "HookEvent::MemoryIngest"]
+depends_on = ["R1"]
+
+[[runtime_dependency]]
+id = "R3"
+name = "portable-db-mount"
+repo = "ocean-os"
+provides = ["mount_portable_memory()", "Infer->Query room elevation"]
+depends_on = ["R1"]
+
+[[runtime_dependency]]
+id = "R4"
+name = "typed-agent-traits"
+repo = "ocean-os"
+provides = ["Agent", "Assistant", "Courier->AutomationAgent classification"]
+
+[[runtime_dependency]]
+id = "R5"
+name = "workflow-engine"
+repo = "ocean-os"
+provides = ["Workflow", "Step", "Contract", "sqlite run-state, retries, closeouts"]
+depends_on = ["R4"]
+
+[[build]]
+id = "A11"
+name = "bedrock-context-mounts"
+status = "proposed"
+primitive_native = false
+owns = ["assistants/*/context.toml", "future [context] manifest stanzas"]
+acceptance = [
+  "Every agent package declares which bedrock namespaces it mounts: /context, /handoffs, /docs, prompt-library, ledger.",
+  "The runtime resolves declared mounts at turn time (semantic search + direct reads) and injects results as first-class context — knowledge access is a manifest fact, not prompt prose.",
+  "content-agent's prompt-library publishing to bedrock /context is the reference instance of the pattern.",
+]
+depends_on = ["A1"]
+runtime_reads = ["ContextMount"]
+
+[[build]]
+id = "A12"
+name = "automation-agent-retyping"
+status = "proposed"
+primitive_native = false
+owns = ["couriers/* migration to automation-agent packages", "agent.toml class + contract stanzas"]
+acceptance = [
+  "The courier framing is retired: /ship, /say, /resolve become tool grants on the transport layer, not standalone agents.",
+  "Each automation agent is a folder declaring a typed Contract (input schema -> output schema, retry, closeout) invoked by workflows/schedules through the daemon — never by the Python router.",
+  "file-courier is either re-typed as the first automation agent or absorbed into tool grants; no new couriers are authored after this lands.",
+]
+depends_on = ["A1", "A8"]
+runtime_reads = ["Contract", "AutomationAgent"]
+
+[[build]]
+id = "A13"
+name = "knowledge-parity-gate"
+status = "proposed"
+primitive_native = false
+owns = ["per-agent knowledge fixture suites", "future gate in Makefile"]
+acceptance = [
+  "Each deployed agent ships a fixture suite of company-operations questions it must answer correctly using ONLY its declared bedrock mounts + accumulated memory — with the answers absent from its system.md.",
+  "The gate proves the mystification effect is runtime-supplied knowledge, reproducible and consistent, not prompt memorization.",
+  "A new agent cannot be registered as deployed until its knowledge-parity suite passes.",
+]
+depends_on = ["A11"]
