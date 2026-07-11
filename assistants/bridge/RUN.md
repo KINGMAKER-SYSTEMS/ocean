@@ -120,3 +120,52 @@ and a **mocked** daemon (a live connection needs the `xapp-` token above):
 python3 assistants/bridge/tests/test_socket_pipeline.py
 # or: python3 -m unittest discover -s assistants/bridge/tests -v
 ```
+
+## 7. Slash-command intake (courier hub) — ACTIVATION
+
+The listener also handles `slash_commands` envelopes (courier-hub intake,
+`slash_intake.py` — see [`README.md`](README.md) for how it works). It is
+**dormant until the command is registered** with the existing Slack app: Socket
+Mode is already on, so there is no Request URL, no signing secret, and no new
+tokens — registration is the only Slack-side step.
+
+**Step 1 — add the command to the app manifest.**
+[api.slack.com/apps](https://api.slack.com/apps) → *(the content-agent app)* →
+**App Manifest** → add under `features:` (alongside the existing `bot_user`):
+
+```yaml
+features:
+  slash_commands:
+    - command: /ocean
+      description: Run a Rising Tides courier (help lists all commands)
+      usage_hint: "help | <courier> [args] — e.g. distro health"
+      should_escape: false
+```
+
+(Equivalent UI path: **Slash Commands** → *Create New Command* → command
+`/ocean`, description and usage hint as above. Leave the Request URL blank —
+Socket Mode delivery.)
+
+**Step 2 — reinstall the app to the workspace** when Slack prompts (adding the
+first slash command adds the `commands` scope).
+
+**Step 3 — restart the live listener process** so it picks up the new code
+(same start command as §4). Merging this repo change alone does nothing to a
+running listener; the restart is a deliberate, manual step.
+
+**Step 4 — smoke it:** type `/ocean help` anywhere in the workspace → the live
+courier command table (same rows as `python3 couriers/hub/router.py list`)
+comes back as an ephemeral message. Then try a read-only command, e.g.
+`/ocean sounds-preview` or `/ocean distro health`.
+
+Behavior notes:
+
+- **Deterministic** couriers run their harness on the bridge host; stdout+stderr
+  come back in-channel in a code block, truncated at ~3,500 chars.
+- **Agentic** couriers dispatch to the Ocean daemon (same payload the hub router
+  sends); the reply is a short "dispatched to daemon — session `<id>`" note. The
+  courier delivers its real results itself, over transport.
+- Errors, usage mistakes, and `/ocean help` reply **ephemerally** (only the
+  invoker sees them).
+- Optional env (defaults are fine): `OCEAN_SLASH_COMMAND=/ocean`,
+  `OCEAN_SLASH_REPLY_LIMIT=3500`, `OCEAN_SLASH_EXEC_TIMEOUT=600`.

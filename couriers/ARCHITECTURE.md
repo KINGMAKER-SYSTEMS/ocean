@@ -7,16 +7,16 @@ out, over the shared Slack route).
 
 ```
   Slack  ──/command──▶  intake adapter  ──▶  hub router  ──┬─▶  deterministic: run harness
- (operator)            (HTTPS, signed)    (this layer)     │
+ (operator)          (Socket Mode bridge) (this layer)     │
       ▲                                                     └─▶  agentic: POST /v1/prompt
-      └────────────── results (chat.postMessage) ◀──────────────  to ocean-daemon (cwd=courier dir)
+      └────────────── results (response_url / chat.postMessage) ◀─  to ocean-daemon (cwd=courier dir)
 ```
 
 ## Layers
 
 | Layer | What | Where | Status |
 |---|---|---|---|
-| **Intake** | Slack slash-command front door: verify signature, 3-sec ack, async reply | _(separate, outward-facing — not built)_ | planned |
+| **Intake** | Slack slash-command front door: `/ocean <command> [args]` over the Socket Mode bridge — 3-sec ack, async dispatch, reply via `response_url` | [`../assistants/bridge/slash_intake.py`](../assistants/bridge/slash_intake.py) | ✅ built |
 | **Router** | `slash → courier` table from manifests; dispatch deterministic vs agentic | [`hub/router.py`](hub/router.py) | ✅ built |
 | **Couriers** | single-purpose agents; each a manifest + protocol + harness | `<courier>/` | file-courier ✅ |
 | **Route** | shared transport the couriers ship over | [`transport/slack.py`](transport/slack.py) | ✅ built |
@@ -71,11 +71,25 @@ Tokens follow Ocean's own convention (`OCEAN_<X>_…` first, bare fallback, then
 file) — see `ocean-providers` `credential_env_names`. The Slack route uses
 `OCEAN_SLACK_BOT_TOKEN` → `SLACK_BOT_TOKEN` → `~/.slack_token`. Nothing hardcoded.
 
+## Intake — how the front door actually landed
+
+The originally-planned intake was an outward-facing HTTPS adapter (Slack app +
+signing secret + public ingress). It was never built — and stays deliberately
+unbuilt — because the Slack bridge (`assistants/bridge/socket_listener.py`)
+already holds a Socket Mode WebSocket, and Slack delivers slash commands over
+that same socket (`slash_commands` envelopes). The intake
+([`../assistants/bridge/slash_intake.py`](../assistants/bridge/slash_intake.py))
+rides it: **no public URL, no signing secret, no new tokens**. One registered
+command (`/ocean <courier-slash> [args]`) fronts this entire hub via the
+router's registry; direct per-slash registration also routes with no code
+change. Dispatch reuses this router's `load_registry` / session fold /
+`call_daemon` — see `assistants/bridge/README.md` and `RUN.md` §7 (activation).
+
 ## Not yet built (deliberately)
 
-- **Slack intake adapter** — needs a Slack app, signing secret, and public
-  ingress (reuse the existing `cloudflared` tunnels). Outward-facing; set up
-  deliberately, not spun up unannounced.
+- **HTTPS intake adapter** — the signed public-ingress variant remains unbuilt
+  on purpose; the Socket Mode intake above covers the front door with a smaller
+  surface. Revisit only if the bridge's socket ever goes away.
 - **Forward-compat with the planned ocean-os plugin runtime** (`ROADMAP.md`:
   *Subprocess plugins*, *Skill/prompt packs*) — manifests are designed to map
   onto it when it lands.

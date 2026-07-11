@@ -18,6 +18,12 @@ never crash the loop). The dispatch reuses OCEAN-84's HARDENED daemon invocation
 (couriers/hub/router.py: call_daemon / session_id_for / extract_reply) — we do not
 re-implement the /v1/prompt retry/timeout/error path here.
 
+The same socket also carries the courier hub's slash-command intake: Slack
+delivers `slash_commands` envelopes over Socket Mode, so `/ocean …` needs no
+public ingress and no signing secret. Those envelopes are acked immediately
+(3-second rule) and handed to slash_intake.py on a worker thread — see
+slash_intake.py for the parse/dispatch/reply pipeline.
+
 The pure pieces (EventDeduper, resolve_context, build_turn, session_key,
 dispatch_to_daemon) stay stdlib + token-free so the whole pipeline is unit-testable
 with a MOCKED Slack client + mocked daemon (tests/test_socket_pipeline.py). A real
@@ -35,6 +41,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -75,6 +82,16 @@ try:  # pragma: no cover - guarded; mocked in tests
     import reply as _reply  # type: ignore
 except Exception:  # pragma: no cover
     _reply = None  # type: ignore
+
+# Courier-hub slash intake (`slash_commands` envelopes on this same socket).
+# Guarded like reply: an import failure disables the intake, never the chat
+# bridge — and we stash the error so run() can say WHY intake is off.
+try:  # pragma: no cover - exercised via tests/test_slash_intake.py
+    import slash_intake as _slash  # type: ignore
+    _slash_import_error: Exception | None = None
+except Exception as _se:  # pragma: no cover
+    _slash = None  # type: ignore
+    _slash_import_error = _se
 
 log = logging.getLogger("ocean.bridge.slack")
 
@@ -421,11 +438,38 @@ def run(manifest_path: Path | None = None):
 
     def _on_request(client, req):  # SocketModeClient handler signature.
         # ACK FIRST (spec §9): ack within Slack's window so it doesn't re-deliver;
-        # dedupe still guards against the races where it does.
+        # dedupe still guards against the races where it does. Slash commands may
+        # ack WITH a body (an ephemeral "running…" the invoker sees inside the
+        # 3-second window); events ack bare.
+        is_slash = req.type == "slash_commands"
+        ack_body = None
+        if is_slash and _slash is not None:
+            try:
+                ack_body = _slash.build_ack(dict(req.payload or {}))
+            except Exception:  # noqa: BLE001
+                log.exception("build_ack failed; acking bare")
         try:
-            client.send_socket_mode_response(SocketModeResponse(envelope_id=req.envelope_id))
+            if ack_body is not None:
+                client.send_socket_mode_response(
+                    SocketModeResponse(envelope_id=req.envelope_id, payload=ack_body))
+            else:
+                client.send_socket_mode_response(SocketModeResponse(envelope_id=req.envelope_id))
         except Exception:  # noqa: BLE001
             log.exception("failed to ack envelope %s", getattr(req, "envelope_id", "?"))
+
+        if is_slash:
+            # Courier-hub intake (/ocean …): execute OFF this thread so a slow
+            # harness or daemon turn never blocks the WS processor; the result is
+            # posted asynchronously via the payload's response_url.
+            if _slash is None:
+                log.error("slash_commands envelope received but slash_intake failed "
+                          "to import (%s); ignoring", _slash_import_error)
+                return
+            threading.Thread(
+                target=_slash.handle_slash, args=(dict(req.payload or {}),),
+                daemon=True, name="slash-intake",
+            ).start()
+            return
 
         event = _extract_inbound({"type": req.type, "payload": req.payload})
         if event is None:
@@ -448,7 +492,8 @@ def run(manifest_path: Path | None = None):
             client = SocketModeClient(app_token=app_token, web_client=web)
             client.socket_mode_request_listeners.append(_on_request)
             client.connect()
-            log.info("Socket Mode connected; listening for app_mention + message events")
+            log.info("Socket Mode connected; listening for app_mention + message "
+                     "events + slash_commands (courier hub intake)")
             backoff = 1.0  # reset on a healthy connect
             # Block this thread while the WS pumps events on its own threads.
             while client.is_connected():

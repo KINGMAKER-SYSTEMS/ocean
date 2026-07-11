@@ -119,6 +119,51 @@ metadata (`files.info`) — plus an explicit note, rather than fabricating a bod
 
 ---
 
+## Slash-command intake — `/ocean` → courier hub (`slash_intake.py`)
+
+The bridge's Socket Mode WebSocket carries more than events: Slack also delivers
+**slash commands** over it, as `slash_commands` envelopes. `slash_intake.py`
+rides that — it is the courier hub's **Intake layer**
+(`couriers/ARCHITECTURE.md`), built with **no public ingress and no signing
+secret**, because the socket the content-agent already holds is the transport.
+
+```
+Slack: /ocean distro health        (or /ocean help, or a direct /distro …)
+   │  slash_commands envelope  (same Socket Mode WS as events)
+   ▼
+socket_listener._on_request                          ── ack ≤3s (ephemeral "running…" for dispatches)
+   │  worker thread (a slow harness never blocks the WS processor)
+   ▼
+slash_intake.handle_slash                            ── parse → route via the hub registry
+   │  REUSES couriers/hub/router.py: load_registry, session fold, call_daemon
+   ├─ help/usage      → ephemeral reply (live command table = `router.py list`)
+   ├─ deterministic   → subprocess the harness (router's argv shape), capture
+   │                    stdout+stderr → in-channel code block (truncated ~3,500)
+   └─ agentic         → router.call_daemon (router's exact payload shape)
+                        → short "dispatched to daemon — session `<id>`" note
+   ▼
+payload's response_url  (stdlib urllib POST, no token, 30-min validity;
+                         fallback: plain reply via router.deliver_reply)
+```
+
+**One registered command fronts the whole hub:** `/ocean <courier-slash> [args]`
+maps onto the router's `/<slash>` table, so new couriers appear in `/ocean help`
+with zero intake changes. Direct per-slash payloads also route (if a payload's
+`command` matches a courier slash), so per-command Slack registration can be
+added later without code changes.
+
+**Dormant by default.** Nothing here runs until the `/ocean` command is added to
+the Slack app's manifest — see [`RUN.md`](RUN.md) §7 for the activation steps.
+No new env vars, tokens, or dependencies; the intake reuses the bridge's
+existing connection and the router's existing daemon path. Optional tuning:
+`OCEAN_SLASH_COMMAND` (default `/ocean`), `OCEAN_SLASH_REPLY_LIMIT` (default
+`3500`), `OCEAN_SLASH_EXEC_TIMEOUT` (default `600`s).
+
+Unit tests: `tests/test_slash_intake.py` (mocked runner/daemon/responder — no
+network, no Slack).
+
+---
+
 ## `OCEAN_ASSISTANTS_DIR` — which profile the daemon loads
 
 This is the single most important env var on the Slack path, and the easiest to
