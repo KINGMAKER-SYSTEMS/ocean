@@ -11,6 +11,10 @@
 **/courier.ledger
 **/*.log
 
+# Stray harness runs from the wrong cwd land a db at repo root; the real one
+# lives at assistants/content-agent/data/prompt_library.db (tracked, seeded).
+/prompt_library.db
+
 # Python
 __pycache__/
 *.pyc
