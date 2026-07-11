@@ -143,6 +143,8 @@ Then the drift gate keeps source and output in lockstep:
 | `[MOBL]` | **MOBL** house profile | mobile / on-the-move — glanceable, voice-friendly, answer-first; defer bulky artifacts to richer surfaces. Sourced DRY from `_base/MOBL/{system,comms,vibe}.md`; `MOBL/system.md` is the composed artifact | live (R4 seed, OCEAN-89) |
 | `[VOX]` | **VOX** house profile | voice / hands-free (`leo-voice`) — spoken-clean output (no markdown/paths/code), answer-first, barge-in-aware brevity; defer bulky output to richer surfaces. Sourced DRY from `_base/VOX/{system,comms,safety,vibe}.md`; `VOX/system.md` is the composed artifact | live (R4, OCEAN-89) |
 | `[BRWSR]` | **BRWSR** house profile | browser / Chrome side panel (`surface-extension`) — docked, sees the live active tab (URL/title injected per OCEAN-70), browser-tool SOPs, narrow-panel brevity. Sourced DRY from `_base/BRWSR/{system,comms,tools,safety,vibe}.md`; `BRWSR/system.md` is the composed artifact | live (R4, OCEAN-89) |
+| `[CLI]` | **prompt-lab** | video-prompt optimization lab — RATCHET bake-off rounds, LAWS audits, career-mean crowning of master prompts + modular composer feeding content-agent's prompt library; engine stays at its on-disk lab (`OCEAN_PROMPT_LAB_ENGINE_DIR`) | ported (wave 1) |
+| `[CLI]` | **voice-intake** | voice-memo intake — mlx-whisper GPU transcription → decipher → anchored, deduped tickets into Linear SALE/OUT/CAMP/CONT/OCEAN or GitHub Issues (rt-yt-substrate); SHA-ledger idempotent, two-track promote gate; engine's `GOAL-PROMPT.md` stays canonical | ported (wave 1) |
 
 ## Phased delivery roadmap
 

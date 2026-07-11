@@ -21,6 +21,9 @@ its compiled seed prompt — editable, hot-reconfigurable, no rebuild. The surfa
 | Surface | Assistant | Domain |
 |---|---|---|
 | `[BONZAI]` | bonzai | git hygiene — prune branch sprawl safely, HTML triage board, enforce merge→main→delete |
+| `[SLACK]` `[CLI]` | content-agent | conversational content-pipeline assistant — generate video, gallery/status, prompt library, canvas rendering |
+| `[CLI]` | prompt-lab | video-prompt optimization lab — RATCHET bake-off rounds, LAWS audits, crowned master prompts feeding content-agent's library |
+| `[CLI]` | voice-intake | voice memos → anchored, deduped tickets (Linear SALE/OUT/CAMP/CONT/OCEAN or GitHub Issues); SHA-ledger idempotent |
 
 More surfaces to come (content tab, campaign-booking tab, finances section — each
 a surface an agent specializes into).
@@ -37,6 +40,10 @@ by command. Architecture: [`couriers/ARCHITECTURE.md`](couriers/ARCHITECTURE.md)
 | `/ship` | file-courier | deterministic | upload `dropbox/` files to a Slack channel |
 | `/say` | file-courier | deterministic | post a message to a Slack channel |
 | `/resolve` | file-courier | deterministic | verify a Slack destination |
+| `/sounds` | sound-watcher | deterministic | Warner tracker sweep: Audio Tracking Sheet → Slack canvases + one roll-up (`/sounds-preview` = dry-run) |
+| `/babysit` | pr-babysitter | agentic | one unattended PR-maintenance pass over open PRs — fix CI/conflicts, merge safe, report (`/babysit-status` = read-only) |
+| `/monmail` | mon-email-watcher | deterministic | Mon Rovîa Gmail sweep → Calendar markers + Slack drafts (`/monmail-preview` = dry-run) |
+| `/distro` | mon-distro | deterministic | read-first ops window into the Mon Rovia evergreen distro engine — health, queue, upcoming; posting double-latched |
 
 Run `python3 couriers/hub/router.py list` for the live table (it reads the
 manifests, so this prose may lag — the router is authoritative).
@@ -67,6 +74,8 @@ manifests, so this prose may lag — the router is authoritative).
   records the typed agent-filesystem direction across the Ocean repos.
 - [`docs/ocean-agents-builds.toml`](docs/ocean-agents-builds.toml) is the
   codified source of truth for the `ocean-agents` package-side build list.
+- [`docs/PORTING_ROADMAP.md`](docs/PORTING_ROADMAP.md) tracks the migration of
+  the existing agent fleet into packages (the porting convention + wave plan).
 
 ## Agent channel — async coordination
 

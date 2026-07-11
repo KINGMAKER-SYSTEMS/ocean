@@ -1,0 +1,29 @@
+# Courier manifest — the routing contract for this courier.
+# The hub router (../hub/router.py) reads every courier.toml to build the
+# slash-command → courier table.
+#
+# This courier is the hub identity for the Warner Sound Watcher engine at
+# ~/Projects/active/warner-sound-watcher (override via
+# $OCEAN_SOUND_WATCHER_ENGINE_DIR). The engine keeps running hourly under its
+# own launchd job — these commands are the on-demand path, not a scheduler.
+
+name = "sound-watcher"
+description = "Mirror new TikTok sound links from the Warner tracker (Audio Tracking tab) into Slack #warner-ugc-sounds canvases + Sound Board."
+
+# deterministic = the router runs the harness directly (no LLM spawn).
+mode = "deterministic"
+
+# Entry point the router invokes, relative to this manifest's directory.
+entry = "bin/courier"
+
+[[commands]]
+slash = "/sounds"
+subcommand = "sweep"
+summary = "Run one real watcher cycle now: poll sheet → diff → canvases + one roll-up ping → republish Sound Board"
+usage = "/sounds"
+
+[[commands]]
+slash = "/sounds-preview"
+subcommand = "preview"
+summary = "Dry-run a cycle: list new links since last state — no Slack writes, no board publish, no state change"
+usage = "/sounds-preview"

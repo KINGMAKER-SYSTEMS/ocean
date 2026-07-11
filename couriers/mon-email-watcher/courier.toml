@@ -1,0 +1,32 @@
+# Courier manifest — the routing contract for this courier.
+# The hub router (../hub/router.py) reads every courier.toml to build the
+# slash-command → courier table.
+#
+# This courier is the hub identity for the mon-rovia-watcher Rust engine at
+# /Users/ericcromartie/Documents/Development/mon-rovia-email-watcher (override
+# via $OCEAN_MON_EMAIL_WATCHER_ENGINE_DIR). The engine keeps running its daily
+# 9 AM Gmail sweep under its own launchd job — these commands are the on-demand
+# path, not a scheduler.
+
+name = "mon-email-watcher"
+description = "Sweep Gmail for Mon Rovîa management email (Wasserman/Boaz booking threads) → Google Calendar markers + Slack-ready drafts, via the mon-rovia-watcher Rust engine."
+
+# deterministic = the router runs the harness directly (no LLM spawn).
+mode = "deterministic"
+
+# Entry point the router invokes, relative to this manifest's directory.
+entry = "bin/courier"
+
+# Preview first — it answers "anything new?" with zero writes. Real subcommands
+# verified against the engine's src/main.rs dispatch (sweep-preview / sweep).
+[[commands]]
+slash = "/monmail-preview"
+subcommand = "preview"
+summary = "Dry-run the daily sweep (engine `sweep-preview`): Gmail reads only — no calendar writes, no Slack, no state change"
+usage = "/monmail-preview"
+
+[[commands]]
+slash = "/monmail"
+subcommand = "sweep"
+summary = "Run one real daily sweep now (engine `sweep`): Gmail → calendar markers + Slack drafts, state saved"
+usage = "/monmail"

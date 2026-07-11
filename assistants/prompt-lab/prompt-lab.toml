@@ -1,0 +1,55 @@
+# prompt-lab — assistant manifest (mirrors the courier.toml pattern).
+#
+# Declares the video-prompt optimization lab as a brain-in-the-loop specialist:
+# its identity entry, its surfaces, and how a turn is scoped to it. Where
+# content-agent SERVES the crowned prompt library, prompt-lab is the lab that
+# CROWNS it — bake-off rounds, laws, masters, the modular composer.
+
+name = "prompt-lab"
+class = "assistant"            # vs. "courier" — brain-in-the-loop, not outbound-only
+description = "Video-prompt optimization lab: run RATCHET bake-off rounds against the live Content Lab, audit against LAWS, crown master prompts, maintain the modular composer."
+
+# agentic = every turn is reasoned by the Ocean daemon (POST /v1/prompt) scoped to
+# this dir; the daemon auto-loads CLAUDE.md/AGENTS.md via load_project_prompt.
+mode = "agentic"
+
+# Entry identity files the daemon ancestor-walk picks up when cwd is this dir.
+entry = "CLAUDE.md"
+
+# Surfaces this assistant is authored for. CLI = the terminal / Claude-Code-style
+# surface — the lab is operator-driven shell work (rounds, audits, crowning).
+surfaces = ["CLI"]
+
+# --- CLI surface binding (terminal / Claude Code) --------------------------
+[surface.CLI]
+# Ocean OS client_type → surface map: cli → [CLI] (ocean-os surface_dir).
+client_type = "cli"
+cwd = "assistants/prompt-lab"
+tools = "CLI/tools.toml"
+profile = "CLI/system.md"
+session_key = "cli:prompt-lab:{cwd}"
+
+# --- Engine access -----------------------------------------------------------
+# The lab ENGINE stays in place — scripts, state, crowned masters, laws, and
+# anchors all live in the engine dir; this package is identity + protocol only.
+# Nothing here is forked or copied; the package references the engine via env.
+[engine]
+# Where the lab lives on disk (bakeoff.py, LAWS.md, MASTER-PROMPTS.md, RATCHET.md,
+# MODULAR-PROMPTS.md + prompt_modules.json, state.json, anchors/, rounds/).
+dir_env     = "OCEAN_PROMPT_LAB_ENGINE_DIR"
+dir_default = "/Users/ericcromartie/Documents/Development/prompting agent"
+
+# Live Content Lab (deployed FastAPI backend) the bake-off submits to and polls.
+# Env NAMES only — values come from the environment / the engine's own .env,
+# never from this file.
+api_url_env = "CONTENT_LAB_API_URL"
+api_key_env = "CONTENT_LAB_API_KEY"
+
+# Credentials the engine's scripts read at runtime from their own environment
+# (engine-side .env; names only, never values, never read into context).
+credential_envs = [
+  "GEMINI_API_KEY",       # Gemini image/video (anchor minting, video judge probes)
+  "OPENAI_API_KEY",       # GPT frame audits (legacy judge path)
+  "FAL_KEY",              # fal.ai (Kling probes)
+  "REPLICATE_API_TOKEN",  # Replicate-direct probes (kling_round.py)
+]

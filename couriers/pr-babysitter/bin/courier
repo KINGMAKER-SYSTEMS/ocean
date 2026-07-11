@@ -1,0 +1,93 @@
+#!/bin/sh
+# Ocean pr-babysitter (GitHub route) — thin wrapper over the standalone engine.
+# Usage:
+#   courier run       # one full babysitting pass (engine owns lock, logs, merge gate)
+#   courier status    # read-only: lock state + last agent report + latest log tail
+#   courier where     # resolved engine dir + lock state, for sanity checks
+#
+# The engine (pr-babysitter-agent) already runs in production on cron. This
+# wrapper only adds an on-demand path into it: it execs the engine's own run
+# script and NEVER touches the engine, its cron, or its lock dir.
+set -eu
+
+HERE=$(cd "$(dirname "$0")" && pwd)
+PKG=$(cd "$HERE/.." && pwd)
+COURIERS=$(cd "$PKG/.." && pwd)
+
+# Load env if present — never committed. Shared class-level env first, then
+# package-level overrides it (same convention as file-courier).
+set -a
+[ -f "$COURIERS/courier.env" ] && . "$COURIERS/courier.env"
+[ -f "$PKG/courier.env" ] && . "$PKG/courier.env"
+set +a
+
+ENGINE_DIR="${OCEAN_PR_BABYSITTER_ENGINE_DIR:-/Users/ericcromartie/Documents/Development/pr-babysitter-agent}"
+RUN_SCRIPT="$ENGINE_DIR/scripts/pr-babysitter.sh"
+LOG_DIR="$ENGINE_DIR/logs"
+REPORT="$LOG_DIR/pr-babysitter-report.md"
+LATEST="$LOG_DIR/pr-babysitter-latest.log"
+# Mirrors LOCK_DIR in the engine's scripts/pr-babysitter.sh. Read-only here:
+# a held lock is a live run (or something for Eric to inspect) — never remove.
+LOCK_DIR="/tmp/pr-babysitter-agent.lock"
+
+lock_state() {
+  if [ -d "$LOCK_DIR" ]; then
+    echo "HELD ($LOCK_DIR) — a pass is in flight; do not start another, do not remove"
+  else
+    echo "free"
+  fi
+}
+
+if [ "$#" -gt 0 ]; then cmd="$1"; shift; else cmd=""; fi
+
+case "$cmd" in
+  run)
+    if [ ! -x "$RUN_SCRIPT" ]; then
+      echo "engine run script not found or not executable: $RUN_SCRIPT" >&2
+      echo "set OCEAN_PR_BABYSITTER_ENGINE_DIR (see courier.env.example)" >&2
+      exit 1
+    fi
+    # The engine owns the entire pass: its own mkdir lock (prints
+    # "already running" and exits 0 on overlap), gh PR listing, the Codex
+    # triage/fix loop, checks-wait, safe merges, and log capture. Just exec it.
+    exec "$RUN_SCRIPT"
+    ;;
+  status)
+    echo "engine : $ENGINE_DIR"
+    echo "lock   : $(lock_state)"
+    echo
+    if [ -f "$REPORT" ]; then
+      echo "== last agent report ($REPORT) =="
+      cat "$REPORT"
+    else
+      echo "(no agent report yet at $REPORT)"
+    fi
+    echo
+    log="$LATEST"
+    if [ ! -f "$log" ]; then
+      # Engine copies -latest.log at the very end of a pass; if a run died
+      # early it may not exist, so fall back to the newest per-run log.
+      log=$(ls -t "$LOG_DIR"/pr-babysitter-2*.log 2>/dev/null | head -n 1)
+    fi
+    if [ -n "${log:-}" ] && [ -f "$log" ]; then
+      echo "== latest log tail ($log) =="
+      tail -n 40 "$log"
+    else
+      echo "(no run logs yet under $LOG_DIR)"
+    fi
+    ;;
+  where)
+    if [ -x "$RUN_SCRIPT" ]; then script_ok="(ok)"; else script_ok="(MISSING)"; fi
+    echo "engine dir : $ENGINE_DIR"
+    echo "run script : $RUN_SCRIPT $script_ok"
+    echo "logs       : $LOG_DIR"
+    echo "lock       : $(lock_state)"
+    ;;
+  ""|-h|--help|help)
+    sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'
+    ;;
+  *)
+    echo "unknown subcommand: $cmd (try: run | status | where)" >&2
+    exit 1
+    ;;
+esac

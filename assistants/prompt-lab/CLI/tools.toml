@@ -1,0 +1,49 @@
+# prompt-lab — CLI surface tool configuration.
+#
+# Grants prompt-lab's tools on the [CLI] surface (terminal / Claude-Code-style
+# clients). Same self-learning contract as content-agent's CLI/tools.toml: this
+# is DATA — an operator grants a capability by editing it and resetting the agent
+# (fresh session_id), no rebuild. The engine stays in place; nothing is forked.
+
+[agent]
+name = "prompt-lab"
+surface = "CLI"
+reset = "new-session"
+
+# Built-in runtime tools allowed on the CLI surface.
+[builtin]
+read  = true   # engine docs + evidence: LAWS.md, RATCHET.md, MASTER-PROMPTS.md, rounds/
+write = true   # round artifacts, composed prompts, law/master updates (audit trail)
+edit  = true   # law rewrites + master crowning edits — never a silent overwrite
+bash  = true   # drive the engine scripts (bakeoff.py, modular_*, gen_anchor_bank.py)
+grep  = true   # search laws, judge notes, round history
+glob  = true   # locate rounds/, anchors/, media/, drive_batch/ artifacts
+fetch = true   # HTTP to the Content Lab API
+
+# The lab engine — scripts + state, in place at $OCEAN_PROMPT_LAB_ENGINE_DIR.
+# Reference, never fork; crowned masters and laws live HERE, not in the package.
+[tool.engine]
+kind        = "engine"
+dir_env     = "OCEAN_PROMPT_LAB_ENGINE_DIR"
+dir_default = "/Users/ericcromartie/Documents/Development/prompting agent"
+summary     = "Run RATCHET rounds, rank by career means, audit against LAWS, compose rotated production batches, mint anchor banks."
+commands = [
+  "python3 bakeoff.py status",                          # lane summaries
+  "python3 bakeoff.py round <lane>",                    # run the current RATCHET round
+  "python3 bakeoff.py table",                           # career means (the ranking)
+  "python3 bakeoff.py stability <lane>",                # 4-video consistency run
+  "python3 bakeoff.py serve",                           # dashboards on :8765
+  "python3 modular_prompt.py <format> [n] [--json]",    # compose rotated scene prompts
+  "python3 modular_batch.py <format> <num_scenes> [out]", # compose + generate + download
+  "python3 batch_gen.py <format> <count>",              # evergreen batch off a master
+  "python3 gen_anchor_bank.py <format> <n> <outdir>",   # mint an anchor bank
+]
+# state.json writes are flock-guarded (.state.lock) — never edit it by hand.
+state = "state.json"
+docs  = ["RATCHET.md", "LAWS.md", "MASTER-PROMPTS.md", "MODULAR-PROMPTS.md"]
+
+# Live Content Lab API — the deployed backend the bake-off submits to and polls.
+# Env NAMES only; values come from the environment (see prompt-lab.env.example).
+[api.content_lab]
+base_url_env = "CONTENT_LAB_API_URL"
+api_key_env  = "CONTENT_LAB_API_KEY"

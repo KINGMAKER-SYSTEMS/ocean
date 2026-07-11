@@ -1,0 +1,104 @@
+#!/bin/sh
+# Ocean mon-distro courier — read-first ops window into the Mon Rovia evergreen
+# distro engine (Rust mon-posting-agent, launchd, :3000 → Facebook Reels via Postiz).
+# Usage:
+#   courier health                          # GET /health on the live service (:3000)
+#   courier status                          # GET /status (readiness / gates / scheduler)
+#   courier queue [--json]                  # queue validation counts (engine `check`)
+#   courier preview [--slots N] [--json]    # next postable items off the rotation cursor
+#   courier upcoming [--slots N] [--json]   # upcoming slot times + assigned items
+#   courier readiness [--json]              # launch-gate readiness report
+#   courier activity [--limit N] [--json]   # recent activity events (activity.jsonl)
+#   courier verify-postiz [--json]          # read-only Postiz connectivity check (never posts)
+#   courier post-now --drive-file-id <id> [--dry-run|--draft|--schedule-in <min>] [--json]
+#
+# Posting stays behind the engine's latches (DRY_RUN / POSTING_LOCKED in the
+# engine .env; --enable-posting on the CLI). This wrapper additionally refuses
+# --enable-posting unless OCEAN_MON_DISTRO_ALLOW_POSTING=1 — the courier never
+# posts on its own.
+set -eu
+
+HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+PKG=$(CDPATH= cd -- "$HERE/.." && pwd)
+COURIERS=$(CDPATH= cd -- "$PKG/.." && pwd)
+
+# Local config (never committed): shared class-level env first, then the
+# package-level file overrides it. Same convention as file-courier.
+set -a
+[ -f "$COURIERS/courier.env" ] && . "$COURIERS/courier.env"
+[ -f "$PKG/courier.env" ] && . "$PKG/courier.env"
+set +a
+
+# The engine path contains a space — keep every expansion quoted.
+ENGINE_DIR=${OCEAN_MON_DISTRO_ENGINE_DIR:-"/Users/ericcromartie/Documents/Development/Postiz Posting Agent"}
+API_URL=${OCEAN_MON_DISTRO_API_URL:-"http://127.0.0.1:3000"}
+BIN="$ENGINE_DIR/rust/mon-posting-agent/target/release/mon-posting-agent"
+
+usage() { sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; }
+
+# The binary expects cwd = engine repo root (data/queue.json, .env resolve
+# relative to it — it loads ./.env itself, so the courier never touches creds).
+need_bin() {
+  if [ ! -x "$BIN" ]; then
+    echo "engine binary not found: $BIN" >&2
+    echo "build it: (cd \"$ENGINE_DIR/rust/mon-posting-agent\" && cargo build --release)" >&2
+    exit 1
+  fi
+  cd "$ENGINE_DIR"
+}
+
+# Hit the live launchd service; localhost needs no token (per OPERATIONS.md).
+fetch() {
+  if ! out=$(curl -sf --max-time 10 "$API_URL$1"); then
+    echo "service unreachable at $API_URL$1 — is com.monrovia.mondistro.rust-serve running?" >&2
+    echo "check: launchctl list | grep mondistro" >&2
+    exit 1
+  fi
+  if command -v jq >/dev/null 2>&1; then
+    printf '%s\n' "$out" | jq .
+  else
+    printf '%s\n' "$out"
+  fi
+}
+
+cmd=${1:-}
+[ $# -gt 0 ] && shift
+
+case "$cmd" in
+  health) fetch /health ;;
+  status) fetch /status ;;
+  queue)
+    need_bin
+    exec "$BIN" check "$@" ;;
+  preview|upcoming|readiness)
+    need_bin
+    exec "$BIN" "$cmd" "$@" ;;
+  activity)
+    need_bin
+    # The engine's default --log assumes cwd=rust/mon-posting-agent; we run from
+    # the repo root, so inject the correct path unless the caller passed --log.
+    case " $* " in
+      *" --log "*) exec "$BIN" activity "$@" ;;
+      *)           exec "$BIN" activity --log data/logs/activity.jsonl "$@" ;;
+    esac ;;
+  verify-postiz)
+    need_bin
+    exec "$BIN" verify-postiz "$@" ;;
+  post-now)
+    # Latch: real posting (--enable-posting, incl. draft/schedule-in probes)
+    # requires the operator to have flipped the env latch first.
+    case " $* " in
+      *" --enable-posting "*)
+        if [ "${OCEAN_MON_DISTRO_ALLOW_POSTING:-0}" != "1" ]; then
+          echo "refused: --enable-posting needs OCEAN_MON_DISTRO_ALLOW_POSTING=1 (explicit operator latch)" >&2
+          exit 1
+        fi ;;
+    esac
+    need_bin
+    exec "$BIN" post-now "$@" ;;
+  ""|-h|--help|help)
+    usage ;;
+  *)
+    echo "unknown verb: $cmd (try: health|status|queue|preview|upcoming|readiness|activity|verify-postiz|post-now)" >&2
+    exit 1 ;;
+esac
