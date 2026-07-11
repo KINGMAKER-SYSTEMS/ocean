@@ -56,7 +56,7 @@ couriers/<name>/            assistants/<name>/
 | `assistants/creator-research` | assistant | `Creator Research Agent` | campaign target-list + proposal sheets (gws) |
 | `assistants/yt-prompt-bible` | assistant | `yt-longform-prompt-bible` | long-form format registry + QA contract |
 | `couriers/yt-clipper` | courier (agentic) | `youtube-clipping` | `ycp` autopilot; Slack QC gate |
-| `couriers/tt-uploader` | courier | `Auto Uploader (TT)` | TikTok Studio uploader; keep engine sovereign |
+| ~~`couriers/tt-uploader`~~ | courier | `Auto Uploader (TT)` | **retired 2026-07-11** — Eric declared the project dead; engine archived to `~/Projects/archive/Auto Uploader (TT)/` (ARCHIVED.md: history holds pre-redaction secrets, never push unscrubbed). Package removed from the hub; git history keeps it if ever revived |
 
 ## Wave 3 — when their build stabilizes
 

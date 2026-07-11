@@ -51,7 +51,6 @@ by command. Architecture: [`couriers/ARCHITECTURE.md`](couriers/ARCHITECTURE.md)
 | `/hopecore` | hopecore | agentic | pair earned-hope quotes with Mon Rovîa footage + music → one wave to Slack review, nothing auto-publishes (`/hopecore-status`) |
 | `/coremusic` | core-music-editor | agentic | one Core Core acoustic-reel edit wave — liminal montage over the performance spine → Slack review previews (`/coremusic-status`) |
 | `/ycp` | yt-clipper | agentic | one clip-factory autopilot pass — source → clip → Slack ✅ QC gate → scoreboard (`/ycp-scoreboard` = read-only) |
-| `/ttup` | tt-uploader | deterministic | read-first ops window into the TikTok auto-uploader — health, supervisor, heartbeat vs daily target, ledgers; never triggers uploads |
 
 Run `python3 couriers/hub/router.py list` for the live table (it reads the
 manifests, so this prose may lag — the router is authoritative).
