@@ -45,8 +45,8 @@ Two kinds of entry live side by side here:
 - **House surface profiles** — `SLACK/`, `CNVS/`, `MOBL/`, … — keyed by the Ocean
   surface flag. These hold *surface-wide* house rules (how to behave in Slack vs on
   a canvas vs on mobile) and apply to **any** assistant loaded on that surface.
-- **Named specialists** — `bonzai/`, and future `content-agent/`, … — a full agent
-  package (identity, harness, CLI, artifacts) bound to its own surface.
+- **Named specialists** — `bonzai/`, `content-agent/`, `prompt-lab/`, … — a full
+  agent package (identity, harness, CLI, artifacts) bound to its own surface.
 
 ## The shared-SOP pattern (`_shared/`, and the `_base/<SURFACE>/` direction)
 
@@ -97,8 +97,10 @@ edit the sources and re-run `compose_profile.py <SURFACE> --write` (CI gate:
 surfaces — `VOX`, `BRWSR`, `CNVS`, `MOBL` — so each one's house rules now live as
 `_base/<SURFACE>/*.md` sources and the published `assistants/<SURFACE>/system.md` is
 the composed output (which now also carries the `_shared/` core, prepended by the
-composer). The house invariants live **once** in `_shared/system.md`; no surface
-restates them. Per-surface section files follow a small shared vocabulary —
+composer). OCEAN-210 then authored the remaining five surfaces — `ACP`, `TUI`,
+`WEB`, `GUI`, `CLI` — born on the same pattern, so **all ten** house surfaces are
+now `_base/`-sourced and composed. The house invariants live **once** in
+`_shared/system.md`; no surface restates them. Per-surface section files follow a small shared vocabulary —
 `system.md` (role), `comms.md` (talk/format), `canvas.md` (rich/spatial rendering),
 `tools.md` (tool SOPs), `limits.md` (format/rate rules), `safety.md` (the
 surface-specific shape of the safety invariants), `vibe.md` (the closing) — composed
@@ -137,12 +139,17 @@ Then the drift gate keeps source and output in lockstep:
 | Surface flag | Profile / Assistant | Domain | Status |
 |---|---|---|---|
 | `[BONZAI]` | **bonzai** | git hygiene / worktree — prune branch sprawl safely; HTML triage board; enforce merge→main→delete | live (R3) |
-| `[SLACK]` | **SLACK** house profile | Slack-native comms (threads/DMs, mrkdwn not full Markdown, emoji-aware), canvas-rendering SOPs, inbound-only safety — the base every Slack assistant loads. Now sourced DRY from `_base/SLACK/{system,comms,canvas,limits}.md` via the composer; `SLACK/system.md` is the composed artifact | live (R5) |
+| `[SLACK]` | **SLACK** house profile | Slack-native comms (threads/DMs, mrkdwn not full Markdown, emoji-aware), canvas-rendering SOPs, inbound-only safety — the base every Slack assistant loads. Now sourced DRY from `_base/SLACK/{system,comms,canvas,limits}.md` via the composer; `SLACK/system.md` is the composed artifact | live (R3, DRY-sourced in OCEAN-80) |
 | `[SLACK]` | **content-agent** | conversational content-pipeline assistant: generate video, chat/Q&A, gallery/status, **prompt library** (crowned master prompt per format + top performers + page assignments, local SQLite harness), canvas rendering — calls the content-posting-lab API; identity + `SLACK/` overrides + `tools.toml` + pipeline SOPs + inbound `bridge/` — Socket Mode listener → daemon → threaded reply, plus the canvas consumer — all wired and live | live (Slack bridge; OCEAN-112/244/375; prompt-library OCEAN-80) |
 | `[CNVS]` | **CNVS** house profile | tldraw / spatial canvas — visual, durable artifacts; additive layout; confirm destructive board ops. Sourced DRY from `_base/CNVS/{system,canvas,vibe}.md`; `CNVS/system.md` is the composed artifact | live (R4 seed, OCEAN-89) |
 | `[MOBL]` | **MOBL** house profile | mobile / on-the-move — glanceable, voice-friendly, answer-first; defer bulky artifacts to richer surfaces. Sourced DRY from `_base/MOBL/{system,comms,vibe}.md`; `MOBL/system.md` is the composed artifact | live (R4 seed, OCEAN-89) |
 | `[VOX]` | **VOX** house profile | voice / hands-free (`leo-voice`) — spoken-clean output (no markdown/paths/code), answer-first, barge-in-aware brevity; defer bulky output to richer surfaces. Sourced DRY from `_base/VOX/{system,comms,safety,vibe}.md`; `VOX/system.md` is the composed artifact | live (R4, OCEAN-89) |
 | `[BRWSR]` | **BRWSR** house profile | browser / Chrome side panel (`surface-extension`) — docked, sees the live active tab (URL/title injected per OCEAN-70), browser-tool SOPs, narrow-panel brevity. Sourced DRY from `_base/BRWSR/{system,comms,tools,safety,vibe}.md`; `BRWSR/system.md` is the composed artifact | live (R4, OCEAN-89) |
+| `[ACP]` | **ACP** house profile | editor agent panel over the Agent Client Protocol (`acp-zed`, Zed canonical) — embedded pair programmer on the open repo. Sourced DRY from `_base/ACP/{system,comms,limits,vibe}.md`; `ACP/system.md` is the composed artifact | live (R5, OCEAN-210) |
+| `[TUI]` | **TUI** house profile | terminal cockpit — plain-text/basic-markdown transcript, sharp shell pairing. Sourced DRY from `_base/TUI/{system,comms,limits,vibe}.md`; `TUI/system.md` is the composed artifact | live (R5, OCEAN-210) |
+| `[WEB]` | **WEB** house profile | Ocean Surface browser PWA — richest render surface; Leptos components as task UI, not decoration. Sourced DRY from `_base/WEB/{system,comms,canvas,limits,vibe}.md`; `WEB/system.md` is the composed artifact | live (R5, OCEAN-210) |
+| `[GUI]` | **GUI** house profile | GPUI native desktop — spatial canvas (build via `surface_patch`) beside a compact chat lane. Sourced DRY from `_base/GUI/{system,comms,canvas,limits,vibe}.md`; `GUI/system.md` is the composed artifact | live (R5, OCEAN-210) |
+| `[CLI]` | **CLI** house profile | one-shot, non-interactive terminal tool — scriptable, do-the-work-print-the-result; the base under every CLI specialist below. Sourced DRY from `_base/CLI/{system,comms,limits,vibe}.md`; `CLI/system.md` is the composed artifact | live (R5, OCEAN-210) |
 | `[CLI]` | **prompt-lab** | video-prompt optimization lab — RATCHET bake-off rounds, LAWS audits, career-mean crowning of master prompts + modular composer feeding content-agent's prompt library; engine stays at its on-disk lab (`OCEAN_PROMPT_LAB_ENGINE_DIR`) | ported (wave 1) |
 | `[CLI]` | **voice-intake** | voice-memo intake — mlx-whisper GPU transcription → decipher → anchored, deduped tickets into Linear SALE/OUT/CAMP/CONT/OCEAN or GitHub Issues (rt-yt-substrate); SHA-ledger idempotent, two-track promote gate; engine's `GOAL-PROMPT.md` stays canonical | ported (wave 1) |
 | `[CLI]` | **creator-research** | campaign creator-research — builds/maintains the authoritative campaign Sheet (Target List, Rate Reference, Analytics, CPV Value Ranking), rate model + CPV rubric, locked roster (sombr: 327); engine stays at `OCEAN_CREATOR_RESEARCH_ENGINE_DIR` | ported (wave 2) |
@@ -151,23 +158,24 @@ Then the drift gate keeps source and output in lockstep:
 ## Phased delivery roadmap
 
 The surface taxonomy holds **ten** client surfaces plus the `[BONZAI]` specialist.
-We author real profiles in waves rather than stubbing all ten at once — generic
-seed consts in Ocean OS remain the graceful fallback for any surface not yet
-authored here.
+We authored real profiles in waves rather than stubbing all ten at once; as of
+OCEAN-210 **all ten are authored** — Ocean OS's generic seed consts remain the
+graceful fallback only when the assistants root itself isn't resolvable.
 
-- **R3 — current.** `bonzai` (git-hygiene specialist) + the **`SLACK`** house
+- **R3 — shipped.** `bonzai` (git-hygiene specialist) + the **`SLACK`** house
   profile (load-bearing: the content-agent Slack assistant depends on it). Slack is
   the first real conversational surface; its profile is complete per the design
   spec §4.
-- **R4 — current.** Flesh out **`CNVS`** (Slack/tldraw canvas rendering), **`MOBL`**
+- **R4 — shipped.** Flesh out **`CNVS`** (Slack/tldraw canvas rendering), **`MOBL`**
   (Ocean mobile app), **`VOX`** (`leo-voice` — hands-free voice agent), and
   **`BRWSR`** (`surface-extension` — browser/Chrome control surface). All four now
   ship real profiles: CNVS/MOBL as seeds, **VOX** (spoken-clean, barge-in-aware) and
   **`BRWSR`** (docked side panel, live-tab-aware, browser-tool SOPs) at full depth.
-- **R5 — later.** `ACP` (`acp-zed` editor control plane), `TUI` (terminal
-  cockpit), `WEB` (Ocean Surface PWA), `GUI` (GPUI native desktop), `CLI`. These
-  run on Ocean OS's built-in seed prompts today; they graduate to file-loaded
-  profiles here as each surface's behavior is worth specializing.
+- **R5 — shipped (OCEAN-210).** `ACP` (`acp-zed` editor control plane), `TUI`
+  (terminal cockpit), `WEB` (Ocean Surface PWA), `GUI` (GPUI native desktop), `CLI`.
+  These used to run on Ocean OS's built-in seed prompts — silently, whenever the
+  daemon found no `assistants/<DIR>/` for the surface. OCEAN-210 (wave-7 hygiene)
+  authored all five as `_base/`-sourced, composed profiles, closing that gap.
 
 **Adding an assistant or a surface = drop a folder with a `system.md`.** No router
 edits. The surface flag is assigned by Ocean OS; the behavior is authored here.

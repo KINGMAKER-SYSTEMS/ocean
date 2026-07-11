@@ -24,7 +24,7 @@ its compiled seed prompt — editable, hot-reconfigurable, no rebuild. The surfa
 | `[SLACK]` `[CLI]` | content-agent | conversational content-pipeline assistant — generate video, gallery/status, prompt library, canvas rendering |
 | `[CLI]` | prompt-lab | video-prompt optimization lab — RATCHET bake-off rounds, LAWS audits, crowned master prompts feeding content-agent's library |
 | `[CLI]` | voice-intake | voice memos → anchored, deduped tickets (Linear SALE/OUT/CAMP/CONT/OCEAN or GitHub Issues); SHA-ledger idempotent |
-| `[CLI]` | creator-research | campaign creator-research — authoritative campaign Sheet (Target List, Rate Reference, Analytics, CPV ranking); locked roster, no invented metrics |
+| `[CLI]` | creator-research | campaign creator-research — authoritative campaign Sheet (Target List, Rate Reference, Analytics, Value Ranking by CPV); locked roster, no invented metrics |
 | `[CLI]` | yt-prompt-bible | long-form YouTube format registrar — 10 hardened master-prompt formats, channel kits by codename, 11-section contract + anti-slop QA |
 
 More surfaces to come (content tab, campaign-booking tab, finances section — each

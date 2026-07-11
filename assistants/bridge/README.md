@@ -96,20 +96,18 @@ SSE connection. Run it with `python3 assistants/bridge/canvas_consumer.py run`
 (needs a running daemon + the same `xoxb-` bot token the transport resolves), or
 `… describe` for a no-I/O JSON self-description of the contract.
 
-**Two honest cross-repo caveats** (verified against ocean-os `main`, 2026-06):
+**Cross-repo status** (verified against ocean-os `main`, 2026-06; OCEAN-375):
+both halves of the seam are now **live** on ocean-os `main`.
 
-1. **The daemon doesn't yet relay `slack_canvas` on the SSE wire.** The OCEAN-214
-   runtime emits the op onto its internal bus, but the daemon's event bridge
-   drops it on a `_ => {}` catch-all — there is no `AgentTurnEvent::SlackCanvas`
-   variant on `main` (the #165 PR that adds it is not merged to `main`). Until
-   that lands, `canvas_consumer.run()` connects and waits but receives no canvas
-   events. The consumer is built to the documented contract and is correct the
-   moment ocean-os lands its half.
-2. **No fulfillment-return endpoint is mounted on the daemon.**
-   `deliver_fulfillment()` POSTs to the documented seam and **fail-softs on 404**
-   (logs, never crashes), so the code is inert-but-ready. The Slack-side effect
-   of mutating ops (create/update/append) is already live regardless; only the
-   read/list *awareness* round-trip depends on this route.
+1. **The daemon relays `slack_canvas` on the SSE wire.** The OCEAN-214 runtime's
+   canvas ops reach this consumer via a dedicated `AgentTurnEvent::SlackCanvas`
+   relay arm (landed via the OCEAN-235/#165 seam).
+2. **The fulfillment-return endpoint is mounted** at `/v1/agent/canvas/fulfill`
+   (overridable via `OCEAN_CANVAS_FULFILL_PATH`), so `deliver_fulfillment()`
+   posts the bridged read/list result back and the agent's `pending_bridge`
+   placeholder resolves to real content. It still **fail-softs on 404** or an
+   unreachable daemon (logs, never crashes), so the consumer degrades gracefully
+   against an older daemon build.
 
 **Slack read caveat (not a bug, an API limit):** Slack exposes **no** endpoint
 that returns a canvas's raw markdown body. `read_canvas` returns what the public
@@ -295,6 +293,7 @@ Copy `bridge.env.example` → `bridge.env` (gitignored) and fill it in.
 | `OCEAN_SLACK_TOKEN_FILE` | `~/.slack_token` | Fallback bot-token file if neither env var is set. |
 | `OCEAN_DAEMON_TIMEOUT` | `300` | Per-turn daemon timeout (s) — reused from the OCEAN-84 router. |
 | `OCEAN_DAEMON_MAX_TRIES` | `3` | Daemon transient-retry count. |
+| `OCEAN_CANVAS_FULFILL_PATH` | `/v1/agent/canvas/fulfill` | Where `canvas_consumer.py` POSTs bridged read/list results back to the daemon. |
 | `OCEAN_LOG_LEVEL` | `INFO` | Listener log verbosity. |
 
 > **Token resolution order (outbound, first hit wins):**

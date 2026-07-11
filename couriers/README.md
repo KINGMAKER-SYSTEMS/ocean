@@ -19,22 +19,39 @@ stdlib (no `slack_sdk`/`requests`/curl). Owns: token resolution, link parsing
 (`/archives/C…`, `?thread_ts=…&cid=…`, raw id), `auth.test`/`conversations.info`,
 message posting, the modern 3-step file upload
 (`getUploadURLExternal` → PUT bytes → `completeUploadExternal`), rate-limit +
-transient retry, channel threading, and an experimental canvas create. Every
-courier species imports this; none reimplements Slack.
+transient retry, channel threading, and canvas ops (create / edit
+replace-append-prepend / best-effort read / list). Every courier species
+imports this; none reimplements Slack.
 
-> Prior route: Telegram. Parked under [`transport/parked/`](transport/parked) —
-> the transport shape is identical if it ever needs to come back.
+> Prior route: Telegram — retired. [`transport/parked/`](transport/parked) is
+> the archive slot for retired routes; the transport shape is identical if one
+> ever needs to come back.
 
 ## Species
 
-| Courier | Ships | Entry |
+| Courier | Mode | Ships |
 |---|---|---|
-| [`file-courier`](file-courier) | files from a dropbox folder + text messages; deletes files on confirmed upload | `file-courier/bin/courier` |
+| [`file-courier`](file-courier) | deterministic | files from a dropbox folder + text messages; deletes files on confirmed upload |
+| [`sound-watcher`](sound-watcher) | deterministic | Warner Audio Tracking Sheet sweeps → Slack canvases + one roll-up ping |
+| [`pr-babysitter`](pr-babysitter) | agentic | one unattended PR-maintenance pass — fix CI/conflicts, merge safe, report |
+| [`mon-email-watcher`](mon-email-watcher) | deterministic | Mon Rovîa Gmail sweeps → Calendar markers + Slack drafts |
+| [`mon-distro`](mon-distro) | deterministic | read-first ops window into the Mon Rovia evergreen distro engine |
+| [`uiau`](uiau) | deterministic | Us In Another Universe engine — scrape viral clips, cook 9:16 montages to Slack review |
+| [`folk-edit`](folk-edit) | agentic | one Stillness wave — moment-select → cut → mantra → Slack review gate |
+| [`hopecore`](hopecore) | agentic | earned-hope quotes + Mon Rovîa footage + music → one wave to Slack review |
+| [`core-music-editor`](core-music-editor) | agentic | one Core Core acoustic-reel edit wave → Slack review previews |
+| [`yt-clipper`](yt-clipper) | agentic | clip-factory autopilot pass — source → clip → Slack QC gate → scoreboard |
+| [`tt-uploader`](tt-uploader) | deterministic | read-first ops window into the TikTok auto-uploader |
+
+Every species' entry is `bin/courier` (declared in its `courier.toml`). Run
+`python3 hub/router.py list` for the live slash-command registry — the router
+reads the manifests, so this table may lag.
 
 ## Adding a courier species
 
-1. Create `couriers/<name>/` with its own `CLAUDE.md` (operating protocol) +
-   entry point.
+1. Create `couriers/<name>/` with a `courier.toml` manifest (the router
+   discovers it — no router edits), its own `CLAUDE.md` (operating protocol),
+   and an entry point (`bin/courier` by convention).
 2. `import slack` from `../transport` — use `Slack.post_message` / `upload_file`
    / `call`. Do not hand-roll API calls.
 3. Keep the species focused on *what* to ship and *how to confirm*; the route
@@ -44,6 +61,7 @@ courier species imports this; none reimplements Slack.
 
 Token resolution (first hit wins): `$OCEAN_SLACK_BOT_TOKEN` → `$SLACK_BOT_TOKEN`
 → file at `$OCEAN_SLACK_TOKEN_FILE` (default `~/.slack_token`). Bot token
-(`xoxb-…`) needs `chat:write`, `files:write`, and a channel read scope. Put
+(`xoxb-…`) needs `chat:write`, `files:write`, a channel read scope, and
+`canvases:write` if the species publishes canvases. Put
 shared config in `couriers/courier.env` (gitignored); a species may override in
 its own `courier.env`.

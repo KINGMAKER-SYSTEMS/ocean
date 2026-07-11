@@ -18,7 +18,7 @@ out, over the shared Slack route).
 |---|---|---|---|
 | **Intake** | Slack slash-command front door: `/ocean <command> [args]` over the Socket Mode bridge — 3-sec ack, async dispatch, reply via `response_url` | [`../assistants/bridge/slash_intake.py`](../assistants/bridge/slash_intake.py) | ✅ built |
 | **Router** | `slash → courier` table from manifests; dispatch deterministic vs agentic | [`hub/router.py`](hub/router.py) | ✅ built |
-| **Couriers** | single-purpose agents; each a manifest + protocol + harness | `<courier>/` | file-courier ✅ |
+| **Couriers** | single-purpose agents; each a manifest + protocol + harness | `<courier>/` | 11 packages ✅ (`router.py list`) |
 | **Route** | shared transport the couriers ship over | [`transport/slack.py`](transport/slack.py) | ✅ built |
 | **Daemon** | always-on Ocean runtime; spawns agentic couriers | `ocean-daemon` (`:4780`) | ✅ exists |
 
@@ -45,6 +45,10 @@ Declared per courier in its `courier.toml`:
   mechanical jobs like `file-courier /ship`. Fast, cheap, bulletproof.
 - **agentic** — the router POSTs a scoped prompt; a daemon agent applies judgment
   (e.g. a Slingshot-style discover → rank → format → deliver), driving its harness.
+  The router folds the Slack thread key (`slack:<courier>:<channel>:<thread_ts|dm>`)
+  into a deterministic UUIDv5 `session_id` so a thread resumes one daemon session,
+  retries transient daemon failures, and posts the agent's reply back over the
+  Slack route.
 
 ## Manifest schema (`<courier>/courier.toml`)
 
