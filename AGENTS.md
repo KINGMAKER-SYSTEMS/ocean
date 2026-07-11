@@ -24,6 +24,8 @@ its compiled seed prompt — editable, hot-reconfigurable, no rebuild. The surfa
 | `[SLACK]` `[CLI]` | content-agent | conversational content-pipeline assistant — generate video, gallery/status, prompt library, canvas rendering |
 | `[CLI]` | prompt-lab | video-prompt optimization lab — RATCHET bake-off rounds, LAWS audits, crowned master prompts feeding content-agent's library |
 | `[CLI]` | voice-intake | voice memos → anchored, deduped tickets (Linear SALE/OUT/CAMP/CONT/OCEAN or GitHub Issues); SHA-ledger idempotent |
+| `[CLI]` | creator-research | campaign creator-research — authoritative campaign Sheet (Target List, Rate Reference, Analytics, CPV ranking); locked roster, no invented metrics |
+| `[CLI]` | yt-prompt-bible | long-form YouTube format registrar — 10 hardened master-prompt formats, channel kits by codename, 11-section contract + anti-slop QA |
 
 More surfaces to come (content tab, campaign-booking tab, finances section — each
 a surface an agent specializes into).
@@ -44,6 +46,12 @@ by command. Architecture: [`couriers/ARCHITECTURE.md`](couriers/ARCHITECTURE.md)
 | `/babysit` | pr-babysitter | agentic | one unattended PR-maintenance pass over open PRs — fix CI/conflicts, merge safe, report (`/babysit-status` = read-only) |
 | `/monmail` | mon-email-watcher | deterministic | Mon Rovîa Gmail sweep → Calendar markers + Slack drafts (`/monmail-preview` = dry-run) |
 | `/distro` | mon-distro | deterministic | read-first ops window into the Mon Rovia evergreen distro engine — health, queue, upcoming; posting double-latched |
+| `/uiau` | uiau | deterministic | drive the Us In Another Universe engine — scrape viral clips, cook 9:16 Mon Rovia montages to Slack for delete-to-curate review |
+| `/folkedit` | folk-edit | agentic | one Stillness wave — moment-select → phrase-complete cut → five-word mantra → staged at the Slack review gate (`/folkedit-deliver`, `/folkedit-status`) |
+| `/hopecore` | hopecore | agentic | pair earned-hope quotes with Mon Rovîa footage + music → one wave to Slack review, nothing auto-publishes (`/hopecore-status`) |
+| `/coremusic` | core-music-editor | agentic | one Core Core acoustic-reel edit wave — liminal montage over the performance spine → Slack review previews (`/coremusic-status`) |
+| `/ycp` | yt-clipper | agentic | one clip-factory autopilot pass — source → clip → Slack ✅ QC gate → scoreboard (`/ycp-scoreboard` = read-only) |
+| `/ttup` | tt-uploader | deterministic | read-first ops window into the TikTok auto-uploader — health, supervisor, heartbeat vs daily target, ledgers; never triggers uploads |
 
 Run `python3 couriers/hub/router.py list` for the live table (it reads the
 manifests, so this prose may lag — the router is authoritative).

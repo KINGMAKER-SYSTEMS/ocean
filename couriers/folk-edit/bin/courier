@@ -1,0 +1,145 @@
+#!/bin/sh
+# Ocean folk-edit (Stillness route) — thin wrapper over the standalone engine.
+# Usage:
+#   courier run --stillness [--vision] [--no-deliver]   # exec factory/reel_pipeline.py via the Lab venv
+#   courier status                                      # read-only: batch + board + Drive-mirror summary
+#   courier where                                       # resolved engine dir / venv python / factory paths
+#
+# The engine (the Mon Rovia folk edit agent) already runs in production. This
+# wrapper only adds an on-demand path into it: it execs the engine's own
+# pipeline and NEVER touches the engine's state, docs, or the mon-sync cron.
+# Stage run:   courier run --stillness --vision --no-deliver   (the review gate)
+# Deliver run: courier run --stillness                         (after human review)
+set -eu
+
+HERE=$(cd "$(dirname "$0")" && pwd)
+PKG=$(cd "$HERE/.." && pwd)
+COURIERS=$(cd "$PKG/.." && pwd)
+
+# Load env if present — never committed. Shared class-level env first, then
+# package-level overrides it (same convention as the other couriers).
+set -a
+[ -f "$COURIERS/courier.env" ] && . "$COURIERS/courier.env"
+[ -f "$PKG/courier.env" ] && . "$PKG/courier.env"
+set +a
+
+# Engine dir contains spaces — keep it quoted everywhere.
+ENGINE_DIR="${OCEAN_FOLK_EDIT_ENGINE_DIR:-/Users/ericcromartie/Documents/Development/mon rovia folk edit agent}"
+FACTORY="$ENGINE_DIR/factory"
+PIPELINE="$FACTORY/reel_pipeline.py"
+# The Lab venv carries PIL / cv2 / numpy / google-genai (per the engine docs).
+LAB_PY="${OCEAN_FOLK_EDIT_PYTHON:-$HOME/Projects/active/content-posting-lab/venv/bin/python}"
+
+if [ "$#" -gt 0 ]; then cmd="$1"; shift; else cmd=""; fi
+
+case "$cmd" in
+  run)
+    if [ ! -f "$PIPELINE" ]; then
+      echo "engine pipeline not found: $PIPELINE" >&2
+      echo "set OCEAN_FOLK_EDIT_ENGINE_DIR (see courier.env.example)" >&2
+      exit 1
+    fi
+    if [ ! -x "$LAB_PY" ]; then
+      echo "Lab venv python not found or not executable: $LAB_PY" >&2
+      echo "set OCEAN_FOLK_EDIT_PYTHON (see courier.env.example)" >&2
+      exit 1
+    fi
+    if [ "$#" -eq 0 ]; then
+      echo "refusing an argless run: reel_pipeline.py with no flags would run the" >&2
+      echo "RETIRED hook-bank format AND deliver to Slack immediately." >&2
+      echo "  stage (review gate): courier run --stillness --vision --no-deliver" >&2
+      echo "  deliver (reviewed):  courier run --stillness" >&2
+      exit 1
+    fi
+    case " $* " in
+      *" --stillness "*) : ;;
+      *)
+        echo "refusing: --stillness is required (the hook-bank era is retired;" >&2
+        echo "the locked Stillness spec is the only live format)." >&2
+        exit 1
+        ;;
+    esac
+    # The engine owns the whole wave: Gemini seeding (--vision), phrase-complete
+    # Mon-present cuts, render, board state, Slack delivery + Drive mirror
+    # (unless --no-deliver). Just exec it from the factory dir, per its docs.
+    cd "$FACTORY"
+    exec "$LAB_PY" "$PIPELINE" "$@"
+    ;;
+  status)
+    echo "engine : $ENGINE_DIR"
+    if [ ! -d "$FACTORY" ]; then
+      echo "factory dir not found: $FACTORY (set OCEAN_FOLK_EDIT_ENGINE_DIR)" >&2
+      exit 1
+    fi
+    # Read-only summary of the engine's own state files (stdlib json only —
+    # no Lab venv needed to look).
+    python3 - "$FACTORY" <<'PY'
+import json, os, sys
+
+fac = sys.argv[1]
+
+def load(name):
+    p = os.path.join(fac, name)
+    if not os.path.exists(p):
+        return None
+    try:
+        return json.load(open(p))
+    except Exception as e:
+        print(f"{name}: unreadable ({e})")
+        return None
+
+batch = load("batch.json")
+if isinstance(batch, list) and batch:
+    seeded = sum(1 for c in batch if c.get("vision_reason"))
+    tag = f"{seeded}/{len(batch)} vision-seeded" if seeded else "interval-seeded (no vision_reason — verify Gemini ran)"
+    print(f"batch  : {len(batch)} clip(s) staged ({tag})")
+    for c in batch[:8]:
+        why = (c.get("vision_reason") or "").strip()
+        why = f' — "{why[:70]}"' if why else ""
+        print(f"         {c.get('id','?'):<12} {c.get('song','?')}{why}")
+    if len(batch) > 8:
+        print(f"         … +{len(batch) - 8} more")
+else:
+    print("batch  : none staged (batch.json missing/empty)")
+
+state = load("state.json")
+if isinstance(state, dict):
+    tickets = state.get("tickets") or []
+    by = {}
+    for t in tickets:
+        by[t.get("state", "?")] = by.get(t.get("state", "?"), 0) + 1
+    cols = state.get("cols") or sorted(by)
+    parts = [f"{c}={by.get(c, 0)}" for c in cols]
+    print(f"board  : {len(tickets)} ticket(s)  " + "  ".join(parts))
+else:
+    print("board  : no state.json yet")
+
+man = load("sync_manifest.json")
+if isinstance(man, list):
+    print(f"drive  : {len(man)} reel(s) mirrored (sync_manifest.json)")
+    for m in man[-3:]:
+        print(f"         {m.get('drive_name', '?')}")
+else:
+    print("drive  : no sync manifest yet")
+
+if os.path.exists(os.path.join(fac, "loop_state.json")):
+    print("loop   : ralph-loop archive present (DONE at wave 9 — never restart)")
+PY
+    ;;
+  where)
+    if [ -f "$PIPELINE" ]; then pipe_ok="(ok)"; else pipe_ok="(MISSING)"; fi
+    if [ -x "$LAB_PY" ]; then py_ok="(ok)"; else py_ok="(MISSING)"; fi
+    echo "engine dir : $ENGINE_DIR"
+    echo "factory    : $FACTORY"
+    echo "pipeline   : $PIPELINE $pipe_ok"
+    echo "lab python : $LAB_PY $py_ok"
+    echo "canon docs : $ENGINE_DIR/CLAUDE.md + OPERATOR-PROMPT.md + factory/GOAL-stillness.md"
+    ;;
+  ""|-h|--help|help)
+    sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+    ;;
+  *)
+    echo "unknown subcommand: $cmd (try: run | status | where)" >&2
+    exit 1
+    ;;
+esac

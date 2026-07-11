@@ -1,0 +1,100 @@
+# Courier manifest — the routing contract for this courier.
+# The hub router (../hub/router.py) reads every courier.toml to build the
+# slash-command → courier table.
+#
+# This courier is a *package* over a standalone engine that already runs in
+# production (the Mon Rovia folk edit agent — "The Stillness Page" content
+# engine). The engine, its docs, and its state stay untouched; this manifest
+# adds identity + an on-demand path into it. The engine's own CLAUDE.md and
+# OPERATOR-PROMPT.md remain canonical — this package defers to them.
+
+name = "folk-edit"
+description = "The Stillness Page content engine — Mon Rovia live footage → Gemini moment selection → phrase-complete cut → fixed five-word mantra → Slack review gate (#mon-rovia-edits) → Drive mirror."
+
+# agentic = the router POSTs a scoped prompt to the Ocean daemon with
+# cwd = this dir; the daemon agent loads CLAUDE.md here and drives bin/courier.
+# Curation requires taste judgment (the evidence-ranked hierarchy in the
+# engine's OPERATOR-PROMPT.md), so this can never be a deterministic exec.
+mode = "agentic"
+
+# Harness the agent drives (agentic couriers don't get exec'd by the router,
+# but the entry is still the canonical way in).
+entry = "bin/courier"
+
+[[commands]]
+slash = "/folkedit"
+summary = "Run one Stillness wave up to the review gate (stage only — never delivers)"
+usage = "/folkedit"
+prompt = """
+You are the folk-edit courier — the taste layer over The Stillness Page engine.
+Before acting, load the operating protocol in this directory's CLAUDE.md and
+follow it exactly; the engine's own CLAUDE.md and OPERATOR-PROMPT.md (in the
+engine dir — `bin/courier where` shows it) are canonical and override anything
+here. Run ONE production wave UP TO the review gate by driving the harness —
+do not hand-roll ffmpeg/whisper/Gemini calls:
+
+1. `bin/courier status` — ground in current truth: staged batch, board state,
+   Drive-mirror count. If a batch is already staged and awaiting review, report
+   that and stop — do not stage over an unreviewed wave.
+2. Confirm source footage + whisper transcripts are staged in
+   /tmp/monrovia-lab/ (the engine's CLAUDE.md "How to ship a wave" covers
+   harvest). If nothing is staged, report that footage supply is the blocker
+   and stop — do not rip sources on your own initiative.
+3. `bin/courier run --stillness --vision --no-deliver` — Gemini watches,
+   phrase_window snaps the cuts, renders stage to the board. This is the
+   review gate; NOTHING is delivered.
+4. Verify vision actually ran (the pipeline fails OPEN to blind intervals):
+   batch.json entries must carry vision_reason. Flag any effort-register
+   reasons (powerful / intense / stamina / passionate / charged / build-up /
+   belting) — the taste hierarchy kills those at review.
+5. Report what's staged: clip ids, songs, vision reasons, any kill-list flags.
+   Tell the operator to eyeball the board stills, then explicitly run
+   /folkedit-deliver when satisfied.
+
+Hard rules (absolute): NEVER pass a delivering invocation from this command —
+`--no-deliver` always. Never vary the mantra, type spec, or framing. Never run
+wipe_all.py. Never restart the ralph loop. Nothing auto-publishes, ever.
+"""
+
+[[commands]]
+slash = "/folkedit-deliver"
+summary = "Deliver the reviewed, already-staged wave to #mon-rovia-edits + Drive mirror"
+usage = "/folkedit-deliver"
+prompt = """
+You are the folk-edit courier in delivery mode. Load this directory's
+CLAUDE.md first; the engine's CLAUDE.md + OPERATOR-PROMPT.md stay canonical.
+This command exists ONLY for a wave the operator has already reviewed on the
+board (staged via /folkedit). The operator invoking this command IS the
+explicit go — but verify before shipping:
+
+1. `bin/courier status` — confirm a staged batch exists and the board shows
+   rendered clips awaiting review. If there is no staged batch, report that
+   and stop; never render-and-deliver from scratch in one breath.
+2. Confirm with the operator (read back): clip count, ids, songs, and that
+   they spot-checked the stills. Slack #mon-rovia-edits is a shared channel.
+3. `bin/courier run --stillness` — reuses the just-staged batch.json + cached
+   renders (no second Gemini pass), delivers to Slack, mirrors to Drive.
+4. Report: what shipped, Slack/Drive results, anything that failed. Remind the
+   operator that curating the channel curates the feed (Slack delete prunes
+   Drive within ~10 min).
+
+Hard rules (absolute): never deliver a wave that was not first staged and
+reviewed. Never vary the mantra or format. Never run wipe_all.py. Delivery to
+Slack is the human curation surface — it is NOT publishing; no auto-poster
+runs from here.
+"""
+
+[[commands]]
+slash = "/folkedit-status"
+summary = "Report engine state (read-only — renders nothing, delivers nothing)"
+usage = "/folkedit-status"
+prompt = """
+You are the folk-edit courier in read-only mode. Load this directory's
+CLAUDE.md for context, then run `bin/courier status` ONLY — never
+`bin/courier run`, no renders, no deliveries, no writes to the engine.
+Summarize for the operator: what's in the staged batch (and whether it's
+vision-seeded), the board's ticket states, how many reels are mirrored to
+Drive, and whether anything is awaiting review. If footage supply is the
+blocker (empty batch, no staged sources), say so plainly — that is the
+project's real bottleneck.
+"""

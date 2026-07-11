@@ -145,6 +145,8 @@ Then the drift gate keeps source and output in lockstep:
 | `[BRWSR]` | **BRWSR** house profile | browser / Chrome side panel (`surface-extension`) — docked, sees the live active tab (URL/title injected per OCEAN-70), browser-tool SOPs, narrow-panel brevity. Sourced DRY from `_base/BRWSR/{system,comms,tools,safety,vibe}.md`; `BRWSR/system.md` is the composed artifact | live (R4, OCEAN-89) |
 | `[CLI]` | **prompt-lab** | video-prompt optimization lab — RATCHET bake-off rounds, LAWS audits, career-mean crowning of master prompts + modular composer feeding content-agent's prompt library; engine stays at its on-disk lab (`OCEAN_PROMPT_LAB_ENGINE_DIR`) | ported (wave 1) |
 | `[CLI]` | **voice-intake** | voice-memo intake — mlx-whisper GPU transcription → decipher → anchored, deduped tickets into Linear SALE/OUT/CAMP/CONT/OCEAN or GitHub Issues (rt-yt-substrate); SHA-ledger idempotent, two-track promote gate; engine's `GOAL-PROMPT.md` stays canonical | ported (wave 1) |
+| `[CLI]` | **creator-research** | campaign creator-research — builds/maintains the authoritative campaign Sheet (Target List, Rate Reference, Analytics, CPV Value Ranking), rate model + CPV rubric, locked roster (sombr: 327); engine stays at `OCEAN_CREATOR_RESEARCH_ENGINE_DIR` | ported (wave 2) |
+| `[CLI]` | **yt-prompt-bible** | long-form YouTube format registrar — 10 hardened master-prompt formats for faceless animation channels; spawn channel kits by codename, deconstruct→QA→promote new formats, enforce the 11-section contract + 10 anti-slop rules; engine stays at `OCEAN_YT_PROMPT_BIBLE_ENGINE_DIR` | ported (wave 2) |
 
 ## Phased delivery roadmap
 

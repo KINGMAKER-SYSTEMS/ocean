@@ -45,7 +45,7 @@ couriers/<name>/            assistants/<name>/
 | `assistants/prompt-lab` | assistant | agentic | `~/Documents/Development/prompting agent` | video-prompt evolution lab; crowns masters that feed content-agent's prompt library |
 | `assistants/voice-intake` | assistant | agentic | `~/Documents/Development/Voice Memos To Do` | voice memos → anchored tickets (Linear/GitHub); mlx-whisper harness |
 
-## Wave 2 — next
+## Wave 2 — ported (2026-07-10)
 
 | Package | Class | Source | Notes |
 |---|---|---|---|

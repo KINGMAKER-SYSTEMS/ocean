@@ -1,0 +1,71 @@
+#!/bin/sh
+# Ocean yt-clipper courier — thin wrapper over the youtube-clipping engine's
+# `ycp` CLI (Python venv, non-editable install; SQLite DB is the source of truth).
+# Usage:
+#   courier scoreboard [--demo]        # read-only: Race-to-$15K game state from the DB
+#   courier autopilot [flags...]       # one full daily pass: source → clip → qc → capture → brief → scoreboard
+#                                      #   flags pass through: --max-videos N | --skip-source | --no-clip | --no-hook
+#   courier where                      # resolved engine dir + venv sanity check
+#
+# Posting stays behind the engine's own gates: the Slack ✅ QC gate (qc.auto:
+# false — Eric approves every clip) and distribution.enabled in its config.
+# This wrapper never touches either.
+set -eu
+
+HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+PKG=$(CDPATH= cd -- "$HERE/.." && pwd)
+COURIERS=$(CDPATH= cd -- "$PKG/.." && pwd)
+
+# Local config (never committed): shared class-level env first, then the
+# package-level file overrides it. Same convention as file-courier.
+set -a
+[ -f "$COURIERS/courier.env" ] && . "$COURIERS/courier.env"
+[ -f "$PKG/courier.env" ] && . "$PKG/courier.env"
+set +a
+
+ENGINE_DIR=${OCEAN_YT_CLIPPER_ENGINE_DIR:-/Users/ericcromartie/Documents/Development/youtube-clipping}
+PY="$ENGINE_DIR/.venv/bin/python"
+
+usage() { sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; }
+
+# ycp resolves config/, data/, and its own .env from the engine repo root —
+# always run from there (the engine's cron wrapper does the same).
+need_engine() {
+  if [ ! -x "$PY" ]; then
+    echo "engine venv not found: $PY" >&2
+    echo "set it up: (cd \"$ENGINE_DIR\" && ./scripts/setup.sh)" >&2
+    exit 1
+  fi
+  cd "$ENGINE_DIR"
+}
+
+cmd=${1:-}
+[ $# -gt 0 ] && shift
+
+case "$cmd" in
+  scoreboard)
+    need_engine
+    exec "$PY" -m ycp scoreboard "$@" ;;
+  autopilot)
+    need_engine
+    # DeepSeek key for the hook agent — same runtime 1Password resolution the
+    # engine's own scripts/autopilot.sh does. Never lands on disk; if absent,
+    # the engine falls back to its transcript heuristic.
+    if [ -z "${DEEPSEEK_API_KEY:-}" ] && [ -n "${DEEPSEEK_OP_REF:-}" ] && command -v op >/dev/null 2>&1; then
+      DEEPSEEK_API_KEY=$(op read "$DEEPSEEK_OP_REF" 2>/dev/null || true)
+      export DEEPSEEK_API_KEY
+    fi
+    exec "$PY" -m ycp autopilot "$@" ;;
+  where)
+    printf 'engine: %s\n' "$ENGINE_DIR"
+    if [ -x "$PY" ]; then
+      printf 'venv:   %s (ok)\n' "$PY"
+    else
+      printf 'venv:   %s (MISSING — run ./scripts/setup.sh in the engine)\n' "$PY"
+    fi ;;
+  ""|-h|--help|help)
+    usage ;;
+  *)
+    echo "unknown verb: $cmd (try: scoreboard | autopilot | where)" >&2
+    exit 1 ;;
+esac

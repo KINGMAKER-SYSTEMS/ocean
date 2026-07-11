@@ -1,0 +1,56 @@
+# creator-research — CLI surface tool configuration.
+#
+# Grants creator-research's tools on the [CLI] surface (terminal / Claude-Code-
+# style clients). Same self-learning contract as the other assistants' tools.toml:
+# this is DATA — an operator grants a capability by editing it and resetting the
+# agent (fresh session_id), no rebuild. The engine stays in place; nothing is
+# forked.
+
+[agent]
+name = "creator-research"
+surface = "CLI"
+reset = "new-session"
+
+# Built-in runtime tools allowed on the CLI surface.
+[builtin]
+read  = true   # engine docs + evidence: HANDOFF.md, views_cache.json, handles.json
+write = true   # ingest outputs, cache updates driven through the engine scripts
+grep  = true   # search handles, cache entries, run outputs
+glob  = true   # locate run outputs, cache files, engine scripts
+bash  = true   # drive the gws CLI + the engine's build/ingest scripts
+
+# The research engine — scripts + data, in place at $OCEAN_CREATOR_RESEARCH_ENGINE_DIR.
+# Reference, never fork; the campaign Sheet is the deliverable, the engine is how
+# it's built. All scripts idempotent — run from the engine dir.
+[tool.engine]
+kind        = "engine"
+dir_env     = "OCEAN_CREATOR_RESEARCH_ENGINE_DIR"
+dir_default = "/Users/ericcromartie/Documents/Development/Creator Research Agent"
+summary     = "Build/refresh the campaign Sheet (Target List + Rate Reference + Analytics + Value Ranking), apply the rate model, ingest view scrapes, rank by CPV."
+commands = [
+  "python3 build_sheet2.py",                        # merge creator runs (dedup by handle), apply rate model → Target List + Rate Reference
+  "python3 build_analytics.py",                     # Target List → Analytics tab + 5 native charts
+  "python3 build_value_rank.py",                    # Target List + views_cache.json → Value Ranking tab (CPV + Value Score)
+  "python3 ingest_views.py <workflow_output>",      # parse a scrape run into views_cache.json (basis 'scraped')
+  "cd rust/creator-research-readonly && cargo run -- handles --json",  # read-only inspector: handles | cache | ingest-preview | parse
+]
+# Views priority baked into the builds: observed > scraped > est (follower-based).
+# build_sheet.py is the superseded v1; enrich_views.py is DEPRECATED for views.
+docs = ["HANDOFF.md", "AGENTS.md"]
+data = ["handles.json", "views_cache.json", "sombr_result.json"]
+
+# gws CLI — all Google Sheets writes go through it (local install, keyring-authed;
+# no credential env needed here). Gotcha: it prints a "keyring" line to stderr —
+# pipe JSON with 2>/dev/null; quote ranges with spaces ('Target List'!A1).
+[tool.gws]
+kind    = "cli"
+bin     = "gws"
+summary = "Google Sheets reads/writes for the campaign Sheet (the engine scripts wrap it; direct calls for spot reads)."
+
+# Perplexity API — RATE BENCHMARKS ONLY (proven useless for per-creator views:
+# 0/327). Env NAME only; the value resolves from 1Password at runtime and is
+# never echoed. Model: sonar-pro.
+[api.perplexity]
+base_url    = "https://api.perplexity.ai"
+api_key_env = "PERPLEXITY_API_KEY"
+scope       = "rate-benchmarks-only"
