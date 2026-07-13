@@ -20,6 +20,7 @@ its compiled seed prompt — editable, hot-reconfigurable, no rebuild. The surfa
 
 | Surface | Assistant | Domain |
 |---|---|---|
+| `[TUI]` | house profile | terminal-native engineering with markdown plus bounded render-protocol component projections |
 | `[BONZAI]` | bonzai | git hygiene — prune branch sprawl safely, HTML triage board, enforce merge→main→delete |
 | `[SLACK]` `[CLI]` | content-agent | conversational content-pipeline assistant — generate video, gallery/status, prompt library, canvas rendering |
 | `[CLI]` | prompt-lab | video-prompt optimization lab — RATCHET bake-off rounds, LAWS audits, crowned master prompts feeding content-agent's library |

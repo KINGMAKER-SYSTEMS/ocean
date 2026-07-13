@@ -138,3 +138,18 @@ POST /v1/voice/realtime/client-secret, with a note that the surface proxy's
 /api/stt and /api/tts forward to the daemon and the browser Realtime client
 mints its ephemeral secret via the daemon; provider keys resolve only inside
 ocean-os.
+_________________________________________________________________________________
+
+time:      [07:10pm] [13-07-26]
+agent:     [pi], [gpt-5.2-pro]
+worktree:  [main]
+type:      [bug report]: teach TUI assistants the live component projection contract
+area:      [agent-building]: composed terminal surface profile
+
+Replaced the obsolete blanket rich-component prohibition in the authored TUI profile with the live terminal projection contract. TUI assistants may now use callout, progress, stat, chart, timeline, table, code, diff, file tree, gallery, and confirm components with bounded props and correct lifecycle handling, while arbitrary HTML, maps, canvas layouts, and unsupported web forms remain excluded. Re-composed the published TUI system profile from its base sources.
+
+Verification:
+- `python3 assistants/tools/compose_profile.py --check TUI`
+- `python3 -m py_compile assistants/tools/compose_profile.py`
+- `git diff --check`
+_________________________________________________________________________________
