@@ -2,12 +2,11 @@
 
 Status: active cross-repo orientation map for agents.
 
-This map is mirrored across the four Ocean repos so an agent can start in any
-repo and still route the user's words to the right source of truth. It does not
-replace the local `AGENTS.md` chain. Read the target repo's `AGENTS.md` before
-editing.
-
-Animated cartography artifact: `../../ocean-os/docs/OCEAN_PROJECT_MAP_ART.html`.
+Maintained copies of this map live in the four Ocean repos so an agent can
+start in any repo and still route the user's words to the right source of
+truth. The copies may briefly differ while separate repository PRs land; the
+ownership table below is the contract to preserve. This map does not replace
+the local `AGENTS.md` chain. Read the target repo's `AGENTS.md` before editing.
 
 ## First Routing Rule
 

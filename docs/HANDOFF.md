@@ -1,444 +1,137 @@
 # Ocean Bedrock Handoff
 
-Generated: 2026-06-17  
-Repo: `/root/rt-nas/rt-nas`  
-Service: `ocean-bedrock`  
-Public URL: <https://ocean-bedrock-production.up.railway.app>
+- Verified: 2026-07-14
+- Repository: `risingtides-dev/ocean-bedrock`
+- Default branch: `master`
+- Verified base commit: `576c5cb2e63a9c106ef99bc8d5b0886417975367`
+- Service: `ocean-bedrock`
+- Public URL: <https://ocean-bedrock-production.up.railway.app>
 
-> **See "Update — 2026-07-01" at the bottom of this file for the current post-P0 state.** The body below is the 2026-06-17 snapshot and is now stale in places (test suite, MCP tool count, audit trail).
+This is the current-state handoff. Historical implementation notes, deployment IDs, and superseded counts belong in [`DEV-LOG.md`](DEV-LOG.md), not here.
 
-## 1. What is live
+## Current role
 
-```txt
-health endpoint:       live
-Postgres ledger:       live
-scoped bearer auth:    live
-file API:              live — routed through StorageAdapter
-local mount:           live — managed-local → /data/files
-R2 mounts:             live — 6 buckets, read/write/delete/move/copy
-mount registry API:    live — GET /api/v1/mounts (admin-gated)
-MCP wrapper:           live — 10 tools
-coworker bootstrap:    live
-ingest worker:         live — text chunk → embed → graph pipeline
-semantic vectors:      live — Workers AI bge-base-en-v1.5 + Cloudflare Vectorize
-semantic search:       live — GET /api/v1/semantic/search
-graph extraction:      live — nodes: 108, edges: 106
-scheduled triage:      live — ocean-bedrock-triage-cron, 06:00 + 18:00 UTC
-Telegram alerts:       live — medium/high triage findings
-source adapter tables: live — 8 adapters seeded
-server-side runners:   live — local_folder runner wired; other adapters stubbed
+Ocean Bedrock is the authenticated shared data and knowledge substrate for the Ocean system. It owns shared files, scoped access, locks, source ingestion, ledger events, semantic search, graph context, and its MCP wrapper.
+
+It does not own agent execution, provider routing, sessions, or product surfaces:
+
+- `ocean-os` owns daemon and runtime authority.
+- `ocean-surface` owns browser, extension, and native product surfaces.
+- `ocean-agents` owns provider-agnostic assistant and courier packages.
+- `ocean-bedrock` owns the shared data and knowledge plane.
+
+Use [`OCEAN_PROJECT_MAP.md`](OCEAN_PROJECT_MAP.md) for cross-repo routing.
+
+## Verified repository state
+
+The following checks passed from a clean checkout on 2026-07-14 after `npm ci`:
+
+```text
+npm test                    37/37 passed
+npm run smoke               passed
+npm run source:check        passed
+npm run secret:scan         passed (115 files)
+npm run secret:globs:check passed
 ```
 
-Ocean Bedrock is **not** the full Ocean Longhouse quorum/runtime. It is the cloud-box support substrate: storage, ingest, semantic/graph context, ledger traces, triage, and operator tooling.
+The public unauthenticated endpoints also responded successfully:
 
-## 2. Critical guardrails
-
-1. Do not redefine Ocean Longhouse in Bedrock docs.
-2. Canonical split:
-   - `ocean-daemon` = local runtime/body/execution authority.
-   - `ocean-longhouse` = hive brain/coordination layer.
-   - `ocean-bedrock` = cloud-box support substrate.
-3. Do not hallucinate Ocean docs. Use canonical docs:
-   - `ocean-os/docs/LONGHOUSE.md`
-   - `ocean-os/docs/LONGHOUSE_ORCHESTRATION.md`
-   - relevant `ocean-surface` docs for Surface-specific claims.
-4. Do not commit or paste raw secrets into docs.
-5. Coworker ingest must remain opt-in folder selection.
-6. Coworker/agent tokens should be scoped bearer/MCP tokens, not admin tokens.
-7. Avoid ingesting secrets by default.
-8. `DATABASE_URL` is Railway-internal (`postgres.railway.internal:5432`) — does not resolve off-Railway.
-9. Token files at `/root/.config/ocean-bedrock/` are gitignored; never commit or log them.
-10. Default to the contributor token for testing, not the admin token.
-
-## 3. Deployment facts
-
-```txt
-Railway project:       rising-tides-agents
-Railway service:       ocean-bedrock
-Railway service ID:    b117c870-d503-4cb3-8653-c094b50b6fbb
-Public URL:            https://ocean-bedrock-production.up.railway.app
-Volume:                ocean-bedrock-volume
-Volume mount:          /data
-Node package:          ocean-bedrock@0.1.0
-Runtime:               node src/server.mjs
+```text
+GET /health  -> ok=true, instance=ocean-bedrock, version=0.1.0
+GET /        -> route index with current API links
 ```
 
-Deployment history (key IDs):
+These checks attest the repository and public health surface. They do not attest private production data counts, database migrations, scheduled jobs, mounts, tokens, or deployment identity. Verify those with authorized production access before making operational claims.
 
-```txt
-4116f466   initial successful service deploy
-d04ef61f   metadata/worker deploy
-5d31071a   contributor role deploy
-54a961eb   landing route deploy
-202428df   source/sync API deploy
-db04d2f4   Ocean Context semantic/graph/toolbox deploy
-cf1c3e9b   Wave 1 triage scheduler + failed-job tooling
-bc7f1ca2   Wave 2 data-plane mount router
-af2a2949   Telegram triage env enable
-d9984f8a   mount containment fix + triage alert docs
-           (commit 738818b — latest before R2 adapter)
-367b346    R2 object adapter
-c0ec37fe   Epoch 01 P1 coworker onboarding deploy — current Railway deployment
-```
+## Runtime shape
 
-Production env vars:
-
-```txt
-OCEAN_BEDROCK_ROOT=/data
-OCEAN_BEDROCK_INSTANCE=ocean-bedrock
-OCEAN_LEDGER_STORE=postgres
-OCEAN_BEDROCK_WORKER_ENABLED=true
-DATABASE_URL=<Railway Postgres URL — internal only>
-OCEAN_BEDROCK_BOOTSTRAP_TOKEN=<secret>
-CLOUDFLARE_ACCOUNT_ID=<set>
-CLOUDFLARE_API_TOKEN=<secret — has R2 object read/write/delete>
-OCEAN_VECTORIZE_INDEX=ocean-longhouse-context
-OCEAN_EMBEDDING_MODEL=@cf/baai/bge-base-en-v1.5
-OCEAN_EMBEDDING_DIMENSIONS=768
-OCEAN_EMBEDDING_POOLING=cls
-OCEAN_TRIAGE_TELEGRAM_BOT_TOKEN=<secret>
-OCEAN_TRIAGE_TELEGRAM_CHAT_ID=<set>
-```
-
-## 4. Token locations
-
-```txt
-/root/.config/ocean-bedrock/railway-admin-token.txt      — admin, all paths
-/root/.config/ocean-bedrock/operator-test-token.txt      — test role
-/root/.config/ocean-bedrock/operator-contributor-token.txt — use this for testing
-```
-
-Contributor token scopes:
-
-```txt
-paths:   /coworkers/operator-contributor, /sessions/operator-contributor, /context/ocean-bedrock
-can:     read, write, lock
-cannot:  delete, admin token ops
-```
-
-## 5. Storage mounts
-
-Live mounts (from `GET /api/v1/mounts`):
-
-```txt
-type    id                           prefix
-local   managed-local                /               → /data/files
-r2      r2-content-posting-lab       /assets/content-posting-lab
-r2      r2-pi-video-gallery          /assets/video-gallery
-r2      r2-pi-backups                /archive/pi-backups
-r2      r2-sales-pitch-pdfs          /sales/pitch-pdfs
-r2      r2-financial-invoices        /finance/invoices
-r2      r2-rt-html-previews          /previews/html
-```
-
-R2 adapter (`src/mounts/adapters/r2.mjs`) uses Cloudflare REST API with the existing `CLOUDFLARE_API_TOKEN` bearer auth — no S3 credentials, no new npm packages.
-
-Implementation notes:
-- `stat()` — list endpoint with `prefix=<key>&limit=2`; CF REST does not support HEAD
-- `list()` — `delimiter=/` for depth=1 (immediate children); cursor pagination up to 20 pages
-- `read()` — returns `{stream: res.body}` (Web ReadableStream); server pipes via `Readable.fromWeb()`
-- `write()` — streams upload via `Readable.toWeb(createReadStream(tmpPath))` with `duplex: 'half'`
-- `mkdir()` — no-op (R2 has no real directories)
-- `delete({recursive})` — walks cursor pages; Promise.all concurrent (revisit if bulk-deleting large prefixes)
-- `diskRoot = null` → text search returns 501
-
-## 6. Database state
-
-Schema tables (all present in `longhouse` schema):
-
-```txt
-mounts, ledger_events, context_snapshots
-source_adapters, source_instances, source_streams, source_sync_runs, source_records
-embedding_chunks, graph_nodes, graph_edges, ingest_jobs
-```
-
-Current counts (as of 2026-06-17):
-
-```txt
-embedding chunks:   90 (90 vectorized, 0 pending)
-graph nodes:        108
-graph edges:        106
-ingest jobs done:   76
-ingest jobs cancelled: 9 (stale smoke runs, already dispositioned)
-source adapters:    8 seeded
-```
-
-## 7. Ingest pipeline
-
-Path: file write → `ingest_jobs` queue → worker loop → chunk → embed → graph extract
-
-Worker runs in the same process as the HTTP server (`OCEAN_BEDROCK_WORKER_ENABLED=true`). Jobs are picked up in order: `chunk_object` → `embed_object` → `extract_graph`. All three are required for a path to appear in semantic/graph search.
-
-Semantic search: `GET /api/v1/semantic/search?q=<query>&limit=<n>&threshold=<0-1>`
-
-Graph neighborhood: `GET /api/v1/graph/neighborhood?path=<path>&depth=<n>`
-
-## 8. Scheduled triage
-
-Service: `ocean-bedrock-triage-cron` (separate Railway service, same project)  
-Schedule: `0 6,18 * * *` UTC (06:00 and 18:00)  
-Script: `npm run ocean:triage`  
-Idempotency key: `triage:<YYYY-MM-DD>:<am|pm>`
-
-Findings stored at: `/context/ocean-bedrock/triage/_alerts/<date>-<slot>.md`  
-Thresholds: `OCEAN_TRIAGE_FAILED_ALERT` (default 1) / `OCEAN_TRIAGE_QUEUE_ALERT` (default 50)  
-Telegram alerts: active for medium/high severity; webhook remains off.
-
-Failed job tooling: `npm run ocean:jobs`  
-Full runbook: `docs/OCEAN-TRIAGE-OPS.md`
-
-## 9. MCP wrapper
+- Node.js 22 or newer; entry point `src/server.mjs`.
+- Default local port `8080`.
+- Durable root defaults to `./data`; production commonly overrides `OCEAN_BEDROCK_ROOT`.
+- Bearer-token roles and path scopes protect authenticated routes.
+- File operations route through storage adapters.
+- Source ingestion records lineage and queues indexing work.
+- Text plus PDF/DOCX content can enter the chunk, embedding, and graph pipeline.
+- PDF/DOCX objects uploaded before binary extraction was deployed require an explicit backfill, then worker processing:
 
 ```bash
-export OCEAN_BEDROCK_URL='https://ocean-bedrock-production.up.railway.app'
-export OCEAN_BEDROCK_TOKEN="$(cat /root/.config/ocean-bedrock/operator-contributor-token.txt)"
-npm run mcp
+npm run ocean:backfill:binary -- --dry-run --limit 100
+npm run ocean:backfill:binary -- --limit 100
+npm run ocean:worker
 ```
 
-Tools (10):
+Always inspect the dry run before enqueueing production work.
+- Postgres is selected for the ledger when `DATABASE_URL` is present; otherwise JSONL is used.
+- Workers AI and Vectorize require the Cloudflare environment documented in the README.
 
-```txt
-bedrock_info, bedrock_list, bedrock_read, bedrock_write, bedrock_mkdir,
-bedrock_search, bedrock_lock, bedrock_unlock, bedrock_trace, bedrock_snapshot
+Canonical setup and configuration live in [`../README.md`](../README.md). API details live in [`API.md`](API.md), [`openapi.yaml`](openapi.yaml), and the runtime `GET /api/v1/openapi.yaml` endpoint.
+
+## MCP surface
+
+`scripts/ocean-bedrock-mcp.mjs` currently exports 14 tools:
+
+```text
+bedrock_info
+bedrock_list
+bedrock_read
+bedrock_write
+bedrock_mkdir
+bedrock_search
+bedrock_semantic_search
+bedrock_graph_neighborhood
+bedrock_toolbox_manifest
+bedrock_triage_daily
+bedrock_lock
+bedrock_unlock
+bedrock_trace
+bedrock_snapshot
 ```
 
-## 10. Source adapter registry
+`test/toolbox-manifest.test.mjs` pins the toolbox manifest to the MCP exports so these lists cannot silently diverge.
 
-8 adapters seeded. Server-side runner dispatch is live (`src/sources/runners/`):
-- `local_folder` — fully implemented
-- `github`, `telegram`, `slack`, `notion`, `linear`, `google_drive`, `r2` — stubbed (return 501 / not-implemented)
+## Known limitations
 
-Source API:
+- `.pptx`, `.xlsx`, and `.rtf` uploads are stored but are not indexable by the binary extraction path.
+- `/vault` is a folder placeholder, not an encrypted secrets manager.
+- Plain file search and semantic search are separate APIs.
+- Some source integrations still depend on adapter-specific implementation and credentials; run `npm run source:check` and inspect the relevant runner before promising support.
+- The active auth store depends on deployment configuration. Do not assume Postgres auth cutover from the existence of schema/code alone.
+- Basic health does not prove private mounts, database state, embeddings, triage schedules, or Telegram delivery.
 
-```txt
-GET  /api/v1/sources/adapters
-GET  /api/v1/sources/instances
-GET  /api/v1/sources/instances/:id
-GET  /api/v1/sync/runs
-GET  /api/v1/sync/runs/:id
-GET  /api/v1/sync/records/:runId
-POST /api/v1/sync/run (triggers a local_folder sync run)
-```
+## Safety invariants
 
-## 11. Verification commands
+1. Never commit, print, or paste raw tokens, database URLs, or provider credentials.
+2. Use scoped contributor tokens for normal testing; reserve admin tokens for admin-only checks.
+3. Keep coworker folder ingestion opt-in and inspect dry-run exclusions before syncing.
+4. Do not describe Bedrock as the Ocean runtime or Longhouse coordination brain.
+5. Do not claim production counts or deployment status from historical notes.
+6. Use HTTPS, Tailscale, or another encrypted transport for remote access.
+
+## Local verification
 
 ```bash
-export BASE='https://ocean-bedrock-production.up.railway.app'
-export TOKEN="$(cat /root/.config/ocean-bedrock/operator-contributor-token.txt)"
-export ADMIN="$(cat /root/.config/ocean-bedrock/railway-admin-token.txt)"
-
-# Health
-curl "$BASE/health"
-
-# Mounts (admin)
-curl -H "x-ocean-bedrock-token: $ADMIN" "$BASE/api/v1/mounts"
-
-# Stat an R2 path
-curl -H "x-ocean-bedrock-token: $ADMIN" \
-  "$BASE/api/v1/stat?path=/assets/content-posting-lab"
-
-# List an R2 directory
-curl -H "x-ocean-bedrock-token: $ADMIN" \
-  "$BASE/api/v1/list?path=/assets/content-posting-lab"
-
-# Write a file (contributor)
-echo "test" | curl -X PUT \
-  -H "x-ocean-bedrock-token: $TOKEN" --data-binary @- \
-  "$BASE/api/v1/file?path=/coworkers/operator-contributor/test.md"
-
-# Semantic search
-curl -H "x-ocean-bedrock-token: $TOKEN" \
-  "$BASE/api/v1/semantic/search?q=triage&limit=5"
-
-# DB check (local, requires Railway-internal DATABASE_URL)
-node scripts/check-postgres.mjs
+npm ci
+npm test
+npm run smoke
+npm run source:check
+npm run secret:scan
+npm run secret:globs:check
 ```
 
-## 12. Deploy runbook
+Additional checks require appropriate environment and credentials:
 
 ```bash
-# From repo root
-railway up --service ocean-bedrock
-
-# Verify
+npm run db:check
 curl -fsS https://ocean-bedrock-production.up.railway.app/health
 ```
 
-Smoke test (local, no Railway required):
+## Handoff checklist
 
-```bash
-npm run smoke
-```
+Before updating this handoff:
 
-## 13. Known issues
-
-1. Recursive R2 delete uses concurrent `Promise.all` with no per-request status check — fine for current use, revisit for bulk-delete on large prefixes.
-2. Token/invite registry now has a Postgres-backed implementation and production tables (`longhouse.auth_tokens`, `longhouse.auth_invites`) are migrated. The service default remains volume JSON until `OCEAN_AUTH_STORE=postgres` / `OCEAN_BEDROCK_AUTH_STORE=postgres` is explicitly enabled for auth cutover.
-3. `/vault` is a folder placeholder, not an encrypted secrets vault.
-4. `/api/v1/search` is plain file text search; semantic search lives at `/api/v1/semantic/search`. R2 paths return 501 for text search (`diskRoot = null`).
-5. Graph extraction is heuristic (file/dir/heading/topic/link/source-lineage nodes); rich business entities (people, projects, clients) not yet extracted.
-6. Source adapter runners for github/telegram/slack/notion/linear/google_drive/r2 are stubbed at 501.
-7. Coworker real rollout prep is partially complete: one-time invite exchange, shared secret exclusions, dry-run skipped/sensitive reporting, local GUI preview, hard acknowledgement gate, and Postgres-backed token/invite registry code/tables are done. Remaining: auth-store cutover flag deployment, packaged GUI, and broader rollout docs polish.
-
-## 14. Next work queue
-
-### Priority 1 — Real coworker rollout prep
-
-Before issuing tokens to real coworkers:
-
-- Confirm path scopes and document install instructions.
-- Package the local GUI/download flow (`npm run ocean:app`).
-- Use the one-time invite exchange instead of raw token paste.
-- Run a real folder dry-run; inspect skipped files and verify secrets are ignored.
-- Issue contributor-only tokens, confirm delete is blocked.
-
-### Priority 2 — Source adapter runners
-
-Wire real sync runners for the other 7 adapter types (github, telegram, slack, notion, linear, google_drive, r2). The runner dispatch layer is already in place in `src/sources/runners/`.
-
-### Priority 3 — Richer graph/entity extraction
-
-Add people/project/client/task entity extraction. Wire graph-backed context packs for agents. Fuse graph + semantic results in search.
-
-### Priority 4 — Vault
-
-Replace `/vault` folder placeholder with an actual encrypted secrets vault (age/sops or a KV-backed store).
-
-## 15. Acceptance criteria for next handoff
-
-Include in the next handoff:
-
-- commit hash and Railway deployment ID,
-- current `curl /health` output,
-- `node scripts/check-postgres.mjs` output,
-- exact migration status,
-- any new issued coworker tokens by name/scope (not raw values),
-- whether source adapter runners beyond local_folder are wired.
-
-## Update — 2026-07-01
-
-Phase-0 stabilization pass on top of the 2026-06-17 snapshot above. Everything
-in sections 1–15 still describes the deployed shape; this section layers on
-what changed since, verified against `git log` and the actual test/source
-files rather than copied from memory.
-
-**First test suite landed (commits #3–#6).** 27/27 passing via `node --test
-test/*.test.mjs` across 5 files:
-
-```txt
-test/information-layer.test.mjs      chunking + content-type detection,
-                                      including a PINNED "known gap" test for
-                                      binary PDF/DOCX/Office uploads (see below)
-test/graph-extractors.test.mjs       graph-extraction core (merge-into-graph half)
-test/semantic-prep.test.mjs          embed->vectorize prep (migrate-into-index half)
-test/triage.test.mjs                 triageFindings — the daily-triage decision core
-test/local-adapter-security.test.mjs local-adapter security (see P0 fix below)
-```
-
-**P0 security fix (#8, `2407fc5`).** `LocalStorageAdapter._diskPath()` in
-`src/mounts/adapters/local.mjs` used a purely lexical `startsWith(absRoot)`
-containment check, and only the leaf path component was checked for symlinks.
-A symlink planted in an *intermediate* directory (e.g.
-`<root>/docs/escape -> /outside`) was followed by the kernel and never
-inspected, letting a token scoped to `/docs` read/write/delete/move/copy files
-outside the mount root and outside its own path scope. Fixed by making
-`_diskPath()` realpath-resolve the deepest existing ancestor of the target
-(so it still works for not-yet-created write/mkdir targets) and re-assert
-containment under the realpath'd root before any fs op; all 10 call sites are
-now async/awaited. 4 regression tests added in
-`test/local-adapter-security.test.mjs` (legit in-root paths still resolve;
-read through an intermediate symlink is blocked; write through an
-intermediate symlink is blocked; lexical `../` escape is still rejected).
-
-**Audit-trail fix (#7, `31f354e`).** `scripts/issue-token.mjs` — the
-documented onboarding path (`npm run token:create`) — called `addToken()`
-directly and left no audit record, even though the HTTP route
-`POST /api/v1/tokens` audits `token.create` and the README promises an audit
-log for token changes. Fixed with a fail-soft `appendTokenAudit()` that
-appends a `token.create` event to the sibling `audit.jsonl` (honoring
-`OCEAN_BEDROCK_AUDIT_FILE`) on every CLI-issued token; an audit failure never
-sinks a successful issuance.
-
-**Still open / known gaps:**
-
-- **PDF/DOCX/Office silent-skip.** Uploads of binary office/PDF documents are
-  stored but never indexed for search/embedding — this is now a
-  test-pinned decision point (`information-layer.test.mjs`, "KNOWN GAP: binary
-  office/pdf docs upload but are not indexable"), not just an unverified
-  assumption. Still a real data-loss gap for anyone expecting those files to
-  be searchable.
-- **MCP doc-count drift, corrected.** `docs/MCP.md` and `docs/WIKI.md` already
-  correctly list all 14 tools exported by `scripts/ocean-bedrock-mcp.mjs`
-  (`bedrock_info`, `bedrock_list`, `bedrock_read`, `bedrock_write`,
-  `bedrock_mkdir`, `bedrock_search`, `bedrock_semantic_search`,
-  `bedrock_graph_neighborhood`, `bedrock_toolbox_manifest`,
-  `bedrock_triage_daily`, `bedrock_lock`, `bedrock_unlock`, `bedrock_trace`,
-  `bedrock_snapshot`) — no drift there. The actual drift was in *this* file
-  (section 1 and section 9 above still say "10 tools" and list only 10),
-  which this update section supersedes. Separately, `toolboxManifest()` in
-  `src/ocean-context.mjs` (code, not docs) hardcodes an 11-tool list missing
-  `bedrock_toolbox_manifest`, `bedrock_lock`, and `bedrock_unlock` — left
-  as-is since this pass is docs-only; worth a follow-up code fix.
-- **Auth-store Postgres cutover still not flipped in prod.** Postgres-backed
-  token/invite registry code and tables (`longhouse.auth_tokens`,
-  `longhouse.auth_invites`) exist and are migrated, but the service default
-  remains volume JSON until `OCEAN_AUTH_STORE=postgres` (or
-  `OCEAN_BEDROCK_AUTH_STORE=postgres`) is explicitly set — matches known issue
-  #2 in section 13, unchanged.
-- **7 of 8 source adapters still stubbed.** Only `local_folder` is fully
-  implemented in `src/sources/runner.mjs`; `github`, `telegram`, `slack`,
-  `notion`, `linear`, `google_drive`, `r2` remain 501 stubs — matches known
-  issue #6 in section 13, unchanged.
-
-## Update — 2026-07-01 (PR: binary-doc extraction)
-
-Closes the top two items from the "Still open / known gaps" list above:
-
-- **PDF/DOCX silent-skip → extracted and indexed.** New `src/extract.mjs`
-  (`extractableBinary()` extension gate + `extractText()` via `unpdf` for PDF
-  and `mammoth` for DOCX). `processIngestJob` in `src/metadata.mjs` now routes
-  non-textual but extractable files through extraction into the same
-  chunk → embed → graph pipeline as text files. Unparseable/empty documents
-  THROW, so the job fails visibly in `npm run ocean:jobs` — never a silent
-  skip. `.pptx`/`.xlsx`/`.rtf` remain unindexable and are pinned as the
-  narrowed KNOWN GAP in `test/information-layer.test.mjs`. Backfill for
-  pre-extractor uploads: `npm run ocean:backfill:binary -- --dry-run --limit 100`
-  (enqueues `index_object` jobs for pdf/docx objects with no chunks), then run
-  the worker.
-- **`toolboxManifest()` 11-tool drift → fixed.** The hardcoded list in
-  `src/ocean-context.mjs` now matches the 14 tools exported by
-  `scripts/ocean-bedrock-mcp.mjs`, pinned by `test/toolbox-manifest.test.mjs`
-  so the two cannot drift apart silently again.
-
-Test suite: 37/37 passing (`npm test`), including in-test-generated PDF and
-checked-in `test/fixtures/minimal.docx` fixtures plus corrupt-file
-failure-path coverage.
-
-## Update — 2026-07-08: onboarding runs real end-to-end; design system canonical
-
-- **Coworker onboarding is real now, not a demo.** `scripts/ocean-ceremony-scan.mjs`
-  scans the actual machine (`~/.claude`, `~/.codex`, `~/.pi`, `~/.omp`), streams
-  the ceremony arc to `POST /api/ceremony/runs/:id/events`, drives the real
-  `POST /api/preview`, then BLOCKS at the human ack gate (polls `/api/state`
-  `syncUnlocked`; never auto-acks) and only POSTs `/api/sync` after a confirmed
-  human ack. Fixed this session: source counts report true de-duplicated totals
-  (Claude 98 / Codex 631 skills; previously pinned at the display cap 50), the
-  sync POST is gated on a confirmed ack (an unattended timeout can no longer
-  fire a real sync at production), and on timeout the ack/sync narration frames
-  are dropped instead of lying. E2E verified live: real scan drove the stage
-  with zero console errors; orb intensity matched `12 + 4×sources = 28`.
-- **Routing contract:** `/` on the local app serves the operator panel
-  (`ui/app/index.html`, rebuilt this session — the original inline GUI was
-  deleted during cleanup and had never been committed). The ceremony/orb lives
-  ONLY at `/onboarding`. The orb must never own `/`.
-- **Design system is canonical at `design/`:** `tokens.css` (all `--ocean-*`
-  custom properties + self-hosted InterVariable `@font-face`), `tokens.json`,
-  `fonts/InterVariable.woff2` (SIL OFL), `DESIGN-PRINCIPLES.md`, `README.md`
-  (vendoring guide), and `orb/ocean-orb.js` — the reusable OceanOrb class
-  (voice states idle/listening/thinking/speaking, logo absorption).
-  `ui/onboarding/ocean-three.js` is now a thin mount facade over it.
-- **Port etiquette (hard rule):** `8790` belongs to `ocean-surface-proxy` and
-  `8765` to the operator's long-running app instance. Test/verification
-  instances of the local app use distant ports (`18xxx`).
-- Gates green: smoke, source:check, secret:scan, secret:globs:check,
-  check-ceremony-protocol, `node --check` on all touched files, zero emoji.
+- Record the commit and branch being handed off.
+- Run the local verification suite.
+- Separate repository facts from production facts.
+- For production claims, capture the verification time and command without recording secrets.
+- Put narrative implementation and deployment history in `DEV-LOG.md`; append the required concise work record to `events.md`.
+- Keep this file short, current, and free of appended update sections.
