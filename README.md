@@ -22,7 +22,7 @@ package and is loaded automatically by the runtime; this README only orients.
 | Group | What it is | Details |
 |---|---|---|
 | [`assistants/`](assistants) | **Surface specialists** — brain-in-the-loop agents an operator *unlocks*; each loads a surface profile (`assistants/<SURFACE>/system.md`) that Ocean OS prefers over its compiled seed prompt. Six named specialists (bonzai, content-agent, prompt-lab, voice-intake, creator-research, yt-prompt-bible) plus composed house profiles for surfaces like `SLACK`, `CNVS`, `MOBL`, `VOX`, `BRWSR`. | [`assistants/README.md`](assistants/README.md) |
-| [`couriers/`](couriers) | **Delivery agents** — narrow, single-purpose agents that ship a payload to a destination over a shared route, invoked by slash command through the hub router. Eleven packages today, from `/ship`/`/say` (file-courier) to `/ycp`, `/hopecore`, `/ttup`. | [`couriers/ARCHITECTURE.md`](couriers/ARCHITECTURE.md) |
+| [`couriers/`](couriers) | **Delivery agents** — narrow, single-purpose agents that ship a payload to a destination over a shared route, invoked by slash command through the hub router. Ten packages are currently registered, from `/ship`/`/say` (file-courier) to `/ycp`, `/hopecore`, and `/coremusic`. | [`couriers/ARCHITECTURE.md`](couriers/ARCHITECTURE.md) |
 
 The registry tables live in `AGENTS.md`; the **live** courier registry is the
 router itself (it reads each `courier.toml`, so it never lags):

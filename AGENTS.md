@@ -91,3 +91,9 @@ Agents working in parallel use [`AGENTS-CHANNEL.md`](AGENTS-CHANNEL.md) as a
 shared lobby: sign in on the roster, post short notes with `#topic` tags and
 @mentions, resolve threads when done. Read it when starting overlapping work or
 when you were @mentioned; don't duplicate handoff content there.
+
+## Child devlog Index
+
+- `assistants/` — surface specialists and composed house profiles → `assistants/AGENTS.md`
+- `couriers/` — manifest-driven delivery packages, hub, and shared transport → `couriers/AGENTS.md`
+- `docs/` — cross-repo routing, architecture, build registration, and fleet-porting documentation → `docs/AGENTS.md`
