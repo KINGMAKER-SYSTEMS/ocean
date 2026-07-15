@@ -153,3 +153,17 @@ Verification:
 - `python3 -m py_compile assistants/tools/compose_profile.py`
 - `git diff --check`
 _________________________________________________________________________________
+_________________________________________________________________________________
+
+time:  [14:51] [14-07-26]
+agent: [pi] [gpt-5]
+worktree: [docs/current-state-reset-20260712]
+type:  [refactor]
+area:  [writing]
+
+Reconciled the public courier inventory with the executable manifest router: ten courier
+packages are registered and the stale nonexistent /ttup reference is removed. Added a
+docs-local contract that makes manifests/router output authoritative, updated the root
+child index, and removed the project map's dead artifact link and false strict-mirroring
+claim.
+_________________________________________________________________________________

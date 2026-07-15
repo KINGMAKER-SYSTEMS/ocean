@@ -18,7 +18,7 @@ out, over the shared Slack route).
 |---|---|---|---|
 | **Intake** | Slack slash-command front door: `/ocean <command> [args]` over the Socket Mode bridge — 3-sec ack, async dispatch, reply via `response_url` | [`../assistants/bridge/slash_intake.py`](../assistants/bridge/slash_intake.py) | ✅ built |
 | **Router** | `slash → courier` table from manifests; dispatch deterministic vs agentic | [`hub/router.py`](hub/router.py) | ✅ built |
-| **Couriers** | single-purpose agents; each a manifest + protocol + harness | `<courier>/` | 11 packages ✅ (`router.py list`) |
+| **Couriers** | single-purpose agents; each a manifest + protocol + harness | `<courier>/` | 10 registered packages (`router.py list`) |
 | **Route** | shared transport the couriers ship over | [`transport/slack.py`](transport/slack.py) | ✅ built |
 | **Daemon** | always-on Ocean runtime; spawns agentic couriers | `ocean-daemon` (`:4780`) | ✅ exists |
 

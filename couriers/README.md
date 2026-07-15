@@ -41,7 +41,6 @@ imports this; none reimplements Slack.
 | [`hopecore`](hopecore) | agentic | earned-hope quotes + Mon Rovîa footage + music → one wave to Slack review |
 | [`core-music-editor`](core-music-editor) | agentic | one Core Core acoustic-reel edit wave → Slack review previews |
 | [`yt-clipper`](yt-clipper) | agentic | clip-factory autopilot pass — source → clip → Slack QC gate → scoreboard |
-| [`tt-uploader`](tt-uploader) | deterministic | read-first ops window into the TikTok auto-uploader |
 
 Every species' entry is `bin/courier` (declared in its `courier.toml`). Run
 `python3 hub/router.py list` for the live slash-command registry — the router
