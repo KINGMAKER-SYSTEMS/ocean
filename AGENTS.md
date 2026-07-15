@@ -7,7 +7,7 @@ Repo-wide working contract for `ocean-bedrock`.
 ## Ownership
 
 - This file governs repo-wide work in `src/`, `scripts/`, `docs/`, `db/`, `test/`, `workflows/`, and top-level durable files.
-- `docs/DEV-LOG.md` and `docs/HANDOFF.md` are the canonical long-form project notes.
+- `docs/HANDOFF.md` is the concise canonical current-state handoff; `docs/DEV-LOG.md` is the canonical long-form implementation and deployment history.
 - `docs/OCEAN_PROJECT_MAP.md` maps how `ocean-bedrock` connects to `ocean-os`, `ocean-agents`, and `ocean-surface`.
 - `events.md` is the append-only repository ledger.
 
@@ -35,4 +35,4 @@ Repo-wide working contract for `ocean-bedrock`.
 
 ## Child devlog Index
 
-- None yet.
+- `docs/` — active architecture, API, operations, handoff, and historical documentation → `docs/AGENTS.md`

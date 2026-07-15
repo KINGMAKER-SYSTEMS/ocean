@@ -155,3 +155,17 @@ area: [docs]: Cross-repo documentation
 
 Mirrored the daemon-owned voice contract (voice phase 4, 2026-07-10) into docs/OCEAN_PROJECT_MAP.md so the four Ocean repos stay byte-identical. The core daemon routes block now lists POST /v1/voice/stt, /v1/voice/tts, and POST /v1/voice/realtime/client-secret, followed by a phase-4 note that the surface proxy forwards /api/stt and /api/tts to the daemon and that provider keys (xAI, OpenAI) resolve only inside ocean-os. Docs-only change; map kept in sync across repos.
 _________________________________________________________________________________
+_________________________________________________________________________________
+
+time:  [14:42] [14-07-26]
+agent: [pi] [gpt-5]
+worktree: [docs/current-state-reset-20260712]
+type:  [refactor]
+area:  [writing]
+
+Reset docs/HANDOFF.md from an accumulated June snapshot plus override sections into a
+concise verified current-state handoff. Added a docs-local devlog contract, clarified the
+root child index, and removed the dead project-map artifact link and false strict-mirroring
+claim. Verification from a clean checkout passed 37 tests, smoke, source contract, secret
+scan, secret-glob checks, and public health/route-index requests.
+_________________________________________________________________________________

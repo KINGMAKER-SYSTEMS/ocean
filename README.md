@@ -142,7 +142,8 @@ Agents should:
 | `PORT` / `OCEAN_BEDROCK_PORT` | `8080` | HTTP port |
 | `HOST` / `OCEAN_BEDROCK_HOST` | `0.0.0.0` | Bind host |
 | `OCEAN_BEDROCK_ROOT` | `./data` | Persistent data root |
-| `OCEAN_BEDROCK_AUTH_FILE` | `$OCEAN_BEDROCK_ROOT/.ocean-bedrock/tokens.json` | Token registry |
+| `OCEAN_BEDROCK_AUTH_FILE` | `$OCEAN_BEDROCK_ROOT/.ocean-bedrock/tokens.json` | File-backed token registry path |
+| `OCEAN_AUTH_STORE` / `OCEAN_BEDROCK_AUTH_STORE` | `file` | Auth registry backend: `file` or `postgres`; Postgres requires `DATABASE_URL` and migrated auth tables |
 | `OCEAN_LEDGER_STORE` | `postgres` when `DATABASE_URL` is set, otherwise `jsonl` | Ocean Ledger store: `jsonl` or `postgres` |
 | `OCEAN_LEDGER_FILE` | `$OCEAN_BEDROCK_ROOT/.ocean-bedrock/ocean-ledger.jsonl` | Local Ocean Ledger JSONL store |
 | `DATABASE_URL` | unset | Required on the server for Postgres ledger, metadata, source registry, and sync-run lineage |
