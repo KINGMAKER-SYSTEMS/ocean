@@ -39,7 +39,8 @@ try {
       JOIN pg_class c ON c.oid = t.tgrelid
       JOIN pg_namespace n ON n.oid = c.relnamespace
       WHERE n.nspname = 'longhouse' AND c.relname = 'room_members'
-        AND t.tgname = 'room_members_owner_guard_trg' AND t.tgdeferrable
+        AND t.tgname = 'room_members_owner_guard_trg'
+        AND t.tgdeferrable AND t.tginitdeferred AND t.tgenabled <> 'D'
     `);
     roomOwnerGuardTrigger = trigger.rows.length > 0;
   }
