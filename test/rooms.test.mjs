@@ -100,8 +100,8 @@ test('descriptor rejects unknown fields and bad types', () => {
 
 test('registration_key requires a stable 1-128 char string', () => {
   assert.equal(validateRegistrationKey(' agent-flux-1 '), 'agent-flux-1');
-  for (const bad of [undefined, null, '', '   ', 'k'.repeat(129)]) {
-    assert.throws(() => validateRegistrationKey(bad), RoomsError);
+  for (const bad of [undefined, null, '', '   ', 'k'.repeat(129), {}, 123, true, ['k']]) {
+    assert.throws(() => validateRegistrationKey(bad), RoomsError, `expected reject: ${String(bad)}`);
   }
 });
 
@@ -143,6 +143,33 @@ test('publicMemberProjection omits every internal field', () => {
   });
   const serialized = JSON.stringify(projection);
   for (const leak of ['owner_principal_token_id', 'registration_key', 'removed_by', 'tok_']) {
+    assert.equal(serialized.includes(leak), false, `leaked: ${leak}`);
+  }
+});
+
+test('publicMemberProjection rebuilds descriptors — forbidden JSONB keys never leak', () => {
+  // Simulates a malformed/legacy/direct-SQL row whose stored descriptor
+  // carries fields the validator would never accept.
+  const projection = publicMemberProjection({
+    member_id: 'id', actor_type: 'agent', role_in_room: 'member',
+    display_name: 'rogue', owner_member_id: 'owner-id',
+    owner_principal_token_id: 'tok_x', registration_key: 'k',
+    joined_at: '2026-07-16T18:00:00.000Z',
+    public_agent_descriptor: {
+      display_name: 'rogue',
+      description: 'fine',
+      path: '/Users/someone/dev/secret-project',
+      tools: ['bash'],
+      token: 'tok_leak',
+      api_key: 'sk-leak',
+    },
+  });
+  assert.deepEqual(projection.public_agent_descriptor, {
+    display_name: 'rogue',
+    description: 'fine',
+  });
+  const serialized = JSON.stringify(projection);
+  for (const leak of ['path', 'tools', 'sk-leak', 'tok_leak']) {
     assert.equal(serialized.includes(leak), false, `leaked: ${leak}`);
   }
 });

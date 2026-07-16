@@ -112,7 +112,10 @@ export function descriptorsEqual(a, b) {
 // supply one is NOT allowed — the daemon must send registration_key so a
 // lost HTTP response cannot mint a twin. We only validate shape here.
 export function validateRegistrationKey(input) {
-  const value = String(input ?? '').trim();
+  if (typeof input !== 'string') {
+    throw new RoomsError(400, 'registration_key must be a string.');
+  }
+  const value = input.trim();
   if (!value || value.length > 128) {
     throw new RoomsError(400, 'Each agent requires a stable registration_key (1-128 chars, daemon-supplied).');
   }
@@ -122,7 +125,10 @@ export function validateRegistrationKey(input) {
 // ── safe projection ───────────────────────────────────────────────────
 
 // Public member projection. Omits owner_principal_token_id,
-// registration_key, removed_by, and every other internal field.
+// registration_key, removed_by, and every other internal field. The stored
+// descriptor is REBUILT from the five allowed keys — a malformed/legacy/
+// direct-SQL JSONB row containing paths, tokens, or tools never leaks
+// through the roster wholesale.
 export function publicMemberProjection(row) {
   if (!row) return null;
   const projection = {
@@ -133,7 +139,14 @@ export function publicMemberProjection(row) {
     joined_at: row.joined_at?.toISOString?.() || row.joined_at,
   };
   if (row.owner_member_id) projection.owner_member_id = row.owner_member_id;
-  if (row.public_agent_descriptor) projection.public_agent_descriptor = row.public_agent_descriptor;
+  const stored = row.public_agent_descriptor;
+  if (stored && typeof stored === 'object' && !Array.isArray(stored)) {
+    const descriptor = {};
+    for (const key of DESCRIPTOR_ALLOWED_KEYS) {
+      if (stored[key] !== undefined) descriptor[key] = stored[key];
+    }
+    projection.public_agent_descriptor = descriptor;
+  }
   return projection;
 }
 
