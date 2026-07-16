@@ -9,6 +9,7 @@ import {
   normalizeRoomId,
   roomIdFromPath,
   roomScope,
+  suppressForeignRoomEvents,
   validateMemberId,
   validateTtlMinutes,
   validateAgentDescriptor,
@@ -135,6 +136,37 @@ test('descriptorsEqual: exact retry matches, changed content does not', () => {
   assert.equal(descriptorsEqual(a, same), true);
   assert.equal(descriptorsEqual(a, changed), false);
   assert.equal(descriptorsEqual(a, { ...same, description: 'now with text' }), false);
+});
+
+// ── AC1 global-read suppression ───────────────────────────────────────
+
+test('suppressForeignRoomEvents: foreign-room rows drop, memberships and non-rooms pass, lookups cached', async () => {
+  const rooms = { myroom: true, foreign: true };      // registered rooms
+  const memberships = { myroom: true, foreign: false };
+  let findRoomCalls = 0;
+  const events = [
+    { id: 1, correlation_id: 'myroom', virtual_path: '/rooms/myroom' },
+    { id: 2, correlation_id: 'foreign', virtual_path: '/rooms/foreign' },
+    { id: 3, correlation_id: 'ticket-42', virtual_path: '/docs/notes.md' },   // not a room
+    { id: 4, correlation_id: null, virtual_path: '/rooms/foreign/child.md' }, // path-only descendant leak
+    { id: 5, correlation_id: 'foreign', virtual_path: null },                  // correlation-only leak
+    { id: 6, correlation_id: null, virtual_path: null },
+  ];
+  const visible = await suppressForeignRoomEvents(events, {
+    findRoom: async (id) => { findRoomCalls += 1; return rooms[id] ? { id } : null; },
+    hasActiveMembership: async (id) => memberships[id],
+  });
+  assert.deepEqual(visible.map((event) => event.id), [1, 3, 6]);
+  // 'foreign' and 'myroom' and 'ticket-42' each looked up once — verdicts cached.
+  assert.equal(findRoomCalls, 3);
+});
+
+test('suppressForeignRoomEvents: admin-style caller with no memberships sees no room rows', async () => {
+  const visible = await suppressForeignRoomEvents(
+    [{ id: 1, correlation_id: 'warroom', virtual_path: '/rooms/warroom' }],
+    { findRoom: async () => ({ id: 'warroom' }), hasActiveMembership: async () => false },
+  );
+  assert.deepEqual(visible, []);
 });
 
 // ── safe projection ───────────────────────────────────────────────────
