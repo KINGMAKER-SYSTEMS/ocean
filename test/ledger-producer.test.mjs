@@ -179,6 +179,9 @@ test('B3 pre-I/O gate: invalid cursor rejects BEFORE any file I/O', async (t) =>
   const store = createLedgerStore({ store: 'jsonl', ledgerFile });
   await assert.rejects(store.read({ after_sequence: 42 }), LedgerValidationError);
   await assert.rejects(store.read({ after_sequence: 'abc' }), LedgerValidationError);
+  // empty string is NOT "absent" — only null/undefined are; it must reject
+  // through the strict parser like any other non-canonical value
+  await assert.rejects(store.read({ after_sequence: '' }), LedgerValidationError);
   // the pre-I/O gate means the ledger file was never even created
   await assert.rejects(fs.access(ledgerFile), { code: 'ENOENT' });
 });
@@ -189,4 +192,5 @@ test('B3 pre-I/O gate: Postgres read validates cursor before pool access', async
   const store = createLedgerStore({ store: 'postgres', databaseUrl: 'postgres://invalid-host.invalid:5432/none_test' });
   await assert.rejects(store.read({ after_sequence: 42 }), LedgerValidationError);
   await assert.rejects(store.read({ after_sequence: '01' }), LedgerValidationError);
+  await assert.rejects(store.read({ after_sequence: '' }), LedgerValidationError);
 });

@@ -303,9 +303,11 @@ function createJsonlLedgerStore({ ledgerFile }) {
     },
     async read(filters = {}) {
       // S1B B3: cursor validation BEFORE any file I/O (pre-I/O gate) — an
-      // invalid cursor must not even create the ledger file.
+      // invalid cursor must not even create the ledger file. ONLY
+      // null/undefined mean absent: empty string hits the strict parser and
+      // rejects like any other non-canonical value.
       const afterSequence = filters.after_sequence ?? filters.afterSequence ?? null;
-      const hasCursor = afterSequence !== null && afterSequence !== undefined && afterSequence !== '';
+      const hasCursor = afterSequence !== null && afterSequence !== undefined;
       const cursor = hasCursor ? BigInt(parseAfterSequence(afterSequence)) : null;
       const events = await readJsonlEvents(ledgerFile);
       const filtered = filterEvents(events, filters);
@@ -471,9 +473,10 @@ async function appendPostgresEvent(databaseUrl, input) {
 }
 
 async function readPostgresEvents(databaseUrl, filters = {}) {
-  // S1B B3: cursor validation BEFORE any pool access (pre-I/O gate).
+  // S1B B3: cursor validation BEFORE any pool access (pre-I/O gate). ONLY
+  // null/undefined mean absent — empty string rejects via the strict parser.
   const afterSequenceRaw = filters.after_sequence ?? filters.afterSequence ?? null;
-  const hasCursor = afterSequenceRaw !== null && afterSequenceRaw !== undefined && afterSequenceRaw !== '';
+  const hasCursor = afterSequenceRaw !== null && afterSequenceRaw !== undefined;
   const afterSequence = hasCursor ? parseAfterSequence(afterSequenceRaw) : null;
 
   const pool = await getPool(databaseUrl);
