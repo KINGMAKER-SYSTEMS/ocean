@@ -387,3 +387,18 @@ room rows per-event. Writes additionally require the canonical pair
 (`correlation_id = room_id`, `virtual_path = /rooms/{room_id}`) and an
 `actor_member_id` owned by the calling principal. Non-room ledger behavior is
 unchanged.
+
+### Producer idempotency and cursor paging (Gate-2 S1B)
+
+`POST /api/v1/ledger/events` with a `(source_id, source_sequence)` tuple is
+idempotent ONLY for identical normalized content — the prior event is
+returned. Any content delta on a reused tuple is `409` with
+`{ source_id, source_sequence, existing_event_id }`. A `source_id` matching
+`^room:` requires `source_sequence` as a canonical decimal u64 STRING (JSON
+numbers are rejected `400`, before any I/O); other sources keep arbitrary
+text.
+
+`GET /api/v1/ledger/events?after_sequence=N` pages the ledger as a cursor:
+canonical decimal sequence string, strictly greater, ascending, bounded by
+`limit`; pass the last returned sequence to continue. Without the parameter,
+the existing newest-window behavior is unchanged.

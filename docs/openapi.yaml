@@ -246,11 +246,19 @@ paths:
           name: path
           schema: { type: string }
         - in: query
+          name: after_sequence
+          schema: { type: string, pattern: '^(0|[1-9][0-9]*)$' }
+          description: >-
+            Cursor (Gate-2 S1B): canonical decimal sequence STRING. Returns
+            events with sequence strictly greater, ordered ASCENDING, bounded
+            by limit; pass the last returned sequence to continue. Absent =
+            existing newest-window behavior unchanged.
+        - in: query
           name: limit
           schema: { type: integer, default: 100, maximum: 5000 }
       responses:
         '200': { description: Ledger events (registered-room rows filtered by membership) }
-        '400': { description: Registered-room correlation with a disagreeing path }
+        '400': { description: Registered-room correlation with a disagreeing path, or non-canonical after_sequence }
         '403': { description: Registered-room identified without active membership }
     post:
       summary: Append an Ocean Ledger event
@@ -280,9 +288,10 @@ paths:
                   type: array
                   items: { type: string }
       responses:
-        '201': { description: Appended event }
-        '400': { description: Noncanonical room pair or malformed actor_member_id }
+        '201': { description: Appended event (or the prior event on an identical producer retry) }
+        '400': { description: Noncanonical room pair, malformed actor_member_id, or invalid room source_sequence }
         '403': { description: Missing/unowned actor_member_id or no active membership }
+        '409': { description: 'Producer conflict: (source_id, source_sequence) reused with different content' }
   /api/v1/ledger/trace:
     get:
       summary: Trace an Ocean Ledger correlation chain

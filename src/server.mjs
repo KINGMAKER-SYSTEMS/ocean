@@ -25,6 +25,9 @@ import {
 } from './rooms.mjs';
 import {
   createLedgerStore,
+  parseAfterSequence,
+  LedgerConflictError,
+  LedgerValidationError,
 } from './ledger.mjs';
 import {
   claimNextIngestJob,
@@ -1413,6 +1416,17 @@ function roomsErrorToHttp(error) {
   return error;
 }
 
+// S1B typed ledger errors → exact HTTP statuses (never string matching).
+function ledgerErrorToHttp(error) {
+  if (error instanceof LedgerConflictError) {
+    return new HttpError(409, error.message, error.details);
+  }
+  if (error instanceof LedgerValidationError) {
+    return new HttpError(400, error.message);
+  }
+  return error;
+}
+
 // RoomsError is not HttpError: an invalid room id thrown bare from a handler
 // would surface as a 500 in Postgres mode. Every route entry uses this.
 function normalizeRoomIdForHttp(roomIdRaw) {
@@ -1883,6 +1897,15 @@ export function createOceanBedrockServer(options = {}) {
         isWrite: false,
       });
       if (apiPath) requirePathScope(principal, apiPath);
+      // S1B B3: validated cursor — canonical decimal, strict >, ascending.
+      let afterSequence;
+      if (url.searchParams.has('after_sequence')) {
+        try {
+          afterSequence = parseAfterSequence(url.searchParams.get('after_sequence'));
+        } catch (error) {
+          throw ledgerErrorToHttp(error);
+        }
+      }
       const events = await state.ledger.read({
         correlation_id: url.searchParams.get('correlation_id') || undefined,
         actor_id: url.searchParams.get('actor_id') || undefined,
@@ -1891,6 +1914,7 @@ export function createOceanBedrockServer(options = {}) {
         event_type: url.searchParams.get('event_type') || undefined,
         source_id: url.searchParams.get('source_id') || undefined,
         path: apiPath || undefined,
+        after_sequence: afterSequence,
         limit: url.searchParams.get('limit') || 100,
       });
       let visible = events.filter((event) => ledgerEventVisibleToPrincipal(event, principal));
@@ -1927,7 +1951,7 @@ export function createOceanBedrockServer(options = {}) {
         actor_id: adminOverride ? body.actor_id || body.actorId || principal.id : principal.id,
         actor_name: adminOverride ? body.actor_name || body.actorName || principal.name : principal.name,
         source_id: body.source_id || body.sourceId || 'longhouse-api',
-      });
+      }).catch((error) => { throw ledgerErrorToHttp(error); });
       jsonResponse(res, 201, { event });
       return;
     }
@@ -1990,7 +2014,7 @@ export function createOceanBedrockServer(options = {}) {
         context_snapshot: snapshot,
         clearance,
         tags: Array.isArray(body.tags) ? body.tags : [],
-      });
+      }).catch((error) => { throw ledgerErrorToHttp(error); });
       jsonResponse(res, 201, { snapshot: event });
       return;
     }
