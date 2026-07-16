@@ -323,3 +323,64 @@ Revokes a token.
 ### `GET /api/v1/audit?limit=100`
 
 Admin only. Returns recent write/delete/lock/token events.
+
+## Federated rooms (Gate-2 S1A)
+
+Room membership lives in Postgres (`longhouse.room_members`) and requires the
+single shared database authority: auth, ledger, and rooms must resolve to the
+same `DATABASE_URL` (with `OCEAN_AUTH_DATABASE_URL` absent or equal). In any
+split, file, or JSONL configuration every route below returns an explicit
+`503` and never logs a database URL.
+
+### `POST /api/v1/rooms/{room_id}/register`
+
+Admin + `/rooms/{room_id}` scope. Optional `{ "title" }` body. Atomically
+claims the ledger correlation (id = room_id, metadata `federation_kind=room`)
+and creates the owner human row from the authenticated principal. `201
+{ room_id, owner }`; same-principal retry `200`; unrelated existing
+correlation or concurrent loser `409`.
+
+### `POST /api/v1/invites` (room branch)
+
+Body `{ room_id, recipient_name?, ttl_minutes? }` from an ACTIVE room owner.
+Role (`contributor`) and exact scope (`/rooms/{room_id}`) are derived
+server-side; supplying `role`/`scopes` is `400`. TTL default 1440, bounds
+1..10080. `201 { code, invite }` — safe fields only. The generic admin branch
+(no `room_id`) is unchanged.
+
+### `POST /api/v1/rooms/{room_id}/members/self`
+
+No body. Requires the contributor token minted by a CONSUMED invite scoped
+exactly to the room (provenance proven in-transaction). `201 { member }`;
+retry `200`; removed principal on the same token `403 membership_revoked`.
+
+### `POST /api/v1/rooms/{room_id}/members/agents`
+
+Body `{ agents: [{ registration_key, display_name, description?,
+model_alias?, skills_count?, subagent_names? }] }`, max 32, one all-or-nothing
+transaction, request order preserved. Local paths/tools/credentials are
+rejected. All-new `201`; retry/mixed `200`; same key with different content
+`409`.
+
+### `GET /api/v1/rooms/{room_id}/members`
+
+Active roster for active members: safe projections only —
+`owner_principal_token_id`, `registration_key`, `removed_by`, and bearer
+material never serialize.
+
+### `DELETE /api/v1/rooms/{room_id}/members/{member_id}`
+
+Owner removes any other member (owned agents removed atomically); a member
+removes only self; owner self-leave `409`. Repeat delete by a
+still-authorized caller `200 { removed: [] }`; a self-removed caller `403
+membership_revoked`.
+
+### Ledger gating for registered rooms
+
+Any ledger read/write/trace identifying a registered room (by correlation id
+or a `/rooms/{room_id}` path, descendants included) requires room scope plus
+ACTIVE membership; admin does not bypass, and broad reads suppress foreign
+room rows per-event. Writes additionally require the canonical pair
+(`correlation_id = room_id`, `virtual_path = /rooms/{room_id}`) and an
+`actor_member_id` owned by the calling principal. Non-room ledger behavior is
+unchanged.
