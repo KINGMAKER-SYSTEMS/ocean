@@ -33,7 +33,10 @@ export class RoomsError extends Error {
 }
 
 export function normalizeRoomId(input) {
-  const value = String(input ?? '').trim().toLowerCase();
+  if (typeof input !== 'string') {
+    throw new RoomsError(400, 'room id must be a string.');
+  }
+  const value = input.trim().toLowerCase();
   if (!ROOM_ID_RE.test(value)) {
     throw new RoomsError(400, 'Invalid room id: use 1-128 chars of a-z 0-9 . _ - starting alphanumeric.');
   }
@@ -141,6 +144,34 @@ export function validateRegistrationKey(input) {
     throw new RoomsError(400, 'Each agent requires a stable registration_key (1-128 chars, daemon-supplied).');
   }
   return value;
+}
+
+// AC1 global-read suppression: a ledger row whose correlation_id or
+// virtual_path identifies a REGISTERED room is visible only to that room's
+// active members — scope/clearance filtering alone is not enough, and admin
+// does not bypass. Lookup functions are injected so this stays pure-testable;
+// verdicts are cached per call for bulk reads.
+export async function suppressForeignRoomEvents(events, { findRoom, hasActiveMembership }) {
+  const verdicts = new Map();   // candidate id → true (member) | false (foreign room) | null (not a room)
+  const allowed = [];
+  for (const event of events) {
+    const candidates = new Set();
+    if (event.correlation_id) candidates.add(event.correlation_id);
+    const pathRoom = roomIdFromPath(event.virtual_path || '');
+    if (pathRoom) candidates.add(pathRoom);
+    let visible = true;
+    for (const candidate of candidates) {
+      let verdict = verdicts.get(candidate);
+      if (verdict === undefined) {
+        const room = await findRoom(candidate);
+        verdict = room ? Boolean(await hasActiveMembership(candidate)) : null;
+        verdicts.set(candidate, verdict);
+      }
+      if (verdict === false) { visible = false; break; }
+    }
+    if (visible) allowed.push(event);
+  }
+  return allowed;
 }
 
 // ── safe projection ───────────────────────────────────────────────────

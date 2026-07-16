@@ -16,6 +16,7 @@ import {
   normalizeRoomId,
   roomIdFromPath,
   roomScope,
+  suppressForeignRoomEvents,
   validateAgentDescriptor,
   validateMemberId,
   validateRegistrationKey,
@@ -1293,7 +1294,7 @@ async function handleTokenCreate(req, state, principal) {
 }
 
 async function handleInviteCreate(req, state, principal) {
-  const body = await readJsonBody(req, state.maxJsonBytes);
+  const body = requireJsonObjectBody(await readJsonBody(req, state.maxJsonBytes));
 
   // R-2 room-owner branch: an active room owner mints a contributor invite
   // whose role and exact scope are DERIVED server-side. The generic admin
@@ -1333,7 +1334,9 @@ async function handleInviteCreate(req, state, principal) {
       inviteId: created.invite.id,
       expiresAt: created.invite.expiresAt,
     });
-    return { code: created.code, expires_at: created.invite.expiresAt, room_id: roomId };
+    // Frozen envelope (v4 artifact amended to match the reviewer addendum):
+    // { code, invite } with the store's safe public invite record.
+    return { code: created.code, invite: created.invite };
   }
 
   requirePermission(principal, 'admin');
@@ -1383,6 +1386,26 @@ function requireFederation(state) {
   }
 }
 
+// readJsonBody accepts any JSON value: a scalar passes Object.keys() checks
+// vacuously and null throws TypeError downstream. Strict routes require an
+// actual object BEFORE key-level checks.
+function requireJsonObjectBody(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    throw new HttpError(400, 'Request body must be a JSON object.');
+  }
+  return body;
+}
+
+// Malformed percent-encoding in a path segment must be a clean 400, never a
+// URIError-driven 500.
+function safeDecodeSegment(segment) {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    throw new HttpError(400, 'Malformed percent-encoding in path segment.');
+  }
+}
+
 function roomsErrorToHttp(error) {
   if (error instanceof RoomsError) {
     return new HttpError(error.status, error.message, error.code ? { code: error.code } : undefined);
@@ -1406,10 +1429,13 @@ async function handleRoomRegister(req, state, principal, roomIdRaw) {
   const roomId = normalizeRoomId(roomIdRaw);
   requirePermission(principal, 'admin');
   requirePathScope(principal, roomScope(roomId));
-  const body = await readJsonBody(req, state.maxJsonBytes);
-  const allowedKeys = Object.keys(body).filter((key) => key !== 'title');
-  if (allowedKeys.length) throw new HttpError(400, 'Registration accepts an optional title only.');
-  const title = body.title !== undefined ? String(body.title).slice(0, 256) : null;
+  const body = requireJsonObjectBody(await readJsonBody(req, state.maxJsonBytes));
+  const strayKeys = Object.keys(body).filter((key) => key !== 'title');
+  if (strayKeys.length) throw new HttpError(400, 'Registration accepts an optional title only.');
+  if (body.title !== undefined && typeof body.title !== 'string') {
+    throw new HttpError(400, 'title must be a string.');
+  }
+  const title = body.title !== undefined ? body.title.slice(0, 256) : null;
   const result = await state.rooms.register({ roomId, principal, title }).catch((error) => { throw roomsErrorToHttp(error); });
   await appendAudit(state, {
     actor: principal.name, actorId: principal.id, action: 'room.register', roomId,
@@ -1417,9 +1443,15 @@ async function handleRoomRegister(req, state, principal, roomIdRaw) {
   return result;
 }
 
-async function handleRoomSelfJoin(state, principal, roomIdRaw) {
+async function handleRoomSelfJoin(req, state, principal, roomIdRaw) {
   requireFederation(state);
   const roomId = normalizeRoomId(roomIdRaw);
+  // No caller identity fields, ever: any nonempty body is rejected, and a
+  // scalar/null/array JSON body is not a vacuous pass.
+  const body = requireJsonObjectBody(await readJsonBody(req, state.maxJsonBytes));
+  if (Object.keys(body).length) {
+    throw new HttpError(400, 'Self-join takes no body; identity derives from the authenticated principal.');
+  }
   if (principal.role !== 'contributor') {
     throw new HttpError(403, 'Self-join requires the room-scoped contributor token from a consumed invite.');
   }
@@ -1441,9 +1473,16 @@ async function handleRoomAgentsRegister(req, state, principal, roomIdRaw) {
   const roomId = normalizeRoomId(roomIdRaw);
   requirePermission(principal, 'write');
   requirePathScope(principal, roomScope(roomId));
-  const body = await readJsonBody(req, state.maxJsonBytes);
+  const body = requireJsonObjectBody(await readJsonBody(req, state.maxJsonBytes));
+  const strayTopKeys = Object.keys(body).filter((key) => key !== 'agents');
+  if (strayTopKeys.length) {
+    throw new HttpError(400, `Agent registration accepts an agents array only (rejected: ${strayTopKeys.join(', ')}).`);
+  }
   if (!Array.isArray(body.agents) || body.agents.length === 0) {
     throw new HttpError(400, 'agents must be a non-empty array.');
+  }
+  if (body.agents.length > 32) {
+    throw new HttpError(400, 'agents batch is capped at 32 per request.');
   }
   const seenKeys = new Set();
   const agents = body.agents.map((entry) => {
@@ -1530,6 +1569,11 @@ async function gateRoomLedgerAccess(state, principal, { correlationId, virtualPa
     if (correlationId !== roomId || virtualPath !== roomScope(roomId)) {
       throw new HttpError(400, `Registered-room writes require correlation_id = <room_id> and virtual_path = ${roomScope(roomId)}.`);
     }
+  } else if (correlationId === roomId && virtualPath && roomIdFromPath(virtualPath) !== roomId) {
+    // A registered-room correlation paired with ANY disagreeing path —
+    // /docs, /rooms/<other>, or a non-room child — is a 400, even when the
+    // path itself is not a room.
+    throw new HttpError(400, 'virtual_path does not identify the same registered room as correlation_id.');
   } else if (correlationId && pathRoomId && correlationId !== pathRoomId) {
     throw new HttpError(400, 'correlation_id and virtual_path identify different rooms.');
   }
@@ -1678,25 +1722,25 @@ export function createOceanBedrockServer(options = {}) {
     // ── Gate-2 S1A federated room routes (R-1, R-4..R-7) ──
     const roomRegisterMatch = url.pathname.match(/^\/api\/v1\/rooms\/([^/]+)\/register$/);
     if (req.method === 'POST' && roomRegisterMatch) {
-      const result = await handleRoomRegister(req, state, principal, decodeURIComponent(roomRegisterMatch[1]));
+      const result = await handleRoomRegister(req, state, principal, safeDecodeSegment(roomRegisterMatch[1]));
       jsonResponse(res, result.status, { room_id: result.room_id, owner: result.owner });
       return;
     }
     const roomSelfJoinMatch = url.pathname.match(/^\/api\/v1\/rooms\/([^/]+)\/members\/self$/);
     if (req.method === 'POST' && roomSelfJoinMatch) {
-      const result = await handleRoomSelfJoin(state, principal, decodeURIComponent(roomSelfJoinMatch[1]));
+      const result = await handleRoomSelfJoin(req, state, principal, safeDecodeSegment(roomSelfJoinMatch[1]));
       jsonResponse(res, result.status, { member: result.member });
       return;
     }
     const roomAgentsMatch = url.pathname.match(/^\/api\/v1\/rooms\/([^/]+)\/members\/agents$/);
     if (req.method === 'POST' && roomAgentsMatch) {
-      const result = await handleRoomAgentsRegister(req, state, principal, decodeURIComponent(roomAgentsMatch[1]));
+      const result = await handleRoomAgentsRegister(req, state, principal, safeDecodeSegment(roomAgentsMatch[1]));
       jsonResponse(res, result.status, { members: result.members });
       return;
     }
     const roomRosterMatch = url.pathname.match(/^\/api\/v1\/rooms\/([^/]+)\/members$/);
     if (req.method === 'GET' && roomRosterMatch) {
-      const result = await handleRoomRoster(state, principal, decodeURIComponent(roomRosterMatch[1]));
+      const result = await handleRoomRoster(state, principal, safeDecodeSegment(roomRosterMatch[1]));
       jsonResponse(res, 200, result);
       return;
     }
@@ -1704,8 +1748,8 @@ export function createOceanBedrockServer(options = {}) {
     if (req.method === 'DELETE' && roomMemberDeleteMatch) {
       const result = await handleRoomMemberRemove(
         state, principal,
-        decodeURIComponent(roomMemberDeleteMatch[1]),
-        decodeURIComponent(roomMemberDeleteMatch[2]),
+        safeDecodeSegment(roomMemberDeleteMatch[1]),
+        safeDecodeSegment(roomMemberDeleteMatch[2]),
       );
       jsonResponse(res, result.status, { removed: result.removed });
       return;
@@ -1836,7 +1880,15 @@ export function createOceanBedrockServer(options = {}) {
         path: apiPath || undefined,
         limit: url.searchParams.get('limit') || 100,
       });
-      const visible = events.filter((event) => ledgerEventVisibleToPrincipal(event, principal));
+      let visible = events.filter((event) => ledgerEventVisibleToPrincipal(event, principal));
+      // AC1: registered-room events never leak through a global/broad read —
+      // per-row suppression by active membership; admin does not bypass.
+      if (state.federationAvailable) {
+        visible = await suppressForeignRoomEvents(visible, {
+          findRoom: (id) => state.rooms.findRoom(id),
+          hasActiveMembership: async (id) => (await state.rooms.activeMembership(id, principal.id)).length > 0,
+        });
+      }
       jsonResponse(res, 200, { events: visible });
       return;
     }
