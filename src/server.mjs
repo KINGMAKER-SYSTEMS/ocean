@@ -14,8 +14,10 @@ import { createAuthStore } from './auth-store.mjs';
 import {
   createRoomsStore,
   normalizeRoomId,
+  roomIdFromPath,
   roomScope,
   validateAgentDescriptor,
+  validateMemberId,
   validateRegistrationKey,
   validateTtlMinutes,
   RoomsError,
@@ -1291,8 +1293,50 @@ async function handleTokenCreate(req, state, principal) {
 }
 
 async function handleInviteCreate(req, state, principal) {
-  requirePermission(principal, 'admin');
   const body = await readJsonBody(req, state.maxJsonBytes);
+
+  // R-2 room-owner branch: an active room owner mints a contributor invite
+  // whose role and exact scope are DERIVED server-side. The generic admin
+  // branch below keeps its old contract untouched.
+  if (body.room_id !== undefined) {
+    requireFederation(state);
+    let roomId;
+    let ttlMinutes;
+    try {
+      roomId = normalizeRoomId(body.room_id);
+      ttlMinutes = validateTtlMinutes(body.ttl_minutes);
+    } catch (error) {
+      throw roomsErrorToHttp(error);
+    }
+    const strayKeys = Object.keys(body).filter((key) => !['room_id', 'recipient_name', 'ttl_minutes'].includes(key));
+    if (strayKeys.length) {
+      throw new HttpError(400, `Room invites accept room_id, recipient_name, ttl_minutes only; role and scopes are derived server-side (rejected: ${strayKeys.join(', ')}).`);
+    }
+    if (body.recipient_name !== undefined && typeof body.recipient_name !== 'string') {
+      throw new HttpError(400, 'recipient_name must be a string.');
+    }
+    const memberships = await state.rooms.activeMembership(roomId, principal.id);
+    const ownerRow = memberships.find((row) => row.actor_type === 'user' && row.role_in_room === 'owner');
+    if (!ownerRow) throw new HttpError(403, 'Only an active room owner may mint invites for this room.');
+    const created = await state.auth.createInvite({
+      name: (body.recipient_name || `room:${roomId}`).slice(0, 128),
+      role: 'contributor',
+      scopes: [roomScope(roomId)],
+      ttlMinutes,
+      createdBy: principal.id,
+    });
+    await appendAudit(state, {
+      actor: principal.name,
+      actorId: principal.id,
+      action: 'room.invite.create',
+      roomId,
+      inviteId: created.invite.id,
+      expiresAt: created.invite.expiresAt,
+    });
+    return { code: created.code, expires_at: created.invite.expiresAt, room_id: roomId };
+  }
+
+  requirePermission(principal, 'admin');
   const created = await state.auth.createInvite({
     name: body.name,
     role: body.role || 'contributor',
@@ -1441,7 +1485,12 @@ async function handleRoomRoster(state, principal, roomIdRaw) {
 async function handleRoomMemberRemove(state, principal, roomIdRaw, memberIdRaw) {
   requireFederation(state);
   const roomId = normalizeRoomId(roomIdRaw);
-  const memberId = String(memberIdRaw || '').trim();
+  let memberId;
+  try {
+    memberId = validateMemberId(memberIdRaw);
+  } catch (error) {
+    throw roomsErrorToHttp(error);
+  }
   requirePathScope(principal, roomScope(roomId));
   // Authorization (active caller human row, owner/self rules, self-leave 409,
   // tombstone 403) lives INSIDE the store transaction against locked rows.
@@ -1455,20 +1504,19 @@ async function handleRoomMemberRemove(state, principal, roomIdRaw, memberIdRaw) 
   return result;
 }
 
-// R-8: room-aware ledger gating. When correlation_id or virtual_path
+// R-8: room-aware ledger gating. When correlation_id or virtual_path —
+// DESCENDANT paths included, so /rooms/<id>/child cannot bypass membership —
 // identifies a REGISTERED room: valid token + room scope + active membership;
 // writes require the canonical pair AND an actor_member_id owned by the
 // caller. Reads may identify by correlation alone. Non-room ledger behavior
 // is untouched (including deployments without federation, where no rooms
 // exist by construction).
-const ROOM_PATH_RE = /^\/rooms\/([^/]+)$/;
-
 async function gateRoomLedgerAccess(state, principal, { correlationId, virtualPath, isWrite, actorMemberId }) {
   if (!state.federationAvailable) return;
-  const pathMatch = virtualPath ? ROOM_PATH_RE.exec(virtualPath) : null;
+  const pathRoomId = virtualPath ? roomIdFromPath(virtualPath) : null;
   const candidates = new Set();
   if (correlationId) candidates.add(correlationId);
-  if (pathMatch) candidates.add(pathMatch[1]);
+  if (pathRoomId) candidates.add(pathRoomId);
   if (!candidates.size) return;
 
   let roomId = null;
@@ -1478,13 +1526,12 @@ async function gateRoomLedgerAccess(state, principal, { correlationId, virtualPa
   if (!roomId) return;
 
   if (isWrite) {
+    // Canonical pair, exact: descendant/noncanonical paths are 400 on writes.
     if (correlationId !== roomId || virtualPath !== roomScope(roomId)) {
       throw new HttpError(400, `Registered-room writes require correlation_id = <room_id> and virtual_path = ${roomScope(roomId)}.`);
     }
-  } else if (correlationId && pathMatch && correlationId !== pathMatch[1]) {
+  } else if (correlationId && pathRoomId && correlationId !== pathRoomId) {
     throw new HttpError(400, 'correlation_id and virtual_path identify different rooms.');
-  } else if (!correlationId && pathMatch) {
-    // Path-only read of a registered room is fine; gate on that room.
   }
 
   requirePathScope(principal, roomScope(roomId));
@@ -1492,7 +1539,13 @@ async function gateRoomLedgerAccess(state, principal, { correlationId, virtualPa
 
   if (isWrite) {
     if (!actorMemberId) throw new HttpError(403, 'Registered-room writes require actor_member_id.');
-    const owned = await state.rooms.memberOwnedByPrincipal(roomId, actorMemberId, principal.id);
+    let memberId;
+    try {
+      memberId = validateMemberId(actorMemberId, 'actor_member_id');
+    } catch (error) {
+      throw roomsErrorToHttp(error);
+    }
+    const owned = await state.rooms.memberOwnedByPrincipal(roomId, memberId, principal.id);
     if (!owned) throw new HttpError(403, 'actor_member_id is not an active member owned by the calling principal.');
   }
 }
@@ -1622,6 +1675,42 @@ export function createOceanBedrockServer(options = {}) {
 
     const principal = await authenticate(req, url, state);
 
+    // ── Gate-2 S1A federated room routes (R-1, R-4..R-7) ──
+    const roomRegisterMatch = url.pathname.match(/^\/api\/v1\/rooms\/([^/]+)\/register$/);
+    if (req.method === 'POST' && roomRegisterMatch) {
+      const result = await handleRoomRegister(req, state, principal, decodeURIComponent(roomRegisterMatch[1]));
+      jsonResponse(res, result.status, { room_id: result.room_id, owner: result.owner });
+      return;
+    }
+    const roomSelfJoinMatch = url.pathname.match(/^\/api\/v1\/rooms\/([^/]+)\/members\/self$/);
+    if (req.method === 'POST' && roomSelfJoinMatch) {
+      const result = await handleRoomSelfJoin(state, principal, decodeURIComponent(roomSelfJoinMatch[1]));
+      jsonResponse(res, result.status, { member: result.member });
+      return;
+    }
+    const roomAgentsMatch = url.pathname.match(/^\/api\/v1\/rooms\/([^/]+)\/members\/agents$/);
+    if (req.method === 'POST' && roomAgentsMatch) {
+      const result = await handleRoomAgentsRegister(req, state, principal, decodeURIComponent(roomAgentsMatch[1]));
+      jsonResponse(res, result.status, { members: result.members });
+      return;
+    }
+    const roomRosterMatch = url.pathname.match(/^\/api\/v1\/rooms\/([^/]+)\/members$/);
+    if (req.method === 'GET' && roomRosterMatch) {
+      const result = await handleRoomRoster(state, principal, decodeURIComponent(roomRosterMatch[1]));
+      jsonResponse(res, 200, result);
+      return;
+    }
+    const roomMemberDeleteMatch = url.pathname.match(/^\/api\/v1\/rooms\/([^/]+)\/members\/([^/]+)$/);
+    if (req.method === 'DELETE' && roomMemberDeleteMatch) {
+      const result = await handleRoomMemberRemove(
+        state, principal,
+        decodeURIComponent(roomMemberDeleteMatch[1]),
+        decodeURIComponent(roomMemberDeleteMatch[2]),
+      );
+      jsonResponse(res, result.status, { removed: result.removed });
+      return;
+    }
+
     if (req.method === 'GET' && url.pathname === '/api/v1/info') {
       requirePermission(principal, 'read');
       jsonResponse(res, 200, {
@@ -1732,6 +1821,11 @@ export function createOceanBedrockServer(options = {}) {
       requirePermission(principal, 'read');
       const apiPath = url.searchParams.has('path') ? normalizeApiPath(url.searchParams.get('path')) : null;
       if (apiPath) requirePathScope(principal, apiPath);
+      await gateRoomLedgerAccess(state, principal, {
+        correlationId: url.searchParams.get('correlation_id') || null,
+        virtualPath: apiPath,
+        isWrite: false,
+      });
       const events = await state.ledger.read({
         correlation_id: url.searchParams.get('correlation_id') || undefined,
         actor_id: url.searchParams.get('actor_id') || undefined,
@@ -1753,6 +1847,12 @@ export function createOceanBedrockServer(options = {}) {
       const apiPath = body.virtual_path || body.virtualPath || body.path ? normalizeApiPath(body.virtual_path || body.virtualPath || body.path) : null;
       if (apiPath) requirePathScope(principal, apiPath);
       requireClearance(principal, body.clearance || 'UNCLASSIFIED');
+      await gateRoomLedgerAccess(state, principal, {
+        correlationId: body.correlation_id || body.correlationId || null,
+        virtualPath: apiPath,
+        isWrite: true,
+        actorMemberId: body.actor_member_id || body.actorMemberId || null,
+      });
       const adminOverride = principal.role === 'admin';
       const event = await state.ledger.append({
         ...body,
@@ -1770,6 +1870,11 @@ export function createOceanBedrockServer(options = {}) {
       requirePermission(principal, 'read');
       const correlationId = url.searchParams.get('correlation_id');
       if (!correlationId) throw new HttpError(400, 'Missing correlation_id.');
+      await gateRoomLedgerAccess(state, principal, {
+        correlationId,
+        virtualPath: null,
+        isWrite: false,
+      });
       const events = await state.ledger.trace(correlationId, url.searchParams.get('limit') || 1000);
       const visible = events.filter((event) => ledgerEventVisibleToPrincipal(event, principal));
       jsonResponse(res, 200, { correlation_id: correlationId, events: visible });
@@ -1789,6 +1894,12 @@ export function createOceanBedrockServer(options = {}) {
       for (const filePath of normalizedFiles) requirePathScope(principal, filePath);
       const visibleEvents = body.events || body.visible_events || body.visibleEvents || [];
       if (!Array.isArray(visibleEvents)) throw new HttpError(400, 'events/visible_events must be an array when provided.');
+      await gateRoomLedgerAccess(state, principal, {
+        correlationId: body.correlation_id || body.correlationId || null,
+        virtualPath: apiPath,
+        isWrite: true,
+        actorMemberId: body.actor_member_id || body.actorMemberId || null,
+      });
       const snapshot = {
         name: body.name || null,
         snapshot_type: body.snapshot_type || body.snapshotType || 'context',

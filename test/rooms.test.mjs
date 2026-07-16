@@ -7,7 +7,9 @@ import assert from 'node:assert/strict';
 
 import {
   normalizeRoomId,
+  roomIdFromPath,
   roomScope,
+  validateMemberId,
   validateTtlMinutes,
   validateAgentDescriptor,
   validateRegistrationKey,
@@ -33,6 +35,27 @@ test('normalizeRoomId rejects malformed ids', () => {
 
 test('roomScope is the exact frozen shape', () => {
   assert.equal(roomScope('warroom'), '/rooms/warroom');
+});
+
+test('validateMemberId accepts UUIDs, 400s everything else (never PG 22P02)', () => {
+  assert.equal(
+    validateMemberId('9C2F4A52-0000-4000-8000-000000000001'),
+    '9c2f4a52-0000-4000-8000-000000000001',
+  );
+  for (const bad of ['', 'not-a-uuid', '123', 'tok_abc', '9c2f4a52-0000-4000-8000', null, undefined, {}, 42]) {
+    assert.throws(() => validateMemberId(bad), RoomsError, `expected reject: ${String(bad)}`);
+  }
+});
+
+test('roomIdFromPath catches descendants — child paths cannot bypass gating', () => {
+  assert.equal(roomIdFromPath('/rooms/warroom'), 'warroom');
+  assert.equal(roomIdFromPath('/rooms/warroom/notes.md'), 'warroom');
+  assert.equal(roomIdFromPath('/rooms/warroom/deep/child'), 'warroom');
+  assert.equal(roomIdFromPath('/roomsx/warroom'), null);
+  assert.equal(roomIdFromPath('/docs/rooms/warroom'), null);
+  assert.equal(roomIdFromPath('/rooms/'), null);
+  assert.equal(roomIdFromPath('/rooms'), null);
+  assert.equal(roomIdFromPath(null), null);
 });
 
 // ── ttl ───────────────────────────────────────────────────────────────

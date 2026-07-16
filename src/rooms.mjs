@@ -48,6 +48,27 @@ export function roomVirtualPath(roomId) {
   return `/rooms/${roomId}`;
 }
 
+// Member ids are Bedrock-minted UUIDs; malformed input must be a clean 400,
+// never a PG 22P02/500.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function validateMemberId(input, label = 'member_id') {
+  const value = String(input ?? '').trim();
+  if (!UUID_RE.test(value)) {
+    throw new RoomsError(400, `${label} must be a UUID.`);
+  }
+  return value.toLowerCase();
+}
+
+// Room detection from a virtual path, DESCENDANTS included: /rooms/<id> and
+// /rooms/<id>/anything both identify <id>, so a noncanonical child path can
+// never bypass membership gating. Returns null for non-room paths.
+export function roomIdFromPath(virtualPath) {
+  if (typeof virtualPath !== 'string') return null;
+  const match = /^\/rooms\/([^/]+)(?:\/|$)/.exec(virtualPath);
+  return match ? match[1] : null;
+}
+
 export function validateTtlMinutes(input) {
   // Default ONLY when the key is omitted; null/empty/numeric strings are
   // rejected — the wire type is a finite JSON integer.
