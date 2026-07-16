@@ -29,6 +29,22 @@ components:
         ok: { type: boolean, const: false }
         error: { type: string }
         details: {}
+    RoomMember:
+      type: object
+      description: >-
+        Safe public projection of a federated room member. Internal fields
+        (owner_principal_token_id, registration_key, removed_by, bearer
+        material) are never serialized.
+      properties:
+        member_id: { type: string, format: uuid }
+        actor_type: { type: string, enum: [user, agent] }
+        role_in_room: { type: string, enum: [owner, member] }
+        display_name: { type: string }
+        joined_at: { type: string, format: date-time }
+        owner_member_id: { type: string, format: uuid, description: Present on agent rows only. }
+        public_agent_descriptor:
+          type: object
+          description: Safe subset only — display_name, description, model_alias, skills_count, subagent_names.
 paths:
   /health:
     get:
@@ -200,6 +216,13 @@ paths:
   /api/v1/ledger/events:
     get:
       summary: List Ocean Ledger events visible to the token
+      description: >-
+        Registered-room gating (Gate-2 R-8): identifying a registered room by
+        correlation_id or a /rooms/{room_id} path (descendants included)
+        requires room scope + ACTIVE membership; a registered-room
+        correlation paired with any disagreeing path is 400. Broad reads
+        suppress registered-room rows per-event for non-members — admin does
+        not bypass.
       parameters:
         - in: query
           name: correlation_id
@@ -226,9 +249,17 @@ paths:
           name: limit
           schema: { type: integer, default: 100, maximum: 5000 }
       responses:
-        '200': { description: Ledger events }
+        '200': { description: Ledger events (registered-room rows filtered by membership) }
+        '400': { description: Registered-room correlation with a disagreeing path }
+        '403': { description: Registered-room identified without active membership }
     post:
       summary: Append an Ocean Ledger event
+      description: >-
+        Registered-room writes (Gate-2 R-8) require the canonical pair
+        correlation_id = room_id AND virtual_path = /rooms/{room_id}
+        (descendant/noncanonical paths are 400) plus an actor_member_id owned
+        by the calling principal (missing or unowned is 403; malformed UUID is
+        400). Non-room appends are unchanged.
       requestBody:
         content:
           application/json:
@@ -244,14 +275,21 @@ paths:
                 visible_context: {}
                 context_snapshot: {}
                 clearance: { type: string, enum: [PUBLIC, UNCLASSIFIED, CONFIDENTIAL, SECRET, TOP_SECRET], default: UNCLASSIFIED }
+                actor_member_id: { type: string, format: uuid, description: Required for registered-room writes; must be an active member owned by the caller. }
                 tags:
                   type: array
                   items: { type: string }
       responses:
         '201': { description: Appended event }
+        '400': { description: Noncanonical room pair or malformed actor_member_id }
+        '403': { description: Missing/unowned actor_member_id or no active membership }
   /api/v1/ledger/trace:
     get:
       summary: Trace an Ocean Ledger correlation chain
+      description: >-
+        Tracing a registered-room correlation (Gate-2 R-8) requires room scope
+        + ACTIVE membership; admin does not bypass. Non-room traces are
+        unchanged.
       parameters:
         - in: query
           name: correlation_id
@@ -262,9 +300,15 @@ paths:
           schema: { type: integer, default: 1000, maximum: 5000 }
       responses:
         '200': { description: Correlated event chain }
+        '403': { description: Registered room traced without active membership }
   /api/v1/ledger/snapshots:
     post:
       summary: Create a context snapshot event
+      description: >-
+        A snapshot identifying a registered room (Gate-2 R-8) is a room WRITE:
+        canonical correlation_id = room_id + virtual_path = /rooms/{room_id}
+        pair required (disagreement 400) plus an actor_member_id owned by the
+        calling principal (missing/unowned 403). Non-room snapshots unchanged.
       requestBody:
         content:
           application/json:
@@ -284,8 +328,11 @@ paths:
                 summary: { type: string }
                 metadata: { type: object }
                 clearance: { type: string, enum: [PUBLIC, UNCLASSIFIED, CONFIDENTIAL, SECRET, TOP_SECRET], default: CONFIDENTIAL }
+                actor_member_id: { type: string, format: uuid, description: Required for registered-room snapshots; must be an active member owned by the caller. }
       responses:
         '201': { description: Snapshot event created }
+        '400': { description: Noncanonical room pair or malformed actor_member_id }
+        '403': { description: Missing/unowned actor_member_id or no active membership }
   /api/v1/ledger/verify:
     get:
       summary: Verify local Ocean Ledger hash chain, admin only
@@ -581,3 +628,156 @@ paths:
           schema: { type: integer, default: 100, maximum: 1000 }
       responses:
         '200': { description: Audit events }
+  /api/v1/invites:
+    post:
+      summary: Create an invite (generic admin, or Gate-2 room-owner branch)
+      description: >-
+        Without room_id: the existing generic admin invite (contract
+        unchanged). With room_id: an ACTIVE room owner mints a single-use
+        contributor invite whose role and exact /rooms/{room_id} scope are
+        DERIVED server-side; client-supplied role/scopes are 400. TTL default
+        1440 minutes, bounds 1..10080. The room branch requires the single
+        shared Postgres authority (503 otherwise).
+      requestBody:
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - title: Generic admin invite (unchanged contract)
+                  type: object
+                  not: { required: [room_id] }
+                  properties:
+                    name: { type: string }
+                    role: { type: string }
+                    scopes:
+                      type: array
+                      items: { type: string }
+                    ttlMinutes: { type: integer }
+                - title: Room-owner invite (Gate-2, strict)
+                  type: object
+                  additionalProperties: false
+                  required: [room_id]
+                  properties:
+                    room_id: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$', description: Canonicalized to lowercase server-side. }
+                    recipient_name: { type: string }
+                    ttl_minutes: { type: integer, minimum: 1, maximum: 10080, default: 1440 }
+      responses:
+        '201': { description: '{ code, invite } — safe fields, no hash/bearer material' }
+        '400': { description: Supplied role/scopes, bad TTL, or non-object body }
+        '403': { description: Caller is not an active owner of the room }
+        '503': { description: Federation unavailable (split/file/JSONL config) }
+  /api/v1/rooms/{room_id}/register:
+    post:
+      summary: Register a federated room (bootstrap; admin + room scope)
+      description: >-
+        One transaction claims the ledger correlation (id = room_id, metadata
+        federation_kind=room) and creates the owner human row from the
+        authenticated principal. Retry identity is (room_id, principal). An
+        unrelated pre-existing correlation is never silently claimed.
+      parameters:
+        - { in: path, name: room_id, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                title: { type: string }
+      responses:
+        '201': { description: '{ room_id, owner: RoomMember }' }
+        '200': { description: Same-principal retry — existing owner returned }
+        '400': { description: Invalid room id / non-title keys / non-object body }
+        '409': { description: Unrelated correlation, different principal, or concurrent loser }
+        '503': { description: Federation unavailable }
+  /api/v1/rooms/{room_id}/members/self:
+    post:
+      summary: Self-join after invite redeem (no body fields, ever)
+      description: >-
+        Requires the active contributor token minted by a CONSUMED invite
+        scoped exactly to this room (provenance proven inside the join
+        transaction). Identity derives from the principal; any nonempty body
+        is 400. A removed principal's same token gets 403 membership_revoked
+        — only a new invite readmits.
+      parameters:
+        - { in: path, name: room_id, required: true, schema: { type: string } }
+      responses:
+        '201': { description: '{ member: RoomMember }' }
+        '200': { description: Same-principal retry — existing member returned }
+        '400': { description: Nonempty/non-object body or invalid room id }
+        '403': { description: Wrong token role/scope/provenance, or membership_revoked }
+        '503': { description: Federation unavailable }
+  /api/v1/rooms/{room_id}/members/agents:
+    post:
+      summary: Register own agents (safe descriptors + registration keys)
+      description: >-
+        Caller must hold an ACTIVE human row (locked for the transaction).
+        One transaction, all-or-nothing, max 32 per batch, response preserves
+        request order. registration_key is the idempotency identity; exact
+        retry returns existing rows (200), all-new is 201, same key with
+        different content is 409. Local paths, tools, and credentials are
+        rejected outright — Bedrock never accepts them.
+      parameters:
+        - { in: path, name: room_id, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [agents]
+              properties:
+                agents:
+                  type: array
+                  minItems: 1
+                  maxItems: 32
+                  items:
+                    type: object
+                    additionalProperties: false
+                    required: [registration_key, display_name]
+                    properties:
+                      registration_key: { type: string, minLength: 1, maxLength: 128 }
+                      display_name: { type: string, minLength: 1 }
+                      description: { type: string, description: Truncated to 2048 chars server-side (not rejected). }
+                      model_alias: { type: string, description: Truncated to 128 chars server-side (not rejected). }
+                      skills_count: { type: integer, minimum: 0, maximum: 4294967295 }
+                      subagent_names: { type: array, items: { type: string, description: Each truncated to 128 chars server-side. } }
+      responses:
+        '201': { description: 'All rows new — { members: [RoomMember] }' }
+        '200': { description: Idempotent retry / mixed — full list, request order }
+        '400': { description: Forbidden/unknown fields, duplicate keys, bad batch }
+        '403': { description: No active human membership }
+        '409': { description: registration_key reuse with different content }
+        '503': { description: Federation unavailable }
+  /api/v1/rooms/{room_id}/members:
+    get:
+      summary: Active roster (shared, safe projections only)
+      description: Requires valid token + room scope + ACTIVE membership.
+      parameters:
+        - { in: path, name: room_id, required: true, schema: { type: string } }
+      responses:
+        '200': { description: '{ members: [RoomMember] } — all active human+agent rows' }
+        '400': { description: Invalid room id }
+        '403': { description: No active membership (membership_revoked when tombstoned) }
+        '503': { description: Federation unavailable }
+  /api/v1/rooms/{room_id}/members/{member_id}:
+    delete:
+      summary: Remove a member (soft removal, atomic with owned agents)
+      description: >-
+        Owner removes any other member — a human's owned agents go in the same
+        transaction; a member removes only self; owner self-leave is 409.
+        Repeat delete by a still-authorized caller is idempotent 200
+        {removed: []}; a self-removed caller gets 403 membership_revoked.
+        Registered-room ledger access is separately gated — writes require the
+        canonical correlation_id = room_id + virtual_path = /rooms/{room_id}
+        pair and an actor_member_id owned by the caller.
+      parameters:
+        - { in: path, name: room_id, required: true, schema: { type: string } }
+        - { in: path, name: member_id, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: '{ removed: [member_id] }' }
+        '400': { description: Invalid room id or malformed member UUID }
+        '403': { description: Not authorized / membership_revoked }
+        '409': { description: Owner self-leave denied }
+        '503': { description: Federation unavailable }

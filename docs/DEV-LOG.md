@@ -941,3 +941,36 @@ npm run smoke
   cleanup wave deleted the never-committed inline GUI; ceremony now lives only
   at `/onboarding`. Panel verified in-browser against real config (sources,
   preview state, ack gate, schedule; zero console errors, Inter live).
+
+## 2026-07-16 — Gate-2 S1A: federated room membership + authz (feat/s1a-federated-rooms)
+
+- `db/006_federated_rooms.sql`: `longhouse.room_members` with composite
+  same-room/same-principal FK, actor-shape CHECKs, one-active-owner /
+  one-active-human / registration-key partial uniques, and a DEFERRABLE
+  INITIALLY DEFERRED owner-guard trigger (active agents must reference an
+  active user owner; removal cannot orphan). Transaction-wrapped, idempotent
+  on second apply.
+- `src/rooms.mjs`: room store — atomic register (correlation claim marked
+  `federation_kind=room`), self-join with in-transaction consumed-invite
+  provenance + tombstone lock (no revoked-token resurrection), batch agent
+  registration keyed by daemon-supplied registration_key (all-or-nothing,
+  201 all-new / 200 retry-mixed, changed-content 409), locked in-transaction
+  removal authorization, fail-closed safe projections.
+- `src/server.mjs`: single-shared-Postgres F3 gate (resolved options/env,
+  URLs never logged, split state → 503), routes R-1..R-7 with strict JSON
+  object bodies, room-owner invite branch (derived contributor role + exact
+  scope), and R-8 ledger gating: canonical-pair writes with owned
+  actor_member_id, descendant-path detection, per-row global-read
+  suppression (admin does not bypass), gate ordered before generic scope so
+  the frozen mismatch 400 wins.
+- Tests: 61 DB-free (validators, projections, suppression helper, file/JSONL
+  HTTP 503/400 pins) plus `scripts/rooms-postgres-smoke.mjs` — quadruple-
+  gated disposable-Postgres protocol gate (94 checks green, reviewer-executed
+  on a fresh disposable PG14 `_test` database): exact-status races,
+  SQLSTATE-verified direct-SQL constraint pins, split-Postgres F3,
+  create-only cleanup with verbatim abort on any preexisting `longhouse`
+  schema.
+- Reviewed continuously by codex against the frozen
+  `gate2-s1a-freeze.md` v4 (ocean-surface `.stitchpad/artifacts/`); store
+  gate approved at b9f9df0, route/R-8 gate through fb9e24f (reopened mismatch-order fix), PG protocol
+  gate through e4cb564; ocean independent trace APPROVE with no findings.

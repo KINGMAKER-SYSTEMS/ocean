@@ -12,7 +12,7 @@ const args = process.argv.slice(2);
 if (args.includes('--help') || args.includes('-h')) {
   console.log(`Usage:
   DATABASE_URL=postgres://... npm run db:migrate -- --yes
-  DATABASE_URL=postgres://... npm run db:migrate -- --yes db/001_longhouse_core.sql db/002_ocean_ledger.sql db/003_source_adapters.sql db/004_source_capabilities_truth.sql db/005_auth_registry.sql
+  DATABASE_URL=postgres://... npm run db:migrate -- --yes db/001_longhouse_core.sql db/002_ocean_ledger.sql db/003_source_adapters.sql db/004_source_capabilities_truth.sql db/005_auth_registry.sql db/006_federated_rooms.sql
 
 Runs SQL migrations against DATABASE_URL. Requires --yes intentionally.`);
   process.exit(0);
@@ -40,6 +40,7 @@ if (files.length === 0) {
     path.resolve(repoRoot, 'db/003_source_adapters.sql'),
     path.resolve(repoRoot, 'db/004_source_capabilities_truth.sql'),
     path.resolve(repoRoot, 'db/005_auth_registry.sql'),
+    path.resolve(repoRoot, 'db/006_federated_rooms.sql'),
   );
 }
 

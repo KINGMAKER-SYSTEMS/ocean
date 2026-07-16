@@ -26,9 +26,24 @@ try {
       to_regclass('longhouse.graph_edges') AS graph_edges_table,
       to_regclass('longhouse.ingest_jobs') AS ingest_jobs_table,
       to_regclass('longhouse.auth_tokens') AS auth_tokens_table,
-      to_regclass('longhouse.auth_invites') AS auth_invites_table
+      to_regclass('longhouse.auth_invites') AS auth_invites_table,
+      to_regclass('longhouse.room_members') AS room_members_table
   `);
   const row = result.rows[0];
+  // The deferred owner-guard trigger is load-bearing for room integrity;
+  // table existence alone is too weak a readiness signal.
+  let roomOwnerGuardTrigger = false;
+  if (row.room_members_table) {
+    const trigger = await pool.query(`
+      SELECT 1 FROM pg_trigger t
+      JOIN pg_class c ON c.oid = t.tgrelid
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = 'longhouse' AND c.relname = 'room_members'
+        AND t.tgname = 'room_members_owner_guard_trg'
+        AND t.tgdeferrable AND t.tginitdeferred AND t.tgenabled <> 'D'
+    `);
+    roomOwnerGuardTrigger = trigger.rows.length > 0;
+  }
   let sourceAdaptersSeeded = 0;
   if (row.source_adapters_table) {
     const adapterCount = await pool.query(`
@@ -78,6 +93,8 @@ try {
     user: row.user,
     schemaReady: Boolean(row.mounts_table && row.ledger_events_table && row.context_snapshots_table && sourceAdapterTablesReady),
     authRegistryReady: Boolean(row.auth_tokens_table && row.auth_invites_table),
+    roomMembersReady: Boolean(row.room_members_table) && roomOwnerGuardTrigger,
+    roomOwnerGuardTrigger,
     tables: {
       mounts: row.mounts_table,
       ledgerEvents: row.ledger_events_table,
@@ -93,6 +110,7 @@ try {
       ingestJobs: row.ingest_jobs_table,
       authTokens: row.auth_tokens_table,
       authInvites: row.auth_invites_table,
+      roomMembers: row.room_members_table,
     },
     sourceAdaptersSeeded,
     semantic: semanticCounts,

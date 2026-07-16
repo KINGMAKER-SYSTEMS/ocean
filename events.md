@@ -169,3 +169,22 @@ root child index, and removed the dead project-map artifact link and false stric
 claim. Verification from a clean checkout passed 37 tests, smoke, source contract, secret
 scan, secret-glob checks, and public health/route-index requests.
 _________________________________________________________________________________
+time:  [18:37] [16-07-26]
+agent: [claude] [fable 5]
+worktree: [feat/s1a-federated-rooms]
+type:  [feature-request]
+area:  [backend]
+
+Built Gate-2 S1A federated room membership end to end against the codex-frozen
+v4 contract: 006 migration (room_members, composite same-principal FK, partial
+uniques, deferred owner-guard trigger), rooms.mjs store with transactional
+provenance/tombstone/removal locks, server routes R-1..R-7 + room-owner invite
+branch + R-8 ledger gating with global-read suppression, quadruple-gated
+disposable-PG protocol harness, smoke/db:check/package updates, openapi+API
+docs. Verification: npm test 61/61, npm run smoke green, reviewer-executed
+harness 94/0 on a second fresh disposable PG14 _test database. Store gate
+approved at b9f9df0, route/R-8 gate through fb9e24f (mismatch-order fix), PG gate through e4cb564;
+ocean independent trace APPROVE with no findings. Repo fact only — nothing
+here is deployed or production-attested. Final merge pending docs/branch
+verification closeout.
+_________________________________________________________________________________

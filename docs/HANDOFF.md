@@ -1,9 +1,10 @@
 # Ocean Bedrock Handoff
 
-- Verified: 2026-07-14
+- Verified: 2026-07-16
 - Repository: `risingtides-dev/ocean-bedrock`
 - Default branch: `master`
-- Verified base commit: `576c5cb2e63a9c106ef99bc8d5b0886417975367`
+- Working branch: `feat/s1a-federated-rooms` (unmerged), branch base `95706c1`
+- Reviewed implementation tip: `e4cb564`
 - Service: `ocean-bedrock`
 - Public URL: <https://ocean-bedrock-production.up.railway.app>
 
@@ -24,24 +25,25 @@ Use [`OCEAN_PROJECT_MAP.md`](OCEAN_PROJECT_MAP.md) for cross-repo routing.
 
 ## Verified repository state
 
-The following checks passed from a clean checkout on 2026-07-14 after `npm ci`:
+The following checks passed on 2026-07-16 on branch `feat/s1a-federated-rooms`
+(Gate-2 S1A federated room membership; not merged to `master` yet):
 
 ```text
-npm test                    37/37 passed
-npm run smoke               passed
+npm test                    61/61 passed (incl. rooms pure + file/JSONL HTTP suites)
+npm run smoke               passed (incl. F3 federated 503 assertions)
 npm run source:check        passed
-npm run secret:scan         passed (115 files)
+npm run secret:scan         passed (119 files)
 npm run secret:globs:check passed
+npm run rooms:pg-smoke      94/0 (reviewer-executed on a fresh disposable PG14 `_test` database)
 ```
 
-The public unauthenticated endpoints also responded successfully:
-
-```text
-GET /health  -> ok=true, instance=ocean-bedrock, version=0.1.0
-GET /        -> route index with current API links
-```
-
-These checks attest the repository and public health surface. They do not attest private production data counts, database migrations, scheduled jobs, mounts, tokens, or deployment identity. Verify those with authorized production access before making operational claims.
+These checks attest the repository only. The S1A branch is NOT deployed and
+nothing here is production-attested: private production data counts, database
+migrations (006 has not been applied to any live database), scheduled jobs,
+mounts, tokens, and deployment identity all require authorized production
+access before operational claims. `docs/AGENTS.md` is intentionally unchanged
+by S1A — the documentation workflow did not change; the durable
+federated-rooms boundary rule lives in the root `AGENTS.md`.
 
 ## Runtime shape
 
