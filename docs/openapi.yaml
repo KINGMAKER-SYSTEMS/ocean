@@ -658,7 +658,7 @@ paths:
                   additionalProperties: false
                   required: [room_id]
                   properties:
-                    room_id: { type: string, pattern: '^[a-z0-9][a-z0-9._-]{0,127}$' }
+                    room_id: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$', description: Canonicalized to lowercase server-side. }
                     recipient_name: { type: string }
                     ttl_minutes: { type: integer, minimum: 1, maximum: 10080, default: 1440 }
       responses:
@@ -738,10 +738,10 @@ paths:
                     properties:
                       registration_key: { type: string, minLength: 1, maxLength: 128 }
                       display_name: { type: string, minLength: 1 }
-                      description: { type: string, maxLength: 2048 }
-                      model_alias: { type: string, maxLength: 128 }
+                      description: { type: string, description: Truncated to 2048 chars server-side (not rejected). }
+                      model_alias: { type: string, description: Truncated to 128 chars server-side (not rejected). }
                       skills_count: { type: integer, minimum: 0, maximum: 4294967295 }
-                      subagent_names: { type: array, items: { type: string, maxLength: 128 } }
+                      subagent_names: { type: array, items: { type: string, description: Each truncated to 128 chars server-side. } }
       responses:
         '201': { description: 'All rows new — { members: [RoomMember] }' }
         '200': { description: Idempotent retry / mixed — full list, request order }
