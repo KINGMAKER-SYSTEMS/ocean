@@ -41,6 +41,95 @@ function computeEventHash(eventWithoutHash) {
   return sha256(stableStringify(eventWithoutHash));
 }
 
+// ── Gate-2 S1B: producer-tuple conflict + cursor paging ───────────────
+
+// Typed store errors so the server adapter maps them to exact HTTP statuses
+// (409 / 400) instead of string-matching messages.
+export class LedgerConflictError extends Error {
+  constructor(message, details = {}) {
+    super(message);
+    this.name = 'LedgerConflictError';
+    this.details = details;
+  }
+}
+
+export class LedgerValidationError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'LedgerValidationError';
+  }
+}
+
+// Frozen canonical-content comparison (gate2-s1b-freeze.md v2 B1): a producer
+// retry carrying the same FULL normalized content is idempotent; the same
+// tuple with ANY hash-bearing delta is a conflict. The candidate runs through
+// the REAL normalizer so aliases/defaults resolve exactly as an append would.
+// Excluded ONLY: id/sequence/prev_hash/hash (chain-assigned) and
+// timestamp/received_at (a retry may re-stamp). actor_*, schema_version,
+// visible_context, context_snapshot, source_* are all INCLUDED — deltas
+// there are conflicts, never silent matches.
+const PRODUCER_EXCLUDED_KEYS = new Set([
+  'id', 'sequence', 'prev_hash', 'hash', 'timestamp', 'received_at',
+]);
+
+function producerContentView(source, isRawInput) {
+  const normalized = isRawInput
+    ? normalizeLedgerEvent(
+      { ...source, id: 'cmp', timestamp: '1970-01-01T00:00:00.000Z', received_at: '1970-01-01T00:00:00.000Z' },
+      null,
+    )
+    : source;
+  const view = {};
+  for (const key of Object.keys(normalized)) {
+    if (!PRODUCER_EXCLUDED_KEYS.has(key)) view[key] = normalized[key] ?? null;
+  }
+  return view;
+}
+
+export function producerContentEquals(existingEvent, candidateInput) {
+  return stableStringify(producerContentView(existingEvent, false))
+    === stableStringify(producerContentView(candidateInput, true));
+}
+
+// Frozen B2: room producer streams (source_id `room:...`) must carry a
+// canonical-decimal u64 source_sequence. Non-room sources keep today's
+// arbitrary-text contract untouched.
+const CANONICAL_DECIMAL_RE = /^(0|[1-9][0-9]*)$/;
+const U64_MAX = 18446744073709551615n;
+
+export function validateRoomSourceSequence(sourceId, sourceSequence) {
+  if (typeof sourceId !== 'string' || !sourceId.startsWith('room:')) return;
+  // STRING-strict: a JSON number 1 is rejected, never coerced (frozen v2).
+  if (typeof sourceSequence !== 'string'
+      || !CANONICAL_DECIMAL_RE.test(sourceSequence)
+      || BigInt(sourceSequence) > U64_MAX) {
+    throw new LedgerValidationError('Room producer streams require a canonical decimal u64 source_sequence STRING.');
+  }
+}
+
+// Frozen B3: after_sequence cursor — canonical decimal u64, strict >,
+// ascending. Returns the validated string (safe to hand to Postgres bigint
+// params and BigInt comparisons).
+export function parseAfterSequence(value) {
+  // STRING-strict: a JSON/JS number is rejected, never coerced (frozen v2).
+  if (typeof value !== 'string' || !CANONICAL_DECIMAL_RE.test(value) || BigInt(value) > U64_MAX) {
+    throw new LedgerValidationError('after_sequence must be a canonical decimal sequence number string.');
+  }
+  return value;
+}
+
+function producerConflictOrExisting(existing, input) {
+  if (producerContentEquals(existing, input)) return existing;
+  throw new LedgerConflictError(
+    'source_sequence already used by this producer with different content.',
+    {
+      source_id: existing.source_id,
+      source_sequence: existing.source_sequence,
+      existing_event_id: existing.id,
+    },
+  );
+}
+
 function normalizeLedgerEvent(input, previous) {
   if (!input || typeof input !== 'object') throw new Error('Ledger event body must be an object.');
   if (!input.event_type && !input.eventType) throw new Error('Ledger event requires event_type.');
@@ -133,7 +222,18 @@ async function readJsonlEvents(ledgerFile) {
 }
 
 async function appendJsonlLocked(ledgerFile, input) {
+  const sourceId = input.source_id || input.sourceId || 'longhouse';
+  const sourceSequence = input.source_sequence || input.sourceSequence || null;
+  validateRoomSourceSequence(sourceId, sourceSequence);
   const events = await readJsonlEvents(ledgerFile);
+  if (sourceSequence) {
+    // Same semantics as the Postgres store (S1B local parity, no shim):
+    // exact retry is idempotent, different content is a typed conflict.
+    const existing = events.find(
+      (event) => event.source_id === sourceId && event.source_sequence === sourceSequence,
+    );
+    if (existing) return producerConflictOrExisting(existing, input);
+  }
   const previous = events.length ? events[events.length - 1] : null;
   const event = normalizeLedgerEvent(input, previous);
   await fs.appendFile(ledgerFile, `${JSON.stringify(event)}\n`, { mode: 0o600 });
@@ -202,8 +302,19 @@ function createJsonlLedgerStore({ ledgerFile }) {
       return enqueue(ledgerFile, () => appendJsonlLocked(ledgerFile, input));
     },
     async read(filters = {}) {
+      // S1B B3: cursor validation BEFORE any file I/O (pre-I/O gate) — an
+      // invalid cursor must not even create the ledger file.
+      const afterSequence = filters.after_sequence ?? filters.afterSequence ?? null;
+      const hasCursor = afterSequence !== null && afterSequence !== undefined && afterSequence !== '';
+      const cursor = hasCursor ? BigInt(parseAfterSequence(afterSequence)) : null;
       const events = await readJsonlEvents(ledgerFile);
       const filtered = filterEvents(events, filters);
+      if (hasCursor) {
+        // strict >, ascending, bounded from the FRONT (oldest first).
+        return filtered
+          .filter((event) => BigInt(event.sequence) > cursor)
+          .slice(0, limitFrom(filters.limit));
+      }
       return filtered.slice(-limitFrom(filters.limit));
     },
     trace(correlationId, limit = 1000) {
@@ -252,22 +363,29 @@ const EVENT_COLUMNS = `
 `;
 
 async function appendPostgresEvent(databaseUrl, input) {
+  // Pin 3: room source-sequence validation runs BEFORE any pool/file I/O —
+  // a missing sequence on a ^room: source is a 400, not a wasted connection.
+  const sourceId = input.source_id || input.sourceId || 'longhouse';
+  const sourceSequence = input.source_sequence || input.sourceSequence || null;
+  validateRoomSourceSequence(sourceId, sourceSequence);
+
   const pool = await getPool(databaseUrl);
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     await client.query('SELECT pg_advisory_xact_lock($1, $2)', [705031, 1]);
-
-    const sourceId = input.source_id || input.sourceId || 'longhouse';
-    const sourceSequence = input.source_sequence || input.sourceSequence || null;
     if (sourceSequence) {
       const existing = await client.query(
         `SELECT ${EVENT_COLUMNS} FROM longhouse.ledger_events WHERE source_id = $1 AND source_sequence = $2 LIMIT 1`,
         [sourceId, sourceSequence],
       );
       if (existing.rows.length) {
+        // S1B B1 (v2): compare BEFORE COMMIT — a conflict raises out of the
+        // transaction (rolled back in the catch); only a proven idempotent
+        // match commits and returns the prior event.
+        const prior = producerConflictOrExisting(rowToEvent(existing.rows[0]), input);
         await client.query('COMMIT');
-        return rowToEvent(existing.rows[0]);
+        return prior;
       }
     }
 
@@ -353,6 +471,11 @@ async function appendPostgresEvent(databaseUrl, input) {
 }
 
 async function readPostgresEvents(databaseUrl, filters = {}) {
+  // S1B B3: cursor validation BEFORE any pool access (pre-I/O gate).
+  const afterSequenceRaw = filters.after_sequence ?? filters.afterSequence ?? null;
+  const hasCursor = afterSequenceRaw !== null && afterSequenceRaw !== undefined && afterSequenceRaw !== '';
+  const afterSequence = hasCursor ? parseAfterSequence(afterSequenceRaw) : null;
+
   const pool = await getPool(databaseUrl);
   const values = [];
   const clauses = [];
@@ -370,6 +493,25 @@ async function readPostgresEvents(databaseUrl, filters = {}) {
   eq('event_type', filters.event_type);
   eq('source_id', filters.source_id);
   eq('virtual_path', filters.virtual_path || filters.path);
+
+  // S1B B3: cursor paging — strict >, ascending. Absent cursor keeps the
+  // existing DESC-window-reversed behavior byte-identical.
+  if (hasCursor) {
+    values.push(afterSequence);
+    // ::numeric — accepted u64 text above bigint max must compare, not
+    // overflow the bind (pin 2).
+    clauses.push(`sequence > $${values.length}::numeric`);
+    values.push(limitFrom(filters.limit));
+    const result = await pool.query(
+      `SELECT ${EVENT_COLUMNS}
+       FROM longhouse.ledger_events
+       ${`WHERE ${clauses.join(' AND ')}`}
+       ORDER BY sequence ASC
+       LIMIT $${values.length}`,
+      values,
+    );
+    return result.rows.map(rowToEvent);
+  }
 
   values.push(limitFrom(filters.limit));
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';

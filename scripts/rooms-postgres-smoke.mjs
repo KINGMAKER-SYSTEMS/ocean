@@ -304,6 +304,51 @@ try {
   })).status === 201);
   check('inactive-member ledger denial (no-membership write)', (await api(directToken.token, 'POST', '/api/v1/ledger/events', writeBody())).status === 403);
 
+  // ── S1B: producer-tuple conflict + after_sequence cursor ─────────────
+  console.log('S1B producer conflict + cursor:');
+  const producerId = `room:${ROOM}:member:${memberId}:producer:p1`;
+  const producerBody = (sequence, overrides = {}) => writeBody({
+    source_id: producerId, source_sequence: sequence, ...overrides,
+  });
+  const p1 = await api(joinToken, 'POST', '/api/v1/ledger/events', producerBody('1', { payload: { text: 'p-1' } }));
+  check('producer write 201', p1.status === 201);
+  const p1Retry = await api(joinToken, 'POST', '/api/v1/ledger/events', producerBody('1', { payload: { text: 'p-1' } }));
+  check('exact producer retry returns prior event', p1Retry.status === 201
+    && p1Retry.body.event.id === p1.body.event.id);
+  const p1Conflict = await api(joinToken, 'POST', '/api/v1/ledger/events', producerBody('1', { payload: { text: 'MUTATED' } }));
+  check('different content same tuple 409 + details', p1Conflict.status === 409
+    && p1Conflict.body.details?.existing_event_id === p1.body.event.id
+    && p1Conflict.body.details?.source_sequence === '1');
+  check('numeric source_sequence rejected 400', (await api(joinToken, 'POST', '/api/v1/ledger/events', producerBody(2, { payload: { text: 'p-2' } }))).status === 400);
+  check('non-canonical source_sequence 400', (await api(joinToken, 'POST', '/api/v1/ledger/events', producerBody('01', { payload: { text: 'p-2' } }))).status === 400);
+  check('missing source_sequence on room source 400', (await api(joinToken, 'POST', '/api/v1/ledger/events', producerBody(undefined, { payload: { text: 'p-2' } }))).status === 400);
+  const [c1, c2] = await Promise.all([
+    api(joinToken, 'POST', '/api/v1/ledger/events', producerBody('2', { payload: { text: 'p-2' } })),
+    api(joinToken, 'POST', '/api/v1/ledger/events', producerBody('2', { payload: { text: 'p-2' } })),
+  ]);
+  check('concurrent same-tuple same-content: one event, both 201', c1.status === 201 && c2.status === 201
+    && c1.body.event.id === c2.body.event.id);
+  await api(joinToken, 'POST', '/api/v1/ledger/events', producerBody('3', { payload: { text: 'p-3' } }));
+  // cursor walk reassembles the ascending stream without overlap
+  const walk = [];
+  let cursor = '0';
+  for (let page = 0; page < 10; page += 1) {
+    const pageResult = await api(joinToken, 'GET', `/api/v1/ledger/events?correlation_id=${ROOM}&after_sequence=${cursor}&limit=2`);
+    if (pageResult.status !== 200 || !pageResult.body.events.length) break;
+    walk.push(...pageResult.body.events);
+    cursor = String(pageResult.body.events.at(-1).sequence);
+  }
+  const ascending = walk.every((event, index) => index === 0 || Number(event.sequence) > Number(walk[index - 1].sequence));
+  check('after_sequence walk: strict ascending, no overlap, full stream', ascending && walk.length >= 4,
+    `walked ${walk.length}`);
+  check('after_sequence numeric-in-string only: abc 400', (await api(joinToken, 'GET', `/api/v1/ledger/events?correlation_id=${ROOM}&after_sequence=abc`)).status === 400);
+  const u64Read = await api(joinToken, 'GET', `/api/v1/ledger/events?correlation_id=${ROOM}&after_sequence=18446744073709551615`);
+  check('after_sequence u64-max: 200 empty, no bigint overflow', u64Read.status === 200 && u64Read.body.events.length === 0);
+  check('non-room arbitrary source_sequence regression 201', (await api(admin1.token, 'POST', '/api/v1/ledger/events', {
+    event_type: 'note', correlation_id: 'ticket-77', payload: { text: 's1b-regression' },
+    source_id: 'github', source_sequence: 'commit-abc123',
+  })).status === 201);
+
   // ── direct invalid SQL (SQLSTATE-verified) ───────────────────────────
   console.log('direct SQL constraint pins:');
   const principalTok = redeem.body.record.id;

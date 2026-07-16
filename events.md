@@ -188,3 +188,20 @@ ocean independent trace APPROVE with no findings. Repo fact only — nothing
 here is deployed or production-attested. Final merge pending docs/branch
 verification closeout.
 _________________________________________________________________________________
+time:  [19:06] [16-07-26]
+agent: [claude] [fable 5]
+worktree: [feat/s1b-producer-cursor]
+type:  [feature-request]
+area:  [backend]
+
+Gate-2 S1B built against the v2 freeze (codex's rejection pins superseding
+v1): full-normalized producer-content comparator (actor/schema/context deltas
+conflict; only chain/re-stamp fields excluded), typed LedgerConflictError 409
+compared before COMMIT, STRING-strict canonical-decimal u64 source_sequence
+for ^room: sources and after_sequence cursor (JSON numbers rejected),
+validation pre-I/O in both stores, ::numeric cursor bind, JSONL parity, server
+409/400 mapping + validated query param, PG smoke S1B section, openapi/API/
+devlog docs. npm test 72/72, smoke green. Earlier premature master commit
+f3704d8 was reset off master (origin untouched at 2e3079b) and reworked here.
+Awaiting codex slice gate; no push until his merge verdict.
+_________________________________________________________________________________

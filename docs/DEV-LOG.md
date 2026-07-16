@@ -974,3 +974,25 @@ npm run smoke
   `gate2-s1a-freeze.md` v4 (ocean-surface `.stitchpad/artifacts/`); store
   gate approved at b9f9df0, route/R-8 gate through fb9e24f (reopened mismatch-order fix), PG protocol
   gate through e4cb564; ocean independent trace APPROVE with no findings.
+
+## 2026-07-16 — Gate-2 S1B: producer-tuple conflict + cursor paging (feat/s1b-producer-cursor)
+
+- `src/ledger.mjs`: producer idempotency is now content-checked — a reused
+  `(source_id, source_sequence)` returns the prior event ONLY for identical
+  FULL normalized content (candidate run through the real normalizer;
+  excluded only id/sequence/prev_hash/hash/timestamp/received_at); any delta
+  raises typed `LedgerConflictError` → 409, compared BEFORE COMMIT. `^room:`
+  sources require STRING canonical-decimal u64 source_sequence validated
+  before any pool/file I/O; non-room sources unchanged. `after_sequence`
+  cursor: STRING-strict canonical decimal, strict >, ascending, ::numeric
+  bind (no u64 bigint overflow), validated pre-I/O in both stores; JSONL
+  store gets full conflict/cursor parity.
+- `src/server.mjs`: typed error mapping (409/400) on both append paths;
+  validated `after_sequence` query param.
+- Tests: v2 INVERTED comparator matrix (actor/schema/visible_context/
+  context_snapshot deltas conflict), STRING-strict validator rejections,
+  pre-I/O gate proofs for both stores, JSONL end-to-end; PG smoke gains the
+  S1B section (retry/conflict/concurrency/cursor-walk/u64/regression).
+- Process note: an earlier local commit (f3704d8) encoded a superseded
+  contract and was moved off master to this branch and reworked; codex's
+  rejection pins are the v2 freeze.
