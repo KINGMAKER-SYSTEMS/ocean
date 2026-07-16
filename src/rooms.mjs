@@ -141,11 +141,18 @@ export function publicMemberProjection(row) {
   if (row.owner_member_id) projection.owner_member_id = row.owner_member_id;
   const stored = row.public_agent_descriptor;
   if (stored && typeof stored === 'object' && !Array.isArray(stored)) {
-    const descriptor = {};
+    const candidate = {};
     for (const key of DESCRIPTOR_ALLOWED_KEYS) {
-      if (stored[key] !== undefined) descriptor[key] = stored[key];
+      if (stored[key] !== undefined) candidate[key] = stored[key];
     }
-    projection.public_agent_descriptor = descriptor;
+    // Fail closed on TYPES: a malformed/legacy/direct-SQL row whose allowed
+    // keys hold nested objects (description:{token:...}) must not serialize.
+    // Invalid stored shape → the descriptor is omitted entirely.
+    try {
+      projection.public_agent_descriptor = validateAgentDescriptor(candidate);
+    } catch {
+      /* omit descriptor — never serialize unvalidated stored JSON */
+    }
   }
   return projection;
 }
@@ -266,8 +273,9 @@ export function createRoomsStore(pool) {
       return result.rows.length > 0;
     },
 
-    // R-4: self-join after scoped redeem. Provenance + tombstone are checked
-    // by the caller (server.mjs owns auth); this transaction owns identity.
+    // R-4: self-join after scoped redeem. Role/scope shape is the caller's
+    // auth check; the consumed-invite PROVENANCE, tombstone, and identity all
+    // live inside this one transaction.
     async selfJoin({ roomId, principal }) {
       return withTransaction(async (client) => {
         const room = await client.query(
@@ -277,19 +285,40 @@ export function createRoomsStore(pool) {
         );
         if (!room.rows.length) throw new RoomsError(404, 'Room is not registered.');
 
-        // Tombstone check INSIDE the transaction (frozen: transactional).
-        const tombstone = await client.query(
-          `SELECT 1 FROM longhouse.room_members
-           WHERE room_id = $1 AND owner_principal_token_id = $2
-             AND actor_type = 'user' AND removed_at IS NOT NULL
-           LIMIT 1`,
-          [roomId, principal.id],
+        // Provenance + shape, from the DB rows as authority (the server-side
+        // principal check is defense-in-depth only): the calling token must be
+        // the one minted by a CONSUMED invite (token.created_by →
+        // invite.consumed_by_token_id = this token), role contributor, active,
+        // and scoped EXACTLY to this room.
+        const provenance = await client.query(
+          `SELECT 1 FROM longhouse.auth_tokens t
+           JOIN longhouse.auth_invites i ON i.id = t.created_by
+           WHERE t.id = $1 AND i.consumed_by_token_id = t.id
+             AND t.role = 'contributor' AND t.revoked_at IS NULL
+             AND (t.expires_at IS NULL OR t.expires_at > now())
+             AND t.scopes = ARRAY[$2]::text[]`,
+          [principal.id, roomScope(roomId)],
         );
-        if (tombstone.rows.length) {
-          throw new RoomsError(403, 'membership_revoked', 'membership_revoked');
+        if (!provenance.rows.length) {
+          throw new RoomsError(403, 'Self-join requires the active contributor token minted by a consumed invite scoped exactly to this room.');
         }
 
-        const existing = await activeMember(client, roomId, principal.id);
+        // Tombstone + active decision over LOCKED rows: select ALL human rows
+        // for (room, principal) FOR UPDATE — no removed_at predicate — so a
+        // concurrent removeMember (which locks its target FOR UPDATE) cannot
+        // commit between an unlocked tombstone read and the insert and let a
+        // revoked token resurrect itself.
+        const humanRows = await client.query(
+          `SELECT * FROM longhouse.room_members
+           WHERE room_id = $1 AND owner_principal_token_id = $2
+             AND actor_type = 'user'
+           FOR UPDATE`,
+          [roomId, principal.id],
+        );
+        if (humanRows.rows.some((row) => row.removed_at)) {
+          throw new RoomsError(403, 'membership_revoked', 'membership_revoked');
+        }
+        const existing = humanRows.rows.find((row) => !row.removed_at);
         if (existing) {
           return { status: 200, member: publicMemberProjection(existing) };
         }
@@ -322,7 +351,17 @@ export function createRoomsStore(pool) {
     // Duplicate keys within one batch → 400 (validated by the caller).
     async registerAgents({ roomId, principal, agents }) {
       return withTransaction(async (client) => {
-        const human = await activeMember(client, roomId, principal.id);
+        // FOR SHARE: hold the caller's human row so a concurrent removal
+        // cannot race these inserts (the deferred trigger would also catch
+        // orphaning at commit, but failing early here is deterministic).
+        const locked = await client.query(
+          `SELECT * FROM longhouse.room_members
+           WHERE room_id = $1 AND owner_principal_token_id = $2
+             AND actor_type = 'user' AND removed_at IS NULL
+           LIMIT 1 FOR SHARE`,
+          [roomId, principal.id],
+        );
+        const human = locked.rows[0];
         if (!human) throw new RoomsError(403, 'Caller has no active human membership in this room.');
 
         const members = [];
@@ -377,10 +416,37 @@ export function createRoomsStore(pool) {
     },
 
     // R-7: soft removal. Owner removes any other member (a human's owned
-    // agents go atomically); a member removes only self. Owner self-leave
-    // and authorization are the caller's checks; this owns the transaction.
-    async removeMember({ roomId, memberId, removedByPrincipalId }) {
+    // agents go atomically); a member removes only self. Caller authorization
+    // is checked INSIDE this transaction against locked rows, so it cannot
+    // race a concurrent removal of the caller.
+    async removeMember({ roomId, memberId, principal }) {
       return withTransaction(async (client) => {
+        const callerRow = await client.query(
+          `SELECT * FROM longhouse.room_members
+           WHERE room_id = $1 AND owner_principal_token_id = $2
+             AND actor_type = 'user' AND removed_at IS NULL
+           LIMIT 1 FOR UPDATE`,
+          [roomId, principal.id],
+        );
+        const caller = callerRow.rows[0];
+        if (!caller) {
+          const tombstone = await client.query(
+            `SELECT 1 FROM longhouse.room_members
+             WHERE room_id = $1 AND owner_principal_token_id = $2
+               AND actor_type = 'user' AND removed_at IS NOT NULL LIMIT 1`,
+            [roomId, principal.id],
+          );
+          if (tombstone.rows.length) throw new RoomsError(403, 'membership_revoked', 'membership_revoked');
+          throw new RoomsError(403, 'No active membership in this room.');
+        }
+        const isOwner = caller.role_in_room === 'owner';
+        if (isOwner && memberId === caller.member_id) {
+          throw new RoomsError(409, 'Owner self-leave is not allowed in Gate 2; rooms cannot be orphaned.');
+        }
+        if (!isOwner && memberId !== caller.member_id) {
+          throw new RoomsError(403, 'Members may remove only themselves.');
+        }
+
         const target = await client.query(
           'SELECT * FROM longhouse.room_members WHERE room_id = $1 AND member_id = $2 FOR UPDATE',
           [roomId, memberId],
@@ -388,7 +454,7 @@ export function createRoomsStore(pool) {
         const row = target.rows[0];
         if (!row) throw new RoomsError(404, 'Member not found in this room.');
         if (row.removed_at) {
-          return { status: 200, removed: [] };   // idempotent repeat (caller re-authorized)
+          return { status: 200, removed: [] };   // idempotent repeat (caller re-authorized above)
         }
         const removed = [];
         if (row.actor_type === 'user') {
@@ -398,7 +464,7 @@ export function createRoomsStore(pool) {
              WHERE room_id = $1 AND owner_member_id = $2
                AND actor_type = 'agent' AND removed_at IS NULL
              RETURNING member_id`,
-            [roomId, memberId, removedByPrincipalId],
+            [roomId, memberId, principal.id],
           );
           removed.push(...agents.rows.map((agent) => agent.member_id));
         }
@@ -406,7 +472,7 @@ export function createRoomsStore(pool) {
           `UPDATE longhouse.room_members
            SET removed_at = now(), removed_by = $3
            WHERE room_id = $1 AND member_id = $2`,
-          [roomId, memberId, removedByPrincipalId],
+          [roomId, memberId, principal.id],
         );
         removed.push(row.member_id);
         return { status: 200, removed };

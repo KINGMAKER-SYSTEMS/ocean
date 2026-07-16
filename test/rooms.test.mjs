@@ -174,6 +174,27 @@ test('publicMemberProjection rebuilds descriptors — forbidden JSONB keys never
   }
 });
 
+test('publicMemberProjection fails closed on nested-value types', () => {
+  // Allowed top-level keys hiding nested objects (direct-SQL/legacy rows)
+  // must not serialize — the whole descriptor is omitted.
+  const projection = publicMemberProjection({
+    member_id: 'id', actor_type: 'agent', role_in_room: 'member',
+    display_name: 'sneaky', owner_member_id: 'owner-id',
+    owner_principal_token_id: 'tok_x', registration_key: 'k',
+    joined_at: '2026-07-16T18:00:00.000Z',
+    public_agent_descriptor: {
+      display_name: 'sneaky',
+      description: { token: 'tok_nested_secret' },
+      subagent_names: [{ path: '/Users/someone/dev' }],
+    },
+  });
+  assert.equal('public_agent_descriptor' in projection, false);
+  const serialized = JSON.stringify(projection);
+  for (const leak of ['tok_nested_secret', '/Users/someone/dev', 'token', 'path']) {
+    assert.equal(serialized.includes(leak), false, `leaked: ${leak}`);
+  }
+});
+
 test('publicMemberProjection: human row has no owner/descriptor keys', () => {
   const projection = publicMemberProjection({
     member_id: 'id', actor_type: 'user', role_in_room: 'owner',

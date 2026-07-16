@@ -1357,20 +1357,6 @@ async function requireActiveRoomMembership(state, principal, roomId) {
   return memberships;
 }
 
-// R-4 provenance: the calling token must be the one minted by a CONSUMED
-// invite (token.created_by → invite.consumed_by_token_id === principal.id).
-async function requireConsumedInviteProvenance(state, principal) {
-  const result = await state.auth.pool.query(
-    `SELECT 1 FROM longhouse.auth_tokens t
-     JOIN longhouse.auth_invites i ON i.id = t.created_by
-     WHERE t.id = $1 AND i.consumed_by_token_id = t.id`,
-    [principal.id],
-  );
-  if (!result.rows.length) {
-    throw new HttpError(403, 'Self-join requires the token minted by a consumed room invite.');
-  }
-}
-
 async function handleRoomRegister(req, state, principal, roomIdRaw) {
   requireFederation(state);
   const roomId = normalizeRoomId(roomIdRaw);
@@ -1393,11 +1379,12 @@ async function handleRoomSelfJoin(state, principal, roomIdRaw) {
   if (principal.role !== 'contributor') {
     throw new HttpError(403, 'Self-join requires the room-scoped contributor token from a consumed invite.');
   }
+  // Defense-in-depth shape check; the store's transaction re-proves
+  // provenance, role, and exact scope from the DB rows as authority.
   const scopes = principal.scopes || [];
   if (scopes.length !== 1 || scopes[0] !== roomScope(roomId)) {
     throw new HttpError(403, `Self-join token must be scoped exactly to ${roomScope(roomId)}.`);
   }
-  await requireConsumedInviteProvenance(state, principal);
   const result = await state.rooms.selfJoin({ roomId, principal }).catch((error) => { throw roomsErrorToHttp(error); });
   await appendAudit(state, {
     actor: principal.name, actorId: principal.id, action: 'room.self_join', roomId,
@@ -1456,18 +1443,10 @@ async function handleRoomMemberRemove(state, principal, roomIdRaw, memberIdRaw) 
   const roomId = normalizeRoomId(roomIdRaw);
   const memberId = String(memberIdRaw || '').trim();
   requirePathScope(principal, roomScope(roomId));
-  const memberships = await requireActiveRoomMembership(state, principal, roomId);
-  const humanRow = memberships.find((row) => row.actor_type === 'user');
-  if (!humanRow) throw new HttpError(403, 'No active human membership in this room.');
-  const isOwner = humanRow.role_in_room === 'owner';
-  if (isOwner && memberId === humanRow.member_id) {
-    throw new HttpError(409, 'Owner self-leave is not allowed in Gate 2; rooms cannot be orphaned.');
-  }
-  if (!isOwner && memberId !== humanRow.member_id) {
-    throw new HttpError(403, 'Members may remove only themselves.');
-  }
+  // Authorization (active caller human row, owner/self rules, self-leave 409,
+  // tombstone 403) lives INSIDE the store transaction against locked rows.
   const result = await state.rooms.removeMember({
-    roomId, memberId, removedByPrincipalId: principal.id,
+    roomId, memberId, principal,
   }).catch((error) => { throw roomsErrorToHttp(error); });
   await appendAudit(state, {
     actor: principal.name, actorId: principal.id, action: 'room.member_remove', roomId,
