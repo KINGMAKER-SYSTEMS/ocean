@@ -3,8 +3,9 @@
 - Verified: 2026-07-16
 - Repository: `risingtides-dev/ocean-bedrock`
 - Default branch: `master`
-- Working branch: `feat/s1a-federated-rooms` (unmerged), branch base `95706c1`
-- Reviewed implementation tip: `e4cb564`
+- Working branch: `master`
+- Gate-2 S1A merge: `2e3079b`
+- Gate-2 S1B final merge: `1f20784`
 - Service: `ocean-bedrock`
 - Public URL: <https://ocean-bedrock-production.up.railway.app>
 
@@ -25,25 +26,24 @@ Use [`OCEAN_PROJECT_MAP.md`](OCEAN_PROJECT_MAP.md) for cross-repo routing.
 
 ## Verified repository state
 
-The following checks passed on 2026-07-16 on branch `feat/s1a-federated-rooms`
-(Gate-2 S1A federated room membership; not merged to `master` yet):
+The following checks passed on 2026-07-16 on `master` after Gate-2 S1A
+federated room membership and S1B producer idempotency/cursor paging were
+merged:
 
 ```text
-npm test                    61/61 passed (incl. rooms pure + file/JSONL HTTP suites)
+npm test                    72/72 passed
 npm run smoke               passed (incl. F3 federated 503 assertions)
 npm run source:check        passed
 npm run secret:scan         passed (119 files)
-npm run secret:globs:check passed
-npm run rooms:pg-smoke      94/0 (reviewer-executed on a fresh disposable PG14 `_test` database)
+npm run secret:globs:check  passed
+npm run rooms:pg-smoke      105/0 (reviewer-executed on an isolated temporary PG14 `_test` database)
 ```
 
-These checks attest the repository only. The S1A branch is NOT deployed and
-nothing here is production-attested: private production data counts, database
-migrations (006 has not been applied to any live database), scheduled jobs,
-mounts, tokens, and deployment identity all require authorized production
-access before operational claims. `docs/AGENTS.md` is intentionally unchanged
-by S1A — the documentation workflow did not change; the durable
-federated-rooms boundary rule lives in the root `AGENTS.md`.
+These checks attest the repository only. The Gate-2 changes are NOT deployed
+and nothing here is production-attested: private production data counts,
+database migrations (006 has not been applied to any live database), scheduled
+jobs, mounts, tokens, and deployment identity all require authorized production
+access before operational claims.
 
 ## Runtime shape
 
@@ -64,6 +64,10 @@ npm run ocean:worker
 
 Always inspect the dry run before enqueueing production work.
 - Postgres is selected for the ledger when `DATABASE_URL` is present; otherwise JSONL is used.
+- Federated room routes require auth, ledger, and rooms to resolve to one shared
+  Postgres database; split or file-backed configurations fail closed with 503.
+- Room producer tuples are content-checked for idempotency, and ledger consumers
+  can page forward with the strict-string `after_sequence` cursor.
 - Workers AI and Vectorize require the Cloudflare environment documented in the README.
 
 Canonical setup and configuration live in [`../README.md`](../README.md). API details live in [`API.md`](API.md), [`openapi.yaml`](openapi.yaml), and the runtime `GET /api/v1/openapi.yaml` endpoint.
