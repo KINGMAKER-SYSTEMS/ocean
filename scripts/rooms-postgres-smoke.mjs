@@ -329,18 +329,25 @@ try {
   check('concurrent same-tuple same-content: one event, both 201', c1.status === 201 && c2.status === 201
     && c1.body.event.id === c2.body.event.id);
   await api(joinToken, 'POST', '/api/v1/ledger/events', producerBody('3', { payload: { text: 'p-3' } }));
-  // cursor walk reassembles the ascending stream without overlap
+  // cursor walk reassembles the ascending stream without overlap, and every
+  // page must respect the requested bound — an implementation ignoring the
+  // limit fails here, not just the shape predicates
   const walk = [];
+  const pageSizes = [];
   let cursor = '0';
+  let boundRespected = true;
   for (let page = 0; page < 10; page += 1) {
     const pageResult = await api(joinToken, 'GET', `/api/v1/ledger/events?correlation_id=${ROOM}&after_sequence=${cursor}&limit=2`);
     if (pageResult.status !== 200 || !pageResult.body.events.length) break;
+    pageSizes.push(pageResult.body.events.length);
+    if (pageResult.body.events.length > 2) { boundRespected = false; break; }
     walk.push(...pageResult.body.events);
     cursor = String(pageResult.body.events.at(-1).sequence);
   }
   const ascending = walk.every((event, index) => index === 0 || Number(event.sequence) > Number(walk[index - 1].sequence));
-  check('after_sequence walk: strict ascending, no overlap, full stream', ascending && walk.length >= 4,
-    `walked ${walk.length}`);
+  check('after_sequence walk: strict ascending, no overlap, full stream, limit=2 bound respected on every page',
+    ascending && walk.length >= 4 && boundRespected,
+    `walked ${walk.length}, pages [${pageSizes.join(',')}]`);
   check('after_sequence numeric-in-string only: abc 400', (await api(joinToken, 'GET', `/api/v1/ledger/events?correlation_id=${ROOM}&after_sequence=abc`)).status === 400);
   const u64Read = await api(joinToken, 'GET', `/api/v1/ledger/events?correlation_id=${ROOM}&after_sequence=18446744073709551615`);
   check('after_sequence u64-max: 200 empty, no bigint overflow', u64Read.status === 200 && u64Read.body.events.length === 0);
