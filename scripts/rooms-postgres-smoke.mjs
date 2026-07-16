@@ -358,7 +358,7 @@ try {
     "SELECT count(*)::int AS count FROM longhouse.room_members WHERE room_id='agentrace' AND removed_at IS NULL AND role_in_room='member'",
   );
   // Serialized outcomes only: either agents landed before removal (removal
-  // took human+agents atomically) or removal won (register 403/409). Either
+  // took human+agents atomically) or removal won (register 403). Either
   // way nothing member-owned stays active.
   check('registerAgents-vs-removal serialized, nothing active left',
     serializedOutcome && arActive.rows[0].count === 0,
@@ -382,7 +382,9 @@ try {
   const removal = await api(admin1.token, 'DELETE', `/api/v1/rooms/${ROOM}/members/${memberId}`);
   check('owner removes human+agents atomically', removal.status === 200 && removal.body.removed.length >= 5,
     `removed ${JSON.stringify(removal.body.removed)}`);
-  check('repeat delete by owner idempotent 200', (await api(admin1.token, 'DELETE', `/api/v1/rooms/${ROOM}/members/${memberId}`)).status === 200);
+  const repeatDelete = await api(admin1.token, 'DELETE', `/api/v1/rooms/${ROOM}/members/${memberId}`);
+  check('repeat delete by owner idempotent 200 {removed: []}', repeatDelete.status === 200
+    && Array.isArray(repeatDelete.body.removed) && repeatDelete.body.removed.length === 0);
   check('removed member roster 403 membership_revoked', (await api(joinToken, 'GET', `/api/v1/rooms/${ROOM}/members`)).status === 403);
   const rejoin = await api(joinToken, 'POST', `/api/v1/rooms/${ROOM}/members/self`);
   check('removed principal same-token rejoin 403 membership_revoked', rejoin.status === 403 && /membership_revoked/.test(JSON.stringify(rejoin.body)));

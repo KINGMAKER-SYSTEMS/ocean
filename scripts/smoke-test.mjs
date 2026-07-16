@@ -12,7 +12,9 @@ delete process.env.DATABASE_URL;
 process.env.OCEAN_BEDROCK_BOOTSTRAP_TOKEN = 'smoke-admin-token';
 process.env.OCEAN_LEDGER_STORE = 'jsonl';
 
-const { server, ready } = createOceanBedrockServer({ root, instance: 'smoke-test' });
+// Explicit stores: ambient OCEAN_AUTH_STORE must never be able to falsify
+// the F3 503 claims below.
+const { server, ready } = createOceanBedrockServer({ root, instance: 'smoke-test', authStore: 'file', ledgerStore: 'jsonl' });
 await ready;
 await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 const address = server.address();
