@@ -1413,6 +1413,16 @@ function roomsErrorToHttp(error) {
   return error;
 }
 
+// RoomsError is not HttpError: an invalid room id thrown bare from a handler
+// would surface as a 500 in Postgres mode. Every route entry uses this.
+function normalizeRoomIdForHttp(roomIdRaw) {
+  try {
+    return normalizeRoomId(roomIdRaw);
+  } catch (error) {
+    throw roomsErrorToHttp(error);
+  }
+}
+
 async function requireActiveRoomMembership(state, principal, roomId) {
   const memberships = await state.rooms.activeMembership(roomId, principal.id);
   if (!memberships.length) {
@@ -1426,7 +1436,7 @@ async function requireActiveRoomMembership(state, principal, roomId) {
 
 async function handleRoomRegister(req, state, principal, roomIdRaw) {
   requireFederation(state);
-  const roomId = normalizeRoomId(roomIdRaw);
+  const roomId = normalizeRoomIdForHttp(roomIdRaw);
   requirePermission(principal, 'admin');
   requirePathScope(principal, roomScope(roomId));
   const body = requireJsonObjectBody(await readJsonBody(req, state.maxJsonBytes));
@@ -1445,7 +1455,7 @@ async function handleRoomRegister(req, state, principal, roomIdRaw) {
 
 async function handleRoomSelfJoin(req, state, principal, roomIdRaw) {
   requireFederation(state);
-  const roomId = normalizeRoomId(roomIdRaw);
+  const roomId = normalizeRoomIdForHttp(roomIdRaw);
   // No caller identity fields, ever: any nonempty body is rejected, and a
   // scalar/null/array JSON body is not a vacuous pass.
   const body = requireJsonObjectBody(await readJsonBody(req, state.maxJsonBytes));
@@ -1470,7 +1480,7 @@ async function handleRoomSelfJoin(req, state, principal, roomIdRaw) {
 
 async function handleRoomAgentsRegister(req, state, principal, roomIdRaw) {
   requireFederation(state);
-  const roomId = normalizeRoomId(roomIdRaw);
+  const roomId = normalizeRoomIdForHttp(roomIdRaw);
   requirePermission(principal, 'write');
   requirePathScope(principal, roomScope(roomId));
   const body = requireJsonObjectBody(await readJsonBody(req, state.maxJsonBytes));
@@ -1514,7 +1524,7 @@ async function handleRoomAgentsRegister(req, state, principal, roomIdRaw) {
 
 async function handleRoomRoster(state, principal, roomIdRaw) {
   requireFederation(state);
-  const roomId = normalizeRoomId(roomIdRaw);
+  const roomId = normalizeRoomIdForHttp(roomIdRaw);
   requirePermission(principal, 'read');
   requirePathScope(principal, roomScope(roomId));
   await requireActiveRoomMembership(state, principal, roomId);
@@ -1523,7 +1533,7 @@ async function handleRoomRoster(state, principal, roomIdRaw) {
 
 async function handleRoomMemberRemove(state, principal, roomIdRaw, memberIdRaw) {
   requireFederation(state);
-  const roomId = normalizeRoomId(roomIdRaw);
+  const roomId = normalizeRoomIdForHttp(roomIdRaw);
   let memberId;
   try {
     memberId = validateMemberId(memberIdRaw);

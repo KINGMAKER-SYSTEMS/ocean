@@ -56,7 +56,12 @@ export function roomVirtualPath(roomId) {
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export function validateMemberId(input, label = 'member_id') {
-  const value = String(input ?? '').trim();
+  // String-strict: String(['<uuid>']) coerces a one-element array into a
+  // passing value, so type-check before any trimming.
+  if (typeof input !== 'string') {
+    throw new RoomsError(400, `${label} must be a UUID string.`);
+  }
+  const value = input.trim();
   if (!UUID_RE.test(value)) {
     throw new RoomsError(400, `${label} must be a UUID.`);
   }

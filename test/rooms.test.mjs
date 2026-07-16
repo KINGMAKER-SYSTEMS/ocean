@@ -43,8 +43,10 @@ test('validateMemberId accepts UUIDs, 400s everything else (never PG 22P02)', ()
     validateMemberId('9C2F4A52-0000-4000-8000-000000000001'),
     '9c2f4a52-0000-4000-8000-000000000001',
   );
-  for (const bad of ['', 'not-a-uuid', '123', 'tok_abc', '9c2f4a52-0000-4000-8000', null, undefined, {}, 42]) {
-    assert.throws(() => validateMemberId(bad), RoomsError, `expected reject: ${String(bad)}`);
+  for (const bad of ['', 'not-a-uuid', '123', 'tok_abc', '9c2f4a52-0000-4000-8000', null, undefined, {}, 42,
+    ['9c2f4a52-0000-4000-8000-000000000001']]) {
+    // The array case matters: String(['<uuid>']) coerces to a passing value.
+    assert.throws(() => validateMemberId(bad), RoomsError, `expected reject: ${JSON.stringify(bad)}`);
   }
 });
 
