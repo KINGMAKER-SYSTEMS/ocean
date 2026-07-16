@@ -1874,12 +1874,15 @@ export function createOceanBedrockServer(options = {}) {
     if (req.method === 'GET' && url.pathname === '/api/v1/ledger/events') {
       requirePermission(principal, 'read');
       const apiPath = url.searchParams.has('path') ? normalizeApiPath(url.searchParams.get('path')) : null;
-      if (apiPath) requirePathScope(principal, apiPath);
+      // Room gate FIRST: a room member's correlation/path mismatch must be the
+      // frozen 400, not a generic scope 403. The gate enforces room scope
+      // itself; the generic check below covers the non-room case.
       await gateRoomLedgerAccess(state, principal, {
         correlationId: url.searchParams.get('correlation_id') || null,
         virtualPath: apiPath,
         isWrite: false,
       });
+      if (apiPath) requirePathScope(principal, apiPath);
       const events = await state.ledger.read({
         correlation_id: url.searchParams.get('correlation_id') || undefined,
         actor_id: url.searchParams.get('actor_id') || undefined,
@@ -1907,14 +1910,15 @@ export function createOceanBedrockServer(options = {}) {
       requirePermission(principal, 'write');
       const body = await readJsonBody(req, state.maxJsonBytes);
       const apiPath = body.virtual_path || body.virtualPath || body.path ? normalizeApiPath(body.virtual_path || body.virtualPath || body.path) : null;
-      if (apiPath) requirePathScope(principal, apiPath);
-      requireClearance(principal, body.clearance || 'UNCLASSIFIED');
+      // Room gate FIRST (frozen mismatch 400 precedes generic scope 403).
       await gateRoomLedgerAccess(state, principal, {
         correlationId: body.correlation_id || body.correlationId || null,
         virtualPath: apiPath,
         isWrite: true,
         actorMemberId: body.actor_member_id || body.actorMemberId || null,
       });
+      if (apiPath) requirePathScope(principal, apiPath);
+      requireClearance(principal, body.clearance || 'UNCLASSIFIED');
       const adminOverride = principal.role === 'admin';
       const event = await state.ledger.append({
         ...body,
@@ -1947,8 +1951,15 @@ export function createOceanBedrockServer(options = {}) {
       requirePermission(principal, 'write');
       const body = await readJsonBody(req, state.maxJsonBytes);
       const clearance = body.clearance || 'CONFIDENTIAL';
-      requireClearance(principal, clearance);
       const apiPath = body.virtual_path || body.virtualPath || body.path ? normalizeApiPath(body.virtual_path || body.virtualPath || body.path) : null;
+      // Room gate FIRST (frozen mismatch 400 precedes generic scope 403).
+      await gateRoomLedgerAccess(state, principal, {
+        correlationId: body.correlation_id || body.correlationId || null,
+        virtualPath: apiPath,
+        isWrite: true,
+        actorMemberId: body.actor_member_id || body.actorMemberId || null,
+      });
+      requireClearance(principal, clearance);
       if (apiPath) requirePathScope(principal, apiPath);
       const visibleFiles = body.files || body.visible_files || body.visibleFiles || [];
       if (!Array.isArray(visibleFiles)) throw new HttpError(400, 'files/visible_files must be an array when provided.');
@@ -1956,12 +1967,6 @@ export function createOceanBedrockServer(options = {}) {
       for (const filePath of normalizedFiles) requirePathScope(principal, filePath);
       const visibleEvents = body.events || body.visible_events || body.visibleEvents || [];
       if (!Array.isArray(visibleEvents)) throw new HttpError(400, 'events/visible_events must be an array when provided.');
-      await gateRoomLedgerAccess(state, principal, {
-        correlationId: body.correlation_id || body.correlationId || null,
-        virtualPath: apiPath,
-        isWrite: true,
-        actorMemberId: body.actor_member_id || body.actorMemberId || null,
-      });
       const snapshot = {
         name: body.name || null,
         snapshot_type: body.snapshot_type || body.snapshotType || 'context',

@@ -26,7 +26,8 @@ try {
       to_regclass('longhouse.graph_edges') AS graph_edges_table,
       to_regclass('longhouse.ingest_jobs') AS ingest_jobs_table,
       to_regclass('longhouse.auth_tokens') AS auth_tokens_table,
-      to_regclass('longhouse.auth_invites') AS auth_invites_table
+      to_regclass('longhouse.auth_invites') AS auth_invites_table,
+      to_regclass('longhouse.room_members') AS room_members_table
   `);
   const row = result.rows[0];
   let sourceAdaptersSeeded = 0;
@@ -78,6 +79,7 @@ try {
     user: row.user,
     schemaReady: Boolean(row.mounts_table && row.ledger_events_table && row.context_snapshots_table && sourceAdapterTablesReady),
     authRegistryReady: Boolean(row.auth_tokens_table && row.auth_invites_table),
+    roomMembersReady: Boolean(row.room_members_table),
     tables: {
       mounts: row.mounts_table,
       ledgerEvents: row.ledger_events_table,
@@ -93,6 +95,7 @@ try {
       ingestJobs: row.ingest_jobs_table,
       authTokens: row.auth_tokens_table,
       authInvites: row.auth_invites_table,
+      roomMembers: row.room_members_table,
     },
     sourceAdaptersSeeded,
     semantic: semanticCounts,

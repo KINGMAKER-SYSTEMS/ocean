@@ -169,7 +169,28 @@ try {
   if (sourceRegistry && (!sourceRegistry.ready || sourceRegistry.adapters !== 8)) {
     throw new Error(`source adapter schema check failed: ${JSON.stringify(sourceRegistry)}`);
   }
-  console.log('ocean-bedrock smoke test passed');
+  // Gate-2 F3: with file auth + JSONL ledger, EVERY federated room surface is
+  // an explicit 503 (no URL leakage) while all the ordinary local features
+  // exercised above stayed green.
+  const federatedAttempts = [
+    ['POST', '/api/v1/rooms/smokeroom/register', '{}'],
+    ['POST', '/api/v1/rooms/smokeroom/members/self', undefined],
+    ['POST', '/api/v1/rooms/smokeroom/members/agents', JSON.stringify({ agents: [{ display_name: 'x', registration_key: 'k' }] })],
+    ['GET', '/api/v1/rooms/smokeroom/members', undefined],
+    ['DELETE', '/api/v1/rooms/smokeroom/members/9c2f4a52-0000-4000-8000-000000000001', undefined],
+    ['POST', '/api/v1/invites', JSON.stringify({ room_id: 'smokeroom' })],
+  ];
+  for (const [method, apiPath, body] of federatedAttempts) {
+    const response = await fetch(`${base}${apiPath}`, {
+      method,
+      headers: { Authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body,
+    });
+    if (response.status !== 503) throw new Error(`expected F3 503 for ${method} ${apiPath}, got ${response.status}`);
+    const payload = await response.text();
+    if (payload.includes('postgres://')) throw new Error(`F3 503 leaked a database URL on ${method} ${apiPath}`);
+  }
+  console.log('ocean-bedrock smoke test passed (incl. F3 federated 503s)');
 } finally {
   await new Promise((resolve) => server.close(resolve));
   await fs.rm(root, { recursive: true, force: true });
