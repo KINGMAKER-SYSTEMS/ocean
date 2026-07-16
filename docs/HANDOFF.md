@@ -1,9 +1,10 @@
 # Ocean Bedrock Handoff
 
-- Verified: 2026-07-14
+- Verified: 2026-07-16
 - Repository: `risingtides-dev/ocean-bedrock`
 - Default branch: `master`
-- Verified base commit: `576c5cb2e63a9c106ef99bc8d5b0886417975367`
+- Working branch: `feat/s1a-federated-rooms` (unmerged), branch base `95706c1`
+- Reviewed implementation tip: `e4cb564`
 - Service: `ocean-bedrock`
 - Public URL: <https://ocean-bedrock-production.up.railway.app>
 

@@ -972,5 +972,5 @@ npm run smoke
   schema.
 - Reviewed continuously by codex against the frozen
   `gate2-s1a-freeze.md` v4 (ocean-surface `.stitchpad/artifacts/`); store
-  gate approved at b9f9df0, route/R-8 gate through c2a9363, PG protocol gate
-  through e4cb564; ocean independent trace APPROVE with no findings.
+  gate approved at b9f9df0, route/R-8 gate through fb9e24f (reopened mismatch-order fix), PG protocol
+  gate through e4cb564; ocean independent trace APPROVE with no findings.

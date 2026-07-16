@@ -183,7 +183,7 @@ branch + R-8 ledger gating with global-read suppression, quadruple-gated
 disposable-PG protocol harness, smoke/db:check/package updates, openapi+API
 docs. Verification: npm test 61/61, npm run smoke green, reviewer-executed
 harness 94/0 on a second fresh disposable PG14 _test database. Store gate
-approved at b9f9df0, route/R-8 gate through c2a9363, PG gate through e4cb564;
+approved at b9f9df0, route/R-8 gate through fb9e24f (mismatch-order fix), PG gate through e4cb564;
 ocean independent trace APPROVE with no findings. Repo fact only — nothing
 here is deployed or production-attested. Final merge pending docs/branch
 verification closeout.

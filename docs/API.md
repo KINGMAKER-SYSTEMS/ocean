@@ -329,8 +329,11 @@ Admin only. Returns recent write/delete/lock/token events.
 Room membership lives in Postgres (`longhouse.room_members`) and requires the
 single shared database authority: auth, ledger, and rooms must resolve to the
 same `DATABASE_URL` (with `OCEAN_AUTH_DATABASE_URL` absent or equal). In any
-split, file, or JSONL configuration every route below returns an explicit
-`503` and never logs a database URL.
+split, file, or JSONL configuration the five `/api/v1/rooms/...` routes and
+the `room_id` branch of `POST /api/v1/invites` return an explicit `503` and
+never log a database URL; the generic invite branch and ordinary ledger
+behavior remain unchanged (no registered rooms can exist there, so the room
+gates never engage).
 
 ### `POST /api/v1/rooms/{room_id}/register`
 
