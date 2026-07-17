@@ -26,6 +26,7 @@
     "db:migrate": "node scripts/migrate.mjs",
     "smoke": "node scripts/smoke-test.mjs",
     "rooms:pg-smoke": "node scripts/rooms-postgres-smoke.mjs",
+    "rooms:protocol-gate": "node scripts/rooms-protocol-harness.mjs",
     "test": "node --test test/*.test.mjs"
   },
   "engines": {

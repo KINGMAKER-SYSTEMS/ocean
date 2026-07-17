@@ -307,12 +307,18 @@ try {
   // ── S1B: producer-tuple conflict + after_sequence cursor ─────────────
   console.log('S1B producer conflict + cursor:');
   const producerId = `room:${ROOM}:member:${memberId}:producer:p1`;
-  const producerBody = (sequence, overrides = {}) => writeBody({
-    source_id: producerId, source_sequence: sequence, ...overrides,
+  const secondProducerId = `room:${ROOM}:member:${memberId}:producer:p2`;
+  const producerBody = (sequence, overrides = {}, sourceId = producerId) => writeBody({
+    source_id: sourceId, source_sequence: sequence, ...overrides,
   });
-  const p1 = await api(joinToken, 'POST', '/api/v1/ledger/events', producerBody('1', { payload: { text: 'p-1' } }));
-  check('producer write 201', p1.status === 201);
-  const p1Retry = await api(joinToken, 'POST', '/api/v1/ledger/events', producerBody('1', { payload: { text: 'p-1' } }));
+  const [p1, p2] = await Promise.all([
+    api(joinToken, 'POST', '/api/v1/ledger/events', producerBody('1', { payload: { text: 'p1-1' } })),
+    api(joinToken, 'POST', '/api/v1/ledger/events', producerBody('1', { payload: { text: 'p2-1' } }, secondProducerId)),
+  ]);
+  check('two producer streams both source_sequence=1 succeed independently', p1.status === 201
+    && p2.status === 201
+    && p1.body.event.id !== p2.body.event.id);
+  const p1Retry = await api(joinToken, 'POST', '/api/v1/ledger/events', producerBody('1', { payload: { text: 'p1-1' } }));
   check('exact producer retry returns prior event', p1Retry.status === 201
     && p1Retry.body.event.id === p1.body.event.id);
   const p1Conflict = await api(joinToken, 'POST', '/api/v1/ledger/events', producerBody('1', { payload: { text: 'MUTATED' } }));
