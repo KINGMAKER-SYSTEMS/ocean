@@ -54,6 +54,7 @@ function inviteRowToRecord(row) {
     expiresAt: row.expires_at?.toISOString?.() || row.expires_at,
     consumedAt: row.consumed_at?.toISOString?.() || row.consumed_at || null,
     consumedByTokenId: row.consumed_by_token_id || null,
+    redemptionId: row.redemption_id || null,
   };
 }
 
@@ -167,19 +168,54 @@ export function createPostgresAuthStore(databaseUrl) {
     },
     async redeemInvite(code, options = {}) {
       const wanted = hashToken(code || '');
+      const redemptionId = options.redemptionId || null;
       const token = options.token || generateToken();
       const tokenHash = hashToken(token);
       const client = await pool.connect();
       try {
         await client.query('BEGIN');
+        // S2 blockers B1 (idempotent form): the caller durably owns the
+        // bearer + redemption_id BEFORE this call, so the row is selected
+        // regardless of consumption to distinguish replay from reuse.
+        // Legacy {code}-only keeps the original unconsumed/unexpired filter.
         const inviteResult = await client.query(
-          `SELECT * FROM longhouse.auth_invites
-           WHERE hash = $1 AND consumed_at IS NULL AND expires_at > now()
-           FOR UPDATE`,
+          redemptionId
+            ? `SELECT * FROM longhouse.auth_invites
+               WHERE hash = $1
+               FOR UPDATE`
+            : `SELECT * FROM longhouse.auth_invites
+               WHERE hash = $1 AND consumed_at IS NULL AND expires_at > now()
+               FOR UPDATE`,
           [wanted],
         );
         const invite = inviteRowToRecord(inviteResult.rows[0]);
-        if (!invite || isTokenExpired(invite)) {
+        if (redemptionId && invite && invite.consumedAt) {
+          // Exact replay: same code + same redemption_id + same token hash
+          // returns the same safe record with NO state change. Anything else
+          // is a second consumer and fails exactly like a consumed invite.
+          // Replay does not re-check expiry: the redemption already happened;
+          // only its response was lost.
+          if (invite.redemptionId !== redemptionId || !invite.consumedByTokenId) {
+            await client.query('ROLLBACK');
+            return null;
+          }
+          const tokenResult = await client.query(
+            'SELECT * FROM longhouse.auth_tokens WHERE id = $1',
+            [invite.consumedByTokenId],
+          );
+          const existing = tokenRowToRecord(tokenResult.rows[0]);
+          if (!existing || !timingSafeEqualString(existing.hash, tokenHash)) {
+            await client.query('ROLLBACK');
+            return null;
+          }
+          await client.query('COMMIT');
+          return {
+            replayed: true,
+            invite: publicInviteRecord(invite),
+            record: publicTokenRecord(existing),
+          };
+        }
+        if (!invite || invite.consumedAt || isTokenExpired(invite)) {
           await client.query('ROLLBACK');
           return null;
         }
@@ -199,20 +235,28 @@ export function createPostgresAuthStore(databaseUrl) {
         );
         const updated = await client.query(
           `UPDATE longhouse.auth_invites
-           SET consumed_at = now(), consumed_by_token_id = $2
+           SET consumed_at = now(), consumed_by_token_id = $2, redemption_id = $3
            WHERE id = $1
            RETURNING *`,
-          [invite.id, tokenRecord.id],
+          [invite.id, tokenRecord.id, redemptionId],
         );
         await client.query('COMMIT');
         return {
           token,
+          replayed: false,
           invite: publicInviteRecord(inviteRowToRecord(updated.rows[0])),
           record: publicTokenRecord(tokenRowToRecord(inserted.rows[0])),
         };
       } catch (error) {
         await client.query('ROLLBACK').catch(() => {});
-        if (error.code === '23505') throw new Error('A token with this secret already exists.');
+        if (error.code === '23505') {
+          // Extended form: EVERY uniqueness collision is a second-consumer
+          // 403, not a 500 — a reused redemption_id hits the 007 partial
+          // index, and a reused TOKEN against a different invite hits the
+          // auth_tokens hash constraint first.
+          if (redemptionId) return null;
+          throw new Error('A token with this secret already exists.');
+        }
         throw error;
       } finally {
         client.release();

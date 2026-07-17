@@ -10,6 +10,7 @@
 // preexisting is dropped/truncated/deleted. Discard the disposable
 // container/database afterwards (printed, never automated).
 
+import crypto from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
@@ -81,12 +82,14 @@ try {
   const MIGRATIONS = [
     'db/001_longhouse_core.sql', 'db/002_ocean_ledger.sql', 'db/003_source_adapters.sql',
     'db/004_source_capabilities_truth.sql', 'db/005_auth_registry.sql', 'db/006_federated_rooms.sql',
+    'db/007_federation_bridge_authority.sql',
   ];
   for (const file of MIGRATIONS) {
     await gatePool.query(await fs.readFile(path.resolve(repoRoot, file), 'utf8'));
   }
   await gatePool.query(await fs.readFile(path.resolve(repoRoot, 'db/006_federated_rooms.sql'), 'utf8'));
-  console.log('migrations 001..006 applied (006 twice — idempotent)');
+  await gatePool.query(await fs.readFile(path.resolve(repoRoot, 'db/007_federation_bridge_authority.sql'), 'utf8'));
+  console.log('migrations 001..007 applied (006 and 007 twice — idempotent)');
 
   // ── boot server against the test database ───────────────────────────
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rooms-pg-smoke-'));
@@ -266,9 +269,16 @@ try {
 
   // ── R-8 ledger gating ────────────────────────────────────────────────
   console.log('R-8 ledger gating:');
+  // S2 blockers B2: room MESSAGE payloads are authenticated data — the
+  // strict schema is {client_event_id, author_member_id, body[,mentions]}.
+  // client_event_id is DETERMINISTIC per logical message so producer retries
+  // stay content-identical.
+  const msgPayload = (author, body, extra = {}) => ({
+    client_event_id: `ce-${body}`, author_member_id: author, body, ...extra,
+  });
   const writeBody = (overrides = {}) => ({
     event_type: 'message', correlation_id: ROOM, virtual_path: `/rooms/${ROOM}`,
-    payload: { text: 'hello room' }, actor_member_id: memberId, ...overrides,
+    payload: msgPayload(memberId, 'hello room'), actor_member_id: memberId, ...overrides,
   });
   check('canonical write 201', (await api(joinToken, 'POST', '/api/v1/ledger/events', writeBody())).status === 201);
   check('descendant path write 400', (await api(joinToken, 'POST', '/api/v1/ledger/events', writeBody({ virtual_path: `/rooms/${ROOM}/notes.md` }))).status === 400);
@@ -312,29 +322,29 @@ try {
     source_id: sourceId, source_sequence: sequence, ...overrides,
   });
   const [p1, p2] = await Promise.all([
-    api(joinToken, 'POST', '/api/v1/ledger/events', producerBody('1', { payload: { text: 'p1-1' } })),
-    api(joinToken, 'POST', '/api/v1/ledger/events', producerBody('1', { payload: { text: 'p2-1' } }, secondProducerId)),
+    api(joinToken, 'POST', '/api/v1/ledger/events', producerBody('1', { payload: msgPayload(memberId, 'p1-1') })),
+    api(joinToken, 'POST', '/api/v1/ledger/events', producerBody('1', { payload: msgPayload(memberId, 'p2-1') }, secondProducerId)),
   ]);
   check('two producer streams both source_sequence=1 succeed independently', p1.status === 201
     && p2.status === 201
     && p1.body.event.id !== p2.body.event.id);
-  const p1Retry = await api(joinToken, 'POST', '/api/v1/ledger/events', producerBody('1', { payload: { text: 'p1-1' } }));
+  const p1Retry = await api(joinToken, 'POST', '/api/v1/ledger/events', producerBody('1', { payload: msgPayload(memberId, 'p1-1') }));
   check('exact producer retry returns prior event', p1Retry.status === 201
     && p1Retry.body.event.id === p1.body.event.id);
-  const p1Conflict = await api(joinToken, 'POST', '/api/v1/ledger/events', producerBody('1', { payload: { text: 'MUTATED' } }));
+  const p1Conflict = await api(joinToken, 'POST', '/api/v1/ledger/events', producerBody('1', { payload: msgPayload(memberId, 'MUTATED', { client_event_id: 'ce-p1-1' }) }));
   check('different content same tuple 409 + details', p1Conflict.status === 409
     && p1Conflict.body.details?.existing_event_id === p1.body.event.id
     && p1Conflict.body.details?.source_sequence === '1');
-  check('numeric source_sequence rejected 400', (await api(joinToken, 'POST', '/api/v1/ledger/events', producerBody(2, { payload: { text: 'p-2' } }))).status === 400);
-  check('non-canonical source_sequence 400', (await api(joinToken, 'POST', '/api/v1/ledger/events', producerBody('01', { payload: { text: 'p-2' } }))).status === 400);
-  check('missing source_sequence on room source 400', (await api(joinToken, 'POST', '/api/v1/ledger/events', producerBody(undefined, { payload: { text: 'p-2' } }))).status === 400);
+  check('numeric source_sequence rejected 400', (await api(joinToken, 'POST', '/api/v1/ledger/events', producerBody(2, { payload: msgPayload(memberId, 'p-2') }))).status === 400);
+  check('non-canonical source_sequence 400', (await api(joinToken, 'POST', '/api/v1/ledger/events', producerBody('01', { payload: msgPayload(memberId, 'p-2') }))).status === 400);
+  check('missing source_sequence on room source 400', (await api(joinToken, 'POST', '/api/v1/ledger/events', producerBody(undefined, { payload: msgPayload(memberId, 'p-2') }))).status === 400);
   const [c1, c2] = await Promise.all([
-    api(joinToken, 'POST', '/api/v1/ledger/events', producerBody('2', { payload: { text: 'p-2' } })),
-    api(joinToken, 'POST', '/api/v1/ledger/events', producerBody('2', { payload: { text: 'p-2' } })),
+    api(joinToken, 'POST', '/api/v1/ledger/events', producerBody('2', { payload: msgPayload(memberId, 'p-2') })),
+    api(joinToken, 'POST', '/api/v1/ledger/events', producerBody('2', { payload: msgPayload(memberId, 'p-2') })),
   ]);
   check('concurrent same-tuple same-content: one event, both 201', c1.status === 201 && c2.status === 201
     && c1.body.event.id === c2.body.event.id);
-  await api(joinToken, 'POST', '/api/v1/ledger/events', producerBody('3', { payload: { text: 'p-3' } }));
+  await api(joinToken, 'POST', '/api/v1/ledger/events', producerBody('3', { payload: msgPayload(memberId, 'p-3') }));
   // cursor walk reassembles the ascending stream without overlap, and every
   // page must respect the requested bound — an implementation ignoring the
   // limit fails here, not just the shape predicates
@@ -492,14 +502,15 @@ try {
   check('both first snapshot reads held', heldReads.length === 2, `held ${heldReads.length}`);
   const midSnapshot = await api(cutRedeem.body.token, 'POST', '/api/v1/ledger/events', {
     event_type: 'message', correlation_id: CUTOVER, virtual_path: `/rooms/${CUTOVER}`,
-    payload: { text: 'mid-snapshot-live-marker' }, actor_member_id: cutJoin.body.member.member_id,
+    payload: { client_event_id: 'ce-mid-snapshot', author_member_id: cutJoin.body.member.member_id, body: 'mid-snapshot-live-marker' },
+    actor_member_id: cutJoin.body.member.member_id,
   });
   check('mid-snapshot append accepted while both snapshots held', midSnapshot.status === 201);
   heldReads.splice(0).forEach((release) => release());
   state.ledger.read = realLedgerRead;   // restored BEFORE the oracle
   for (const [name, sub] of [['A', subA], ['B', subB]]) {
     // eslint-disable-next-line no-await-in-loop
-    await sub.waitFor((f) => f.event === 'room_event' && f.data.payload?.text === 'mid-snapshot-live-marker', 40000);
+    await sub.waitFor((f) => f.event === 'room_event' && f.data.payload?.body === 'mid-snapshot-live-marker', 40000);
   }
   // authoritative oracle: gated cursor reads with BOTH correlation and exact
   // path filters — the same dual-filter contract the stream itself uses
@@ -527,13 +538,13 @@ try {
   const subW = trackedSse(`/api/v1/rooms/${ROOM}/events`, { token: joinToken });
   await subW.waitFor((f) => f.event === 'hello');
   const secretRow = await api(admin1.token, 'POST', '/api/v1/ledger/events', writeBody({
-    payload: { text: 'sse-secret' }, clearance: 'TOP_SECRET', actor_member_id: ownerMemberId,
+    payload: msgPayload(ownerMemberId, 'sse-secret'), clearance: 'TOP_SECRET', actor_member_id: ownerMemberId,
   }));
-  const markerRow = await api(joinToken, 'POST', '/api/v1/ledger/events', writeBody({ payload: { text: 'sse-after-secret' } }));
+  const markerRow = await api(joinToken, 'POST', '/api/v1/ledger/events', writeBody({ payload: msgPayload(memberId, 'sse-after-secret') }));
   check('secret + marker appended', secretRow.status === 201 && markerRow.status === 201);
-  await subW.waitFor((f) => f.event === 'room_event' && f.data.payload?.text === 'sse-after-secret');
+  await subW.waitFor((f) => f.event === 'room_event' && f.data.payload?.body === 'sse-after-secret');
   check('clearance-filtered row never streamed to contributor',
-    !subW.frames.some((f) => f.event === 'room_event' && f.data.payload?.text === 'sse-secret'));
+    !subW.frames.some((f) => f.event === 'room_event' && f.data.payload?.body === 'sse-secret'));
 
   // cursor resume after forced close: Last-Event-ID, no dupe, only new rows
   const lastSeenW = subW.frames.filter((f) => f.event === 'room_event').map((f) => f.id).at(-1);
@@ -541,8 +552,8 @@ try {
   await subW.done;
   const subW2 = trackedSse(`/api/v1/rooms/${ROOM}/events`, { token: joinToken, lastEventId: lastSeenW });
   await subW2.waitFor((f) => f.event === 'hello');
-  await api(joinToken, 'POST', '/api/v1/ledger/events', writeBody({ payload: { text: 'sse-after-resume' } }));
-  await subW2.waitFor((f) => f.event === 'room_event' && f.data.payload?.text === 'sse-after-resume');
+  await api(joinToken, 'POST', '/api/v1/ledger/events', writeBody({ payload: msgPayload(memberId, 'sse-after-resume') }));
+  await subW2.waitFor((f) => f.event === 'room_event' && f.data.payload?.body === 'sse-after-resume');
   const resumedIds = subW2.frames.filter((f) => f.event === 'room_event').map((f) => f.id);
   check('resume from Last-Event-ID: strictly after cursor, no dupe',
     resumedIds.every((id) => BigInt(id) > BigInt(lastSeenW)));
@@ -645,6 +656,164 @@ try {
     memberR.token, memberT.token, overflowMember.token, 'sha256:'];
   check('no token material in ANY frame of ANY subscriber',
     secretMaterial.every((secret) => !everyFrameJson.includes(secret)));
+
+  // ── S2 blockers: B1 idempotent redeem / B2 payload auth / B3 u64 ─────
+  console.log('S2 blockers (B1/B2/B3):');
+
+  // B1 — idempotent invite redemption (F3-only extended form)
+  const b1Invite = await api(admin1.token, 'POST', '/api/v1/invites', { name: 'daemon-join', role: 'contributor', scopes: [`/rooms/${ROOM}`] });
+  const daemonBearer = crypto.randomBytes(32).toString('base64url');
+  const daemonRedemptionId = crypto.randomUUID();
+  const b1First = await api('', 'POST', '/api/v1/invites/redeem', {
+    code: b1Invite.body.code, redemption_id: daemonRedemptionId, token: daemonBearer,
+  });
+  check('B1 first idempotent redeem 201 {invite, record} — NO token in body',
+    b1First.status === 201 && Boolean(b1First.body.record) && Boolean(b1First.body.invite)
+      && !('token' in b1First.body),
+    `status ${b1First.status} keys ${Object.keys(b1First.body || {}).join(',')}`);
+  check('B1 caller-held bearer actually authenticates', (await api(daemonBearer, 'GET', '/api/v1/info')).status === 200);
+  check('B1 idempotency key never leaks: no redemptionId on extended or legacy public invite envelopes',
+    !('redemptionId' in (b1First.body.invite || {}))
+      && !('redemptionId' in (invite1.body.invite || {}))
+      && !('redemptionId' in (redeem.body.invite || {})));
+  const b1Replay = await api('', 'POST', '/api/v1/invites/redeem', {
+    code: b1Invite.body.code, redemption_id: daemonRedemptionId, token: daemonBearer,
+  });
+  check('B1 exact replay 200 same record, still no token',
+    b1Replay.status === 200 && b1Replay.body.record?.id === b1First.body.record.id
+      && !('token' in b1Replay.body) && !('redemptionId' in (b1Replay.body.invite || {})));
+  check('B1 replay with different token 403',
+    (await api('', 'POST', '/api/v1/invites/redeem', {
+      code: b1Invite.body.code, redemption_id: daemonRedemptionId, token: crypto.randomBytes(32).toString('base64url'),
+    })).status === 403);
+  check('B1 replay with different redemption_id 403',
+    (await api('', 'POST', '/api/v1/invites/redeem', {
+      code: b1Invite.body.code, redemption_id: crypto.randomUUID(), token: daemonBearer,
+    })).status === 403);
+  check('B1 legacy redeem of extended-consumed invite 403',
+    (await api('', 'POST', '/api/v1/invites/redeem', { code: b1Invite.body.code })).status === 403);
+  const b1Other = await api(admin1.token, 'POST', '/api/v1/invites', { name: 'daemon-join-2', role: 'contributor', scopes: [`/rooms/${ROOM}`] });
+  check('B1 same redemption_id against a DIFFERENT invite 403 (unique index)',
+    (await api('', 'POST', '/api/v1/invites/redeem', {
+      code: b1Other.body.code, redemption_id: daemonRedemptionId, token: crypto.randomBytes(32).toString('base64url'),
+    })).status === 403);
+  check('B1 same TOKEN against a different invite 403 (auth_tokens hash collision, not 500)',
+    (await api('', 'POST', '/api/v1/invites/redeem', {
+      code: b1Other.body.code, redemption_id: crypto.randomUUID(), token: daemonBearer,
+    })).status === 403);
+  check('B1 short/weak client token 400',
+    (await api('', 'POST', '/api/v1/invites/redeem', {
+      code: b1Other.body.code, redemption_id: crypto.randomUUID(), token: 'weak',
+    })).status === 400);
+  check('B1 non-UUID redemption_id 400',
+    (await api('', 'POST', '/api/v1/invites/redeem', {
+      code: b1Other.body.code, redemption_id: 'not-a-uuid', token: crypto.randomBytes(32).toString('base64url'),
+    })).status === 400);
+  check('B1 stray extended key 400',
+    (await api('', 'POST', '/api/v1/invites/redeem', {
+      code: b1Other.body.code, redemption_id: crypto.randomUUID(), token: crypto.randomBytes(32).toString('base64url'), extra: 1,
+    })).status === 400);
+  // replay survives invite EXPIRY after consumption: the redemption already
+  // happened; only its response was lost.
+  await gatePool.query("UPDATE longhouse.auth_invites SET expires_at = now() - interval '1 hour' WHERE redemption_id = $1", [daemonRedemptionId]);
+  const b1ExpiredReplay = await api('', 'POST', '/api/v1/invites/redeem', {
+    code: b1Invite.body.code, redemption_id: daemonRedemptionId, token: daemonBearer,
+  });
+  check('B1 exact replay after invite expiry still 200 (consumption predates expiry)',
+    b1ExpiredReplay.status === 200 && b1ExpiredReplay.body.record?.id === b1First.body.record.id);
+
+  // B2 — authenticated room message payloads
+  const b2Write = await api(joinToken, 'POST', '/api/v1/ledger/events',
+    writeBody({ payload: msgPayload(memberId, 'b2-canonical', { mention_member_ids: [ownerMemberId] }) }));
+  check('B2 canonical message with mention 201, actor retained on the row',
+    b2Write.status === 201 && b2Write.body.event.actor_member_id === memberId
+      && b2Write.body.event.payload.mention_member_ids[0] === ownerMemberId);
+  const b2Upper = await api(joinToken, 'POST', '/api/v1/ledger/events',
+    writeBody({
+      actor_member_id: memberId.toUpperCase(),
+      payload: { client_event_id: 'ce-b2-case', author_member_id: memberId.toUpperCase(), body: 'b2-case', mention_member_ids: [ownerMemberId.toUpperCase()] },
+    }));
+  check('B2 raw UUID casings are persisted as validated lowercase on row AND payload',
+    b2Upper.status === 201
+      && b2Upper.body.event.actor_member_id === memberId
+      && b2Upper.body.event.payload.author_member_id === memberId
+      && b2Upper.body.event.payload.mention_member_ids[0] === ownerMemberId);
+  check('B2 wrong author (payload author != actor) 403 member_actor_mismatch',
+    (await api(joinToken, 'POST', '/api/v1/ledger/events',
+      writeBody({ payload: msgPayload(ownerMemberId, 'b2-forged') }))).status === 403);
+  check('B2 principal/actor mismatch 403 (actor member not owned by token)',
+    (await api(joinToken, 'POST', '/api/v1/ledger/events',
+      writeBody({ actor_member_id: ownerMemberId, payload: msgPayload(ownerMemberId, 'b2-imposter') }))).status === 403);
+  check('B2 nonmember mention 400 unknown_mention_member',
+    (await api(joinToken, 'POST', '/api/v1/ledger/events',
+      writeBody({ payload: msgPayload(memberId, 'b2-ghost', { mention_member_ids: ['9c2f4a52-dead-4000-8000-000000000001'] }) }))).status === 400);
+  check('B2 duplicate mentions 400',
+    (await api(joinToken, 'POST', '/api/v1/ledger/events',
+      writeBody({ payload: msgPayload(memberId, 'b2-dup', { mention_member_ids: [ownerMemberId, ownerMemberId] }) }))).status === 400);
+  check('B2 stray payload key 400',
+    (await api(joinToken, 'POST', '/api/v1/ledger/events',
+      writeBody({ payload: msgPayload(memberId, 'b2-stray', { smuggled: true }) }))).status === 400);
+  check('B2 eventType alias cannot bypass payload auth',
+    (await api(joinToken, 'POST', '/api/v1/ledger/events', {
+      eventType: 'message', correlation_id: ROOM, virtual_path: `/rooms/${ROOM}`,
+      payload: { text: 'legacy-shape' }, actor_member_id: memberId,
+    })).status === 400);
+  const b2NonMessage = await api(joinToken, 'POST', '/api/v1/ledger/events',
+    writeBody({ event_type: 'decision.recorded', payload: { decision: 'free-form ok' } }));
+  check('B2 non-message room event keeps free payload and NO retained actor key',
+    b2NonMessage.status === 201 && !('actor_member_id' in b2NonMessage.body.event));
+  // membership freshness is proven INSIDE the append transaction: the
+  // removal fires deterministically AFTER the route-level gate has passed
+  // (the handler is already calling append) and BEFORE the append
+  // transaction opens — only the in-txn FOR SHARE recheck can reject it.
+  const freshVictim = await joinFreshMember(ROOM);
+  const realAppendForRace = state.ledger.append.bind(state.ledger);
+  let raceArmed = true;
+  let removalRanBeforeAppend = false;
+  state.ledger.append = async (input, options) => {
+    if (raceArmed && input.payload?.client_event_id === 'ce-b2-after-removal') {
+      raceArmed = false;
+      await gatePool.query('UPDATE longhouse.room_members SET removed_at = now() WHERE room_id = $1 AND member_id = $2', [ROOM, freshVictim.memberId]);
+      removalRanBeforeAppend = true;
+    }
+    return realAppendForRace(input, options);
+  };
+  const raceResult = await api(freshVictim.token, 'POST', '/api/v1/ledger/events',
+    writeBody({ actor_member_id: freshVictim.memberId, payload: msgPayload(freshVictim.memberId, 'b2-after-removal') }));
+  state.ledger.append = realAppendForRace;
+  check('B2 removal AFTER outer gate / BEFORE append txn is rejected by the in-txn recheck',
+    removalRanBeforeAppend && raceResult.status === 403,
+    `removalRan ${removalRanBeforeAppend} status ${raceResult.status}`);
+
+  // B3 — lossless u64 sequences end-to-end. The ledger is append-only
+  // (mutation trigger), so fixtures are permanent: the 2^53+1 row lands here
+  // (later appends simply continue above 2^53 — sequences are strings
+  // everywhere), and the BIGINT-max row lands at the VERY END of this smoke
+  // where nothing appends after it.
+  await api(admin1.token, 'POST', '/api/v1/rooms/u64room/register', {});
+  const u64Member = await joinFreshMember('u64room');
+  await gatePool.query(
+    `INSERT INTO longhouse.ledger_events
+       (id, schema_version, sequence, event_type, correlation_id, lab, actor_type,
+        actor_id, actor_name, source_id, virtual_path, payload, clearance, tags,
+        event_timestamp, received_at, prev_hash, hash)
+     VALUES
+       ('evt_u64_a', 1, 9007199254740993, 'message', 'u64room', 'longhouse', 'agent', $1, 'u64', 'u64-fixture', '/rooms/u64room', '{"text":"two53plus1"}'::jsonb, 'UNCLASSIFIED', ARRAY[]::text[], now(), now(), 'fixture', 'fixture_u64_a')`,
+    [u64Member.tokenId],
+  );
+  const u64Page = await api(u64Member.token, 'GET',
+    `/api/v1/ledger/events?correlation_id=u64room&path=${encodeURIComponent('/rooms/u64room')}&after_sequence=9007199254740992&limit=10`);
+  check('B3 read returns the EXACT canonical string above 2^53',
+    u64Page.status === 200
+      && JSON.stringify(u64Page.body.events.map((event) => event.sequence)) === JSON.stringify(['9007199254740993']),
+    `got ${JSON.stringify(u64Page.body.events?.map((event) => event.sequence))}`);
+  const u64Sse = trackedSse('/api/v1/rooms/u64room/events?after_sequence=9007199254740992', { token: u64Member.token });
+  const u64Frame = await u64Sse.waitFor((f) => f.event === 'room_event' && f.id === '9007199254740993');
+  check('B3 SSE id: carries the exact 2^53+1 decimal string', u64Frame.id === '9007199254740993');
+  u64Sse.abort();
+  const b3After = await api(joinToken, 'POST', '/api/v1/ledger/events', writeBody({ payload: msgPayload(memberId, 'b3-after-fixtures') }));
+  check('B3 chain continues above 2^53 as exact strings', b3After.status === 201
+    && b3After.body.event.sequence === '9007199254740994');
 
   // ── direct invalid SQL (SQLSTATE-verified) ───────────────────────────
   console.log('direct SQL constraint pins:');
@@ -790,6 +959,27 @@ try {
       splitResponse.status === 503 && !splitText.includes('postgres://'),
       `status ${splitResponse.status}`);
   }
+  // ── B3 terminal: BIGINT max round-trip (LAST ledger activity) ────────
+  console.log('B3 terminal BIGINT-max:');
+  await gatePool.query(
+    `INSERT INTO longhouse.ledger_events
+       (id, schema_version, sequence, event_type, correlation_id, lab, actor_type,
+        actor_id, actor_name, source_id, virtual_path, payload, clearance, tags,
+        event_timestamp, received_at, prev_hash, hash)
+     VALUES
+       ('evt_u64_b', 1, 9223372036854775807, 'message', 'u64room', 'longhouse', 'agent', $1, 'u64', 'u64-fixture', '/rooms/u64room', '{"text":"bigintmax"}'::jsonb, 'UNCLASSIFIED', ARRAY[]::text[], now(), now(), 'fixture', 'fixture_u64_b')`,
+    [u64Member.tokenId],
+  );
+  const u64MaxPage = await api(u64Member.token, 'GET',
+    `/api/v1/ledger/events?correlation_id=u64room&path=${encodeURIComponent('/rooms/u64room')}&after_sequence=9223372036854775806&limit=10`);
+  check('B3 BIGINT max survives read as the exact decimal string',
+    u64MaxPage.status === 200
+      && JSON.stringify(u64MaxPage.body.events.map((event) => event.sequence)) === JSON.stringify(['9223372036854775807']),
+    `got ${JSON.stringify(u64MaxPage.body.events?.map((event) => event.sequence))}`);
+  const u64MaxSse = trackedSse('/api/v1/rooms/u64room/events?after_sequence=9223372036854775806', { token: u64Member.token });
+  const u64MaxFrame = await u64MaxSse.waitFor((f) => f.event === 'room_event' && f.id === '9223372036854775807');
+  check('B3 SSE id: carries the exact BIGINT-max decimal string', u64MaxFrame.id === '9223372036854775807');
+  u64MaxSse.abort();
 } finally {
   if (server) await new Promise((resolve) => server.close(resolve));
   if (splitServer) await new Promise((resolve) => splitServer.close(resolve));

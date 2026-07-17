@@ -49,6 +49,16 @@ Repo-wide working contract for `ocean-bedrock`.
   membership-gated with no admin bypass, composed from the cursor read
   surface via bounded forward-poll — no push/notification primitive may be
   added without its own reviewed freeze.
+- S2 bridge authority (stable rules): invite redemption has an idempotent
+  F3-only form `{code, redemption_id, token}` that never returns a token and
+  replays exactly (same hash + redemption_id) or fails 403 — Bedrock stores
+  only the token hash. Room MESSAGE payloads are authenticated data: strict
+  deny-extra schema, author == authorized actor, active-member mentions,
+  re-proven INSIDE the append transaction; the validated actor member id is
+  retained on the hash-chained row. Every chain sequence is a canonical
+  decimal u64 STRING end-to-end (Postgres reads cast `::text`, ORDER BY
+  references the table column, hash-only bare-integer canonicalization keeps
+  historical hashes valid) — no sequence ever passes through a JS Number.
 
 ## Child devlog Index
 

@@ -138,7 +138,8 @@ test('JSONL store: producer conflict + cursor semantics', async (t) => {
 
   const tuple = { source_id: 'room:warroom:member:m1:producer:p1', source_sequence: '1' };
   const first = await store.append({ ...BASE_INPUT, ...tuple });
-  assert.equal(first.sequence, 1);
+  // S2 blockers B3: chain sequences are canonical decimal u64 STRINGS.
+  assert.equal(first.sequence, '1');
 
   // exact retry → same event, nothing appended
   const retry = await store.append({ ...BASE_INPUT, ...tuple, timestamp: '2026-07-16T20:00:00.000Z' });
@@ -163,13 +164,13 @@ test('JSONL store: producer conflict + cursor semantics', async (t) => {
     await store.append({ ...BASE_INPUT, payload: { text: `m${i}` }, source_id: tuple.source_id, source_sequence: String(i) });
   }
   const pageOne = await store.read({ after_sequence: '0', limit: 3 });
-  assert.deepEqual(pageOne.map((event) => event.sequence), [1, 2, 3], 'ascending from 0, bounded');
+  assert.deepEqual(pageOne.map((event) => event.sequence), ['1', '2', '3'], 'ascending from 0, bounded');
   const pageTwo = await store.read({ after_sequence: String(pageOne.at(-1).sequence), limit: 3 });
-  assert.deepEqual(pageTwo.map((event) => event.sequence), [4, 5], 'strict > resumes without overlap');
+  assert.deepEqual(pageTwo.map((event) => event.sequence), ['4', '5'], 'strict > resumes without overlap');
 
   // absent cursor: existing tail-window behavior unchanged
   const tail = await store.read({ limit: 2 });
-  assert.deepEqual(tail.map((event) => event.sequence), [4, 5]);
+  assert.deepEqual(tail.map((event) => event.sequence), ['4', '5']);
 });
 
 test('B3 pre-I/O gate: invalid cursor rejects BEFORE any file I/O', async (t) => {

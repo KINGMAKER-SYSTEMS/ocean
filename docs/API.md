@@ -440,3 +440,43 @@ a registered room, consumed by the outbound daemon bridge.
   closes; reconnect with that cursor to heal via the snapshot path.
 - **Visibility**: per-principal path-scope + clearance filtering, identical
   to `GET /api/v1/ledger/events`.
+
+### Bedrock blockers for the S2 bridge (Gate-2 S2, B1/B2/B3)
+
+**B1 — idempotent invite redemption.** `POST /api/v1/invites/redeem` accepts
+an extended form `{code, redemption_id, token}` (federation/Postgres only —
+`503` otherwise; legacy `{code}`-only is byte-compatible in both modes). The
+caller durably persists a self-generated 43-char base64url bearer and a UUID
+`redemption_id` BEFORE calling; Bedrock stores only the sha-256 hash. First
+consume: `201 {invite, record}`. An EXACT replay (same code + redemption_id +
+token hash) is `200` with the same safe record — surviving response loss,
+caller restart, and later invite expiry. Any non-exact replay (different
+redemption_id or token hash, or the same redemption_id against another
+invite — enforced by a partial unique index) is `403`. No response of the
+extended form ever carries a token.
+
+**B2 — authenticated room message payloads.** For registered-room appends
+whose RESOLVED event type is `message` (alias `eventType` cannot bypass),
+`payload` is a strict deny-extra object: required `client_event_id`
+(non-empty string), `author_member_id` (UUID), `body` (string); optional
+`mention_member_ids` (unique UUIDs). `author_member_id` must equal the
+authorized `actor_member_id` (`403 member_actor_mismatch`); every mention
+must be an ACTIVE room member (`400 unknown_mention_member`; duplicates
+`400`). Author + mention membership are re-proven INSIDE the append
+transaction (rows locked FOR SHARE), so a concurrent removal cannot race a
+passing pre-check. The validated actor member id is retained on the
+hash-chained row as `actor_member_id` — present ONLY on authenticated room
+message rows, so historical hashes verify unchanged. Other room event types
+and all non-room appends keep their existing contracts.
+
+**B3 — lossless u64 sequences.** Every chain `sequence` (rows, wire, SSE
+`id:`, hello `snapshot_high_water`, cursors) is a canonical decimal u64
+STRING end-to-end — Postgres reads cast `sequence::text` (head probe
+included) and nothing passes through a JavaScript `Number`, so values above
+2^53 and up to BIGINT max round-trip exactly. Hashes use hash-only
+canonicalization (the sequence serializes as a bare integer literal),
+keeping every historical hash and JSONL line valid with zero migration; the
+JSONL reader accepts legacy numeric sequences only while
+`Number.isSafeInteger` holds — anything else fails closed. Inbound u64
+fields (`after_sequence`, room `source_sequence`) remain STRING-strict, and
+the sequence space past u64 max fails closed.

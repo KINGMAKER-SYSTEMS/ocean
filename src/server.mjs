@@ -1367,22 +1367,73 @@ async function handleInviteCreate(req, state, principal) {
   return created;
 }
 
+// S2 blockers B1: the daemon-side bearer token shape minted by
+// generateToken() — 32 bytes base64url, exactly 43 chars. The idempotent
+// redeem form refuses anything weaker.
+const CLIENT_TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
+
 async function handleInviteRedeem(req, state) {
   const body = await readJsonBody(req, state.maxJsonBytes);
-  if (!body.code) throw new HttpError(400, 'Missing invite code.');
-  const redeemed = await state.auth.redeemInvite(String(body.code).trim());
+  const isObjectBody = Boolean(body) && typeof body === 'object' && !Array.isArray(body);
+  const extended = isObjectBody && (body.redemption_id !== undefined || body.token !== undefined);
+
+  if (!extended) {
+    // Legacy {code}-only: one-shot, server-minted token returned once —
+    // byte-compatible in both store modes.
+    if (!isObjectBody || !body.code) throw new HttpError(400, 'Missing invite code.');
+    const redeemed = await state.auth.redeemInvite(String(body.code).trim());
+    if (!redeemed) throw new HttpError(403, 'Invalid, expired, or already redeemed invite.');
+    await appendAudit(state, {
+      actor: redeemed.record.name,
+      actorId: redeemed.record.id,
+      action: 'invite.redeem',
+      inviteId: redeemed.invite.id,
+      tokenId: redeemed.record.id,
+      tokenName: redeemed.record.name,
+      role: redeemed.record.role,
+      scopes: redeemed.record.scopes,
+    });
+    return { status: 201, body: { token: redeemed.token, invite: redeemed.invite, record: redeemed.record } };
+  }
+
+  // S2 blockers B1 idempotent form (F3-only): the caller durably persisted
+  // the bearer + redemption_id BEFORE calling, Bedrock stores only the token
+  // hash, and an exact replay returns the same safe record. No response of
+  // this form ever carries a token.
+  requireFederation(state);
+  const strayKeys = Object.keys(body).filter((key) => !['code', 'redemption_id', 'token'].includes(key));
+  if (strayKeys.length) {
+    throw new HttpError(400, `Idempotent redeem accepts code, redemption_id, token only (rejected: ${strayKeys.join(', ')}).`);
+  }
+  if (!body.code || typeof body.code !== 'string') throw new HttpError(400, 'Missing invite code.');
+  let redemptionId;
+  try {
+    redemptionId = validateMemberId(body.redemption_id, 'redemption_id');
+  } catch (error) {
+    throw roomsErrorToHttp(error);
+  }
+  if (typeof body.token !== 'string' || !CLIENT_TOKEN_RE.test(body.token)) {
+    throw new HttpError(400, 'token must be a 43-character base64url bearer (32 random bytes).');
+  }
+  const redeemed = await state.auth.redeemInvite(body.code.trim(), {
+    redemptionId,
+    token: body.token,
+  });
   if (!redeemed) throw new HttpError(403, 'Invalid, expired, or already redeemed invite.');
   await appendAudit(state, {
     actor: redeemed.record.name,
     actorId: redeemed.record.id,
-    action: 'invite.redeem',
+    action: redeemed.replayed ? 'invite.redeem.replay' : 'invite.redeem',
     inviteId: redeemed.invite.id,
     tokenId: redeemed.record.id,
     tokenName: redeemed.record.name,
     role: redeemed.record.role,
     scopes: redeemed.record.scopes,
   });
-  return redeemed;
+  return {
+    status: redeemed.replayed ? 200 : 201,
+    body: { invite: redeemed.invite, record: redeemed.record },
+  };
 }
 
 // ── Gate-2 S1A: federated rooms (frozen by gate2-s1a-freeze.md v4) ─────
@@ -1695,18 +1746,18 @@ async function handleRoomEventsStream(req, res, url, state, roomSegmentRaw) {
 // is untouched (including deployments without federation, where no rooms
 // exist by construction).
 async function gateRoomLedgerAccess(state, principal, { correlationId, virtualPath, isWrite, actorMemberId }) {
-  if (!state.federationAvailable) return;
+  if (!state.federationAvailable) return null;
   const pathRoomId = virtualPath ? roomIdFromPath(virtualPath) : null;
   const candidates = new Set();
   if (correlationId) candidates.add(correlationId);
   if (pathRoomId) candidates.add(pathRoomId);
-  if (!candidates.size) return;
+  if (!candidates.size) return null;
 
   let roomId = null;
   for (const candidate of candidates) {
     if (await state.rooms.findRoom(candidate)) { roomId = candidate; break; }
   }
-  if (!roomId) return;
+  if (!roomId) return null;
 
   if (isWrite) {
     // Canonical pair, exact: descendant/noncanonical paths are 400 on writes.
@@ -1736,6 +1787,82 @@ async function gateRoomLedgerAccess(state, principal, { correlationId, virtualPa
     const owned = await state.rooms.memberOwnedByPrincipal(roomId, memberId, principal.id);
     if (!owned) throw new HttpError(403, 'actor_member_id is not an active member owned by the calling principal.');
   }
+  return roomId;
+}
+
+// ── Gate-2 S2 blockers B2 (frozen by gate2-s2-bedrock-blockers-freeze-v4) ──
+// Room MESSAGE payloads are authenticated data, not opaque caller JSON: the
+// schema is strict deny-extra, the author must be the authorized actor, and
+// membership freshness is proven INSIDE the append transaction.
+
+export function validateRoomMessagePayload(payload, actorMemberIdRaw) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new HttpError(400, 'Room message events require a payload object.');
+  }
+  const allowed = ['client_event_id', 'author_member_id', 'body', 'mention_member_ids'];
+  const strayKeys = Object.keys(payload).filter((key) => !allowed.includes(key));
+  if (strayKeys.length) {
+    throw new HttpError(400, `Room message payloads accept ${allowed.join(', ')} only (rejected: ${strayKeys.join(', ')}).`);
+  }
+  if (typeof payload.client_event_id !== 'string' || !payload.client_event_id) {
+    throw new HttpError(400, 'Room message payloads require a non-empty client_event_id string.');
+  }
+  if (typeof payload.body !== 'string') {
+    throw new HttpError(400, 'Room message payloads require a body string.');
+  }
+  let authorMemberId;
+  let actorMemberId;
+  try {
+    authorMemberId = validateMemberId(payload.author_member_id, 'author_member_id');
+    actorMemberId = validateMemberId(actorMemberIdRaw, 'actor_member_id');
+  } catch (error) {
+    throw roomsErrorToHttp(error);
+  }
+  if (authorMemberId !== actorMemberId) {
+    throw new HttpError(403, 'member_actor_mismatch');
+  }
+  let mentionMemberIds = [];
+  if (payload.mention_member_ids !== undefined) {
+    if (!Array.isArray(payload.mention_member_ids)) {
+      throw new HttpError(400, 'mention_member_ids must be an array of member UUID strings.');
+    }
+    try {
+      mentionMemberIds = payload.mention_member_ids.map((id) => validateMemberId(id, 'mention_member_ids[]'));
+    } catch (error) {
+      throw roomsErrorToHttp(error);
+    }
+    if (new Set(mentionMemberIds).size !== mentionMemberIds.length) {
+      throw new HttpError(400, 'mention_member_ids must be unique.');
+    }
+  }
+  return { authorMemberId, mentionMemberIds };
+}
+
+// Runs inside the ledger append transaction: a concurrent member removal
+// cannot race a passing pre-check because the membership rows are locked
+// FOR SHARE until the event row commits.
+function roomMessagePreAppend(state, { roomId, principalTokenId, authorMemberId, mentionMemberIds }) {
+  return async (client) => {
+    const author = await client.query(
+      `SELECT 1 FROM longhouse.room_members
+       WHERE room_id = $1 AND member_id = $2
+         AND owner_principal_token_id = $3 AND removed_at IS NULL
+       FOR SHARE`,
+      [roomId, authorMemberId, principalTokenId],
+    );
+    if (!author.rows.length) throw new HttpError(403, 'member_actor_mismatch');
+    if (mentionMemberIds.length) {
+      const mentions = await client.query(
+        `SELECT member_id FROM longhouse.room_members
+         WHERE room_id = $1 AND member_id = ANY($2::uuid[]) AND removed_at IS NULL
+         FOR SHARE`,
+        [roomId, mentionMemberIds],
+      );
+      if (mentions.rows.length !== mentionMemberIds.length) {
+        throw new HttpError(400, 'unknown_mention_member');
+      }
+    }
+  };
 }
 
 function notFound() {
@@ -1857,7 +1984,8 @@ export function createOceanBedrockServer(options = {}) {
     if (!url.pathname.startsWith('/api/v1/')) notFound();
 
     if (req.method === 'POST' && url.pathname === '/api/v1/invites/redeem') {
-      jsonResponse(res, 201, await handleInviteRedeem(req, state));
+      const redeemed = await handleInviteRedeem(req, state);
+      jsonResponse(res, redeemed.status, redeemed.body);
       return;
     }
 
@@ -2063,24 +2191,68 @@ export function createOceanBedrockServer(options = {}) {
       requirePermission(principal, 'write');
       const body = await readJsonBody(req, state.maxJsonBytes);
       const apiPath = body.virtual_path || body.virtualPath || body.path ? normalizeApiPath(body.virtual_path || body.virtualPath || body.path) : null;
+      const actorMemberIdRaw = body.actor_member_id || body.actorMemberId || null;
       // Room gate FIRST (frozen mismatch 400 precedes generic scope 403).
-      await gateRoomLedgerAccess(state, principal, {
+      const gatedRoomId = await gateRoomLedgerAccess(state, principal, {
         correlationId: body.correlation_id || body.correlationId || null,
         virtualPath: apiPath,
         isWrite: true,
-        actorMemberId: body.actor_member_id || body.actorMemberId || null,
+        actorMemberId: actorMemberIdRaw,
       });
       if (apiPath) requirePathScope(principal, apiPath);
       requireClearance(principal, body.clearance || 'UNCLASSIFIED');
+      // S2 blockers B2: keyed on the CANONICAL resolved event type — exactly
+      // the alias resolution normalizeLedgerEvent applies — so an
+      // eventType:"message" spelling cannot bypass payload authentication.
+      const resolvedEventType = body.event_type || body.eventType;
+      const isRoomMessage = Boolean(gatedRoomId) && resolvedEventType === 'message';
+      let appendOptions;
+      let roomMessageAuthor = null;
+      let roomMessagePayload = null;
+      if (isRoomMessage) {
+        const { authorMemberId, mentionMemberIds } = validateRoomMessagePayload(body.payload, actorMemberIdRaw);
+        roomMessageAuthor = authorMemberId;
+        // Persist the VALIDATED spellings: the uuid column lowercases the
+        // retained actor, so raw payload casings would desync the wire from
+        // the row and the hash from a re-read.
+        roomMessagePayload = {
+          client_event_id: body.payload.client_event_id,
+          author_member_id: authorMemberId,
+          body: body.payload.body,
+          ...(body.payload.mention_member_ids !== undefined ? { mention_member_ids: mentionMemberIds } : {}),
+        };
+        appendOptions = {
+          preAppend: roomMessagePreAppend(state, {
+            roomId: gatedRoomId,
+            principalTokenId: principal.id,
+            authorMemberId,
+            mentionMemberIds,
+          }),
+        };
+      }
       const adminOverride = principal.role === 'admin';
-      const event = await state.ledger.append({
+      const appendInput = {
         ...body,
         virtual_path: apiPath,
         actor_type: adminOverride ? body.actor_type || body.actorType || 'agent' : 'agent',
         actor_id: adminOverride ? body.actor_id || body.actorId || principal.id : principal.id,
         actor_name: adminOverride ? body.actor_name || body.actorName || principal.name : principal.name,
         source_id: body.source_id || body.sourceId || 'longhouse-api',
-      }).catch((error) => { throw ledgerErrorToHttp(error); });
+      };
+      if (isRoomMessage) {
+        // Persist the VALIDATED (lowercased) member id: the uuid column
+        // normalizes case, so hashing the raw spelling would break verify.
+        appendInput.actor_member_id = roomMessageAuthor;
+        appendInput.payload = roomMessagePayload;
+        delete appendInput.actorMemberId;
+      } else {
+        // Only authenticated room MESSAGE appends persist the retained actor
+        // column; every other event keeps its historical key set.
+        delete appendInput.actor_member_id;
+        delete appendInput.actorMemberId;
+      }
+      const event = await state.ledger.append(appendInput, appendOptions)
+        .catch((error) => { throw ledgerErrorToHttp(error); });
       jsonResponse(res, 201, { event });
       return;
     }

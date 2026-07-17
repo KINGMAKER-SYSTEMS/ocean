@@ -267,3 +267,30 @@ db:check, and 122/122 real PostgreSQL checks with every matrix section green
 on a fresh disposable local PG14 _test database. The database was stopped and
 discarded; no live system was touched. Commit remains local and unpushed.
 _________________________________________________________________________________
+
+time:      [23:45] [16-07-26]
+agent:     [claude] [fable 5]
+worktree:  feat/s1c-room-events
+type:      [feature-request]
+area:      [backend]
+
+Built the Gate-2 S2 bedrock blocker corrections (gate2-s2-bedrock-blockers-freeze-v4, codex-approved): B1 idempotent invite redemption (extended F3-only {code, redemption_id, token} form, 007 uuid column + partial unique index, 201/200 {invite, record} envelopes, replay survives response loss and post-consumption expiry, no token ever returned); B2 authenticated room message payloads (strict deny-extra schema keyed on the canonical resolved event type behind gateRoomLedgerAccess, author == authorized actor, active-member unique mentions, membership re-proven FOR SHARE inside the append transaction, validated actor_member_id retained on the hash-chained row); B3 lossless u64 sequences (canonical decimal STRING row/wire/in-memory, BigInt arithmetic only, hash-only bare-integer canonicalization keeping every historical hash and JSONL line valid, sequence::text on every PG read including the head probe, safe-integer-gated legacy numeric JSONL reads, u64-max fail-closed). Also fixed two defects the build exposed: ORDER BY resolving the ::text output alias (lexicographic ordering corrupted the chain head probe — qualified to the table column) and the JSONL append queue leaving unhandled rejections plus never cleaning its map entries. New db/007_federation_bridge_authority.sql wired into migrate/check lists; docs/openapi + API.md + AGENTS.md updated. Verification on this machine: 107/107 DB-free tests, local smoke green, and 147/147 quadruple-gated rooms:pg-smoke (25 new S2 checks incl. B1 replay/second-consumer matrix, B2 negatives with removal freshness, B3 2^53+1 and BIGINT-max exact round-trips) on a fresh disposable local PG14 _test database, then discarded; db:check bridgeAuthorityReady green. Uncommitted, local only, no push.
+_________________________________________________________________________________
+
+time:      [23:51] [16-07-26]
+agent:     [claude] [fable 5]
+worktree:  feat/s1c-room-events
+type:      [review]
+area:      [backend]
+
+Applied codex's four S2-blocker review-hold corrections: extended-redeem 23505 collisions all map to 403 (a reused token against a different invite hit the auth_tokens hash constraint and 500ed), room message payloads persist the validated lowercase author/mention spellings on the wire and hash (not raw casings), the smoke removal-race check now deterministically removes the member AFTER the route gate and BEFORE the append transaction via an append wrap so only the in-txn FOR SHARE recheck can reject it, and db:check verifies the redemption index is UNIQUE with the partial predicate rather than name-only. Reverified: 107/107 DB-free tests and 149/149 rooms:pg-smoke (two new pins) on a second fresh disposable PG14 _test database, discarded; bridgeAuthorityReady green. Uncommitted, no push.
+_________________________________________________________________________________
+
+time:      [23:55] [16-07-26]
+agent:     [claude] [fable 5]
+worktree:  feat/s1c-room-events
+type:      [review]
+area:      [backend]
+
+codex surgical hold: publicInviteRecord stripped only hash, so the new redemptionId idempotency key leaked onto every public invite envelope and legacy PG envelopes grew a redemptionId:null key. Fixed at the source — publicInviteRecord now strips hash AND redemptionId — and pinned in the PG smoke (no redemptionId on extended first/replay envelopes nor on legacy create/redeem envelopes). Reverified 107/107 npm test and 150/150 rooms:pg-smoke on a third fresh disposable PG14 _test database, discarded. Uncommitted, no push.
+_________________________________________________________________________________

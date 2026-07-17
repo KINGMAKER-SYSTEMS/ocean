@@ -44,6 +44,27 @@ try {
     `);
     roomOwnerGuardTrigger = trigger.rows.length > 0;
   }
+  // Gate-2 S2 blockers (007): idempotent-redeem and retained-actor columns.
+  const bridgeColumns = (await pool.query(`
+    SELECT
+      EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'longhouse' AND table_name = 'auth_invites'
+          AND column_name = 'redemption_id' AND data_type = 'uuid'
+      ) AS invite_redemption_id,
+      EXISTS (
+        SELECT 1 FROM pg_indexes
+        WHERE schemaname = 'longhouse' AND tablename = 'auth_invites'
+          AND indexname = 'auth_invites_redemption_id_key'
+          AND indexdef LIKE 'CREATE UNIQUE INDEX%'
+          AND indexdef LIKE '%(redemption_id IS NOT NULL)%'
+      ) AS invite_redemption_id_index,
+      EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'longhouse' AND table_name = 'ledger_events'
+          AND column_name = 'actor_member_id' AND data_type = 'uuid'
+      ) AS ledger_actor_member_id
+  `)).rows[0];
   let sourceAdaptersSeeded = 0;
   if (row.source_adapters_table) {
     const adapterCount = await pool.query(`
@@ -95,6 +116,16 @@ try {
     authRegistryReady: Boolean(row.auth_tokens_table && row.auth_invites_table),
     roomMembersReady: Boolean(row.room_members_table) && roomOwnerGuardTrigger,
     roomOwnerGuardTrigger,
+    bridgeAuthorityReady: Boolean(
+      bridgeColumns.invite_redemption_id
+      && bridgeColumns.invite_redemption_id_index
+      && bridgeColumns.ledger_actor_member_id,
+    ),
+    bridgeAuthority: {
+      inviteRedemptionId: bridgeColumns.invite_redemption_id,
+      inviteRedemptionIdIndex: bridgeColumns.invite_redemption_id_index,
+      ledgerActorMemberId: bridgeColumns.ledger_actor_member_id,
+    },
     tables: {
       mounts: row.mounts_table,
       ledgerEvents: row.ledger_events_table,

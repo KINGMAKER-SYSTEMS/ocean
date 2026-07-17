@@ -128,7 +128,10 @@ export async function revokeToken(authFile, tokenId, revokedBy = null) {
 }
 
 export function publicInviteRecord(record) {
-  const { hash, ...safe } = record;
+  // redemptionId is the S2 idempotency key — internal replay state, never a
+  // public field: leaking it would let a bystander block the real redeemer,
+  // and legacy PG envelopes must not grow a redemptionId:null key.
+  const { hash, redemptionId, ...safe } = record;
   return safe;
 }
 

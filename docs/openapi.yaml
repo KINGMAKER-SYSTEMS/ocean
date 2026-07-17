@@ -268,6 +268,15 @@ paths:
         (descendant/noncanonical paths are 400) plus an actor_member_id owned
         by the calling principal (missing or unowned is 403; malformed UUID is
         400). Non-room appends are unchanged.
+        Room MESSAGE events (S2 blockers B2, resolved event_type "message")
+        additionally carry an authenticated strict payload
+        {client_event_id, author_member_id, body[, mention_member_ids]} —
+        extra payload keys are 400, author_member_id must equal the
+        authorized actor_member_id (403 member_actor_mismatch), and every
+        mention must be a unique ACTIVE member (400); membership freshness is
+        re-proven inside the append transaction. The validated actor member
+        id is retained on the hash-chained row (actor_member_id). All chain
+        sequence fields serialize as canonical decimal u64 STRINGS (B3).
       requestBody:
         content:
           application/json:
@@ -675,6 +684,46 @@ paths:
         '400': { description: Supplied role/scopes, bad TTL, or non-object body }
         '403': { description: Caller is not an active owner of the room }
         '503': { description: Federation unavailable (split/file/JSONL config) }
+  /api/v1/invites/redeem:
+    post:
+      summary: Redeem an invite (legacy one-shot, or S2 idempotent form)
+      description: >-
+        Legacy {code}-only (unchanged, both store modes): consumes the invite
+        and returns a server-minted bearer ONCE — non-retryable. Idempotent
+        form (S2 blockers B1, federation/Postgres only — 503 otherwise): the
+        caller durably persists a self-generated bearer and redemption_id
+        BEFORE calling and sends {code, redemption_id, token}; Bedrock stores
+        only the sha-256 token hash. First consume is 201 {invite, record};
+        an EXACT replay (same code + redemption_id + token hash) is 200 with
+        the same safe record, surviving response loss, caller restart, and
+        even later invite expiry. A differing redemption_id or token hash —
+        or the same redemption_id against another invite — is 403. No
+        response of the idempotent form ever carries a token.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - title: Legacy one-shot (unchanged contract)
+                  type: object
+                  not: { anyOf: [ { required: [redemption_id] }, { required: [token] } ] }
+                  required: [code]
+                  properties:
+                    code: { type: string }
+                - title: Idempotent redemption (S2 B1, strict)
+                  type: object
+                  additionalProperties: false
+                  required: [code, redemption_id, token]
+                  properties:
+                    code: { type: string }
+                    redemption_id: { type: string, format: uuid }
+                    token: { type: string, pattern: '^[A-Za-z0-9_-]{43}$', description: Caller-generated 32-byte base64url bearer; only its hash is stored. }
+      responses:
+        '201': { description: 'Legacy: { token, invite, record }. Idempotent first consume: { invite, record } — no token.' }
+        '200': { description: 'Idempotent exact replay: same { invite, record }, no state change, no token.' }
+        '400': { description: Missing code, malformed redemption_id/token, or stray keys on the idempotent form }
+        '403': { description: Invalid/expired/consumed invite, or a non-exact replay (different redemption_id/token, reused redemption_id) }
+        '503': { description: Idempotent form without the single shared Postgres authority }
   /api/v1/rooms/{room_id}/register:
     post:
       summary: Register a federated room (bootstrap; admin + room scope)

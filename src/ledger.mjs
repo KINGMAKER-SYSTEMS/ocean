@@ -13,7 +13,19 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+// Hash-only canonicalization marker (S2 blockers B3): a RawJsonToken emits
+// its text verbatim into the canonical string. Sequences are canonical
+// decimal STRINGS everywhere in memory and on the wire, but the hashed body
+// serializes them as bare integer literals — byte-identical to the historical
+// Number formatting for every value that ever existed, exact above 2^53.
+class RawJsonToken {
+  constructor(text) {
+    this.text = text;
+  }
+}
+
 function stableStringify(value) {
+  if (value instanceof RawJsonToken) return value.text;
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item)).join(',')}]`;
   const keys = Object.keys(value).sort();
@@ -28,17 +40,43 @@ function eventId() {
   return `evt_${Date.now().toString(36)}_${crypto.randomBytes(6).toString('hex')}`;
 }
 
-function asNumber(value) {
-  if (value === null || value === undefined) return value;
-  return Number(value);
-}
-
 function limitFrom(value, fallback = 100) {
   return Math.max(1, Math.min(Number(value || fallback), 5000));
 }
 
+// S2 blockers B3: every stored/read chain sequence must resolve to a
+// canonical decimal u64 STRING. Legacy numeric JSONL values are accepted
+// only while Number.isSafeInteger holds; anything else is corruption and
+// fails closed — never a silent Number round-trip.
+function canonicalSequenceString(value, label = 'sequence') {
+  if (typeof value === 'number') {
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new LedgerValidationError(`Ledger ${label} numeric form is only valid for safe integers.`);
+    }
+    value = String(value);
+  }
+  if (typeof value !== 'string' || !CANONICAL_DECIMAL_RE.test(value) || BigInt(value) > U64_MAX) {
+    throw new LedgerValidationError(`Ledger ${label} must be a canonical decimal u64.`);
+  }
+  return value;
+}
+
+function nextSequenceString(previous) {
+  if (!previous) return '1';
+  const next = BigInt(canonicalSequenceString(previous.sequence)) + 1n;
+  // Fail closed past canonical u64 — the chain never wraps or re-rounds.
+  if (next > U64_MAX) throw new LedgerValidationError('Ledger sequence space is exhausted (u64 maximum).');
+  return String(next);
+}
+
 function computeEventHash(eventWithoutHash) {
-  return sha256(stableStringify(eventWithoutHash));
+  // Hash-only canonicalization: the sequence key contributes a bare integer
+  // literal so historical hashes (computed from Number sequences) verify
+  // unchanged with zero migration.
+  return sha256(stableStringify({
+    ...eventWithoutHash,
+    sequence: new RawJsonToken(canonicalSequenceString(eventWithoutHash.sequence)),
+  }));
 }
 
 // ── Gate-2 S1B: producer-tuple conflict + cursor paging ───────────────
@@ -148,7 +186,9 @@ function normalizeLedgerEvent(input, previous) {
   const event = {
     id: input.id || eventId(),
     schema_version: Number(input.schema_version || input.schemaVersion || 1),
-    sequence: previous ? Number(previous.sequence) + 1 : 1,
+    // B3: canonical decimal STRING in memory/row/wire; BigInt only at the
+    // arithmetic point; past-u64 fails closed inside nextSequenceString.
+    sequence: nextSequenceString(previous),
     event_type: input.event_type || input.eventType,
     correlation_id: input.correlation_id || input.correlationId || input.payload?.correlation_id || null,
     lab: input.lab || input.domain || 'longhouse',
@@ -170,15 +210,22 @@ function normalizeLedgerEvent(input, previous) {
     prev_hash: previous ? previous.hash : null,
   };
 
+  // S2 blockers B2: the authorized actor's opaque room member id is retained
+  // on the hash-chained row. The key enters the hashed body ONLY when
+  // non-null so every historical hash verifies unchanged.
+  const actorMemberId = input.actor_member_id || input.actorMemberId || null;
+  if (actorMemberId !== null) event.actor_member_id = actorMemberId;
+
   return { ...event, hash: computeEventHash(event) };
 }
 
 function rowToEvent(row) {
   if (!row) return null;
-  return {
+  const event = {
     id: row.id,
     schema_version: Number(row.schema_version || 1),
-    sequence: asNumber(row.sequence),
+    // B3: rows arrive as ::text — validated canonical, never through Number.
+    sequence: canonicalSequenceString(row.sequence),
     event_type: row.event_type,
     correlation_id: row.correlation_id,
     lab: row.lab,
@@ -200,6 +247,12 @@ function rowToEvent(row) {
     prev_hash: row.prev_hash,
     hash: row.hash,
   };
+  // B2 retained actor: present ONLY when the column is non-null so pre-007
+  // events keep their exact historical key set (and therefore hashes).
+  if (row.actor_member_id !== null && row.actor_member_id !== undefined) {
+    event.actor_member_id = row.actor_member_id;
+  }
+  return event;
 }
 
 async function ensureLedgerFile(ledgerFile) {
@@ -218,7 +271,14 @@ async function readJsonlEvents(ledgerFile) {
     .split('\n')
     .map((line) => line.trim())
     .filter(Boolean)
-    .map((line) => JSON.parse(line));
+    .map((line) => {
+      const event = JSON.parse(line);
+      // B3 legacy read compatibility: historical lines carry numeric
+      // sequences — accepted only while Number.isSafeInteger holds, then
+      // converted to the canonical string form. New lines are strings.
+      event.sequence = canonicalSequenceString(event.sequence);
+      return event;
+    });
 }
 
 async function appendJsonlLocked(ledgerFile, input) {
@@ -243,9 +303,14 @@ async function appendJsonlLocked(ledgerFile, input) {
 function enqueue(ledgerFile, fn) {
   const previous = queues.get(ledgerFile) || Promise.resolve();
   const next = previous.then(fn, fn);
-  queues.set(ledgerFile, next.finally(() => {
-    if (queues.get(ledgerFile) === next) queues.delete(ledgerFile);
-  }));
+  // The TRACKED promise must never reject (callers observe errors on `next`):
+  // a queue-tail rejection with no follow-up append was an unhandled
+  // rejection. The cleanup also compared the raw `next` against the stored
+  // finally-derived promise, so entries were never actually deleted.
+  const tracked = next.then(() => undefined, () => undefined).then(() => {
+    if (queues.get(ledgerFile) === tracked) queues.delete(ledgerFile);
+  });
+  queues.set(ledgerFile, tracked);
   return next;
 }
 
@@ -269,20 +334,28 @@ async function verifyEvents(events) {
 
   for (const event of events) {
     const { hash, ...withoutHash } = event;
-    const expectedHash = computeEventHash(withoutHash);
-    const expectedSequence = previous ? Number(previous.sequence) + 1 : 1;
+    // B3: BigInt chain arithmetic — no Number round-trip during verify. A
+    // noncanonical sequence is reported as a verify error, never thrown.
+    let eventSequence = null;
+    try {
+      eventSequence = BigInt(canonicalSequenceString(event.sequence));
+    } catch {
+      errors.push({ id: event.id, sequence: event.sequence, error: 'sequence is not a canonical decimal u64.' });
+    }
+    const previousSequence = previous ? BigInt(canonicalSequenceString(previous.sequence)) : null;
+    const expectedSequence = previous ? previousSequence + 1n : 1n;
     const expectedPrevHash = previous ? previous.hash : null;
 
-    if (Number(event.sequence) !== expectedSequence) {
+    if (eventSequence !== null && eventSequence !== expectedSequence) {
       errors.push({ id: event.id, sequence: event.sequence, error: `Expected sequence ${expectedSequence}.` });
     }
     if (event.prev_hash !== expectedPrevHash) {
       errors.push({ id: event.id, sequence: event.sequence, error: 'prev_hash does not match previous event hash.' });
     }
-    if (hash !== expectedHash) {
+    if (eventSequence !== null && hash !== computeEventHash(withoutHash)) {
       errors.push({ id: event.id, sequence: event.sequence, error: 'hash does not match canonical event body.' });
     }
-    previous = event;
+    if (eventSequence !== null) previous = event;
   }
 
   return {
@@ -298,7 +371,12 @@ function createJsonlLedgerStore({ ledgerFile }) {
   return {
     kind: 'jsonl',
     ledgerFile,
-    append(input) {
+    append(input, options = {}) {
+      if (options.preAppend) {
+        // B2 hooks are membership checks that only exist under federation
+        // (postgres). Reaching JSONL with one is a wiring bug — fail loudly.
+        return Promise.reject(new LedgerValidationError('preAppend hooks require the postgres ledger store.'));
+      }
       return enqueue(ledgerFile, () => appendJsonlLocked(ledgerFile, input));
     },
     async read(filters = {}) {
@@ -341,7 +419,7 @@ async function getPool(databaseUrl) {
 const EVENT_COLUMNS = `
   id,
   schema_version,
-  sequence,
+  sequence::text AS sequence,
   event_type,
   correlation_id,
   lab,
@@ -361,10 +439,11 @@ const EVENT_COLUMNS = `
   event_timestamp,
   received_at,
   prev_hash,
-  hash
+  hash,
+  actor_member_id
 `;
 
-async function appendPostgresEvent(databaseUrl, input) {
+async function appendPostgresEvent(databaseUrl, input, hooks = {}) {
   // Pin 3: room source-sequence validation runs BEFORE any pool/file I/O —
   // a missing sequence on a ^room: source is a 400, not a wasted connection.
   const sourceId = input.source_id || input.sourceId || 'longhouse';
@@ -392,10 +471,18 @@ async function appendPostgresEvent(databaseUrl, input) {
     }
 
     const last = await client.query(
-      `SELECT id, sequence, hash FROM longhouse.ledger_events ORDER BY sequence DESC LIMIT 1`,
+      // B3: every sequence read is ::text — including this head probe.
+      `SELECT id, sequence::text AS sequence, hash FROM longhouse.ledger_events ORDER BY ledger_events.sequence DESC LIMIT 1`,
     );
-    const previous = last.rows.length ? rowToEvent(last.rows[0]) : null;
+    const previous = last.rows.length
+      ? { id: last.rows[0].id, sequence: canonicalSequenceString(last.rows[0].sequence), hash: last.rows[0].hash }
+      : null;
     const event = normalizeLedgerEvent(input, previous);
+    if (typeof hooks?.preAppend === 'function') {
+      // S2 blockers B2: membership-freshness checks share this transaction so
+      // a concurrent removal cannot race a passing pre-check.
+      await hooks.preAppend(client, event);
+    }
 
     await client.query(
       `INSERT INTO longhouse.ledger_events (
@@ -423,11 +510,12 @@ async function appendPostgresEvent(databaseUrl, input) {
         prev_hash,
         hash,
         inserted_by,
-        adapter_version
+        adapter_version,
+        actor_member_id
       ) VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
         $11, $12, $13, $14, $15, $16, $17, $18, $19,
-        $20, $21, $22, $23, $24, $25
+        $20, $21, $22, $23, $24, $25, $26
       )`,
       [
         event.id,
@@ -455,6 +543,7 @@ async function appendPostgresEvent(databaseUrl, input) {
         event.hash,
         input.inserted_by || input.insertedBy || null,
         input.adapter_version || input.adapterVersion || null,
+        event.actor_member_id ?? null,
       ],
     );
 
@@ -509,7 +598,7 @@ async function readPostgresEvents(databaseUrl, filters = {}) {
       `SELECT ${EVENT_COLUMNS}
        FROM longhouse.ledger_events
        ${`WHERE ${clauses.join(' AND ')}`}
-       ORDER BY sequence ASC
+       ORDER BY ledger_events.sequence ASC
        LIMIT $${values.length}`,
       values,
     );
@@ -522,7 +611,7 @@ async function readPostgresEvents(databaseUrl, filters = {}) {
     `SELECT ${EVENT_COLUMNS}
      FROM longhouse.ledger_events
      ${where}
-     ORDER BY sequence DESC
+     ORDER BY ledger_events.sequence DESC
      LIMIT $${values.length}`,
     values,
   );
@@ -531,7 +620,7 @@ async function readPostgresEvents(databaseUrl, filters = {}) {
 
 async function verifyPostgresLedger(databaseUrl) {
   const pool = await getPool(databaseUrl);
-  const result = await pool.query(`SELECT ${EVENT_COLUMNS} FROM longhouse.ledger_events ORDER BY sequence ASC`);
+  const result = await pool.query(`SELECT ${EVENT_COLUMNS} FROM longhouse.ledger_events ORDER BY ledger_events.sequence ASC`);
   return verifyEvents(result.rows.map(rowToEvent));
 }
 
@@ -539,8 +628,8 @@ function createPostgresLedgerStore({ databaseUrl }) {
   if (!databaseUrl) throw new Error('Postgres ledger store requires databaseUrl.');
   return {
     kind: 'postgres',
-    append(input) {
-      return appendPostgresEvent(databaseUrl, input);
+    append(input, options = {}) {
+      return appendPostgresEvent(databaseUrl, input, options);
     },
     read(filters = {}) {
       return readPostgresEvents(databaseUrl, filters);
