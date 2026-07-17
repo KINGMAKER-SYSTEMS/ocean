@@ -1584,6 +1584,9 @@ async function handleRoomEventsStream(req, res, url, state, roomSegmentRaw) {
   const bearerMatch = (req.headers.authorization || '').match(/^Bearer\s+(.+)$/i);
   if (!bearerMatch) throw new HttpError(401, 'Missing token. Use Authorization: Bearer <token>.');
   const rawBearer = bearerMatch[1].trim();   // held for heartbeat reauth; never logged/echoed
+  // Whitespace-only Authorization is a MISSING credential (401), never a
+  // token lookup that would leak a 403 distinction.
+  if (!rawBearer) throw new HttpError(401, 'Missing token. Use Authorization: Bearer <token>.');
 
   const record = await state.auth.findToken(rawBearer);
   if (!record) throw new HttpError(403, 'Invalid, revoked, or expired token.');
@@ -1633,6 +1636,10 @@ async function handleRoomEventsStream(req, res, url, state, roomSegmentRaw) {
       // On success the fresh principal REPLACES the active one so
       // clearance/scope changes apply to subsequent row filtering.
       reauthenticate: async () => {
+        // The FULL server-owned gate literally reruns, F3 included — its 503
+        // throw propagates and the module maps any reauth throw to a
+        // TRANSPORT close, never a false revocation.
+        requireFederation(state);
         const fresh = await state.auth.findToken(rawBearer);
         if (!fresh) return { ok: false, reason: 'token_invalid' };
         const freshPrincipal = { id: fresh.id, name: fresh.name, role: fresh.role, scopes: fresh.scopes || ['/'] };
@@ -1674,9 +1681,9 @@ async function handleRoomEventsStream(req, res, url, state, roomSegmentRaw) {
   // Disconnect signals: req 'close' fires when the request MESSAGE completes
   // and is the wrong SSE signal — the response side (plus request abort) is
   // what tracks the live connection.
-  req.on('aborted', () => stream.abort());
-  res.on('close', () => stream.abort());
-  res.on('error', () => stream.abort());
+  req.once('aborted', () => stream.abort());
+  res.once('close', () => stream.abort());
+  res.once('error', () => stream.abort());
   await stream.start();
 }
 
