@@ -98,17 +98,26 @@ export function createRoomEventStream({ roomId, selectedCursor, adapters }) {
     readCursor: selectedCursor,
     enqueuedCursor: selectedCursor,
     lastAcceptedId: selectedCursor,
-    queue: [],
+    queue: [],                // bounded room_event frames only
+    controlQueue: [],         // {frame, terminal?, closeKind?} — never bounded-counted
     inFlightRead: false,
     closed: false,
+    terminalPending: false,
     pollTimer: null,
     heartbeatTimer: null,
-    drainWaiter: null,
+    yieldTimers: new Map(),   // id → resolve; tracked so teardown cancels them
+    drainWaiter: null,        // owned EXCLUSIVELY by the single writer loop
+    writerRunning: false,
   };
 
   function clearTimers() {
     if (state.pollTimer !== null) { timers.clearTimeout(state.pollTimer); state.pollTimer = null; }
     if (state.heartbeatTimer !== null) { timers.clearTimeout(state.heartbeatTimer); state.heartbeatTimer = null; }
+    for (const [id, resolve] of state.yieldTimers) {
+      timers.clearTimeout(id);
+      resolve();   // wake the suspended loop so it observes closed and exits
+    }
+    state.yieldTimers.clear();
   }
 
   function shutdown(kind) {
@@ -117,60 +126,87 @@ export function createRoomEventStream({ roomId, selectedCursor, adapters }) {
     state.phase = 'closed';
     clearTimers();
     state.queue.length = 0;
-    // Release any drain wait so no promise dangles past close.
-    if (state.drainWaiter) { state.drainWaiter(); state.drainWaiter = null; }
+    state.controlQueue.length = 0;
+    if (state.drainWaiter) { state.drainWaiter.resolve(); state.drainWaiter = null; }
     close(kind);
   }
 
-  // Emit one frame with backpressure. Only room_event frames advance
-  // lastAcceptedId — control frames never move a cursor.
-  async function emit(frame) {
-    if (state.closed) return false;
-    const accepted = write(frame);
-    if (frame.event === 'room_event') state.lastAcceptedId = frame.id;
-    if (!accepted && !state.closed) {
-      await new Promise((resolve) => {
-        state.drainWaiter = resolve;
-        Promise.resolve(waitDrain()).then(() => {
-          if (state.drainWaiter === resolve) { state.drainWaiter = null; resolve(); }
-        }, () => {
-          if (state.drainWaiter === resolve) { state.drainWaiter = null; resolve(); }
-        });
-      });
-    }
-    return !state.closed;
+  // Tracked macrotask yield — cancellable at teardown (abort during a yield
+  // must leave zero timers and let the suspended loop observe closed).
+  function trackedYield() {
+    return new Promise((resolve) => {
+      const id = timers.setTimeout(() => { state.yieldTimers.delete(id); resolve(); }, 0);
+      state.yieldTimers.set(id, resolve);
+    });
   }
 
-  // Independent queue pump: drains to the socket in order, awaiting drain on
-  // backpressure. Reads NEVER await the pump — they keep enqueueing while
-  // the socket is blocked (frozen queue model), which is exactly what makes
-  // the overflow bound reachable.
-  let pumpRunning = false;
-  function kickPump() {
-    if (pumpRunning || state.closed) return;
-    pumpRunning = true;
+  // Drain wait owned only by the writer. Rejection = transport failure,
+  // never silently treated as writable.
+  function waitDrainOnce() {
+    return new Promise((resolve, reject) => {
+      const waiter = { resolve, reject };
+      state.drainWaiter = waiter;
+      Promise.resolve(waitDrain()).then(
+        () => { if (state.drainWaiter === waiter) { state.drainWaiter = null; resolve(); } },
+        (error) => { if (state.drainWaiter === waiter) { state.drainWaiter = null; reject(error); } },
+      );
+    });
+  }
+
+  // THE single serialized writer: every socket write — hello, room_event,
+  // heartbeat, resync_required, revoked — flows through this loop, so there
+  // is exactly one writer and at most one drain waiter, ever. Control frames
+  // take priority over queued room_events. A terminal control frame closes
+  // via the bounded best-effort path: once one is pending, backpressure is
+  // no longer awaited (Node buffers writes that return false), the terminal
+  // frame is written best-effort, and the stream closes regardless.
+  function submitControl(frame, { terminal = false, closeKind = null } = {}) {
+    if (state.closed) return;
+    state.controlQueue.push({ frame, terminal, closeKind });
+    if (terminal) {
+      state.terminalPending = true;
+      // Bounded close path ONLY: wake a drain-blocked writer so the terminal
+      // frame goes out best-effort. Non-terminal control frames respect
+      // backpressure and queue behind the drain like everything else.
+      if (state.drainWaiter) state.drainWaiter.resolve();
+    }
+    kickWriter();
+  }
+
+  function kickWriter() {
+    if (state.writerRunning || state.closed) return;
+    state.writerRunning = true;
     (async () => {
       try {
-        while (!state.closed && state.queue.length) {
-          const frame = state.queue.shift();
-          // eslint-disable-next-line no-await-in-loop
-          if (!(await emit(frame))) return;
+        while (!state.closed && (state.controlQueue.length || state.queue.length)) {
+          const entry = state.controlQueue.length
+            ? state.controlQueue.shift()
+            : { frame: state.queue.shift(), terminal: false, closeKind: null };
+          const accepted = write(entry.frame);
+          if (entry.frame.event === 'room_event') state.lastAcceptedId = entry.frame.id;
+          if (entry.terminal) { shutdown(entry.closeKind); return; }
+          if (!accepted && !state.closed && !state.terminalPending) {
+            // eslint-disable-next-line no-await-in-loop
+            await waitDrainOnce();
+          }
         }
       } catch {
-        shutdown('transport');   // a socket write throw is transport, and never an unhandled rejection
+        shutdown('transport');   // write throw or drain rejection — transport, never unhandled
       } finally {
-        pumpRunning = false;
+        state.writerRunning = false;
+        // frames may have arrived while we were exiting
+        if (!state.closed && (state.controlQueue.length || state.queue.length)) kickWriter();
       }
     })();
   }
 
   // Enqueue a VISIBLE row. Frozen overflow: the queue already holds
   // QUEUE_BOUND entries AND this next visible row exists (this call IS the
-  // headroom probe finding it) → resync_required with lastAcceptedId, close.
+  // headroom probe finding it) → resync_required with lastAcceptedId via the
+  // serialized writer's bounded terminal path, then close.
   function enqueueVisible(row) {
     if (state.queue.length >= QUEUE_BOUND) {
-      write(resyncFrame(state.lastAcceptedId));   // best-effort under blocked socket
-      shutdown('resync');
+      submitControl(resyncFrame(state.lastAcceptedId), { terminal: true, closeKind: 'resync' });
       return false;
     }
     state.queue.push(roomEventFrame(row));
@@ -191,7 +227,7 @@ export function createRoomEventStream({ roomId, selectedCursor, adapters }) {
         if (!isRowVisible(row)) continue;
         if (!enqueueVisible(row)) return false;
       }
-      kickPump();
+      kickWriter();
       return rows.length === PAGE_LIMIT;
     } finally {
       state.inFlightRead = false;
@@ -209,10 +245,11 @@ export function createRoomEventStream({ roomId, selectedCursor, adapters }) {
     try {
       let full = await readOnce();
       // Catch-up: keep reading while pages come back full, yielding a
-      // macrotask between pages so the heartbeat timer cannot be starved.
+      // TRACKED macrotask between pages so the heartbeat timer cannot be
+      // starved and teardown can cancel the yield.
       while (full && !state.closed) {
         // eslint-disable-next-line no-await-in-loop
-        await new Promise((resolve) => timers.setTimeout(resolve, 0));
+        await trackedYield();
         // eslint-disable-next-line no-await-in-loop
         full = await readOnce();
       }
@@ -230,14 +267,17 @@ export function createRoomEventStream({ roomId, selectedCursor, adapters }) {
 
   async function heartbeatTick() {
     if (state.closed) return;
+    // APPROVED order: submit heartbeat to the one serialized writer FIRST,
+    // then run full reauth immediately WITHOUT awaiting socket drain — a
+    // blocked socket can never starve reauth, and there is no second writer.
+    submitControl(heartbeatFrame(state.lastAcceptedId));
     try {
-      await emit(heartbeatFrame(state.lastAcceptedId));
       const verdict = await reauthenticate();
       if (state.closed) return;
       if (!verdict.ok) {
-        // Authz DENIAL (membership/scope/permission/token) → terminal revoked.
-        write(revokedFrame(verdict.reason || 'token_invalid'));
-        shutdown('revoked');
+        // Authz DENIAL → terminal revoked queued AFTER the heartbeat, taking
+        // the writer's bounded best-effort close path.
+        submitControl(revokedFrame(verdict.reason || 'token_invalid'), { terminal: true, closeKind: 'revoked' });
         return;
       }
     } catch {
@@ -253,13 +293,15 @@ export function createRoomEventStream({ roomId, selectedCursor, adapters }) {
     state.phase = 'hello';
     let highWater;
     try {
-      highWater = await readHead();
+      // H comes from a server adapter but is still canonical-parsed before
+      // any hello/BigInt use — a malformed head is a transport failure.
+      highWater = parseAfterSequence(await readHead());
     } catch {
       shutdown('transport');
       return;
     }
     if (state.closed) return;
-    await emit(helloFrame(roomId, highWater));
+    submitControl(helloFrame(roomId, highWater));
     scheduleHeartbeat();
 
     // Snapshot (selectedCursor, H] on its own raw cursor; stops past H.
@@ -280,11 +322,12 @@ export function createRoomEventStream({ roomId, selectedCursor, adapters }) {
           if (!isRowVisible(row)) continue;
           if (!enqueueVisible(row)) return;
         }
-        kickPump();
+        kickWriter();
         if (sawPastH || rows.length < PAGE_LIMIT) break;
-        // Yield between snapshot pages — same starvation rule as catch-up.
+        // Tracked yield between snapshot pages — same starvation/teardown
+        // rules as catch-up.
         // eslint-disable-next-line no-await-in-loop
-        await new Promise((resolve) => timers.setTimeout(resolve, 0));
+        await trackedYield();
       }
     } catch {
       shutdown('transport');
@@ -310,8 +353,13 @@ export function createRoomEventStream({ roomId, selectedCursor, adapters }) {
       enqueuedCursor: state.enqueuedCursor,
       lastAcceptedId: state.lastAcceptedId,
       queueLength: state.queue.length,
+      controlQueueLength: state.controlQueue.length,
       closed: state.closed,
-      timers: { poll: state.pollTimer !== null, heartbeat: state.heartbeatTimer !== null },
+      timers: {
+        poll: state.pollTimer !== null,
+        heartbeat: state.heartbeatTimer !== null,
+        yields: state.yieldTimers.size,
+      },
     }),
   };
 }

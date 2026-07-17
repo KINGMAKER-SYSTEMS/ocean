@@ -208,7 +208,7 @@ test('overflow: queue holds bound AND next visible row exists -> resync with las
   assert.deepEqual(fake.closes, ['resync']);
   const view = stream.inspect();
   assert.equal(view.closed, true);
-  assert.deepEqual(view.timers, { poll: false, heartbeat: false }, 'no live timers after close');
+  assert.deepEqual(view.timers, { poll: false, heartbeat: false, yields: 0 }, 'no live timers after close');
 });
 
 test('abort during blocked drain releases the wait; zero timers; start() resolves', async () => {
@@ -225,7 +225,7 @@ test('abort during blocked drain releases the wait; zero timers; start() resolve
   await startPromise;   // must resolve, not hang, after abort released the drain wait
   const view = stream.inspect();
   assert.equal(view.closed, true);
-  assert.deepEqual(view.timers, { poll: false, heartbeat: false });
+  assert.deepEqual(view.timers, { poll: false, heartbeat: false, yields: 0 });
   assert.equal(timers.count(), 0, 'no timer left behind');
 });
 
@@ -278,6 +278,124 @@ test('heartbeat fires during sustained catch-up (no starvation)', async () => {
   await settle();
   stream.abort();
   assert.equal(timers.count(), 0);
+});
+
+// ── corrective-child proofs (codex gate on 52ac00e) ───────────────────
+
+test('blocked writer still reauths: heartbeat enqueue-then-reauth is drain-independent', async () => {
+  const timers = new FakeTimers();
+  // socket accepts hello then blocks forever — heartbeat frame will queue
+  const fake = makeAdapters({ rows: [row('1')], writeReturns: (f) => f.event === 'hello' });
+  let reauths = 0;
+  fake.adapters.reauthenticate = async () => { reauths += 1; return { ok: true }; };
+  const stream = createRoomEventStream({
+    roomId: 'warroom', selectedCursor: '0',
+    adapters: { ...fake.adapters, timers },
+  });
+  await stream.start();
+  await settle();
+  await timers.fire(15000);
+  await settle();
+  assert.equal(reauths, 1, 'full reauth ran despite the socket never draining');
+  // Under backpressure the heartbeat frame correctly QUEUES behind the drain
+  // (only terminal frames take the bounded jump) — submission, not delivery,
+  // is what must be drain-independent.
+  assert.ok(stream.inspect().controlQueueLength >= 1, 'heartbeat is queued in the serialized writer');
+  assert.equal(fake.written.some((f) => f.event === 'heartbeat'), false, 'not written while blocked');
+  stream.abort();
+});
+
+test('waitDrain rejection is a transport close, never treated as writable', async () => {
+  const timers = new FakeTimers();
+  const fake = makeAdapters({ rows: [row('1'), row('2')], writeReturns: (f) => f.event === 'hello' });
+  fake.adapters.waitDrain = () => Promise.reject(new Error('socket destroyed'));
+  const stream = createRoomEventStream({
+    roomId: 'warroom', selectedCursor: '0',
+    adapters: { ...fake.adapters, timers },
+  });
+  await stream.start();
+  await settle();
+  assert.deepEqual(fake.closes, ['transport']);
+  assert.equal(fake.written.some((f) => f.event === 'revoked'), false, 'never falsely revoked');
+  assert.equal(timers.count(), 0);
+});
+
+test('invalid H from readHead is a transport close before hello', async () => {
+  for (const badHead of ['abc', '', '01', 42]) {
+    const timers = new FakeTimers();
+    const fake = makeAdapters({ rows: [] });
+    fake.adapters.readHead = async () => badHead;
+    const stream = createRoomEventStream({
+      roomId: 'warroom', selectedCursor: '0',
+      adapters: { ...fake.adapters, timers },
+    });
+    await stream.start();
+    await settle();
+    assert.deepEqual(fake.closes, ['transport'], `head ${JSON.stringify(badHead)}`);
+    assert.equal(fake.written.length, 0, 'no hello emitted on malformed head');
+    assert.equal(timers.count(), 0);
+  }
+});
+
+test('one writer, one drain waiter: heartbeat during blocked pump neither loses frames nor doubles waiters', async () => {
+  const timers = new FakeTimers();
+  let outstandingDrains = 0;
+  let maxOutstandingDrains = 0;
+  let blocked = true;                 // closure flag — switchable after creation
+  const drainReleases = [];
+  const fake = makeAdapters({
+    rows: [row('1'), row('2')],
+    // hello always accepted; everything else blocks until unblocked
+    writeReturns: (f) => f.event === 'hello' || !blocked,
+  });
+  fake.adapters.waitDrain = () => {
+    if (!blocked) return Promise.resolve();
+    return new Promise((resolve) => {
+      outstandingDrains += 1;
+      maxOutstandingDrains = Math.max(maxOutstandingDrains, outstandingDrains);
+      drainReleases.push(() => { outstandingDrains -= 1; resolve(); });
+    });
+  };
+  const stream = createRoomEventStream({
+    roomId: 'warroom', selectedCursor: '0',
+    adapters: { ...fake.adapters, timers },
+  });
+  await stream.start();
+  await settle();
+  await timers.fire(15000);   // heartbeat submits a control frame while writer is drain-blocked
+  await settle();
+  assert.equal(maxOutstandingDrains, 1, 'exactly one drain waiter at any moment');
+  // unblock: everything still flows, in order, through the single writer
+  blocked = false;
+  drainReleases.splice(0).forEach((release) => release());
+  await settle();
+  const events = fake.written.map((f) => f.event);
+  assert.equal(events[0], 'hello');
+  assert.ok(events.includes('heartbeat') && events.filter((e) => e === 'room_event').length === 2,
+    `all frames delivered once: ${events.join(',')}`);
+  assert.equal(maxOutstandingDrains, 1, 'still exactly one waiter across the whole run');
+  stream.abort();
+  assert.equal(timers.count(), 0);
+});
+
+test('abort during a snapshot/catch-up yield cancels tracked yields and start resolves', async () => {
+  const timers = new FakeTimers();
+  const total = PAGE_LIMIT * 2;   // multi-page snapshot -> tracked yield between pages
+  const fake = makeAdapters({ rows: Array.from({ length: total }, (_, i) => row(String(i + 1))) });
+  const stream = createRoomEventStream({
+    roomId: 'warroom', selectedCursor: '0',
+    adapters: { ...fake.adapters, timers },
+  });
+  const startPromise = stream.start();
+  await settle();
+  assert.equal(stream.inspect().timers.yields, 1, 'a tracked yield is pending mid-snapshot');
+  stream.abort();
+  await settle();
+  await startPromise;   // the suspended loop was woken, observed closed, exited
+  const view = stream.inspect();
+  assert.equal(view.closed, true);
+  assert.deepEqual(view.timers, { poll: false, heartbeat: false, yields: 0 });
+  assert.equal(timers.count(), 0, 'no timer of any kind left behind');
 });
 
 test('double start throws; abort is idempotent', async () => {
