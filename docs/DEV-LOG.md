@@ -1004,8 +1004,9 @@ npm run smoke
   route; the module implements no gate. Frozen protocol: selected-cursor
   precedence (Last-Event-ID wins, else after_sequence, else '0';
   string-strict), cursorless tail-read high water, hello, snapshot through
-  H on its own raw cursor, then ONE durable forward-poll (1s jittered,
-  500-row pages, tracked macrotask yields). ONE serialized writer owns
+  H on its own raw cursor, then ONE immediate live read from
+  max(cursor, H) followed by the continuing 1s±100ms forward-poll loop
+  (500-row pages, tracked macrotask yields). ONE serialized writer owns
   every socket write and the only drain waiter; non-terminal frames respect
   backpressure, terminal frames (resync/revoked) wake a blocked writer and
   close best-effort with their decided kind even on a write throw.
@@ -1015,7 +1016,7 @@ npm run smoke
   successful reauth swaps the active principal so clearance/scope changes
   apply live. Bounded 1024 queue with headroom-probe overflow.
 - `src/server.mjs`: pre-authenticate route match, header-bearer-only
-  (whitespace/query tokens 401 unused), raw segment decoded after auth+F3,
+  (whitespace-only bearer 401; a query-ONLY credential is 401 unused, while a query token beside a valid header is simply ignored), raw segment decoded after auth+F3,
   frozen gate chain, adapter injection, req-aborted/res-close disconnect.
 - Tests: 18 DB-free protocol tests (fake adapters + manual timers) covering
   cursor matrix, cutover, backpressure/overflow, teardown, starvation,

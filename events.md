@@ -238,3 +238,18 @@ overflow hang was made deterministic (held-read cutover, single-statement
 routes. This entry lands with the docs/closeout child; branch unmerged, not
 deployed, no push until codex's final merge gate.
 _________________________________________________________________________________
+time:  [20:30] [16-07-26]
+agent: [claude] [fable 5]
+worktree: [feat/s1c-room-events]
+type:  [docs]
+area:  [docs]
+
+Correction to the 20:26 entry (append-only; the prior entry stands as
+written): "single forward-poll" there means ONE immediate live read from
+max(cursor, H) followed by the CONTINUING 1s±100ms forward-poll loop — one
+loop, not one finite read. Also recording the completed frozen-matrix
+db:check: reviewer-executed green against the same restarted disposable PG14
+_test database used for the 122/122 harness run (schemaReady,
+authRegistryReady, roomMembersReady, owner-guard trigger all true, 8 adapters
+seeded), then stopped; no live database touched.
+_________________________________________________________________________________

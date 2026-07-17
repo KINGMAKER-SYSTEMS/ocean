@@ -38,7 +38,7 @@ npm run secret:scan         passed (120 files)
 npm run secret:globs:check  passed
 node --check                clean on every touched .mjs file
 npm run rooms:pg-smoke      122/122 (reviewer-executed, second fresh disposable PG14 `_test` database)
-npm run db:check            requires DATABASE_URL — not run against any live database from this branch
+npm run db:check            green (reviewer-executed against the SAME restarted disposable PG14 `_test` database as the 122/122 run: schemaReady/authRegistryReady/roomMembersReady/owner-guard trigger all true, 8 adapters seeded; stopped afterwards; no live database touched)
 ```
 
 These checks attest the repository only. The S1C branch is unmerged, the Gate-2 changes are NOT deployed
@@ -65,6 +65,7 @@ npm run ocean:worker
 ```
 
 Always inspect the dry run before enqueueing production work.
+- Registered rooms expose an authenticated SSE stream (`GET /api/v1/rooms/{room_id}/events`): header-only bearer, membership-gated with no admin bypass, scoped cursor replay (snapshot through a high-water mark) followed by a continuing live forward-poll loop — composed from the cursor read surface; there is NO push/notification primitive.
 - Postgres is selected for the ledger when `DATABASE_URL` is present; otherwise JSONL is used.
 - Federated room routes require auth, ledger, and rooms to resolve to one shared
   Postgres database; split or file-backed configurations fail closed with 503.
