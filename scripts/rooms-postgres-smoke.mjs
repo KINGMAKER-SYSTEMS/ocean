@@ -457,29 +457,52 @@ try {
       payload: { text: `seed-${i}` }, actor_type: 'agent', actor_id: cutRedeem.body.record.id, actor_name: 'seed',
     });
   }
+  // DETERMINISTIC mid-snapshot append: wrap the in-process ledger read so
+  // both subscribers' FIRST snapshot page (after_sequence '0') completes its
+  // real PG read then BLOCKS before returning. With both held, the marker is
+  // appended through the gated HTTP route — H is already captured and both
+  // snapshots are provably in flight — then both are released and the real
+  // read is restored before the oracle runs.
+  const realLedgerRead = state.ledger.read.bind(state.ledger);
+  let heldReads = [];
+  state.ledger.read = async (filters = {}) => {
+    const result = await realLedgerRead(filters);
+    if (filters.correlation_id === CUTOVER && filters.after_sequence === '0') {
+      await new Promise((resolve) => heldReads.push(resolve));
+    }
+    return result;
+  };
   const subA = trackedSse(`/api/v1/rooms/${CUTOVER}/events`, { token: cutRedeem.body.token });
   const subB = trackedSse(`/api/v1/rooms/${CUTOVER}/events`, { token: cutRedeem.body.token });
   await subA.waitFor((f) => f.event === 'hello');
   await subB.waitFor((f) => f.event === 'hello');
   const helloA = subA.frames.find((f) => f.event === 'hello');
   check('hello exact payload', helloA.data.room_id === CUTOVER && typeof helloA.data.snapshot_high_water === 'string');
-  // append immediately after hello — the 620-row snapshot is still paging
+  const holdDeadline = Date.now() + 20000;
+  while (heldReads.length < 2 && Date.now() < holdDeadline) {
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  check('both first snapshot reads held', heldReads.length === 2, `held ${heldReads.length}`);
   const midSnapshot = await api(cutRedeem.body.token, 'POST', '/api/v1/ledger/events', {
     event_type: 'message', correlation_id: CUTOVER, virtual_path: `/rooms/${CUTOVER}`,
     payload: { text: 'mid-snapshot-live-marker' }, actor_member_id: cutJoin.body.member.member_id,
   });
-  check('mid-snapshot append accepted', midSnapshot.status === 201);
+  check('mid-snapshot append accepted while both snapshots held', midSnapshot.status === 201);
+  heldReads.splice(0).forEach((release) => release());
+  state.ledger.read = realLedgerRead;   // restored BEFORE the oracle
   for (const [name, sub] of [['A', subA], ['B', subB]]) {
     // eslint-disable-next-line no-await-in-loop
     await sub.waitFor((f) => f.event === 'room_event' && f.data.payload?.text === 'mid-snapshot-live-marker', 40000);
   }
-  // authoritative oracle: the gated cursor read's visible sequence set
+  // authoritative oracle: gated cursor reads with BOTH correlation and exact
+  // path filters — the same dual-filter contract the stream itself uses
   const oracle = [];
   let oracleCursor = '0';
   for (;;) {
     // eslint-disable-next-line no-await-in-loop
     const pageResult = await api(cutRedeem.body.token, 'GET',
-      `/api/v1/ledger/events?correlation_id=${CUTOVER}&after_sequence=${oracleCursor}&limit=500`);
+      `/api/v1/ledger/events?correlation_id=${CUTOVER}&path=${encodeURIComponent(`/rooms/${CUTOVER}`)}&after_sequence=${oracleCursor}&limit=500`);
     if (pageResult.status !== 200 || !pageResult.body.events.length) break;
     oracle.push(...pageResult.body.events.map((event) => String(event.sequence)));
     oracleCursor = oracle.at(-1);
@@ -546,18 +569,27 @@ try {
   check('token revocation -> revoked token_invalid', revokedT.data.reason === 'token_invalid');
   await subR.done; await subT.done;
 
-  // overflow: big snapshot into a non-consuming client -> resync_required
+  // overflow: DETERMINISTIC — bulk-seed >1024 rows with 16KiB payloads in
+  // ONE PG statement (fixture rows outside the hash-chain contract; the
+  // stream read path does not verify chains), so the snapshot volume
+  // (~18MiB) exceeds any socket buffering and the 1024 queue bound is
+  // guaranteed to fill against a non-consuming client.
   await api(admin1.token, 'POST', '/api/v1/rooms/overflowroom/register', {});
   const overflowMember = await joinFreshMember('overflowroom');
-  for (let i = 0; i < 1700; i += 1) {
-    // direct in-process appends (test fixture; route gates are not under test here)
-    // eslint-disable-next-line no-await-in-loop
-    await state.ledger.append({
-      event_type: 'message', correlation_id: 'overflowroom',
-      virtual_path: '/rooms/overflowroom', payload: { text: `bulk-${i}`, pad: 'x'.repeat(160) },
-      actor_type: 'agent', actor_id: overflowMember.tokenId, actor_name: 'bulk',
-    });
-  }
+  const seqBase = await gatePool.query('SELECT COALESCE(MAX(sequence), 0)::bigint AS head FROM longhouse.ledger_events');
+  const overflowBase = BigInt(seqBase.rows[0].head);
+  await gatePool.query(
+    `INSERT INTO longhouse.ledger_events
+       (id, schema_version, sequence, event_type, correlation_id, lab, actor_type,
+        actor_id, actor_name, source_id, virtual_path, payload, clearance, tags,
+        event_timestamp, received_at, prev_hash, hash)
+     SELECT 'evt_bulk_' || gs, 1, $1::bigint + gs, 'message', 'overflowroom', 'longhouse', 'agent',
+            $2, 'bulk', 'overflow-fixture', '/rooms/overflowroom',
+            jsonb_build_object('text', 'bulk-' || gs, 'pad', repeat('x', 16384)),
+            'UNCLASSIFIED', ARRAY[]::text[], now(), now(), 'fixture', 'fixture_' || gs
+     FROM generate_series(1, 1200) AS gs`,
+    [overflowBase.toString(), overflowMember.tokenId],
+  );
   const slowSub = sseClient('/api/v1/rooms/overflowroom/events', { token: overflowMember.token, consume: false });
   const overflowDeadline = Date.now() + 30000;
   let overflowText = '';
@@ -567,7 +599,18 @@ try {
     if (slowSub.status() === 200) break;
   }
   await new Promise((resolve) => setTimeout(resolve, 3000));   // let the queue hit the bound
-  overflowText = await slowSub.startConsuming();
+  // Bounded drain: NEVER hang — race against a timeout that aborts + fails.
+  overflowText = await Promise.race([
+    slowSub.startConsuming(),
+    new Promise((resolve) => setTimeout(() => resolve(null), 30000)),
+  ]);
+  if (overflowText === null) {
+    slowSub.abort();
+    overflowText = '';
+    check('overflow drain completed within bound', false, 'drain timed out after 30s — aborted');
+  } else {
+    check('overflow drain completed within bound', true);
+  }
   // PARSE the frames: resync's after_sequence must equal the LAST room_event
   // id accepted before it, and nothing follows the terminal frame.
   const overflowFrames = overflowText.split('\n\n').filter(Boolean).map((block) => {
@@ -582,11 +625,11 @@ try {
   const resyncIndex = overflowFrames.findIndex((f) => f.event === 'resync_required');
   const lastAcceptedBeforeResync = overflowFrames.slice(0, resyncIndex)
     .filter((f) => f.event === 'room_event').map((f) => f.id).at(-1);
-  check('overflow -> parsed resync_required: after_sequence == last accepted room_event id, then close',
+  check('overflow -> parsed resync_required: after_sequence == last accepted room_event id, then NOTHING after terminal',
     resyncIndex > 0
       && overflowFrames[resyncIndex].data?.after_sequence === lastAcceptedBeforeResync
-      && !overflowFrames.slice(resyncIndex + 1).some((f) => f.event === 'room_event'),
-    `resyncIndex ${resyncIndex}, after_sequence ${overflowFrames[resyncIndex]?.data?.after_sequence}, last ${lastAcceptedBeforeResync}`);
+      && overflowFrames.slice(resyncIndex + 1).every((f) => f.event === undefined),   // no later frame of ANY type
+    `resyncIndex ${resyncIndex}, after_sequence ${overflowFrames[resyncIndex]?.data?.after_sequence}, last ${lastAcceptedBeforeResync}, tail ${overflowFrames.slice(resyncIndex + 1).map((f) => f.event).join(',')}`);
   await slowSub.done;
 
   // UNIVERSAL leak sweep: every frame of every tracked subscriber (control
