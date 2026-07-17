@@ -398,6 +398,78 @@ test('abort during a snapshot/catch-up yield cancels tracked yields and start re
   assert.equal(timers.count(), 0, 'no timer of any kind left behind');
 });
 
+test('terminal write throw closes with the DECIDED kind, not transport', async () => {
+  // revoked: heartbeat denial queues terminal revoked; the revoked write throws
+  {
+    const timers = new FakeTimers();
+    const fake = makeAdapters({ rows: [row('1')] });
+    fake.adapters.reauthenticate = async () => ({ ok: false, reason: 'membership_revoked' });
+    const baseWrite = fake.adapters.write;
+    fake.adapters.write = (frame) => {
+      if (frame.event === 'revoked') throw new Error('socket died mid-write');
+      return baseWrite(frame);
+    };
+    const stream = createRoomEventStream({
+      roomId: 'warroom', selectedCursor: '0',
+      adapters: { ...fake.adapters, timers },
+    });
+    await stream.start();
+    await settle();
+    await timers.fire(15000);
+    await settle();
+    assert.deepEqual(fake.closes, ['revoked'], 'decided kind survives the write throw');
+    assert.equal(timers.count(), 0);
+  }
+  // resync: overflow queues terminal resync; the resync write throws
+  {
+    const timers = new FakeTimers();
+    let writes = 0;
+    const total = QUEUE_BOUND + PAGE_LIMIT + 10;
+    const fake = makeAdapters({
+      rows: Array.from({ length: total }, (_, i) => row(String(i + 1))),
+    });
+    const baseWrite = fake.adapters.write;
+    fake.adapters.write = (frame) => {
+      if (frame.event === 'resync_required') throw new Error('socket died mid-write');
+      writes += 1;
+      baseWrite(frame);
+      return writes <= 2;
+    };
+    const stream = createRoomEventStream({
+      roomId: 'warroom', selectedCursor: '0',
+      adapters: { ...fake.adapters, timers },
+    });
+    const startPromise = stream.start();
+    await settle();
+    await timers.runZeroDelays();
+    await settle();
+    await startPromise.catch(() => {});
+    assert.deepEqual(fake.closes, ['resync'], 'decided kind survives the write throw');
+    assert.equal(timers.count(), 0);
+  }
+});
+
+test('disconnect with a deferred in-flight read: resolve after abort writes nothing', async () => {
+  const timers = new FakeTimers();
+  let resolveRead = null;
+  const fake = makeAdapters({ rows: [] });
+  fake.adapters.readPage = () => new Promise((resolve) => { resolveRead = resolve; });
+  const stream = createRoomEventStream({
+    roomId: 'warroom', selectedCursor: '0',
+    adapters: { ...fake.adapters, timers },
+  });
+  const startPromise = stream.start();
+  await settle();   // hello written; live pollTick's readPage is now deferred
+  const writesBeforeAbort = fake.written.length;
+  stream.abort();
+  await settle();
+  resolveRead([row('1'), row('2')]);   // the read resolves AFTER close
+  await settle();
+  await startPromise;
+  assert.equal(fake.written.length, writesBeforeAbort, 'no write after close from a deferred read');
+  assert.equal(timers.count(), 0);
+});
+
 test('double start throws; abort is idempotent', async () => {
   const timers = new FakeTimers();
   const fake = makeAdapters({ rows: [] });

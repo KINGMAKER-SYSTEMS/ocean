@@ -59,6 +59,7 @@ test('F3: every federated room route is an explicit 503 in file/JSONL mode', asy
     ['GET', '/api/v1/rooms/warroom/members', undefined],
     ['DELETE', '/api/v1/rooms/warroom/members/9c2f4a52-0000-4000-8000-000000000001', undefined],
     ['POST', '/api/v1/invites', { room_id: 'warroom' }],
+    ['GET', '/api/v1/rooms/warroom/events', undefined],
   ];
   for (const [method, apiPath, body] of attempts) {
     const response = await call(method, apiPath, body);

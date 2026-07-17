@@ -30,6 +30,10 @@ import {
   LedgerValidationError,
 } from './ledger.mjs';
 import {
+  createRoomEventStream,
+  selectCursor,
+} from './room-events.mjs';
+import {
   claimNextIngestJob,
   completeIngestJob,
   getPool,
@@ -1567,6 +1571,105 @@ async function handleRoomMemberRemove(state, principal, roomIdRaw, memberIdRaw) 
   return result;
 }
 
+// S1C: authenticated durable SSE fanout (gate2-s1c-freeze.md v3 APPROVED).
+// The server OWNS every gate — auth, F3, permission, scope, membership, row
+// visibility — and injects them as adapters; src/room-events.mjs is the
+// protocol state machine only. Matched BEFORE global authenticate: this
+// route is header-bearer ONLY, and a ?token= query credential is rejected
+// without ever being used.
+async function handleRoomEventsStream(req, res, url, state, roomIdRaw) {
+  if (url.searchParams.has('token')) {
+    throw new HttpError(401, 'This stream accepts an Authorization header bearer only.');
+  }
+  const bearerMatch = (req.headers.authorization || '').match(/^Bearer\s+(.+)$/i);
+  if (!bearerMatch) throw new HttpError(401, 'Missing token. Use Authorization: Bearer <token>.');
+  const rawBearer = bearerMatch[1].trim();   // held for heartbeat reauth; never logged/echoed
+
+  const record = await state.auth.findToken(rawBearer);
+  if (!record) throw new HttpError(403, 'Invalid, revoked, or expired token.');
+  const principal = { id: record.id, name: record.name, role: record.role, scopes: record.scopes || ['/'] };
+
+  requireFederation(state);
+  const roomId = normalizeRoomIdForHttp(roomIdRaw);
+  requirePermission(principal, 'read');
+  requirePathScope(principal, roomScope(roomId));
+  await requireActiveRoomMembership(state, principal, roomId);
+
+  // Cursor AFTER all gates, BEFORE stream headers and any ledger/head read.
+  let selectedCursor;
+  try {
+    selectedCursor = selectCursor({
+      lastEventId: req.headers['last-event-id'] ?? null,
+      afterSequence: url.searchParams.get('after_sequence'),
+    });
+  } catch (error) {
+    throw ledgerErrorToHttp(error);
+  }
+
+  res.writeHead(200, {
+    'content-type': 'text/event-stream',
+    'cache-control': 'no-cache, no-transform',
+    connection: 'keep-alive',
+    'x-accel-buffering': 'no',
+  });
+
+  const roomFilters = { correlation_id: roomId, path: roomScope(roomId) };
+  const stream = createRoomEventStream({
+    roomId,
+    selectedCursor,
+    adapters: {
+      // H: ONE cursorless scoped tail read, newest window, limit 1.
+      readHead: async () => {
+        const rows = await state.ledger.read({ ...roomFilters, limit: 1 });
+        return rows.length ? String(rows[rows.length - 1].sequence) : '0';
+      },
+      readPage: (afterSequence, limit) => state.ledger.read({ ...roomFilters, after_sequence: afterSequence, limit }),
+      isRowVisible: (event) => ledgerEventVisibleToPrincipal(event, principal),
+      // Full gate re-run from the RAW header bearer. HttpError = authz
+      // denial → {ok:false}; anything else (DB/pool) propagates = transport.
+      reauthenticate: async () => {
+        const fresh = await state.auth.findToken(rawBearer);
+        if (!fresh) return { ok: false, reason: 'token_invalid' };
+        const freshPrincipal = { id: fresh.id, name: fresh.name, role: fresh.role, scopes: fresh.scopes || ['/'] };
+        try {
+          requirePermission(freshPrincipal, 'read');
+          requirePathScope(freshPrincipal, roomScope(roomId));
+        } catch (error) {
+          if (error instanceof HttpError) return { ok: false, reason: 'token_invalid' };
+          throw error;
+        }
+        const memberships = await state.rooms.activeMembership(roomId, freshPrincipal.id);
+        if (!memberships.length) return { ok: false, reason: 'membership_revoked' };
+        return { ok: true };
+      },
+      write: (frame) => {
+        let payload = `event: ${frame.event}\n`;
+        if (frame.id !== undefined) payload += `id: ${frame.id}\n`;
+        payload += `data: ${JSON.stringify(frame.data)}\n\n`;
+        return res.write(payload);
+      },
+      waitDrain: () => new Promise((resolve, reject) => {
+        const onDrain = () => { cleanup(); resolve(); };
+        const onError = (error) => { cleanup(); reject(error); };
+        const onClose = () => { cleanup(); reject(new Error('socket closed')); };
+        function cleanup() {
+          res.removeListener('drain', onDrain);
+          res.removeListener('error', onError);
+          res.removeListener('close', onClose);
+        }
+        res.once('drain', onDrain);
+        res.once('error', onError);
+        res.once('close', onClose);
+      }),
+      close: () => { try { res.end(); } catch { /* already gone */ } },
+    },
+  });
+
+  req.on('close', () => stream.abort());
+  res.on('error', () => stream.abort());
+  await stream.start();
+}
+
 // R-8: room-aware ledger gating. When correlation_id or virtual_path —
 // DESCENDANT paths included, so /rooms/<id>/child cannot bypass membership —
 // identifies a REGISTERED room: valid token + room scope + active membership;
@@ -1738,6 +1841,14 @@ export function createOceanBedrockServer(options = {}) {
 
     if (req.method === 'POST' && url.pathname === '/api/v1/invites/redeem') {
       jsonResponse(res, 201, await handleInviteRedeem(req, state));
+      return;
+    }
+
+    // S1C stream: matched BEFORE global authenticate — header-bearer only,
+    // query tokens rejected without use inside the handler.
+    const roomEventsMatch = url.pathname.match(/^\/api\/v1\/rooms\/([^/]+)\/events$/);
+    if (req.method === 'GET' && roomEventsMatch) {
+      await handleRoomEventsStream(req, res, url, state, safeDecodeSegment(roomEventsMatch[1]));
       return;
     }
 

@@ -356,6 +356,176 @@ try {
     source_id: 'github', source_sequence: 'commit-abc123',
   })).status === 201);
 
+  // ── S1C: authenticated durable SSE fanout ─────────────────────────────
+  console.log('S1C SSE fanout:');
+
+  function sseClient(streamPath, { token, lastEventId, consume = true } = {}) {
+    const controller = new AbortController();
+    const frames = [];
+    const headers = { authorization: `Bearer ${token}` };
+    if (lastEventId) headers['last-event-id'] = lastEventId;
+    let responseStatus = null;
+    let bodyReader = null;
+    const done = fetch(`${base}${streamPath}`, { headers, signal: controller.signal })
+      .then(async (response) => {
+        responseStatus = response.status;
+        if (response.status !== 200) return;
+        bodyReader = response.body.getReader();
+        if (!consume) return;   // overflow client: leave the body unread → real backpressure
+        const decoder = new TextDecoder();
+        let buffer = '';
+        try {
+          for (;;) {
+            // eslint-disable-next-line no-await-in-loop
+            const { value, done: eof } = await bodyReader.read();
+            if (eof) break;
+            buffer += decoder.decode(value, { stream: true });
+            let split;
+            while ((split = buffer.indexOf('\n\n')) >= 0) {
+              const block = buffer.slice(0, split);
+              buffer = buffer.slice(split + 2);
+              const frame = {};
+              for (const line of block.split('\n')) {
+                if (line.startsWith('event: ')) frame.event = line.slice(7);
+                else if (line.startsWith('id: ')) frame.id = line.slice(4);
+                else if (line.startsWith('data: ')) frame.data = JSON.parse(line.slice(6));
+              }
+              frames.push(frame);
+            }
+          }
+        } catch { /* aborted/closed */ }
+      })
+      .catch(() => {});
+    return {
+      frames,
+      done,
+      status: () => responseStatus,
+      abort: () => controller.abort(),
+      startConsuming: async () => {   // drain a previously non-consuming client
+        if (!bodyReader) return '';
+        const decoder = new TextDecoder();
+        let text = '';
+        try {
+          for (;;) {
+            // eslint-disable-next-line no-await-in-loop
+            const { value, done: eof } = await bodyReader.read();
+            if (eof) break;
+            text += decoder.decode(value, { stream: true });
+          }
+        } catch { /* closed */ }
+        return text;
+      },
+      waitFor: async (predicate, timeoutMs = 25000) => {
+        const deadline = Date.now() + timeoutMs;
+        for (;;) {
+          const hit = frames.find(predicate);
+          if (hit) return hit;
+          if (Date.now() > deadline) throw new Error('sse waitFor timeout');
+          // eslint-disable-next-line no-await-in-loop
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+      },
+    };
+  }
+
+  // query-token rejected WITHOUT use (before auth/federation)
+  const queryTokenAttempt = await api('', 'GET', `/api/v1/rooms/${ROOM}/events?token=${admin1.token}`);
+  check('stream query-token 401 unused', queryTokenAttempt.status === 401);
+
+  // two-subscriber fanout + snapshot/live cutover under concurrent appends
+  const subA = sseClient(`/api/v1/rooms/${ROOM}/events`, { token: joinToken });
+  const subB = sseClient(`/api/v1/rooms/${ROOM}/events`, { token: joinToken });
+  await subA.waitFor((f) => f.event === 'hello');
+  await subB.waitFor((f) => f.event === 'hello');
+  const helloA = subA.frames.find((f) => f.event === 'hello');
+  check('hello exact payload', helloA.data.room_id === ROOM && typeof helloA.data.snapshot_high_water === 'string');
+  const live1 = await api(joinToken, 'POST', '/api/v1/ledger/events', writeBody({ payload: { text: 'sse-live-1' } }));
+  const live2 = await api(joinToken, 'POST', '/api/v1/ledger/events', writeBody({ payload: { text: 'sse-live-2' } }));
+  check('live appends accepted', live1.status === 201 && live2.status === 201);
+  for (const [name, sub] of [['A', subA], ['B', subB]]) {
+    // eslint-disable-next-line no-await-in-loop
+    await sub.waitFor((f) => f.event === 'room_event' && f.data.payload?.text === 'sse-live-2');
+    const ids = sub.frames.filter((f) => f.event === 'room_event').map((f) => BigInt(f.id));
+    const strictly = ids.every((id, i) => i === 0 || id > ids[i - 1]);
+    check(`subscriber ${name}: strictly increasing ids, no duplicate`, strictly && new Set(ids.map(String)).size === ids.length);
+  }
+  // no token material in any frame
+  const allFramesJson = JSON.stringify([...subA.frames, ...subB.frames]);
+  check('no token leak in frames', !allFramesJson.includes(joinToken) && !allFramesJson.includes(admin1.token) && !allFramesJson.includes('sha256:'));
+
+  // clearance filtering on-stream: TOP_SECRET row invisible to contributor
+  const secretRow = await api(admin1.token, 'POST', '/api/v1/ledger/events', writeBody({
+    payload: { text: 'sse-secret' }, clearance: 'TOP_SECRET', actor_member_id: ownerMemberId,
+  }));
+  const markerRow = await api(joinToken, 'POST', '/api/v1/ledger/events', writeBody({ payload: { text: 'sse-after-secret' } }));
+  check('secret + marker appended', secretRow.status === 201 && markerRow.status === 201);
+  await subA.waitFor((f) => f.event === 'room_event' && f.data.payload?.text === 'sse-after-secret');
+  check('clearance-filtered row never streamed to contributor',
+    !subA.frames.some((f) => f.event === 'room_event' && f.data.payload?.text === 'sse-secret'));
+
+  // cursor resume after forced close: Last-Event-ID, no dupe, only new rows
+  const lastSeenA = subA.frames.filter((f) => f.event === 'room_event').map((f) => f.id).at(-1);
+  subA.abort();
+  await subA.done;
+  const subA2 = sseClient(`/api/v1/rooms/${ROOM}/events`, { token: joinToken, lastEventId: lastSeenA });
+  await subA2.waitFor((f) => f.event === 'hello');
+  await api(joinToken, 'POST', '/api/v1/ledger/events', writeBody({ payload: { text: 'sse-after-resume' } }));
+  await subA2.waitFor((f) => f.event === 'room_event' && f.data.payload?.text === 'sse-after-resume');
+  const resumedIds = subA2.frames.filter((f) => f.event === 'room_event').map((f) => f.id);
+  check('resume from Last-Event-ID: strictly after cursor, no dupe',
+    resumedIds.every((id) => BigInt(id) > BigInt(lastSeenA)));
+  subA2.abort(); subB.abort();
+  await subA2.done; await subB.done;
+
+  // mid-stream revocation pair (heartbeat-driven, run concurrently):
+  // member removal -> membership_revoked · token revocation -> token_invalid
+  async function joinFreshMember(room) {
+    const inv = await api(admin1.token, 'POST', '/api/v1/invites', { room_id: room });
+    const red = await api('', 'POST', '/api/v1/invites/redeem', { code: inv.body.code });
+    const joined = await api(red.body.token, 'POST', `/api/v1/rooms/${room}/members/self`);
+    return { token: red.body.token, memberId: joined.body.member.member_id, tokenId: red.body.record.id };
+  }
+  const memberR = await joinFreshMember(ROOM);   // will be removed
+  const memberT = await joinFreshMember(ROOM);   // token will be revoked
+  const subR = sseClient(`/api/v1/rooms/${ROOM}/events`, { token: memberR.token });
+  const subT = sseClient(`/api/v1/rooms/${ROOM}/events`, { token: memberT.token });
+  await subR.waitFor((f) => f.event === 'hello');
+  await subT.waitFor((f) => f.event === 'hello');
+  await api(admin1.token, 'DELETE', `/api/v1/rooms/${ROOM}/members/${memberR.memberId}`);
+  await api(admin1.token, 'DELETE', `/api/v1/tokens/${memberT.tokenId}`);
+  const revokedR = await subR.waitFor((f) => f.event === 'revoked');
+  const revokedT = await subT.waitFor((f) => f.event === 'revoked');
+  check('member removal -> revoked membership_revoked', revokedR.data.reason === 'membership_revoked');
+  check('token revocation -> revoked token_invalid', revokedT.data.reason === 'token_invalid');
+  await subR.done; await subT.done;
+
+  // overflow: big snapshot into a non-consuming client -> resync_required
+  await api(admin1.token, 'POST', '/api/v1/rooms/overflowroom/register', {});
+  const overflowMember = await joinFreshMember('overflowroom');
+  for (let i = 0; i < 1700; i += 1) {
+    // direct in-process appends (test fixture; route gates are not under test here)
+    // eslint-disable-next-line no-await-in-loop
+    await state.ledger.append({
+      event_type: 'message', correlation_id: 'overflowroom',
+      virtual_path: '/rooms/overflowroom', payload: { text: `bulk-${i}`, pad: 'x'.repeat(160) },
+      actor_type: 'agent', actor_id: overflowMember.tokenId, actor_name: 'bulk',
+    });
+  }
+  const slowSub = sseClient('/api/v1/rooms/overflowroom/events', { token: overflowMember.token, consume: false });
+  const overflowDeadline = Date.now() + 30000;
+  let overflowText = '';
+  while (Date.now() < overflowDeadline) {
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    if (slowSub.status() === 200) break;
+  }
+  await new Promise((resolve) => setTimeout(resolve, 3000));   // let the queue hit the bound
+  overflowText = await slowSub.startConsuming();
+  check('overflow -> resync_required delivered best-effort then close',
+    overflowText.includes('event: resync_required') && overflowText.includes('"after_sequence"'),
+    `stream tail: ...${overflowText.slice(-200)}`);
+  await slowSub.done;
+
   // ── direct invalid SQL (SQLSTATE-verified) ───────────────────────────
   console.log('direct SQL constraint pins:');
   const principalTok = redeem.body.record.id;
@@ -487,6 +657,7 @@ try {
     ['GET', `/api/v1/rooms/${ROOM}/members`, undefined],
     ['DELETE', `/api/v1/rooms/${ROOM}/members/9c2f4a52-0000-4000-8000-000000000001`, undefined],
     ['POST', '/api/v1/invites', JSON.stringify({ room_id: ROOM })],
+    ['GET', `/api/v1/rooms/${ROOM}/events`, undefined],
   ];
   for (const [method, apiPath, body] of splitAttempts) {
     const splitResponse = await fetch(`${splitBase}${apiPath}`, {

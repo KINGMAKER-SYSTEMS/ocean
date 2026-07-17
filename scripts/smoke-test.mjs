@@ -181,6 +181,7 @@ try {
     ['GET', '/api/v1/rooms/smokeroom/members', undefined],
     ['DELETE', '/api/v1/rooms/smokeroom/members/9c2f4a52-0000-4000-8000-000000000001', undefined],
     ['POST', '/api/v1/invites', JSON.stringify({ room_id: 'smokeroom' })],
+    ['GET', '/api/v1/rooms/smokeroom/events', undefined],
   ];
   for (const [method, apiPath, body] of federatedAttempts) {
     const response = await fetch(`${base}${apiPath}`, {

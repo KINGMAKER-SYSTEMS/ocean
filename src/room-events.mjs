@@ -166,9 +166,13 @@ export function createRoomEventStream({ roomId, selectedCursor, adapters }) {
     if (terminal) {
       state.terminalPending = true;
       // Bounded close path ONLY: wake a drain-blocked writer so the terminal
-      // frame goes out best-effort. Non-terminal control frames respect
-      // backpressure and queue behind the drain like everything else.
-      if (state.drainWaiter) state.drainWaiter.resolve();
+      // frame goes out best-effort. Capture+null BEFORE resolving so the
+      // adapter's later settle can never double-handle the same waiter.
+      if (state.drainWaiter) {
+        const waiter = state.drainWaiter;
+        state.drainWaiter = null;
+        waiter.resolve();
+      }
     }
     kickWriter();
   }
@@ -177,11 +181,16 @@ export function createRoomEventStream({ roomId, selectedCursor, adapters }) {
     if (state.writerRunning || state.closed) return;
     state.writerRunning = true;
     (async () => {
+      // Retained so a best-effort TERMINAL write throw still closes with the
+      // already-decided kind (revoked/resync); only ordinary write/drain
+      // failures are transport.
+      let currentTerminalKind = null;
       try {
         while (!state.closed && (state.controlQueue.length || state.queue.length)) {
           const entry = state.controlQueue.length
             ? state.controlQueue.shift()
             : { frame: state.queue.shift(), terminal: false, closeKind: null };
+          currentTerminalKind = entry.terminal ? entry.closeKind : null;
           const accepted = write(entry.frame);
           if (entry.frame.event === 'room_event') state.lastAcceptedId = entry.frame.id;
           if (entry.terminal) { shutdown(entry.closeKind); return; }
@@ -191,7 +200,7 @@ export function createRoomEventStream({ roomId, selectedCursor, adapters }) {
           }
         }
       } catch {
-        shutdown('transport');   // write throw or drain rejection — transport, never unhandled
+        shutdown(currentTerminalKind || 'transport');
       } finally {
         state.writerRunning = false;
         // frames may have arrived while we were exiting
