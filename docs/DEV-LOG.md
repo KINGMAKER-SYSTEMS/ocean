@@ -1028,3 +1028,20 @@ npm run smoke
   disposable PG14 after the first run exposed and closed an overflow hang.
 - Review history preserved: 52ac00e → 3460fe5 → 7868ca2 → 74e6224 →
   59f416b → 3fdacac, each gate-corrected without amending.
+
+## 2026-07-16 — Gate-2 S1D: composed Bedrock protocol gate (feat/s1c-room-events)
+
+- `scripts/rooms-protocol-harness.mjs` runs the existing quadruple-gated,
+  create-only PostgreSQL smoke and fails closed unless its named proofs cover
+  G2-AC1 through G2-AC5 plus G2-AC10 revocation.
+- The underlying PostgreSQL fixture now concurrently posts sequence `1` from
+  two distinct producer streams and proves both events remain independent;
+  same-tuple retry, conflict, and concurrency proofs remain intact.
+- `test/rooms-protocol-harness.test.mjs` pins pass-only parsing, the complete
+  acceptance matrix, and missing-proof failure behavior without a database.
+- Local implementation tip `d37c936` passed 93/93 DB-free tests, smoke,
+  source check, both secret checks, syntax/diff checks, `db:check`, and the
+  real protocol gate: 122/122 PostgreSQL checks with every matrix section
+  passing on a fresh disposable local PG14 `_test` database. The cluster was
+  stopped and discarded; no live database was touched. Local-only, unpushed,
+  unmerged, and not deployed.

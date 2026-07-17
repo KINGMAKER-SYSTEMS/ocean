@@ -6,6 +6,7 @@
 - Working branch: `feat/s1c-room-events` (unmerged), branch base `f5e8846`
 - Gate-2 S1A merge: `2e3079b`; S1B final merge: `1f20784`
 - S1C reviewed implementation tip: `3fdacac` (source/integration gate green)
+- S1D local protocol-harness tip: `d37c936` (not pushed)
 - Service: `ocean-bedrock`
 - Public URL: <https://ocean-bedrock-production.up.railway.app>
 
@@ -27,21 +28,22 @@ Use [`OCEAN_PROJECT_MAP.md`](OCEAN_PROJECT_MAP.md) for cross-repo routing.
 ## Verified repository state
 
 The following checks passed on 2026-07-16 on branch `feat/s1c-room-events`
-(Gate-2 S1C authenticated SSE room fanout; S1A membership and S1B producer
-idempotency/cursor already merged on `master`):
+(Gate-2 S1C authenticated SSE room fanout plus the local S1D protocol gate;
+S1A membership and S1B producer idempotency/cursor already merged on
+`master`):
 
 ```text
-npm test                    90/90 passed (incl. room-events protocol suite)
+npm test                    93/93 passed (incl. room-events + S1D harness suites)
 npm run smoke               passed (F3 federated 503s, seven routes)
 npm run source:check        passed
-npm run secret:scan         passed (120 files)
+npm run secret:scan         passed (121 files)
 npm run secret:globs:check  passed
 node --check                clean on every touched .mjs file
-npm run rooms:pg-smoke      122/122 (reviewer-executed, second fresh disposable PG14 `_test` database)
-npm run db:check            green (reviewer-executed against the SAME restarted disposable PG14 `_test` database as the 122/122 run: schemaReady/authRegistryReady/roomMembersReady/owner-guard trigger all true, 8 adapters seeded; stopped afterwards; no live database touched)
+npm run rooms:protocol-gate 122/122 underlying PG checks; G2-AC1..5 + G2-AC10 matrix all PASS (fresh disposable local PG14 `_test` database)
+npm run db:check            green against that same disposable database: schemaReady/authRegistryReady/roomMembersReady/owner-guard trigger all true, 8 adapters seeded; stopped and discarded afterwards; no live database touched
 ```
 
-These checks attest the repository only. The S1C branch is unmerged, the Gate-2 changes are NOT deployed
+These checks attest the repository only. The S1C/S1D branch is unmerged, the Gate-2 changes are NOT deployed
 and nothing here is production-attested: private production data counts,
 database migrations (006 has not been applied to any live database), scheduled
 jobs, mounts, tokens, and deployment identity all require authorized production
@@ -131,6 +133,7 @@ Additional checks require appropriate environment and credentials:
 
 ```bash
 npm run db:check
+npm run rooms:protocol-gate
 curl -fsS https://ocean-bedrock-production.up.railway.app/health
 ```
 

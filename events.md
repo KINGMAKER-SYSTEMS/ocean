@@ -253,3 +253,17 @@ _test database used for the 122/122 harness run (schemaReady,
 authRegistryReady, roomMembersReady, owner-guard trigger all true, 8 adapters
 seeded), then stopped; no live database touched.
 _________________________________________________________________________________
+time:  [22:46] [16-07-26]
+agent: [codex] [gpt-5]
+worktree: [feat/s1c-room-events]
+type:  [workflow]
+area:  [testing]
+
+Built the local-only Gate-2 S1D protocol harness at d37c936. It composes the
+quadruple-gated PostgreSQL smoke into a fail-closed G2-AC1..5 plus G2-AC10
+matrix and adds the missing concurrent two-producer source_sequence=1 proof.
+Verification passed 93/93 DB-free tests, smoke, source and secret checks,
+db:check, and 122/122 real PostgreSQL checks with every matrix section green
+on a fresh disposable local PG14 _test database. The database was stopped and
+discarded; no live system was touched. Commit remains local and unpushed.
+_________________________________________________________________________________

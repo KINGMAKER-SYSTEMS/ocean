@@ -38,8 +38,9 @@ Repo-wide working contract for `ocean-bedrock`.
 - Federated rooms require auth, ledger, and rooms on the SAME Postgres
   database (resolved-URL equality); any split, file, or JSONL configuration
   fails closed with 503 on room routes and never logs a database URL.
-- Room protocol changes are proven ONLY with the quadruple-gated, create-only
-  `npm run rooms:pg-smoke` against a fresh disposable `_test` database
+- Room protocol changes are proven ONLY with `npm run rooms:protocol-gate`,
+  which composes the named Gate-2 acceptance matrix over the quadruple-gated,
+  create-only `npm run rooms:pg-smoke` on a fresh disposable `_test` database
   (TEST_DATABASE_URL + ROOMS_PG_SMOKE_ALLOW_RESET=1 + `_test` name suffix +
   no-preexisting-`longhouse`-schema check). Never point it at a shared or
   live database; `DATABASE_URL` is never a fallback.
