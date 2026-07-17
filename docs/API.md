@@ -402,3 +402,41 @@ text.
 canonical decimal sequence string, strictly greater, ascending, bounded by
 `limit`; pass the last returned sequence to continue. Without the parameter,
 the existing newest-window behavior is unchanged.
+
+### Room event stream (Gate-2 S1C)
+
+`GET /api/v1/rooms/{room_id}/events` — an authenticated, durable SSE tail of
+a registered room, consumed by the outbound daemon bridge.
+
+- **Header bearer only.** A `?token=` query credential is never read: query-
+  only callers get `401` with the credential unused. Whitespace-only bearers
+  are `401` before any lookup.
+- **Gate order**: authenticate → federation (`503` split/file/JSONL) → room
+  normalization → read permission → exact room scope → ACTIVE membership.
+  Admin does not bypass membership.
+- **Cursor**: canonical-decimal `Last-Event-ID` header wins when present
+  (standard SSE reconnect), else `after_sequence`, else `'0'`. A malformed
+  selected cursor is `400` before any read.
+- **Reads**: every ledger read carries BOTH `correlation_id` and the exact
+  `path=/rooms/{room_id}`; the high water H comes from one CURSORLESS scoped
+  tail read (`limit=1`).
+- **Frames/phases**: `hello {room_id, snapshot_high_water}` → bounded
+  snapshot of visible rows through H → ONE immediate live read from
+  `max(cursor, H)` → one durable forward-poll LOOP (repeated 1s ±100ms
+  polls, 500-row pages, yielded catch-up, at most one read in flight).
+  `room_event` carries SSE `id: <sequence>` and the native ledger row — the
+  ONLY frame with an id. Exact control payloads, all no-id: `heartbeat
+  {sequence: <last accepted id>}`, `resync_required {after_sequence: <last
+  accepted id>}`, `revoked {reason: membership_revoked | token_invalid}`.
+- **Heartbeat/revocation**: every 15s the heartbeat frame is enqueued to
+  the single serialized writer FIRST, then the FULL gate re-runs
+  immediately from the stored raw bearer WITHOUT awaiting socket drain.
+  Authz denial queues terminal `revoked`
+  (`membership_revoked`/`token_invalid`) after the heartbeat;
+  infrastructure failure closes as transport, never a false revocation.
+- **Overflow (exact)**: when the visible-event queue already HOLDS 1024
+  entries and a next visible row exists (headroom probe — the queue never
+  exceeds 1024), the stream sends best-effort `resync_required` then
+  closes; reconnect with that cursor to heal via the snapshot path.
+- **Visibility**: per-principal path-scope + clearance filtering, identical
+  to `GET /api/v1/ledger/events`.

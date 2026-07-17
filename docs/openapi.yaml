@@ -790,3 +790,56 @@ paths:
         '403': { description: Not authorized / membership_revoked }
         '409': { description: Owner self-leave denied }
         '503': { description: Federation unavailable }
+  /api/v1/rooms/{room_id}/events:
+    get:
+      summary: Authenticated durable room event stream (SSE, Gate-2 S1C)
+      description: >-
+        Server-Sent Events tail of a registered room. Header-bearer ONLY —
+        a ?token= query credential is never read (401 unused). Gate order:
+        header authenticate, federation (503 in split/file/JSONL), room
+        normalization, read permission, exact room scope, ACTIVE membership;
+        no admin bypass. Cursor: a canonical-decimal Last-Event-ID header
+        wins when present, else after_sequence, else '0'; a malformed
+        selected cursor is 400 before any read. Every ledger read this
+        stream performs carries BOTH correlation_id=<room_id> and the exact
+        path=/rooms/<room_id>. Protocol: high water H from ONE cursorless
+        scoped tail read (limit 1); hello {room_id, snapshot_high_water};
+        bounded snapshot of visible rows through H; ONE immediate live read
+        from max(cursor, H); then one durable forward-poll LOOP — repeated
+        1s ±100ms polls with 500-row paging and yielded catch-up, at most
+        one read in flight. room_event frames carry SSE id = sequence and
+        the native ledger row as data. Control payloads are exact and carry
+        NO id (only room_event has one): hello
+        {room_id, snapshot_high_water}; heartbeat {sequence: <last accepted
+        id>}; resync_required {after_sequence: <last accepted id>}; revoked
+        {reason: membership_revoked | token_invalid}. Every 15s the
+        heartbeat is enqueued to the single writer FIRST, then the FULL gate
+        re-runs immediately from the stored raw bearer without awaiting
+        socket drain: authz denial queues a terminal revoked frame;
+        infrastructure failure closes as transport without one. Overflow is
+        exact: when the visible-event queue already HOLDS 1024 entries and
+        a next visible row exists (headroom probe) — the queue never
+        exceeds 1024 — the stream sends best-effort resync_required and
+        closes; reconnect with that cursor to heal. Rows are filtered
+        per-principal (path scope + clearance), identical to
+        GET /ledger/events visibility.
+      parameters:
+        - { in: path, name: room_id, required: true, schema: { type: string } }
+        - in: query
+          name: after_sequence
+          schema: { type: string, pattern: '^(0|[1-9][0-9]*)$' }
+          description: Canonical decimal cursor; superseded by a Last-Event-ID header.
+        - in: header
+          name: Last-Event-ID
+          schema: { type: string, pattern: '^(0|[1-9][0-9]*)$' }
+          description: Standard SSE reconnect cursor; wins over after_sequence.
+      responses:
+        '200':
+          description: 'SSE frame stream: hello, room_event (id = sequence), heartbeat, resync_required, revoked'
+          content:
+            text/event-stream:
+              schema: { type: string }
+        '400': { description: Invalid room id or malformed selected cursor }
+        '401': { description: Missing/whitespace bearer, or query-token attempt (credential unused) }
+        '403': { description: Invalid/revoked token, missing read permission or room scope, or no active membership (no admin bypass) — a connect-time 403 is an HTTP error, not a revoked frame }
+        '503': { description: Federation unavailable }

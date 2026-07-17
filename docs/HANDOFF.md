@@ -3,9 +3,9 @@
 - Verified: 2026-07-16
 - Repository: `risingtides-dev/ocean-bedrock`
 - Default branch: `master`
-- Working branch: `master`
-- Gate-2 S1A merge: `2e3079b`
-- Gate-2 S1B final merge: `1f20784`
+- Working branch: `feat/s1c-room-events` (unmerged), branch base `f5e8846`
+- Gate-2 S1A merge: `2e3079b`; S1B final merge: `1f20784`
+- S1C reviewed implementation tip: `3fdacac` (source/integration gate green)
 - Service: `ocean-bedrock`
 - Public URL: <https://ocean-bedrock-production.up.railway.app>
 
@@ -26,20 +26,22 @@ Use [`OCEAN_PROJECT_MAP.md`](OCEAN_PROJECT_MAP.md) for cross-repo routing.
 
 ## Verified repository state
 
-The following checks passed on 2026-07-16 on `master` after Gate-2 S1A
-federated room membership and S1B producer idempotency/cursor paging were
-merged:
+The following checks passed on 2026-07-16 on branch `feat/s1c-room-events`
+(Gate-2 S1C authenticated SSE room fanout; S1A membership and S1B producer
+idempotency/cursor already merged on `master`):
 
 ```text
-npm test                    72/72 passed
-npm run smoke               passed (incl. F3 federated 503 assertions)
+npm test                    90/90 passed (incl. room-events protocol suite)
+npm run smoke               passed (F3 federated 503s, seven routes)
 npm run source:check        passed
-npm run secret:scan         passed (119 files)
+npm run secret:scan         passed (120 files)
 npm run secret:globs:check  passed
-npm run rooms:pg-smoke      105/0 (reviewer-executed on an isolated temporary PG14 `_test` database)
+node --check                clean on every touched .mjs file
+npm run rooms:pg-smoke      122/122 (reviewer-executed, second fresh disposable PG14 `_test` database)
+npm run db:check            requires DATABASE_URL — not run against any live database from this branch
 ```
 
-These checks attest the repository only. The Gate-2 changes are NOT deployed
+These checks attest the repository only. The S1C branch is unmerged, the Gate-2 changes are NOT deployed
 and nothing here is production-attested: private production data counts,
 database migrations (006 has not been applied to any live database), scheduled
 jobs, mounts, tokens, and deployment identity all require authorized production

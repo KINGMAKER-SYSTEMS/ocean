@@ -43,6 +43,11 @@ Repo-wide working contract for `ocean-bedrock`.
   (TEST_DATABASE_URL + ROOMS_PG_SMOKE_ALLOW_RESET=1 + `_test` name suffix +
   no-preexisting-`longhouse`-schema check). Never point it at a shared or
   live database; `DATABASE_URL` is never a fallback.
+- The room event stream (`GET /api/v1/rooms/{room_id}/events`) is a stable
+  authenticated boundary: header-bearer only (query tokens never read),
+  membership-gated with no admin bypass, composed from the cursor read
+  surface via bounded forward-poll — no push/notification primitive may be
+  added without its own reviewed freeze.
 
 ## Child devlog Index
 

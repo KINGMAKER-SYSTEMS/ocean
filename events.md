@@ -221,3 +221,20 @@ temporary PostgreSQL 14 database. Refreshed docs/HANDOFF.md from the stale
 pre-merge S1A snapshot. Repository evidence only; no deployment or
 production-state claim.
 _________________________________________________________________________________
+time:  [20:26] [16-07-26]
+agent: [claude] [fable 5]
+worktree: [feat/s1c-room-events]
+type:  [feature-request]
+area:  [backend]
+
+Gate-2 S1C built and gate-approved at 3fdacac: authenticated durable SSE room
+fanout per the approved v3 freeze — protocol module with injected server-owned
+gates, single serialized writer, string-strict cursor precedence, high-water
+snapshot then single forward-poll, full-gate heartbeat reauth with
+revoked-vs-transport split, bounded queue with reachable overflow, tracked
+teardown. Reviewer-run disposable-PG harness 122/122 after a first-run
+overflow hang was made deterministic (held-read cutover, single-statement
+16KiB bulk seed, bounded drain). npm test 90/90, smoke green with seven F3
+routes. This entry lands with the docs/closeout child; branch unmerged, not
+deployed, no push until codex's final merge gate.
+_________________________________________________________________________________

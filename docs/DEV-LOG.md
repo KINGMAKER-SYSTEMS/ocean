@@ -996,3 +996,34 @@ npm run smoke
 - Process note: an earlier local commit (f3704d8) encoded a superseded
   contract and was moved off master to this branch and reworked; codex's
   rejection pins are the v2 freeze.
+
+## 2026-07-16 — Gate-2 S1C: authenticated durable SSE room fanout (feat/s1c-room-events)
+
+- `src/room-events.mjs`: protocol state machine only — auth/F3/permission/
+  scope/membership/row-visibility are server-owned adapters injected by the
+  route; the module implements no gate. Frozen protocol: selected-cursor
+  precedence (Last-Event-ID wins, else after_sequence, else '0';
+  string-strict), cursorless tail-read high water, hello, snapshot through
+  H on its own raw cursor, then ONE durable forward-poll (1s jittered,
+  500-row pages, tracked macrotask yields). ONE serialized writer owns
+  every socket write and the only drain waiter; non-terminal frames respect
+  backpressure, terminal frames (resync/revoked) wake a blocked writer and
+  close best-effort with their decided kind even on a write throw.
+  Heartbeat (15s, independent timer) enqueues then re-runs the FULL gate
+  from the raw header bearer without awaiting drain — denial is terminal
+  revoked, infrastructure failure is transport, never a false revocation;
+  successful reauth swaps the active principal so clearance/scope changes
+  apply live. Bounded 1024 queue with headroom-probe overflow.
+- `src/server.mjs`: pre-authenticate route match, header-bearer-only
+  (whitespace/query tokens 401 unused), raw segment decoded after auth+F3,
+  frozen gate chain, adapter injection, req-aborted/res-close disconnect.
+- Tests: 18 DB-free protocol tests (fake adapters + manual timers) covering
+  cursor matrix, cutover, backpressure/overflow, teardown, starvation,
+  terminal-kind write throws; PG harness S1C section with held-read
+  deterministic mid-snapshot cutover proven against the gated ledger
+  oracle, parsed overflow (single-statement 16KiB bulk seed, bounded
+  drain), concurrent mid-stream revocations, universal token-leak sweep,
+  nonmember-admin 403. Reviewer-run harness: 122/122 on a second fresh
+  disposable PG14 after the first run exposed and closed an overflow hang.
+- Review history preserved: 52ac00e → 3460fe5 → 7868ca2 → 74e6224 →
+  59f416b → 3fdacac, each gate-corrected without amending.
