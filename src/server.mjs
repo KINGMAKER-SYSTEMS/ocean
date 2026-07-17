@@ -1577,23 +1577,26 @@ async function handleRoomMemberRemove(state, principal, roomIdRaw, memberIdRaw) 
 // protocol state machine only. Matched BEFORE global authenticate: this
 // route is header-bearer ONLY, and a ?token= query credential is rejected
 // without ever being used.
-async function handleRoomEventsStream(req, res, url, state, roomIdRaw) {
-  if (url.searchParams.has('token')) {
-    throw new HttpError(401, 'This stream accepts an Authorization header bearer only.');
-  }
+async function handleRoomEventsStream(req, res, url, state, roomSegmentRaw) {
+  // Header-ONLY bearer extraction: a ?token= query credential is simply
+  // never read on this route — query-only callers get 401 with the
+  // credential unused, and nothing preempts the frozen auth→F3 order.
   const bearerMatch = (req.headers.authorization || '').match(/^Bearer\s+(.+)$/i);
   if (!bearerMatch) throw new HttpError(401, 'Missing token. Use Authorization: Bearer <token>.');
   const rawBearer = bearerMatch[1].trim();   // held for heartbeat reauth; never logged/echoed
 
   const record = await state.auth.findToken(rawBearer);
   if (!record) throw new HttpError(403, 'Invalid, revoked, or expired token.');
-  const principal = { id: record.id, name: record.name, role: record.role, scopes: record.scopes || ['/'] };
+  // Mutable: heartbeat reauth swaps in the fresh principal on success so
+  // clearance/scope changes take effect on the live stream's row filter.
+  let activePrincipal = { id: record.id, name: record.name, role: record.role, scopes: record.scopes || ['/'] };
 
   requireFederation(state);
-  const roomId = normalizeRoomIdForHttp(roomIdRaw);
-  requirePermission(principal, 'read');
-  requirePathScope(principal, roomScope(roomId));
-  await requireActiveRoomMembership(state, principal, roomId);
+  // Frozen order: decode AFTER bearer auth + F3, as part of normalization.
+  const roomId = normalizeRoomIdForHttp(safeDecodeSegment(roomSegmentRaw));
+  requirePermission(activePrincipal, 'read');
+  requirePathScope(activePrincipal, roomScope(roomId));
+  await requireActiveRoomMembership(state, activePrincipal, roomId);
 
   // Cursor AFTER all gates, BEFORE stream headers and any ledger/head read.
   let selectedCursor;
@@ -1624,9 +1627,11 @@ async function handleRoomEventsStream(req, res, url, state, roomIdRaw) {
         return rows.length ? String(rows[rows.length - 1].sequence) : '0';
       },
       readPage: (afterSequence, limit) => state.ledger.read({ ...roomFilters, after_sequence: afterSequence, limit }),
-      isRowVisible: (event) => ledgerEventVisibleToPrincipal(event, principal),
+      isRowVisible: (event) => ledgerEventVisibleToPrincipal(event, activePrincipal),
       // Full gate re-run from the RAW header bearer. HttpError = authz
       // denial → {ok:false}; anything else (DB/pool) propagates = transport.
+      // On success the fresh principal REPLACES the active one so
+      // clearance/scope changes apply to subsequent row filtering.
       reauthenticate: async () => {
         const fresh = await state.auth.findToken(rawBearer);
         if (!fresh) return { ok: false, reason: 'token_invalid' };
@@ -1640,6 +1645,7 @@ async function handleRoomEventsStream(req, res, url, state, roomIdRaw) {
         }
         const memberships = await state.rooms.activeMembership(roomId, freshPrincipal.id);
         if (!memberships.length) return { ok: false, reason: 'membership_revoked' };
+        activePrincipal = freshPrincipal;
         return { ok: true };
       },
       write: (frame) => {
@@ -1665,7 +1671,11 @@ async function handleRoomEventsStream(req, res, url, state, roomIdRaw) {
     },
   });
 
-  req.on('close', () => stream.abort());
+  // Disconnect signals: req 'close' fires when the request MESSAGE completes
+  // and is the wrong SSE signal — the response side (plus request abort) is
+  // what tracks the live connection.
+  req.on('aborted', () => stream.abort());
+  res.on('close', () => stream.abort());
   res.on('error', () => stream.abort());
   await stream.start();
 }
@@ -1844,11 +1854,12 @@ export function createOceanBedrockServer(options = {}) {
       return;
     }
 
-    // S1C stream: matched BEFORE global authenticate — header-bearer only,
-    // query tokens rejected without use inside the handler.
+    // S1C stream: matched BEFORE global authenticate — header-bearer only.
+    // The RAW segment is passed through; decoding happens inside the handler
+    // only after bearer auth + F3 (frozen gate order).
     const roomEventsMatch = url.pathname.match(/^\/api\/v1\/rooms\/([^/]+)\/events$/);
     if (req.method === 'GET' && roomEventsMatch) {
-      await handleRoomEventsStream(req, res, url, state, safeDecodeSegment(roomEventsMatch[1]));
+      await handleRoomEventsStream(req, res, url, state, roomEventsMatch[1]);
       return;
     }
 
