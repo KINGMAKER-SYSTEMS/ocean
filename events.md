@@ -294,3 +294,11 @@ area:      [backend]
 
 codex surgical hold: publicInviteRecord stripped only hash, so the new redemptionId idempotency key leaked onto every public invite envelope and legacy PG envelopes grew a redemptionId:null key. Fixed at the source — publicInviteRecord now strips hash AND redemptionId — and pinned in the PG smoke (no redemptionId on extended first/replay envelopes nor on legacy create/redeem envelopes). Reverified 107/107 npm test and 150/150 rooms:pg-smoke on a third fresh disposable PG14 _test database, discarded. Uncommitted, no push.
 _________________________________________________________________________________
+
+time:      [00:13] [17-07-26]
+agent:     [claude] [fable 5]
+type:      [merge]
+area:      [backend]
+
+Coordination gate cleared by smaths: fast-forwarded master f5e8846 -> e3c461c (S1C SSE fanout, S1D protocol harness, S2 blockers B1-B3) and pushed to origin; feature branch feat/s1c-room-events also pushed for provenance. Production Railway DB migration of 007 remains a separate later gate — no live database was touched.
+_________________________________________________________________________________
