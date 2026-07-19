@@ -76,8 +76,8 @@ manifests, so this prose may lag — the router is authoritative).
 
 ## Architecture docs
 
-- [`docs/OCEAN_PROJECT_MAP.md`](docs/OCEAN_PROJECT_MAP.md) maps the Ocean quad:
-  `ocean-os`, `ocean-agents`, `ocean-surface`, and `ocean-bedrock`.
+- [`docs/OCEAN_PROJECT_MAP.md`](docs/OCEAN_PROJECT_MAP.md) maps the public Ocean
+  repositories and the private, optional `ocean-bedrock` team knowledge plane.
 - [`docs/AGENT_FILESYSTEM_ARCHITECTURE.md`](docs/AGENT_FILESYSTEM_ARCHITECTURE.md)
   records the typed agent-filesystem direction across the Ocean repos.
 - [`docs/ocean-agents-builds.toml`](docs/ocean-agents-builds.toml) is the

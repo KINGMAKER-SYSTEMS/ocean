@@ -1,11 +1,12 @@
 # ocean-agents
 
 Provider-agnostic agent packages for the [Ocean OS](https://github.com/Risingtides-dev/ocean-os)
-ecosystem — the **deployment layer for Rising Tides' agents** (repositioned
-2026-07-10, [`docs/ocean-agents-builds.toml`](docs/ocean-agents-builds.toml)
-`[positioning]`). Each package pairs a deterministic **harness** (the hands —
-pure stdlib, drivable by any runtime via the `bash` tool) with a
-`CLAUDE.md`/`AGENTS.md` **protocol** (loaded by whatever model is the brain).
+ecosystem. This public repository contains package tooling, surface profiles,
+and the current Rising Tides reference/production package catalog; credentials,
+destinations, and the private shared knowledge plane are not part of it. Each
+package pairs a deterministic **harness** (the hands — pure stdlib, drivable by
+any runtime via the `bash` tool) with a `CLAUDE.md`/`AGENTS.md` **protocol**
+(loaded by whatever model is the brain).
 
 Ocean OS is provider-neutral by design — the agent loop runs under DeepSeek,
 Anthropic, OpenAI, or Google interchangeably. These packages preserve that: all
@@ -77,9 +78,11 @@ hardcode tokens or destinations, don't bypass a courier's harness. Full list in
 
 ## Where this repo sits
 
-The Ocean quad: `ocean-os` (Rust runtime + daemon), `ocean-surface` (thin
-clients), **`ocean-agents`** (agent packages + profiles — this repo), and
-`ocean-bedrock` (shared knowledge/data plane). Cross-repo routing and ownership:
+The public Ocean repos are `ocean-os` (Rust runtime + daemon), `ocean-surface`
+(thin clients), and **`ocean-agents`** (agent packages + profiles — this repo).
+`ocean-bedrock` is the private, optional authenticated knowledge/data plane for
+team deployments; Ocean OS and these packages must remain usable without it.
+Cross-repo routing and ownership:
 [`docs/OCEAN_PROJECT_MAP.md`](docs/OCEAN_PROJECT_MAP.md). Package-side build
 register: [`docs/ocean-agents-builds.toml`](docs/ocean-agents-builds.toml);
 typed-filesystem direction:

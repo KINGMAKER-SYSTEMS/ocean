@@ -167,3 +167,17 @@ docs-local contract that makes manifests/router output authoritative, updated th
 child index, and removed the project map's dead artifact link and false strict-mirroring
 claim.
 _________________________________________________________________________________
+
+time: [05:27am] [07-19-26]
+agent: [ocean] [gpt-5]
+worktree: [main]
+type: [workflow]: Public/private boundary cleanup
+area: [writing]: Cross-repo documentation
+
+Updated the public entry points and local project map after \`ocean-bedrock\` moved
+private. The repository now identifies its public package/tooling role, treats
+Bedrock as an optional authenticated team service, removes assumptions that
+public packages can access it, and points maintenance at ocean-os's canonical
+public map. Verification passed: \`make assistants-check\`, live courier router
+listing (20 slash entries), changed-file local-link validation, \`git diff --check\`,
+and no direct public GitHub links to ocean-bedrock.
