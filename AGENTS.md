@@ -9,6 +9,7 @@ Repo-wide working contract for `ocean-bedrock`.
 - This file governs repo-wide work in `src/`, `scripts/`, `docs/`, `db/`, `test/`, `workflows/`, and top-level durable files.
 - `docs/HANDOFF.md` is the concise canonical current-state handoff; `docs/DEV-LOG.md` is the canonical long-form implementation and deployment history.
 - `docs/OCEAN_PROJECT_MAP.md` maps how `ocean-bedrock` connects to `ocean-os`, `ocean-agents`, and `ocean-surface`.
+- `docs/PUBLIC-EXPOSURE-AND-LICENSE-PROVENANCE-AUDIT-2026-07-19.md` is the private redacted public-readiness evidence baseline and action register; never publish it or commit raw scanner output.
 - `events.md` is the append-only repository ledger.
 
 ## Local Contracts

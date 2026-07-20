@@ -302,3 +302,22 @@ area:      [backend]
 
 Coordination gate cleared by smaths: fast-forwarded master f5e8846 -> e3c461c (S1C SSE fanout, S1D protocol harness, S2 blockers B1-B3) and pushed to origin; feature branch feat/s1c-room-events also pushed for provenance. Production Railway DB migration of 007 remains a separate later gate — no live database was touched.
 _________________________________________________________________________________
+
+time:      [10:52pm] [07-19-26]
+agent:     [ocean] [gpt-5]
+worktree:  [history-audit-20260719]
+type:      security audit
+area:      public readiness
+
+Captured the private redacted full-history exposure and license-provenance
+baseline for all four Ocean repositories. Fresh mirrors included branches,
+tags, GitHub PR refs, and reachable public fork heads; checksum-verified
+Gitleaks 8.30.1 scanned all refs with archive depth 2, and independent object
+inventory proved no reachable blob exceeded the 10 MiB scan cap. The report
+records aggregate findings, disposition, provenance gaps, rewrite criteria, and
+a P0-P3 action register without any credential value, private URL, contributor
+email, or raw scanner output. Current Surface Maps-key containment is commit
+`05f5283`; cloud revocation/restriction and alert closure remain explicit
+operator-side follow-up. Verification: `npm test` (107/107), `npm run smoke`, `npm run
+source:check`, `npm run secret:scan`, `npm run secret:globs:check`, changed-link validation, and
+`git diff --check`.

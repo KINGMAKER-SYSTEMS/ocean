@@ -10,6 +10,7 @@ Keep Bedrock's active architecture, API, operations, and handoff documentation a
 - `DEV-LOG.md` owns chronological implementation and deployment history.
 - `OCEAN_PROJECT_MAP.md` routes work across the Ocean repositories.
 - `API.md` and `openapi.yaml` describe the HTTP API; runtime behavior remains authoritative.
+- `PUBLIC-EXPOSURE-AND-LICENSE-PROVENANCE-AUDIT-2026-07-19.md` is the private redacted baseline and action register for the 2026-07-19 public-readiness audit; raw scanner reports and credential values never belong in docs.
 - The remaining documents are scoped references for the named subsystem or workflow, not automatically current-state authorities. Verify their claims against source and tests before reuse; `OCEAN-LONGHOUSE.md` is an architectural direction document and may describe planned work already implemented elsewhere.
 
 ## Local Contracts
