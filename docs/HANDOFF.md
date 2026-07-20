@@ -20,7 +20,8 @@ It does not own agent execution, provider routing, sessions, or product surfaces
 
 - `ocean-os` owns daemon and runtime authority.
 - `ocean-surface` owns browser, extension, and native product surfaces.
-- `ocean-agents` owns provider-agnostic assistant and courier packages.
+- Public `ocean-agents` owns reusable profiles and package mechanisms.
+- Private `risingtides-agents` owns Rising Tides production assistants, couriers, Slack intake, and workflows.
 - `ocean-bedrock` owns the shared data and knowledge plane.
 
 Use [`OCEAN_PROJECT_MAP.md`](OCEAN_PROJECT_MAP.md) for cross-repo routing.

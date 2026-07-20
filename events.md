@@ -321,3 +321,15 @@ email, or raw scanner output. Current Surface Maps-key containment is commit
 operator-side follow-up. Verification: `npm test` (107/107), `npm run smoke`, `npm run
 source:check`, `npm run secret:scan`, `npm run secret:globs:check`, changed-link validation, and
 `git diff --check`.
+
+time:      [06:14pm] [07-20-26]
+agent:     [ocean] [gpt-5]
+worktree:  [agents-split-closeout-20260720]
+type:      security audit closeout
+area:      public/private repository boundary
+
+Recorded completion of the P1 agent-repository separation. The formerly mixed
+history is preserved in private risingtides-agents; fresh public ocean-agents
+contains only allowlisted reusable mechanisms with secret scanning and push
+protection enabled. Updated Bedrock ownership/handoff/Longhouse docs while
+preserving the 2026-07-19 historical exposure inventory as captured evidence.

@@ -42,7 +42,8 @@ Suggested split for the Ocean repos:
 | `ocean-os` | Core contracts, SDK types, shared schemas, policy language, MCP tool definitions |
 | `ocean-longhouse` | This service: virtual filesystem, mount registry, adapters, tokens, locks, audit, replication |
 | `ocean-surface` | Web UI/dashboard for browsing files, managing mounts/tokens, viewing sessions/audit/search |
-| `ocean-agents` | Agent clients, prompts, skills, MCP client configs, handoff/session conventions |
+| public `ocean-agents` | Reusable profiles, package conventions, and generic client/skill wrappers |
+| private `risingtides-agents` | Rising Tides production clients, prompts, skills, MCP configs, and workflow behavior |
 
 The current `ocean-bedrock` prototype is the cloud-box support layer for Longhouse-adjacent storage, context, ingest, and MCP-facing infrastructure. It should align with canonical `ocean-os/docs/LONGHOUSE.md` rather than redefining Longhouse.
 
@@ -269,7 +270,7 @@ Initial Postgres schema drafts:
 
 - Expose MCP server.
 - Connect `ocean-surface` dashboard.
-- Publish `ocean-agents` client/skill wrappers.
+- Publish reusable `ocean-agents` client/skill wrappers; keep deployment-specific configuration in private `risingtides-agents`.
 - Add org/team/project abstractions.
 - Add approval flows for destructive actions and secret access.
 

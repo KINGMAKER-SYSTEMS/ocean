@@ -1,6 +1,6 @@
 # Ocean Public Exposure and License-Provenance Audit — 2026-07-19
 
-Status: completed evidence baseline; action register open.
+Status: completed evidence baseline; P1 agent-repository split completed 2026-07-20; remaining action register open.
 
 Classification: private Rising Tides security and release-planning record. Do not
 copy this report into a public issue or public repository.
@@ -25,6 +25,11 @@ today.
 - `ocean-agents` is the main licensing-boundary risk because public runtime
   profiles/tooling are mixed with Rising Tides production assistants, couriers,
   campaign assets, and rendered output.
+
+Post-audit update (2026-07-20): that mixed repository was renamed to private
+`risingtides-agents`; a fresh allowlisted public `ocean-agents` repository was
+created with new history and reusable mechanism only. The historical exposure
+figures below remain the correct baseline for the formerly public mixed history.
 - `ocean-surface` needs an asset-provenance pass and an included Poppins license
   before repository-wide licensing.
 - `ocean-os` has third-party `NOTICE.md` and crate-scoped licenses but no root
@@ -257,9 +262,10 @@ not by reopening the private repository.
 
 ### P1 — separate licensable product from private factory
 
-- [ ] Create an `ocean-agents` public-package allowlist.
-- [ ] Move production assistant/courier packages and content-agent media/output
-      to a private package location while preserving public generic tooling.
+- [x] Create and execute an `ocean-agents` public-package allowlist (fresh public repository, 2026-07-20).
+- [x] Preserve production assistant/courier packages and content-agent media/output
+      in private `risingtides-agents` while publishing generic tooling in a fresh
+      public `ocean-agents` repository.
 - [ ] Classify `HANDOFF.md`, `events.md`, archived plans, and operational ledgers
       in each public repository as public-development evidence or private
       company process.
