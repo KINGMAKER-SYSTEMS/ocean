@@ -10,6 +10,7 @@ Keep cross-repo routing, package architecture, build registration, and fleet-por
 - `ocean-agents-builds.toml` owns the codified package-side build list.
 - `AGENT_FILESYSTEM_ARCHITECTURE.md` owns the typed agent-filesystem direction.
 - `PORTING_ROADMAP.md` owns the active migration convention and wave plan.
+- `orchestrator/` owns the factory/orchestration operating references relocated from public `ocean-os` on 2026-07-19; `orchestrator/workflows/*.md` is a live Longhouse workflow-discovery dir (`{cwd}/docs/orchestrator/workflows/`).
 - Other documents are scoped references for their named subject; verify current claims before reuse.
 
 ## Local Contracts

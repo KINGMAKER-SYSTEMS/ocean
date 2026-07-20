@@ -193,3 +193,9 @@ Enabled GitHub secret scanning and push protection for the public
 audit. A checksum-verified Gitleaks 8.30.1 mirror scan across branches, tags,
 GitHub PR refs, and recursive archives reported zero findings. No package,
 profile, router, or generated assistant file changed.
+
+## 2026-07-19 — knowledge-separation migration (wave 1)
+
+- Repository visibility flipped to **private** (`gh repo edit --visibility private`); 0 forks/stars at flip time, open PR feat/offshore intact, Actions still enabled.
+- Received relocated internal material from public `ocean-os`: factory/orchestration docs now at `docs/orchestrator/` (Longhouse workflow-discovery-compatible path) and operational skills at `internal/ocean-os/skills/` (live copies in `~/.config/ocean-rs/skills/`).
+- worktree: main
