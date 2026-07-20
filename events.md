@@ -181,3 +181,15 @@ public packages can access it, and points maintenance at ocean-os's canonical
 public map. Verification passed: `make assistants-check`, live courier router
 listing (20 slash entries), changed-file local-link validation, `git diff --check`,
 and no direct public GitHub links to ocean-bedrock.
+
+time:      [10:57pm] [07-19-26]
+agent:     [ocean] [gpt-5]
+worktree:  [security-settings-ledger-20260719]
+type:      security
+area:      GitHub repository settings
+
+Enabled GitHub secret scanning and push protection for the public
+`Risingtides-dev/ocean-agents` repository during the full-history public-readiness
+audit. A checksum-verified Gitleaks 8.30.1 mirror scan across branches, tags,
+GitHub PR refs, and recursive archives reported zero findings. No package,
+profile, router, or generated assistant file changed.
