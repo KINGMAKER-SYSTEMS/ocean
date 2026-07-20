@@ -1,4 +1,4 @@
-# ocean-agents — agent index
+# risingtides-agents — agent index
 
 > Loaded automatically by the Ocean runtime: `ocean-agent` walks the working
 > directory's ancestors and concatenates every `AGENTS.md` / `CLAUDE.md` it
@@ -10,6 +10,12 @@ This repo holds **provider-agnostic agent packages** that run *on top of* the
 Ocean runtime. It is intentionally separate from `ocean-os` (which stays pure
 Rust). Two families so far: **couriers** (ship payloads outbound over a route)
 and **assistants** (brain-in-the-loop specialists that operate on a surface).
+
+This is the **private Rising Tides production catalog**. Reusable,
+organization-neutral mechanisms live in the public `ocean-agents` repository.
+Never move a production package, SOP, workflow, media asset, destination, or
+internal skill into public Ocean without an explicit allowlist and operator
+approval. See `docs/PUBLIC_PRIVATE_REPOSITORY_SEPARATION_2026-07-20.md`.
 
 ## Assistants — surface specialists
 
@@ -80,8 +86,8 @@ manifests, so this prose may lag — the router is authoritative).
   repositories and the private, optional `ocean-bedrock` team knowledge plane.
 - [`docs/AGENT_FILESYSTEM_ARCHITECTURE.md`](docs/AGENT_FILESYSTEM_ARCHITECTURE.md)
   records the typed agent-filesystem direction across the Ocean repos.
-- [`docs/ocean-agents-builds.toml`](docs/ocean-agents-builds.toml) is the
-  codified source of truth for the `ocean-agents` package-side build list.
+- [`docs/risingtides-agents-builds.toml`](docs/risingtides-agents-builds.toml) is the
+  codified source of truth for the `risingtides-agents` package-side build list.
 - [`docs/PORTING_ROADMAP.md`](docs/PORTING_ROADMAP.md) tracks the migration of
   the existing agent fleet into packages (the porting convention + wave plan).
 

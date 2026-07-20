@@ -434,7 +434,7 @@ def _bedrock_cards(formats, prompts):
     idx = ["# Rising Tides — Content Prompt Library",
            "", "Reusable, proven video prompts per content format — the crowned **master** "
            "plus top production performers. Source of truth: the `content-agent` package in "
-           "ocean-agents (local SQLite); this is the org-wide-readable mirror, refreshed on publish.",
+           "risingtides-agents (local SQLite); this is the org-wide-readable mirror, refreshed on publish.",
            "", "| Format | Master method | Council | Card |", "|---|---|---|---|"]
     for f in formats:
         m = next((p for p in prompts if p["id"] == f["master_prompt_id"]), None)

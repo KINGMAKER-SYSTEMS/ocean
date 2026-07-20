@@ -1,14 +1,14 @@
-# Machine-readable build register for the ocean-agents side of the Agent
+# Machine-readable build register for the risingtides-agents side of the Agent
 # Filesystem direction. The architecture doc may summarize this, but this file
 # is the source of truth for package-side builds.
 
 version = 2
-repo = "ocean-agents"
+repo = "risingtides-agents"
 runtime_repo = "ocean-os"
 architecture_doc = "docs/AGENT_FILESYSTEM_ARCHITECTURE.md"
 migration_doc = "docs/PYTHON_TO_RUST_MIGRATION.md"
 
-# Reality check: ocean-agents currently has zero real primitive-native builds.
+# Reality check: risingtides-agents currently has zero real primitive-native builds.
 # What exists here today is filesystem content and Python parity harnesses. The
 # typed primitive implementations and runtime enforcement live in ocean-os.
 primitive_native_builds = 0
@@ -152,14 +152,14 @@ primitive_native = false
 owns = ["docs/PYTHON_TO_RUST_MIGRATION.md deletion gates"]
 acceptance = [
   "After verified Rust replacements are live, Python bridge, router, and harness code are removed.",
-  "ocean-agents contains manifests, profiles, skills, SOPs, and test fixtures only.",
+  "risingtides-agents contains manifests, profiles, skills, SOPs, and test fixtures only.",
 ]
 depends_on = ["A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8", "A9"]
 
 # ---------------------------------------------------------------------------
 # Knowledge-first repositioning — decided 2026-07-10.
 #
-# ocean-agents is the DEPLOYMENT LAYER for Rising Tides' agents, not a demo
+# risingtides-agents is the DEPLOYMENT LAYER for Rising Tides' agents, not a demo
 # folder. Two agent classes:
 #   - interactive assistants  (operator-invoked, brain-in-the-loop, surface-bound)
 #   - automation agents       (workflow-invoked, non-interactive, typed Contract)

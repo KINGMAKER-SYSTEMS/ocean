@@ -63,7 +63,7 @@ doc exists to name what's there, name what's missing, and sequence the build.
 | --- | --- | --- | --- |
 | **ocean-os** | Runtime + daemon (`:4780`) + **typed engine** | Rust | model, tools, local context, the agent loop, **the workflow executor**, **the memory engine**, the low-level parse core |
 | **ocean-bedrock** | Shared knowledge layer — git-backed files + ledger | Node (>=22) | Shared-tier memory (`/docs /context /handoffs /sessions`), semantic search, graph, **workflow specs as data** |
-| **ocean-agents** | Agent *instances* (this repo) | TOML + md + py | couriers (`file-courier`), assistants (`content-agent`, `bonzai`), surface profiles |
+| **risingtides-agents** | Agent *instances* (this repo) | TOML + md + py | couriers (`file-courier`), assistants (`content-agent`, `bonzai`), surface profiles |
 | **ocean-surface** | View only — PWA + GPUI + VSCode ext | Rust/TS | renders/steers; **no agent logic** |
 
 > `~/ocean-os-repo` is a second clone of `ocean-os` (same GitHub remote
@@ -72,7 +72,7 @@ doc exists to name what's there, name what's missing, and sequence the build.
 **Separation principle:** the *execution* primitives (model, tools, the loop,
 the typed engine) live in `ocean-os`; the *shared/knowledge* primitives (shared
 memory, workflow specs-as-data) live in `ocean-bedrock`; *instances* live in
-`ocean-agents`; *views* in `ocean-surface`. They meet at typed boundaries, never
+`risingtides-agents`; *views* in `ocean-surface`. They meet at typed boundaries, never
 by merging stores.
 
 ---
@@ -351,7 +351,7 @@ There are two build tracks:
 
 - **Runtime foundation** in `ocean-os`: typed primitives, stores, dispatch, and
   engines.
-- **Agent package work** in `ocean-agents`: the filesystem artifacts the runtime
+- **Agent package work** in `risingtides-agents`: the filesystem artifacts the runtime
   consumes -- manifests, profiles, SOPs, tool grants, contracts, and fixtures.
 
 This repo should not grow a second runtime. Its end-state is the pure-content
@@ -377,13 +377,13 @@ verified.
 Each step is independently shippable and lands in `ocean-os` without disturbing a
 running assistant.
 
-### 9.2 Agent package build list (`ocean-agents`)
+### 9.2 Agent package build list (`risingtides-agents`)
 
 The codified source of truth for the package-side build list is
-[`ocean-agents-builds.toml`](./ocean-agents-builds.toml). Update that register
+[`risingtides-agents-builds.toml`](./risingtides-agents-builds.toml). Update that register
 first; this table is the human-readable mirror.
 
-**Reality check:** `ocean-agents` currently has **zero primitive-native builds**.
+**Reality check:** `risingtides-agents` currently has **zero primitive-native builds**.
 The useful things in this repo today are filesystem conventions, authored
 profiles/manifests/SOPs, and transitional Python harnesses. The real typed
 primitive implementation and enforcement happen in `ocean-os`.
@@ -404,7 +404,7 @@ primitive implementation and enforcement happen in `ocean-os`.
 | **A12. Automation-agent retyping** | `PROPOSED` | `couriers/*` migration, `agent.toml` class + contract stanzas | The courier framing is retired: `/ship`/`/say`/`/resolve` become tool grants; each automation agent declares a typed `Contract` invoked by workflows through the daemon. No new couriers after this lands. |
 | **A13. Knowledge-parity gate** | `PROPOSED` | per-agent knowledge fixture suites, future Makefile gate | Each deployed agent must answer a company-operations fixture suite using ONLY its declared bedrock mounts + accumulated memory (answers absent from `system.md`). No agent registers as deployed until its suite passes. |
 
-> **Knowledge-first repositioning (decided 2026-07-10).** `ocean-agents` is the
+> **Knowledge-first repositioning (decided 2026-07-10).** `risingtides-agents` is the
 > deployment layer for Rising Tides' agents: interactive **assistants** and
 > workflow-invoked **automation agents**. The differentiator is baked-in company
 > knowledge — bedrock mounts resolved by the runtime at turn time (A11) plus

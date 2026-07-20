@@ -1,10 +1,10 @@
-# How ocean-agents talks to the Ocean OS daemon
+# How risingtides-agents talks to the Ocean OS daemon
 
 This repo holds **provider-agnostic agent packages** (couriers + assistants) that
 run *on top of* the [Ocean OS](https://github.com/Risingtides-dev/ocean-os)
 runtime. None of them embed agent logic, provider credentials, or session
 authority — those live in the daemon. This guide documents the three seams where
-ocean-agents and the daemon meet:
+risingtides-agents and the daemon meet:
 
 1. **Surface-profile loading** — how the daemon picks up an assistant's
    `system.md` at runtime, preferring it over its compiled-in seed prompt.

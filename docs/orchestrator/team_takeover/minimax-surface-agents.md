@@ -1,8 +1,8 @@
 # Minimax Surface/Agents Scout — Takeover Triage
 
-**Role:** Surface/Agents Scout (MiniMax unavailable — cheap fallback)  
-**Model:** Ocean daemon agent (current runtime model)  
-**Scope:** `../ocean-surface`, `../ocean-agents`, `../ocean-orchestrator` handoff/state files  
+**Role:** Surface/Agents Scout (MiniMax unavailable — cheap fallback)
+**Model:** Ocean daemon agent (current runtime model)
+**Scope:** `../ocean-surface`, `../risingtides-agents`, `../ocean-orchestrator` handoff/state files
 **Date:** 2026-06-12
 
 ---
@@ -22,12 +22,12 @@ gh pr list --state open (all 3 repos)
 
 ## Executive Summary
 
-The E9/E10 handoff claimed **5 open tickets** with partial branches (256/257/261/262/258).  
-**Reality:** The v1 branches for 256, 257, 261, 262 are already merged into `origin/main` (tips point to main or are empty-diff). The *real* unfinished tail lives in **v2 follow-up branches** and **locked Claude worktrees** that were never PR'd.  
+The E9/E10 handoff claimed **5 open tickets** with partial branches (256/257/261/262/258).
+**Reality:** The v1 branches for 256, 257, 261, 262 are already merged into `origin/main` (tips point to main or are empty-diff). The *real* unfinished tail lives in **v2 follow-up branches** and **locked Claude worktrees** that were never PR'd.
 
 - **ocean-surface** has **6 unmerged branches** with real commits (257-v2, 261-v2, 270, 279, 280 + uncommitted widget/float-mode work on main checkout).
 - **ocean-os** has **3 unmerged branches** with real commits (256-v2, 262-v2, 258).
-- **ocean-agents** has **1 unmerged branch** (`fix/ocean-171-slack-bridge-env-doc`) with uncommitted socket-listener hardening + content-agent skill updates. The `feat/ocean-244-slack-canvas-bridge` branch (the Python bridge consumer) is **not merged**.
+- **risingtides-agents** has **1 unmerged branch** (`fix/ocean-171-slack-bridge-env-doc`) with uncommitted socket-listener hardening + content-agent skill updates. The `feat/ocean-244-slack-canvas-bridge` branch (the Python bridge consumer) is **not merged**.
 - **No open PRs** exist for any of the original 5 tickets.
 
 ---
@@ -71,7 +71,7 @@ The E9/E10 handoff claimed **5 open tickets** with partial branches (256/257/261
 - **Branches merged into origin/main:** `feat/ocean-256-projection-rooms`, `feat/ocean-262-canvas-fulfill-route`
 - **Open PRs:** only #209 (OCEAN-307 tree-sitter) and #204 (docs handoff) — none of the 5 tickets.
 
-### `ocean-agents` (HEAD @ `2576866` on `fix/ocean-171-slack-bridge-env-doc`)
+### `risingtides-agents` (HEAD @ `2576866` on `fix/ocean-171-slack-bridge-env-doc`)
 - **Not on main.** The checkout is on branch `fix/ocean-171-slack-bridge-env-doc` with uncommitted changes.
 - **Uncommitted diff (socket_listener.py):**
   - `AUTOREPLY_CHANNELS` env-gated auto-reply gating (prevents bot spam)
@@ -91,7 +91,7 @@ The E9/E10 handoff claimed **5 open tickets** with partial branches (256/257/261
 1. **No PRs for any of the 5 tickets.** Work exists in branches/worktrees but never made it to review.
 2. **Branch naming confusion.** v1 branches are merged; v2 branches hold the real remaining work. An agent picking up "OCEAN-257" from the handoff will find the v1 branch empty and think it's done.
 3. **`main.rs` pipeline serialization required.** 262-v2 (+629 lines) and 258 (+11 lines) both touch `crates/ocean-daemon/src/main.rs`. Factory Rule E says these must be ONE PR at a time, never parallel.
-4. **ocean-agents checkout is on a side branch with uncommitted work.** Any factory agent firing into `../ocean-agents` will land on `fix/ocean-171-slack-bridge-env-doc`, not main, and may collide with the uncommitted socket_listener.py changes.
+4. **risingtides-agents checkout is on a side branch with uncommitted work.** Any factory agent firing into `../risingtides-agents` will land on `fix/ocean-171-slack-bridge-env-doc`, not main, and may collide with the uncommitted socket_listener.py changes.
 5. **Locked worktrees.** `worktree-agent-a4b837151c678ac0f` in ocean-surface is "locked" — may block cleanup.
 6. **Uncommitted float-mode work on ocean-surface main.** If a factory agent starts from main and does `git status`, it will see dirty tree and may abort or commit unrelated widget work.
 
@@ -102,9 +102,9 @@ The E9/E10 handoff claimed **5 open tickets** with partial branches (256/257/261
 **Immediate (this tick):**
 1. **Stabilize the checkout state:**
    - `ocean-surface`: stash or branch the uncommitted widget work (`git stash` or `git checkout -b feat/floating-widget-wip`) so main is clean.
-   - `ocean-agents`: switch checkout back to `main`, stash the uncommitted 171 changes, and decide whether 171 needs a PR or is obsolete.
+   - `risingtides-agents`: switch checkout back to `main`, stash the uncommitted 171 changes, and decide whether 171 needs a PR or is obsolete.
 2. **Open PR for the smallest closed-loop ticket first:**
-   - **OCEAN-262** is the best candidate: the daemon route (262-v2, +629 lines) + the Python bridge (244, ocean-agents) together close the Slack canvas loop end-to-end. But 262-v2 touches `main.rs` — needs full workspace build + Codex review.
+   - **OCEAN-262** is the best candidate: the daemon route (262-v2, +629 lines) + the Python bridge (244, risingtides-agents) together close the Slack canvas loop end-to-end. But 262-v2 touches `main.rs` — needs full workspace build + Codex review.
    - **Alternative:** OCEAN-258 (CRDT) is self-contained in SDK + docs + main.rs wiring, but it's the heaviest ticket. Sequence it after 262 if throughput is the goal.
 3. **Clean up merged v1 branches** (`feat/ocean-257-multi-canvas`, `feat/ocean-261-place-call-ui`, `feat/ocean-256-projection-rooms`, `feat/ocean-262-canvas-fulfill-route`) so future scouts don't mistake them for live work.
 4. **Before firing any agent:** verify the target worktree's branch tip is actually ahead of main (`git log --oneline origin/main..HEAD`) and that the diff is additive, not a revert/deletion trap (the 257-v2 and 261-v2 diff stats showed massive deletions when diffed against origin/main — investigate whether those branches are based on an older main or contain actual removals).

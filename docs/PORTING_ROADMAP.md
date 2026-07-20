@@ -1,14 +1,14 @@
-# Porting Roadmap — fleet → ocean-agents packages
+# Porting Roadmap — fleet → risingtides-agents packages
 
 > Source of truth for the migration of the existing agent fleet
-> (`~/Documents/Development/`, `~/Projects/active/`) into ocean-agents
+> (`~/Documents/Development/`, `~/Projects/active/`) into risingtides-agents
 > packages. Inventory audited 2026-07-10 (45 project dirs; 19 active
 > production agents).
 
 ## The porting convention (what a "port" is — and is not)
 
-ocean-agents holds **manifests, personas, protocols, SOPs, and thin
-harnesses** — never the engine (see `docs/ocean-agents-builds.toml`, A10:
+risingtides-agents holds **manifests, personas, protocols, SOPs, and thin
+harnesses** — never the engine (see `docs/risingtides-agents-builds.toml`, A10:
 end state is "manifests, profiles, skills, SOPs, and test fixtures only").
 A port does NOT vendor the source codebase. Engines stay where they run
 today (their launchd/cron jobs untouched); the package is the agent's

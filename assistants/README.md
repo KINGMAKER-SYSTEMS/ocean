@@ -83,7 +83,7 @@ It does **not** read `_shared/`, does **not** path-resolve `_base/<SURFACE>/`, d
 symlink-vs-resolver composition is *"Still parked for John."* So the daemon layering
 is **flat** — the rich `_base/` composition the spec wants is not runtime-side yet.
 
-To make the DRY pattern **real today** without a Rust change, ocean-agents assembles
+To make the DRY pattern **real today** without a Rust change, risingtides-agents assembles
 the base itself with [`tools/compose_profile.py`](tools/compose_profile.py) — option
 **(b)** from §4/§13 (path-resolve + concatenate; no symlink sprawl; base read-only).
 It composes `_shared/system.md` + `_base/<SURFACE>/{system,comms,canvas,tools,limits,safety,vibe}.md`

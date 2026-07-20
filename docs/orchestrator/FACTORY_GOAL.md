@@ -13,7 +13,7 @@ This orchestrator is an installed extension, not an Ocean core subsystem. Withou
 Three repos, one system:
 - `ocean-os` (~/dev/ocean-os) — daemon, runtime, providers, agent, TUI. The brain.
 - `ocean-surface` (~/dev/ocean-surface) — PWA/voice client. The face.
-- `ocean-agents` (~/dev/ocean-agents) — bridges (Slack, etc.).
+- `risingtides-agents` (~/dev/risingtides-agents) — bridges (Slack, etc.).
 
 Ledger: Linear workspace **rising-tides-agents**, team **OCEAN**.
 GitHub: `Risingtides-dev/<repo>`. Live daemon: `127.0.0.1:4780` (`/health`, not `/v1/health`).

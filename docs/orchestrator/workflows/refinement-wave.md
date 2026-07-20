@@ -11,7 +11,7 @@ This is the Ocean-native discovery/refinement workflow for finding the next real
 
 - **Name:** `ocean-os-refinement-wave`
 - **Purpose:** discover verified, ticketable improvements across the Ocean ecosystem.
-- **Repos:** `~/dev/ocean-os`, `~/dev/ocean-surface`, `~/dev/ocean-agents`
+- **Repos:** `~/dev/ocean-os`, `~/dev/ocean-surface`, `~/dev/risingtides-agents`
 - **Ledger:** Linear OCEAN team
 - **Primary output:** real Linear tickets, or locally queued findings if Linear is unavailable.
 
@@ -84,7 +84,7 @@ Finding format:
 
 ```text
 Title: <short user-impact title>
-Repo: ocean-os | ocean-surface | ocean-agents | cross
+Repo: ocean-os | ocean-surface | risingtides-agents | cross
 Severity: P0 | P1 | P2 | P3
 Evidence: <file:line, command output, endpoint result, CI link, or observed failure>
 Impact: <what user/system behavior is wrong>

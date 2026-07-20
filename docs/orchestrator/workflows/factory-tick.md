@@ -1,11 +1,11 @@
 ---
 name: ocean-os-factory-tick
-description: Ocean-native factory loop for keeping ocean-os, ocean-surface, and ocean-agents moving through daemon-mediated tools without depending on any external orchestrator.
+description: Ocean-native factory loop for keeping ocean-os, ocean-surface, and risingtides-agents moving through daemon-mediated tools without depending on any external orchestrator.
 ---
 
 # Workflow: Ocean OS Factory Tick
 
-This is the Ocean-native factory loop for keeping `ocean-os`, `ocean-surface`, and `ocean-agents` moving without depending on an external orchestrator repository. A single Ocean agent can execute serial steps through normal daemon-mediated tools, but every worker dispatch/fanout instruction in this workflow requires an installed orchestration extension. Without that extension, treat dispatch phases as an advisory/manual checklist—core daemon/runtime and Longhouse do not spawn workers. Longhouse may surface the workflow as context; the daemon remains generic permission-gated execution authority.
+This is the Ocean-native factory loop for keeping `ocean-os`, `ocean-surface`, and `risingtides-agents` moving without depending on an external orchestrator repository. A single Ocean agent can execute serial steps through normal daemon-mediated tools, but every worker dispatch/fanout instruction in this workflow requires an installed orchestration extension. Without that extension, treat dispatch phases as an advisory/manual checklist—core daemon/runtime and Longhouse do not spawn workers. Longhouse may surface the workflow as context; the daemon remains generic permission-gated execution authority.
 
 Throughout this document, **orchestrator** means that installed extension, never a core daemon/runtime/Longhouse subsystem. The extension owns worker definitions, tier routing, worktree lanes, lifecycle, and joins; it calls generic daemon tools and APIs for gated actions.
 
@@ -14,7 +14,7 @@ Throughout this document, **orchestrator** means that installed extension, never
 - **Name:** `ocean-os-factory-tick`
 - **Owner:** Ocean OS / Longhouse
 - **Primary repo:** `~/dev/ocean-os`
-- **Sibling repos:** `~/dev/ocean-surface`, `~/dev/ocean-agents`
+- **Sibling repos:** `~/dev/ocean-surface`, `~/dev/risingtides-agents`
 - **Ledger:** Linear workspace `rising-tides-agents`, team `OCEAN`
 - **GitHub org:** `Risingtides-dev`
 - **Live daemon:** `http://127.0.0.1:4780` (`GET /health`, not `/v1/health`)

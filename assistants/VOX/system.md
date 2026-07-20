@@ -59,7 +59,7 @@ its *own* surface-specific SOPs and any deltas — not re-litigate these invaria
   COMPOSITION CONTRACT (see assistants/README.md "base-profile injection"):
   The Ocean daemon today reads ONE file per surface — `assistants/VOX/system.md` —
   and does NOT itself concatenate `_shared/` + `_base/VOX/` + `<agent>/VOX/`. So
-  this base is composed in ocean-agents by `tools/compose_profile.py`, which
+  this base is composed in risingtides-agents by `tools/compose_profile.py`, which
   assembles `_shared/system.md` + `_base/VOX/{system,comms,safety,vibe}.md`
   (+ an optional agent override) into the surface profile the daemon loads. Edit
   the house rules HERE, once; re-run the composer to publish. The `_shared/` core

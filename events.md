@@ -199,3 +199,15 @@ profile, router, or generated assistant file changed.
 - Repository visibility flipped to **private** (`gh repo edit --visibility private`); 0 forks/stars at flip time, open PR feat/offshore intact, Actions still enabled.
 - Received relocated internal material from public `ocean-os`: factory/orchestration docs now at `docs/orchestrator/` (Longhouse workflow-discovery-compatible path) and operational skills at `internal/ocean-os/skills/` (live copies in `~/.config/ocean-rs/skills/`).
 - worktree: main
+
+time:      [06:05pm] [07-20-26]
+agent:     [ocean] [gpt-5]
+worktree:  [agents-split-closeout-20260720]
+type:      repository separation
+area:      private production package catalog
+
+Renamed the private production repository from ocean-agents to
+risingtides-agents after extracting a fresh allowlisted public ocean-agents
+repository. Updated self-references, package/build contracts, the ecosystem map,
+and the private boundary manifest. Full production history and package content
+remain private; public packages now contain reusable mechanism only.

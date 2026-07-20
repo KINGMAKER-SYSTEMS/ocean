@@ -5,7 +5,7 @@ Slack canvas bridge consumer — daemon `slack_canvas` ops → Slack Canvas API 
 The agent's `slack_canvas` tool (ocean-os runtime, OCEAN-214) emits validated
 canvas ops (create / read / update / append / list). The ocean-os daemon relays
 each as an `AgentTurnEvent::SlackCanvas` over the `/v1/agent/events` SSE stream
-(the seam OCEAN-235/#165 defines). Nothing on the ocean-agents side consumed
+(the seam OCEAN-235/#165 defines). Nothing on the risingtides-agents side consumed
 them: a `create`/`update` dead-ended, and a `read` handed the agent the daemon's
 `pending_bridge` placeholder forever. This module is that missing consumer.
 

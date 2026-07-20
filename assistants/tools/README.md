@@ -15,7 +15,7 @@ But the Ocean daemon does **not** compose multiple files — verified in ocean-o
   composition is *"Still parked for John"* — i.e. not implemented runtime-side.
 
 So the daemon-composed layering is **flat**. To keep the house rules DRY without
-waiting on a Rust change, ocean-agents assembles the base itself — this composer —
+waiting on a Rust change, risingtides-agents assembles the base itself — this composer —
 into the single `system.md` the daemon actually loads. This is **option (b)** from
 spec §4/§13 (path-resolve + concatenate; no symlink sprawl; base stays read-only),
 done in agents-space.

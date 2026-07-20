@@ -1,4 +1,4 @@
-# ocean-agents documentation contract
+# risingtides-agents documentation contract
 
 ## Purpose
 
@@ -7,7 +7,8 @@ Keep cross-repo routing, package architecture, build registration, and fleet-por
 ## Ownership
 
 - `OCEAN_PROJECT_MAP.md` owns cross-repo routing from this repository.
-- `ocean-agents-builds.toml` owns the codified package-side build list.
+- `PUBLIC_PRIVATE_REPOSITORY_SEPARATION_2026-07-20.md` records the executed public/private package split and is authoritative for the repository boundary.
+- `risingtides-agents-builds.toml` owns the codified package-side build list.
 - `AGENT_FILESYSTEM_ARCHITECTURE.md` owns the typed agent-filesystem direction.
 - `PORTING_ROADMAP.md` owns the active migration convention and wave plan.
 - `orchestrator/` owns the factory/orchestration operating references relocated from public `ocean-os` on 2026-07-19; `orchestrator/workflows/*.md` is a live Longhouse workflow-discovery dir (`{cwd}/docs/orchestrator/workflows/`).

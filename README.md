@@ -1,90 +1,84 @@
-# ocean-agents
+# risingtides-agents
 
-Provider-agnostic agent packages for the [Ocean OS](https://github.com/Risingtides-dev/ocean-os)
-ecosystem. This public repository contains package tooling, surface profiles,
-and the current Rising Tides reference/production package catalog; credentials,
-destinations, and the private shared knowledge plane are not part of it. Each
-package pairs a deterministic **harness** (the hands — pure stdlib, drivable by
-any runtime via the `bash` tool) with a `CLAUDE.md`/`AGENTS.md` **protocol**
-(loaded by whatever model is the brain).
+Private production agent catalog for Rising Tides deployments on
+[Ocean OS](https://github.com/Risingtides-dev/ocean-os).
 
-Ocean OS is provider-neutral by design — the agent loop runs under DeepSeek,
-Anthropic, OpenAI, or Google interchangeably. These packages preserve that: all
-transport/IO logic lives in the harness, so swapping the model never changes
-behavior. This repo is intentionally **not** part of the `ocean-os` Rust
-workspace (that repo stays pure Rust crates/containers); these agents *run on top
-of* the Ocean runtime.
+This repository contains organization-specific assistants, couriers, Slack
+intake, SOPs, prompt libraries, internal skills, factory workflows, and package
+harnesses. It is private and must not be made public as a whole.
 
-**Start with [`AGENTS.md`](AGENTS.md)** — the agent index. It lists every
-package and is loaded automatically by the runtime; this README only orients.
+Reusable, organization-neutral profiles and reference packages live in the
+public [`ocean-agents`](https://github.com/Risingtides-dev/ocean-agents)
+repository. Bedrock remains the separate private knowledge/data plane; this repo
+owns behavior, not shared-record storage authority.
 
-## Two families
+**Start with [`AGENTS.md`](AGENTS.md)** for the live package inventory and local
+contracts.
 
-| Group | What it is | Details |
-|---|---|---|
-| [`assistants/`](assistants) | **Surface specialists** — brain-in-the-loop agents an operator *unlocks*; each loads a surface profile (`assistants/<SURFACE>/system.md`) that Ocean OS prefers over its compiled seed prompt. Six named specialists (bonzai, content-agent, prompt-lab, voice-intake, creator-research, yt-prompt-bible) plus composed house profiles for surfaces like `SLACK`, `CNVS`, `MOBL`, `VOX`, `BRWSR`. | [`assistants/README.md`](assistants/README.md) |
-| [`couriers/`](couriers) | **Delivery agents** — narrow, single-purpose agents that ship a payload to a destination over a shared route, invoked by slash command through the hub router. Ten packages are currently registered, from `/ship`/`/say` (file-courier) to `/ycp`, `/hopecore`, and `/coremusic`. | [`couriers/ARCHITECTURE.md`](couriers/ARCHITECTURE.md) |
+## Production package families
 
-The registry tables live in `AGENTS.md`; the **live** courier registry is the
-router itself (it reads each `courier.toml`, so it never lags):
+- [`assistants/`](assistants) — named surface specialists plus composed house
+  profiles. Production specialists include content generation, prompt
+  optimization, voice intake, creator research, and long-form format tooling.
+- [`couriers/`](couriers) — manifest-discovered automation and delivery packages
+  for media, email, distribution, review, and operational maintenance.
+- [`docs/orchestrator/`](docs/orchestrator) — private factory and Longhouse
+  workflow-discovery references.
+- [`internal/`](internal) — proprietary operational skills relocated from public
+  Ocean repositories.
+
+The live courier inventory is manifest-driven:
 
 ```bash
 python3 couriers/hub/router.py list
 ```
 
-## Layout convention
+## Boundary
 
-```
-ocean-agents/
-├── assistants/               # surface specialists + house surface profiles
-│   ├── _shared/              # cross-surface core identity (composed under every profile)
-│   ├── _base/<SURFACE>/      # per-surface house SOP sources (composer inputs)
-│   ├── <SURFACE>/system.md   # THE composed profile Ocean OS loads — never hand-edit
-│   ├── <assistant>/          # a named specialist (system.md, CLAUDE.md, harness/, bin/)
-│   └── bridge/               # Slack Socket Mode intake → daemon
-├── couriers/                 # a class: same route, same workflow, different payloads
-│   ├── hub/router.py         # slash → courier dispatch (reads the manifests)
-│   ├── transport/            # THE route — shared, stdlib, no per-agent dup
-│   └── <courier>/            # a species: courier.toml + CLAUDE.md + harness/ + bin/
-├── docs/                     # cross-repo map, architecture, build register, roadmap
-└── README.md
-```
+The public/private split is capability-based:
 
-Adding a package is data, not plumbing: a courier = drop a folder with a
-`courier.toml` (no router edits); an assistant or surface = drop a folder with a
-`system.md` (surface profiles are composed — see the authoring flow in
-[`assistants/README.md`](assistants/README.md)).
+- **Public `ocean-agents`:** reusable mechanism, generic profiles, package
+  conventions, Bonzai, file-courier, manifest routing, and generic transport.
+- **Private `risingtides-agents`:** Rising Tides identities, operating recipes,
+  artists/campaigns, destinations, Slack app behavior, production automation,
+  media, internal factory procedures, and private package roadmaps.
+- **Private `ocean-bedrock`:** authenticated knowledge, durable records,
+  context, handoffs, search/graph, and team data.
 
-## Invoking a courier
+See
+[`docs/PUBLIC_PRIVATE_REPOSITORY_SEPARATION_2026-07-20.md`](docs/PUBLIC_PRIVATE_REPOSITORY_SEPARATION_2026-07-20.md)
+for the executed separation record.
 
-```bash
-python3 couriers/hub/router.py run <slash> [args]   # deterministic → harness; agentic → daemon prompt
-```
+## Local layout
 
-Or drive one directly, e.g. file-courier:
-
-```bash
-cd couriers/file-courier
-cp courier.env.example courier.env     # add your Slack bot token (or use ~/.slack_token)
-# drop files into dropbox/, then:
-bin/courier resolve "https://workspace.slack.com/archives/C0123ABCD"
-bin/courier send --channel C0123ABCD
-bin/courier message --channel C0123ABCD "done ✅"
+```text
+risingtides-agents/
+├── assistants/               # production specialists and surface profiles
+├── couriers/                 # production automation/delivery packages
+├── docs/
+│   └── orchestrator/         # private workflow discovery and factory docs
+├── internal/                 # private operational material
+└── events.md                 # private development ledger
 ```
 
-Invariants (all packages): confirm the destination before sending, never
-hardcode tokens or destinations, don't bypass a courier's harness. Full list in
-[`AGENTS.md`](AGENTS.md).
+## Invariants
 
-## Where this repo sits
+- Keep this repository private.
+- Never copy private packages, SOPs, media, or workflow documents into public
+  Ocean without an explicit allowlist and operator approval.
+- Never hardcode credentials or destinations.
+- Confirm shared destinations before delivery.
+- Do not bypass package harnesses or duplicate shared transport.
+- Treat Bedrock as optional data/context authority, not a miscellaneous package
+  repository or local execution shell.
 
-The public Ocean repos are `ocean-os` (Rust runtime + daemon), `ocean-surface`
-(thin clients), and **`ocean-agents`** (agent packages + profiles — this repo).
-`ocean-bedrock` is the private, optional authenticated knowledge/data plane for
-team deployments; Ocean OS and these packages must remain usable without it.
-Cross-repo routing and ownership:
-[`docs/OCEAN_PROJECT_MAP.md`](docs/OCEAN_PROJECT_MAP.md). Package-side build
-register: [`docs/ocean-agents-builds.toml`](docs/ocean-agents-builds.toml);
-typed-filesystem direction:
-[`docs/AGENT_FILESYSTEM_ARCHITECTURE.md`](docs/AGENT_FILESYSTEM_ARCHITECTURE.md);
-fleet-porting plan: [`docs/PORTING_ROADMAP.md`](docs/PORTING_ROADMAP.md).
+## Architecture
+
+- [`docs/OCEAN_PROJECT_MAP.md`](docs/OCEAN_PROJECT_MAP.md) — public/private
+  ownership and routing.
+- [`docs/AGENT_FILESYSTEM_ARCHITECTURE.md`](docs/AGENT_FILESYSTEM_ARCHITECTURE.md)
+  — typed package direction.
+- [`docs/risingtides-agents-builds.toml`](docs/risingtides-agents-builds.toml) —
+  private package build register.
+- [`docs/PORTING_ROADMAP.md`](docs/PORTING_ROADMAP.md) — private production fleet
+  migration plan.

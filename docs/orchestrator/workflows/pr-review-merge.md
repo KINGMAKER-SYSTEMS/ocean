@@ -10,7 +10,7 @@ This workflow handles open PRs for Ocean OS repos using Ocean itself. It replace
 ## Identity
 
 - **Name:** `ocean-os-pr-review-merge`
-- **Repos:** `~/dev/ocean-os`, `~/dev/ocean-surface`, `~/dev/ocean-agents`
+- **Repos:** `~/dev/ocean-os`, `~/dev/ocean-surface`, `~/dev/risingtides-agents`
 - **Ledger:** Linear OCEAN team
 - **Goal:** land only truthful, reviewed, verified PRs and keep branch/worktree state clean.
 

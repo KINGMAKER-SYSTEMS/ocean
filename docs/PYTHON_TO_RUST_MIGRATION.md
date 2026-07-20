@@ -1,7 +1,7 @@
-# Python → Rust Migration Plan (ocean-agents)
+# Python → Rust Migration Plan (risingtides-agents)
 
 > Companion to [`AGENT_FILESYSTEM_ARCHITECTURE.md`](./AGENT_FILESYSTEM_ARCHITECTURE.md).
-> The "agent as a file system" direction makes `ocean-agents` a **pure-content**
+> The "agent as a file system" direction makes `risingtides-agents` a **pure-content**
 > repo (manifests + profiles + skills, zero executable code) and moves every
 > executable into `ocean-os` as typed Rust.
 >
@@ -23,13 +23,13 @@
   `CANVAS_FULFILLMENT_REGISTRY`, and the daemon's `POST /v1/agent/canvas/fulfill` +
   `GET` query (OCEAN-235/262/271). Surface handling: `client_type: surface-slack` →
   SLACK surface, `slack_surface_prompt`, profile load from `assistants/SLACK/system.md`.
-- **The actual Slack HTTP I/O was externalized to "the ocean-agents bridge."** That
+- **The actual Slack HTTP I/O was externalized to "the risingtides-agents bridge."** That
   externalized half is **the Python we're migrating.** It is not accidental glue — it
   is the unbuilt other half of a half-shipped feature.
 
 So the migration is not "rewrite glue." It is: **close the seam by building the missing
 `ocean-slack` crate in `ocean-os`** (the same shape as `ocean-call`, `ocean-browser`,
-`ocean-acp`, `ocean-mcp` — an integration crate), after which `ocean-agents` has no code.
+`ocean-acp`, `ocean-mcp` — an integration crate), after which `risingtides-agents` has no code.
 
 ---
 
@@ -38,7 +38,7 @@ So the migration is not "rewrite glue." It is: **close the seam by building the 
 | Repo | After migration |
 |---|---|
 | **ocean-os** | + new `ocean-slack` crate (inbound socket-mode + outbound transport + canvas bridge); daemon-native courier/agent dispatch (extends `agentdir.rs`) |
-| **ocean-agents** | **pure content**: `courier.toml`/`content-agent.toml` manifests, `system.md` surface profiles, `SKILL.md`/`skill.yaml`. No `.py`, no `bin/`, no harness code |
+| **risingtides-agents** | **pure content**: `courier.toml`/`content-agent.toml` manifests, `system.md` surface profiles, `SKILL.md`/`skill.yaml`. No `.py`, no `bin/`, no harness code |
 | **ocean-bedrock** | unchanged (shared knowledge + workflow specs) |
 | **ocean-surface** | unchanged (view) |
 

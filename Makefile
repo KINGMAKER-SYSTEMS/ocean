@@ -1,4 +1,4 @@
-# ocean-agents — developer targets.
+# risingtides-agents — developer targets.
 #
 # The assistants/<SURFACE>/system.md profiles the Ocean daemon loads are COMPOSED
 # artifacts (assistants/tools/compose_profile.py). Do not hand-edit them — edit the

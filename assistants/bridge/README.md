@@ -173,7 +173,7 @@ miss because **nothing errors when it's wrong** — the bot just stops sounding 
 Set it to the **absolute path of this repo's `assistants/` directory**:
 
 ```bash
-OCEAN_ASSISTANTS_DIR=/absolute/path/to/ocean-agents/assistants
+OCEAN_ASSISTANTS_DIR=/absolute/path/to/risingtides-agents/assistants
 ```
 
 ### Why it matters (the mechanism)

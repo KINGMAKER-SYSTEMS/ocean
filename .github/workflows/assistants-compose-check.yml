@@ -58,7 +58,7 @@ jobs:
 
   test-runner:
     # Runs the Python unittest suite + a full py_compile syntax sweep.
-    # Pairs with the compose-check job above to give ocean-agents a real PR test gate.
+    # Pairs with the compose-check job above to give risingtides-agents a real PR test gate.
     #
     # The suite (assistants/bridge/tests/test_socket_pipeline.py) is pure stdlib +
     # unittest — no pytest, no slack_sdk, no network. It exercises the Socket Mode

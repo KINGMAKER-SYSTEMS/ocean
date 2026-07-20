@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-compose_profile.py — base-profile injection, made REAL in ocean-agents.
+compose_profile.py — base-profile injection, made REAL in risingtides-agents.
 
 WHY THIS EXISTS (the base-profile pattern resolution):
 The design spec §4 describes composing `_shared` + `_base/<SURFACE>/` + an agent's
@@ -19,7 +19,7 @@ that composition. Verified in ocean-os (crates/ocean-agent/src/lib.rs):
 
 So the daemon-composed layering is FLAT, not the rich _base/ composition the spec
 wants. To keep the house rules DRY (spec §4: "common rules live once; per-agent
-files hold only deltas") WITHOUT waiting on a Rust change, ocean-agents assembles
+files hold only deltas") WITHOUT waiting on a Rust change, risingtides-agents assembles
 the base itself — this composer — into the file the daemon actually loads.
 
 WHAT IT DOES:

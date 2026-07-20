@@ -1,7 +1,7 @@
 # Design — `content-agent`: a conversational Slack assistant on Ocean
 
 > **Date:** 2026-06-04
-> **Repo:** `Risingtides-dev/ocean-agents`
+> **Repo:** `Risingtides-dev/risingtides-agents`
 > **Status:** Design — awaiting review before implementation plan
 > **Companion doc:** the cross-repo *Surface Awareness + Session-Bleed* addendum
 > (runtime contract owned by the `ocean-os` agent). This design is the **consumer**

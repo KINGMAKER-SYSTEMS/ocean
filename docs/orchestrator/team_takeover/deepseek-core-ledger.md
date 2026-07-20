@@ -30,7 +30,7 @@
 - `git branch -a` → 2 open PR branches ahead of main; ~120 stale worktrees from completed E9/E10 work
 - `gh pr list --repo Risingtides-dev/ocean-os` → **2 open PRs** both CI green + mergeable
 - `gh pr list --repo Risingtides-dev/ocean-surface` → **0 open PRs**
-- `gh pr list --repo Risingtides-dev/ocean-agents` → **0 open PRs**
+- `gh pr list --repo Risingtides-dev/risingtides-agents` → **0 open PRs**
 - `git worktree list` → live worktrees include OCEAN-262 (canvas-fulfill, done), OCEAN-256 (projection-rooms, partial), plus ~120 `.claude/worktrees/` stales
 
 ---
@@ -99,7 +99,7 @@ The commit `2ca7d24` exists on `feat/ocean-262-canvas-fulfill-v2`. Steps:
 4. Create PR with `@codex review`
 5. Once approved, merge
 
-This closes the slack_canvas end-to-end loop (bridge consumer in ocean-agents #15 + daemon route = full circle).
+This closes the slack_canvas end-to-end loop (bridge consumer in risingtides-agents #15 + daemon route = full circle).
 
 ### Action 3 — Fire the first E12 P0 cluster (OCEAN-300/301/302)
 
