@@ -117,18 +117,17 @@ Current containment:
 - `cargo fmt --check`, `cargo check -p ocean-surface-proxy`, current-tree
   Gitleaks GCP scan, and `git diff --check` passed.
 
-Remaining operator/cloud action:
+Closure verified 2026-07-20:
 
-1. identify the key by the GitHub alert in the authorized GCP project;
-2. revoke it, or prove and preserve strict HTTP-referrer and Maps-API-only
-   restrictions with bounded quota/billing controls;
-3. provide a replacement deployment key through the secret-managed runtime
-   environment if production maps remain desired; and
-4. resolve GitHub alert 1 as revoked only after cloud verification.
+- the operator confirmed GCP revocation on 2026-07-19;
+- GitHub secret-scanning alert 1 is resolved as `revoked` with that confirmation;
+- the alert has zero open successors and current public source has no key-shaped
+  default; and
+- any future Maps key must enter through secret-managed runtime configuration.
 
-Do not resolve the alert as “used in tests” or “false positive.” A browser key
-is intentionally client-visible, but an organization-owned default does not
-belong in a public reusable product.
+The alert was correctly resolved as revoked, not as test data or a false
+positive. A browser key is intentionally client-visible, but an
+organization-owned default does not belong in a public reusable product.
 
 History rewrite decision: no rewrite at this gate. The value is already in a
 public fork and many PR refs. Revoke/restrict the credential; do not destabilize
@@ -159,10 +158,13 @@ Both findings are in private workflow evidence documents and label their value
 as `tokenRevoked`; the recorded response is HTTP 403. They appear to be evidence
 of completed revocation rather than active credentials.
 
-Classification: amber/closed pending an operator confirmation that the backing
-tokens remain revoked. Do not reproduce the values. Because Bedrock is now
-private and the evidence already records revocation, no public history rewrite
-is recommended.
+Classification: green evidence identifiers, closed. Source verification on
+2026-07-20 proved the committed `tok_*` strings are non-authenticating record IDs
+generated separately from the SHA-256 hash of the raw bearer token. The evidence
+explicitly states that raw tokens were never printed or committed, records
+transactional revocation, and records post-revocation HTTP 403. Current-tree
+secret scans pass. No credential remains available to re-test from Git, and no
+history rewrite is recommended.
 
 ## Current licensing and provenance boundary
 
@@ -256,9 +258,9 @@ not by reopening the private repository.
 - [x] Retire the obsolete public Bedrock coworker-onboarding skill.
 - [x] Remove the bundled Surface Maps key from current public source.
 - [x] Enable GitHub secret scanning and push protection on `ocean-agents`.
-- [ ] Revoke or verify strict restrictions for the alerted Maps key in GCP.
-- [ ] Resolve GitHub Surface alert 1 only after cloud verification.
-- [ ] Confirm both Bedrock evidence tokens remain revoked.
+- [x] Revoke the alerted Maps key in GCP (operator-confirmed 2026-07-19).
+- [x] Resolve GitHub Surface alert 1 as revoked after cloud verification (resolved 2026-07-20).
+- [x] Confirm the Bedrock findings are non-authenticating revoked-token record IDs; no raw bearer token was committed.
 
 ### P1 — separate licensable product from private factory
 

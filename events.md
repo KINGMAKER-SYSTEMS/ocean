@@ -333,3 +333,16 @@ history is preserved in private risingtides-agents; fresh public ocean-agents
 contains only allowlisted reusable mechanisms with secret scanning and push
 protection enabled. Updated Bedrock ownership/handoff/Longhouse docs while
 preserving the 2026-07-19 historical exposure inventory as captured evidence.
+
+time:      [06:45pm] [07-20-26]
+agent:     [ocean] [gpt-5]
+worktree:  [public-readiness-security-20260720]
+type:      security audit closeout
+area:      credential evidence
+
+Closed the remaining credential-evidence actions without exposing values. GitHub
+Surface alert 1 is resolved as revoked after the operator's GCP confirmation and
+all public repositories have zero open secret alerts. Bedrock source proves the
+committed tok_* findings are non-authenticating record IDs separate from raw
+bearer hashes; evidence records revocation plus HTTP 403 and explicitly states
+raw tokens were never committed.
