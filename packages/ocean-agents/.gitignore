@@ -1,0 +1,23 @@
+# Secrets & local config
+**/courier.env
+*.env
+!*.env.example
+
+# Dropbox payloads — never commit the files being shipped
+**/dropbox/*
+!**/dropbox/.gitkeep
+
+# Ledgers / runtime artifacts
+**/courier.ledger
+**/*.log
+
+# Stray harness runs from the wrong cwd land a db at repo root; the real one
+# lives at assistants/<agent>/data/agent_data.db (tracked, seeded).
+/prompt_library.db
+
+# Python
+__pycache__/
+*.pyc
+
+# IDE-generated state (Cursor)
+.cursor/hooks/state/

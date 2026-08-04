@@ -1,0 +1,49 @@
+name: assistants-compose-check
+
+on:
+  push:
+    paths:
+      - "assistants/**"
+      - ".github/workflows/assistants-compose-check.yml"
+  pull_request:
+    paths:
+      - "assistants/**"
+      - ".github/workflows/assistants-compose-check.yml"
+
+jobs:
+  compose-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Compile public Python sources
+        run: |
+          set -euo pipefail
+          while IFS= read -r -d '' f; do
+            python3 -m py_compile "$f"
+          done < <(find assistants couriers -name "*.py" -print0)
+
+      - name: Check composed surface profiles
+        run: python3 assistants/tools/compose_profile.py --check
+
+      - name: Confirm published profiles are non-empty
+        run: |
+          set -euo pipefail
+          fail=0
+          for f in $(git ls-files 'assistants/*/system.md'); do
+            case "$f" in
+              assistants/_base/*|assistants/_shared/*) continue ;;
+            esac
+            if [ ! -s "$f" ]; then
+              echo "EMPTY published profile: $f"
+              fail=1
+            else
+              echo "OK non-empty: $f"
+            fi
+          done
+          exit $fail

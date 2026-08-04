@@ -1,0 +1,99 @@
+# ocean-agents package build register
+
+version = 3
+repo = "ocean-agents"
+runtime_repo = "ocean-os"
+architecture_doc = "docs/AGENT_FILESYSTEM_ARCHITECTURE.md"
+migration_doc = "docs/PYTHON_TO_RUST_MIGRATION.md"
+
+primitive_native_builds = 0
+runtime_enforced_in_this_repo = false
+status_vocab = ["filesystem_convention", "transitional_harness", "proposed"]
+
+[[build]]
+id = "A1"
+name = "typed-package-manifests"
+status = "filesystem_convention"
+primitive_native = false
+owns = ["couriers/*/courier.toml", "future assistants/*/agent.toml"]
+acceptance = [
+  "Public packages declare class, mode, bindings, cwd, profile path, and tool grants.",
+  "The Rust runtime can parse the manifests without Python discovery.",
+]
+depends_on = []
+
+[[build]]
+id = "A2"
+name = "surface-profile-catalog"
+status = "filesystem_convention"
+primitive_native = false
+owns = [
+  "assistants/_shared/",
+  "assistants/_base/<SURFACE>/",
+  "assistants/<SURFACE>/system.md",
+]
+acceptance = [
+  "Every authored surface has source files and a non-empty generated profile.",
+  "make assistants-check proves generated profiles have no drift.",
+  "New surfaces are data, not daemon rebuilds.",
+]
+verification = ["make assistants-check"]
+depends_on = []
+
+[[build]]
+id = "A3"
+name = "named-assistant-reference"
+status = "filesystem_convention"
+primitive_native = false
+owns = ["assistants/bonzai/"]
+acceptance = [
+  "Bonzai remains a complete organization-neutral git-hygiene specialist.",
+]
+depends_on = ["A1", "A2"]
+
+[[build]]
+id = "A4"
+name = "courier-reference-catalog"
+status = "filesystem_convention"
+primitive_native = false
+owns = [
+  "couriers/file-courier/",
+  "couriers/hub/",
+  "couriers/transport/",
+]
+acceptance = [
+  "file-courier remains the deterministic reference package.",
+  "Each package declares destination confirmation and contains no credentials or destinations.",
+  "The router discovers packages without package-specific conditionals.",
+]
+verification = ["python3 couriers/hub/router.py list"]
+depends_on = ["A1"]
+
+[[build]]
+id = "A5"
+name = "verification-gates"
+status = "transitional_harness"
+primitive_native = false
+owns = ["Makefile", ".github/workflows/assistants-compose-check.yml"]
+acceptance = [
+  "Generated profiles cannot drift from authored sources.",
+  "Public Python sources compile on the supported Python version.",
+  "A manifest/schema linter exists before Python discovery is deleted.",
+]
+verification = [
+  "make assistants-check",
+  "python3 couriers/hub/router.py list",
+]
+depends_on = ["A1", "A2", "A4"]
+
+[[build]]
+id = "A6"
+name = "pure-content-cutover"
+status = "proposed"
+primitive_native = false
+owns = ["docs/PYTHON_TO_RUST_MIGRATION.md"]
+acceptance = [
+  "Verified Rust replacements exist before public Python harnesses are retired.",
+  "The final repository contains profiles, manifests, schemas, SOPs, and fixtures only.",
+]
+depends_on = ["A1", "A2", "A3", "A4", "A5"]

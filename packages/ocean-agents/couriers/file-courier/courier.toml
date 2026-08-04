@@ -1,0 +1,36 @@
+# Courier manifest — the routing contract for this courier.
+# The hub router (../hub/router.py) reads every courier.toml to build the
+# slash-command → courier table. This is what turns a folder of harnesses into
+# a routable hub.
+
+name = "file-courier"
+description = "Ship files from a dropbox folder to a Slack channel, and post messages."
+
+# deterministic = the router runs the harness directly (no LLM spawn).
+# agentic       = the router spawns an Ocean daemon agent scoped to this dir
+#                 (POST /v1/prompt with cwd) so it can use judgment, then drive
+#                 the harness itself.
+mode = "deterministic"
+
+# Entry point the router invokes, relative to this manifest's directory.
+entry = "bin/courier"
+
+# Slash commands this courier answers. For deterministic couriers each maps to
+# an `entry` subcommand; trailing operator args are appended verbatim.
+[[commands]]
+slash = "/ship"
+subcommand = "send"
+summary = "Upload the dropbox files to a Slack channel"
+usage = "/ship --channel <id> [--thread-ts <ts>]"
+
+[[commands]]
+slash = "/say"
+subcommand = "message"
+summary = "Post a text message to a Slack channel"
+usage = "/say --channel <id> \"<text>\""
+
+[[commands]]
+slash = "/resolve"
+subcommand = "resolve"
+summary = "Verify a Slack destination (bot identity + channel name)"
+usage = "/resolve <channel-link-or-id>"

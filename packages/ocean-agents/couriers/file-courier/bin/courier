@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Ocean file-courier (Slack route) — thin wrapper over harness/courier.py.
+# Usage:
+#   courier resolve "<slack channel link or id>"
+#   courier send --channel <id> [--thread-ts <ts>] [--dir <path>] [--comment <s>] [--keep] [--pace <s>]
+#   courier message --channel <id> [--thread-ts <ts>] "<text>"
+#
+# Defaults --dir to the package dropbox/ when omitted.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PKG="$(cd "$HERE/.." && pwd)"
+COURIERS="$(cd "$PKG/.." && pwd)"
+ENGINE="$PKG/harness/courier.py"
+DROPBOX="$PKG/dropbox"
+
+# Load env (token, etc.) if present — never committed. Shared class-level env
+# first, then package-level overrides it.
+set -a
+[ -f "$COURIERS/courier.env" ] && . "$COURIERS/courier.env"
+[ -f "$PKG/courier.env" ] && . "$PKG/courier.env"
+set +a
+
+cmd="${1:-}"; shift || true
+
+case "$cmd" in
+  resolve|message)
+    exec python3 "$ENGINE" "$cmd" "$@"
+    ;;
+  send)
+    # inject default --dir if caller didn't pass one
+    case " $* " in
+      *" --dir "*) exec python3 "$ENGINE" send "$@" ;;
+      *)           exec python3 "$ENGINE" send --dir "$DROPBOX" "$@" ;;
+    esac
+    ;;
+  ""|-h|--help|help)
+    sed -n '2,8p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    ;;
+  *)
+    echo "unknown subcommand: $cmd (try: resolve | send | message)" >&2; exit 1 ;;
+esac
