@@ -1,0 +1,67 @@
+[package]
+name = "ocean-call"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# Daemon-side PSTN call-intelligence service: Twilio SIP → LiveKit room →
+# server-side audio tap → streaming STT → rolling summary + task detection,
+# plus a wake-word-gated active voice lane. See
+# docs/superpowers/specs/2026-06-05-ocean-call-intelligence-design.md.
+
+[dependencies]
+ocean-core = { path = "../ocean-core" }
+anyhow.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+tracing.workspace = true
+
+# LiveKit server SDK: SIPClient for outbound dial (create_sip_participant) and
+# trunk/dispatch provisioning. Verified against livekit-api 0.5.0 source. The
+# `room_tap` audio subscribe uses the `livekit` client crate (0.7.44) — added
+# when that adapter lands so the pure logic stays buildable without native deps.
+# TLS backend must stay rustls to match the workspace `reqwest` declaration
+# (default-features = false, features = ["rustls-tls"]). Selecting livekit-api's
+# `native-tls` here re-enables `reqwest/native-tls` through feature unification,
+# pulling hyper-tls -> native-tls -> openssl-sys into the workspace and breaking
+# musl/static cross-builds that do not provide system OpenSSL.
+livekit-api = { version = "0.5", default-features = false, features = ["services-tokio", "access-token", "webhooks", "rustls-tls-native-roots"] }
+livekit-protocol = "0.5"
+
+# Heavy native libwebrtc client, only for the live room_tap. Opt-in via the
+# `livekit-tap` feature so the logic core compiles fast without it.
+livekit = { version = "0.7.44", optional = true }
+futures-util = { version = "0.3", optional = true }
+
+# WebSocket client for the Deepgram streaming STT adapter (stt_deepgram::live).
+# rustls (webpki roots) keeps us on the same TLS stack as reqwest — no OpenSSL,
+# no system cert store. Opt-in via the `deepgram-stt` feature so the default
+# build pulls no websocket stack and stays network/cred-free.
+tokio-tungstenite = { version = "0.24", optional = true, default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+
+[features]
+default = []
+# Enables room_tap::live — the real LiveKit room connect + audio subscribe.
+# Pulls native WebRTC; build with: cargo build -p ocean-call --features livekit-tap
+livekit-tap = ["dep:livekit", "dep:futures-util"]
+# Enables stt_xai::live — the real HTTP transcription call (needs reqwest
+# multipart + a runtime XAI key). The request-building logic is always built.
+xai-stt = ["reqwest/multipart"]
+# Enables tts_xai::live — the real xAI TTS HTTP call that renders Ocean's reply
+# to 16kHz mono PCM for the active lane. The `TtsSynth` trait it implements lives
+# in `session_task::live`, which is `livekit-tap`-gated, so this implies it. The
+# decode/resample/request-shaping logic in `tts_xai` is always built and tested
+# without this feature, a network call, or an xAI key.
+xai-tts = ["livekit-tap"]
+# Enables stt_deepgram::live — the real Deepgram streaming WebSocket provider
+# (needs a runtime DEEPGRAM_API_KEY). Pulls tokio-tungstenite + futures-util.
+# The URL-building, PCM framing, and JSON parsing logic is always built + tested.
+deepgram-stt = ["dep:tokio-tungstenite", "dep:futures-util"]

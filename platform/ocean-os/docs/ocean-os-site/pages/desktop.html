@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ocean Tauri Desktop App</title>
+  <link rel="stylesheet" href="../styles.css">
+  <style>
+    .codepath{color:#c8fbff}.small{font-size:13px;color:var(--muted)}
+    .pill{display:inline-flex;align-items:center;gap:8px;padding:6px 9px;border-radius:999px;font-size:11px;font-weight:950;letter-spacing:.08em;text-transform:uppercase}
+    .native{background:rgba(167,139,250,.10);border:1px solid rgba(167,139,250,.24);color:#ddd6fe}
+    .flow{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+    .flow .card{position:relative}.flow .card:not(:last-child):after{content:"→";position:absolute;right:-13px;top:50%;transform:translateY(-50%);color:var(--cyan);font-weight:900}
+    @media(max-width:980px){.flow{grid-template-columns:1fr}.flow .card:after{display:none}}
+  </style>
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="../index.html"><span class="mark">≈</span><span><strong>Ocean OS</strong><span>Architecture docs</span></span></a>
+    <div class="navgroup"><p class="navtitle">Start</p><a class="navlink" href="../index.html">Architecture overview</a><a class="navlink" href="surfaces.html">Surfaces + screenshots</a></div>
+    <div class="navgroup"><p class="navtitle">Core</p><a class="navlink" href="daemon.html">Daemon</a><a class="navlink" href="runtime.html">Runtime</a><a class="navlink" href="protocol.html">Protocol + events</a><a class="navlink" href="providers.html">Providers + models</a><a class="navlink" href="sessions.html">Sessions + storage</a><a class="navlink" href="longhouse.html">Longhouse coordination</a></div>
+    <div class="navgroup"><p class="navtitle">Clients</p><a class="navlink" href="tui.html">TUI cockpit</a><a class="navlink active" href="desktop.html">Native desktop app</a><a class="navlink" href="surface.html">Ocean Surface</a><a class="navlink" href="browser.html">Browser extension</a><a class="navlink" href="cli-sdk.html">CLI + SDK</a></div>
+    <div class="status">Current desktop architecture is grounded in sibling repo <code>../ocean-surface/crates/ocean-tauri</code>.</div>
+  </aside>
+  <div class="content">
+    <div class="topbar"><div class="crumb">Ocean OS / Clients / <strong>Native desktop app</strong></div><div class="buildnote">Tauri · shared Surface UI</div></div>
+    <main>
+      <section class="hero">
+        <div class="eyebrow"><span class="dot"></span>native Tauri shell</div>
+        <h1>Desktop is the <span class="grad">same Ocean Surface</span> in a native host.</h1>
+        <p class="lead">The sibling <code>ocean-surface</code> repository owns one Leptos/WASM interface for browser/PWA and desktop use. <code>ocean-tauri</code> supplies native window, filesystem-dialog, and path-watching capabilities around that shared UI. Agent authority remains in <code>ocean-daemon</code>.</p>
+      </section>
+
+      <section class="section">
+        <div class="section-head"><div><div class="eyebrow">Ownership</div><h2>One interface, two host environments.</h2></div></div>
+        <div class="body grid2">
+          <div class="card"><h3><span class="pill native">shared UI</span> <code>ocean-surface-ui</code></h3><p>Owns the transcript, composer, sessions, projects, models, component renderer, canvas ledger, voice controls, and daemon event handling used by browser and desktop.</p><p class="small">Source: <span class="codepath">../ocean-surface/crates/ocean-surface-ui/src/app.rs</span>, <span class="codepath">../ocean-surface/crates/ocean-surface-ui/src/daemon.rs</span></p></div>
+          <div class="card"><h3><span class="pill native">native host</span> <code>ocean-tauri</code></h3><p>Owns native process setup and commands that cannot be provided by a browser: directory selection and watched-path events.</p><p class="small">Source: <span class="codepath">../ocean-surface/crates/ocean-tauri/src/lib.rs</span>, <span class="codepath">../ocean-surface/crates/ocean-tauri/src/host.rs</span></p></div>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="section-head"><div><div class="eyebrow">Runtime path</div><h2>The shell does not become a second agent runtime.</h2></div></div>
+        <div class="body">
+          <div class="flow">
+            <div class="card"><div class="num">01</div><h3>Launch</h3><p>The Tauri process opens the desktop window and loads the shared Surface bundle.</p></div>
+            <div class="card"><div class="num">02</div><h3>Attach</h3><p>The UI chooses or creates a daemon-owned session and submits <code>client_type: surface-tauri</code>.</p></div>
+            <div class="card"><div class="num">03</div><h3>Stream</h3><p>Session-scoped SSE carries text, thinking, tools, components, canvas patches, browser activity, and completion.</p></div>
+            <div class="card"><div class="num">04</div><h3>Render</h3><p>Leptos signals update the same component and canvas implementations used by the web/PWA host.</p></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="section-head"><div><div class="eyebrow">Native bridge</div><h2>Only host-specific capability crosses the Tauri boundary.</h2></div></div>
+        <div class="body grid2">
+          <div class="card"><h3>Directory selection</h3><p>The UI invokes the native picker when the operator needs to bind a project or workspace to a local folder.</p></div>
+          <div class="card"><h3>Path watching</h3><p>The host watches requested local paths and emits structured change notifications back to the shared interface.</p></div>
+          <div class="card"><h3>Daemon API</h3><p>Turns, sessions, projects, models, permissions, and component interactions continue through the daemon's HTTP/SSE contract.</p></div>
+          <div class="card"><h3>Single client implementation</h3><p>Desktop behavior belongs in the shared Surface crate unless it requires an operating-system capability unavailable to the browser host.</p></div>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="section-head"><div><div class="eyebrow">Run target</div><h2>Launch the current desktop shell.</h2></div></div>
+        <div class="body grid2">
+          <pre>cd ../ocean-surface
+./scripts/run-tauri.sh</pre>
+          <div class="card"><h3>Source of truth</h3><p>Use <code>ocean-surface/AGENTS.md</code> and the Tauri crate itself for current launch and ownership details. The shared UI remains the product implementation.</p></div>
+        </div>
+      </section>
+      <div class="nextprev"><a class="button" href="surfaces.html">← Surfaces</a><a class="button primary" href="surface.html">Ocean Surface →</a></div>
+    </main>
+  </div>
+</div>
+</body>
+</html>

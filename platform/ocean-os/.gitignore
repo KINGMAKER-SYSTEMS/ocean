@@ -1,0 +1,62 @@
+/target/
+**/target/
+node_modules/
+dist/
+.DS_Store
+*.log
+.env
+.env.*
+.env.local
+!.env.example
+
+# Pi/local orchestration state
+/.pi-subagents/
+.pi/messenger/
+.pi/extensions/
+.pi/extensions.disabled/
+.pi/pi-messenger.json
+.pi/ledger/
+.pi/pm-heartbeat.md
+.pi/pm-mailbox/
+.pi/tidemesh/
+.pi/unified/
+.pi/watchdog/
+subagent-*.md
+gateway-nudges-*.md
+
+# Local runtime/cache artifacts
+*.pid
+__pycache__/
+*.py[cod]
+*.tar.gz
+*.tgz
+*.zip
+
+# Editor/local temp
+.vscode/
+.idea/
+*.swp
+
+# Local Claude Code session state (per-developer)
+.claude/
+.ocean-orchestrator/
+
+# stitchpad runtime
+.stitchpad/.state/
+.stitchpad/stitchpad-git/
+.stitchpad/stitchpad.md
+
+# ocean daemon runtime (keep .ocean/AGENTS.md tracked)
+.ocean/daemon.log
+.ocean/daemon.pid
+
+# Playwright MCP test artifacts
+.playwright-mcp/
+
+# local plugin/session scaffolding + stale/alternate build dirs — keep provenance stamps clean
+.superpowers/
+target-ci/
+/target3/
+
+# Cloudflare Wrangler local cache
+.wrangler/

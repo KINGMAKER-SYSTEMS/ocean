@@ -1,0 +1,373 @@
+//! A single editable text buffer / tab.
+use crate::shell::git::Mark;
+use crate::shell::highlight::{Highlighter, StyledLine};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+pub struct EditorTab {
+    pub path: PathBuf,
+    pub lines: Vec<String>,
+    pub cursor_row: usize,
+    pub cursor_col: usize,
+    pub scroll: usize,
+    pub dirty: bool,
+    /// Top visual row for prose soft-wrap mode.
+    pub visual_scroll: usize,
+    /// Left terminal-cell offset for unwrapped source-code mode.
+    pub horizontal_scroll: usize,
+    /// Pretty, read-only Markdown projection for this tab. The source buffer
+    /// remains authoritative and is never rewritten by preview rendering.
+    pub markdown_preview: bool,
+    /// Read-only image file tab. Binary bytes are never loaded into or saved from
+    /// the text buffer.
+    pub image_preview: bool,
+    /// Peek mode: file-summary header + read-only preview on first open. Enter
+    /// commits to full edit; Esc closes the tab. Always false for image tabs.
+    pub peek: bool,
+    /// Top wrapped row in Markdown preview mode; independent from source scroll.
+    pub preview_scroll: usize,
+    pub highlighted: Vec<StyledLine>,
+    pub git_lines: HashMap<usize, Mark>,
+    // incremental-highlight bookkeeping: edits re-highlight only the touched
+    // line(s); a full pass runs once you pause (fixes multi-line constructs).
+    needs_full_hl: bool,
+    last_edit: Option<Instant>,
+}
+
+impl EditorTab {
+    pub fn open(path: PathBuf, hl: &Highlighter) -> std::io::Result<Self> {
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let lines: Vec<String> = if text.is_empty() {
+            vec![String::new()]
+        } else {
+            text.split('\n').map(|s| s.to_string()).collect()
+        };
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_string();
+        let mut highlighted = hl.highlight(&text, &ext);
+        // keep the highlight cache row-aligned with `lines` (a file ending in
+        // \n yields one fewer syntect row than split lines)
+        highlighted.resize(lines.len().max(1), Vec::new());
+        Ok(Self {
+            path,
+            lines,
+            cursor_row: 0,
+            cursor_col: 0,
+            scroll: 0,
+            dirty: false,
+            visual_scroll: 0,
+            horizontal_scroll: 0,
+            markdown_preview: false,
+            image_preview: false,
+            peek: true,
+            preview_scroll: 0,
+            highlighted,
+            git_lines: HashMap::new(),
+            needs_full_hl: false,
+            last_edit: None,
+        })
+    }
+
+    /// Construct a read-only image tab without ever decoding binary bytes as
+    /// editable UTF-8. Kitty normalization/placement happens at draw time.
+    pub fn open_image(path: PathBuf) -> std::io::Result<Self> {
+        let metadata = std::fs::metadata(&path)?;
+        if !metadata.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "image path is not a file",
+            ));
+        }
+        Ok(Self {
+            path,
+            lines: vec![String::new()],
+            cursor_row: 0,
+            cursor_col: 0,
+            scroll: 0,
+            dirty: false,
+            visual_scroll: 0,
+            horizontal_scroll: 0,
+            markdown_preview: false,
+            image_preview: true,
+            peek: false,
+            preview_scroll: 0,
+            highlighted: vec![Vec::new()],
+            git_lines: HashMap::new(),
+            needs_full_hl: false,
+            last_edit: None,
+        })
+    }
+
+    pub fn name(&self) -> String {
+        self.path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "untitled".into())
+    }
+
+    pub fn ext(&self) -> String {
+        self.path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_string()
+    }
+
+    /// Human-readable language name from the file extension.
+    pub fn language(&self) -> &'static str {
+        match self.ext().as_str() {
+            "rs" => "Rust",
+            "ts" | "tsx" => "TypeScript",
+            "js" | "jsx" | "mjs" | "cjs" => "JavaScript",
+            "py" | "pyi" | "pyx" => "Python",
+            "md" | "mdx" | "markdown" => "Markdown",
+            "json" | "jsonc" => "JSON",
+            "toml" => "TOML",
+            "yaml" | "yml" => "YAML",
+            "html" | "htm" => "HTML",
+            "css" | "scss" | "less" => "CSS",
+            "sh" | "bash" | "zsh" => "Shell",
+            "sql" => "SQL",
+            "go" => "Go",
+            "c" | "h" => "C",
+            "cpp" | "hpp" | "cc" | "hh" | "cxx" | "hxx" => "C++",
+            "java" => "Java",
+            "rb" => "Ruby",
+            "swift" => "Swift",
+            "kt" | "kts" => "Kotlin",
+            "lua" => "Lua",
+            "zig" => "Zig",
+            "nix" => "Nix",
+            "tf" | "tfvars" => "Terraform",
+            "dockerfile" => "Docker",
+            "txt" | "text" => "Plain Text",
+            "svg" => "SVG",
+            "png" | "jpg" | "jpeg" | "gif" | "webp" | "ico" | "bmp" => "Image",
+            _ => "Text",
+        }
+    }
+
+    /// Formatted file size string.
+    pub fn file_size(&self) -> Option<String> {
+        std::fs::metadata(&self.path).ok().map(|m| {
+            let bytes = m.len();
+            if bytes < 1024 {
+                format!("{bytes} B")
+            } else if bytes < 1024 * 1024 {
+                format!("{:.1} KiB", bytes as f64 / 1024.0)
+            } else {
+                format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
+            }
+        })
+    }
+
+    /// Human-readable relative time since last modification.
+    pub fn modified_ago(&self) -> Option<String> {
+        std::fs::metadata(&self.path)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .map(|t| {
+                let elapsed = std::time::SystemTime::now()
+                    .duration_since(t)
+                    .unwrap_or_default();
+                if elapsed.as_secs() < 60 {
+                    "just now".into()
+                } else if elapsed.as_secs() < 3600 {
+                    format!("{}m ago", elapsed.as_secs() / 60)
+                } else if elapsed.as_secs() < 86400 {
+                    format!("{}h ago", elapsed.as_secs() / 3600)
+                } else {
+                    format!("{}d ago", elapsed.as_secs() / 86400)
+                }
+            })
+    }
+
+    /// Commit peek mode: start editing. Returns true if the tab transitioned.
+    pub fn commit_peek(&mut self) -> bool {
+        if !self.peek {
+            return false;
+        }
+        self.peek = false;
+        self.markdown_preview = false;
+        true
+    }
+
+    fn rehighlight(&mut self, hl: &Highlighter) {
+        let text = self.lines.join("\n");
+        self.highlighted = hl.highlight(&text, &self.ext());
+        self.highlighted.resize(self.lines.len().max(1), Vec::new());
+        self.needs_full_hl = false;
+    }
+
+    /// Re-highlight just one line (O(line)) — used on every keystroke so typing
+    /// stays instant even in large files.
+    fn highlight_line(&mut self, row: usize, hl: &Highlighter) {
+        if row >= self.lines.len() {
+            return;
+        }
+        let one = hl.highlight(&self.lines[row], &self.ext());
+        let styled = one.into_iter().next().unwrap_or_default();
+        if row < self.highlighted.len() {
+            self.highlighted[row] = styled;
+        } else {
+            self.highlighted.push(styled);
+        }
+    }
+
+    /// Mark an edit: dirty + schedule a debounced full re-highlight.
+    fn mark_edited(&mut self) {
+        self.dirty = true;
+        self.needs_full_hl = true;
+        self.last_edit = Some(Instant::now());
+    }
+
+    /// Run a deferred full re-highlight once typing has paused (fixes multi-line
+    /// strings/comments). Returns true if it re-highlighted (caller redraws).
+    pub fn settle(&mut self, hl: &Highlighter) -> bool {
+        if self.needs_full_hl
+            && self
+                .last_edit
+                .map(|t| t.elapsed() >= Duration::from_millis(140))
+                .unwrap_or(false)
+        {
+            self.rehighlight(hl);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn save(&mut self) -> std::io::Result<()> {
+        std::fs::write(&self.path, self.lines.join("\n"))?;
+        self.dirty = false;
+        Ok(())
+    }
+
+    /// Load per-line git gutter marks for this file from `git diff HEAD`.
+    pub fn load_git(&mut self, root: &std::path::Path) {
+        self.git_lines = crate::shell::git::changed_lines(root, &self.path);
+    }
+
+    fn clamp_col(&mut self) {
+        let len = self
+            .lines
+            .get(self.cursor_row)
+            .map(|l| l.chars().count())
+            .unwrap_or(0);
+        if self.cursor_col > len {
+            self.cursor_col = len;
+        }
+    }
+
+    pub fn move_cursor(&mut self, drow: isize, dcol: isize, viewport_h: usize) {
+        if drow != 0 {
+            let n = self.lines.len() as isize;
+            let mut r = self.cursor_row as isize + drow;
+            r = r.clamp(0, (n - 1).max(0));
+            self.cursor_row = r as usize;
+            self.clamp_col();
+        }
+        if dcol != 0 {
+            let c = self.cursor_col as isize + dcol;
+            if c < 0 {
+                if self.cursor_row > 0 {
+                    self.cursor_row -= 1;
+                    self.cursor_col = self.lines[self.cursor_row].chars().count();
+                }
+            } else {
+                let len = self.lines[self.cursor_row].chars().count() as isize;
+                self.cursor_col = c.min(len) as usize;
+            }
+        }
+        // keep cursor in view
+        if self.cursor_row < self.scroll {
+            self.scroll = self.cursor_row;
+        } else if viewport_h > 0 && self.cursor_row >= self.scroll + viewport_h {
+            self.scroll = self.cursor_row + 1 - viewport_h;
+        }
+    }
+
+    /// Move the logical-line viewport directly (mouse wheel). Cursor movement
+    /// remains independent; the next keyboard move snaps it back into view.
+    pub fn scroll_lines(&mut self, delta: isize, viewport_h: usize) {
+        let max = self.lines.len().saturating_sub(viewport_h.max(1));
+        self.scroll = (self.scroll as isize + delta).clamp(0, max as isize) as usize;
+    }
+
+    fn byte_idx(line: &str, col: usize) -> usize {
+        line.char_indices()
+            .nth(col)
+            .map(|(i, _)| i)
+            .unwrap_or(line.len())
+    }
+
+    pub fn insert_char(&mut self, ch: char, hl: &Highlighter) {
+        let bi = Self::byte_idx(&self.lines[self.cursor_row], self.cursor_col);
+        self.lines[self.cursor_row].insert(bi, ch);
+        self.cursor_col += 1;
+        self.mark_edited();
+        let row = self.cursor_row;
+        self.highlight_line(row, hl); // O(line), not O(file)
+    }
+
+    pub fn insert_newline(&mut self, hl: &Highlighter) {
+        let bi = Self::byte_idx(&self.lines[self.cursor_row], self.cursor_col);
+        let rest = self.lines[self.cursor_row].split_off(bi);
+        self.lines.insert(self.cursor_row + 1, rest);
+        // keep the highlight cache structurally in sync, then re-light both lines
+        if self.cursor_row < self.highlighted.len() {
+            self.highlighted.insert(self.cursor_row + 1, Vec::new());
+        }
+        let r = self.cursor_row;
+        self.cursor_row += 1;
+        self.cursor_col = 0;
+        self.mark_edited();
+        self.highlight_line(r, hl);
+        self.highlight_line(r + 1, hl);
+    }
+
+    pub fn delete_forward(&mut self, hl: &Highlighter) {
+        let len = self.lines[self.cursor_row].chars().count();
+        if self.cursor_col < len {
+            let bi = Self::byte_idx(&self.lines[self.cursor_row], self.cursor_col);
+            self.lines[self.cursor_row].remove(bi);
+        } else if self.cursor_row + 1 < self.lines.len() {
+            // join: pull the next line up onto this one
+            let next = self.lines.remove(self.cursor_row + 1);
+            if self.cursor_row + 1 < self.highlighted.len() {
+                self.highlighted.remove(self.cursor_row + 1);
+            }
+            self.lines[self.cursor_row].push_str(&next);
+        } else {
+            return;
+        }
+        self.mark_edited();
+        let row = self.cursor_row;
+        self.highlight_line(row, hl);
+    }
+
+    pub fn backspace(&mut self, hl: &Highlighter) {
+        if self.cursor_col > 0 {
+            let bi = Self::byte_idx(&self.lines[self.cursor_row], self.cursor_col - 1);
+            self.lines[self.cursor_row].remove(bi);
+            self.cursor_col -= 1;
+        } else if self.cursor_row > 0 {
+            let cur = self.lines.remove(self.cursor_row);
+            if self.cursor_row < self.highlighted.len() {
+                self.highlighted.remove(self.cursor_row);
+            }
+            self.cursor_row -= 1;
+            self.cursor_col = self.lines[self.cursor_row].chars().count();
+            self.lines[self.cursor_row].push_str(&cur);
+        } else {
+            return;
+        }
+        self.mark_edited();
+        let row = self.cursor_row;
+        self.highlight_line(row, hl);
+    }
+}
