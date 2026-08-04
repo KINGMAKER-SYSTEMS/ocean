@@ -1,0 +1,894 @@
+openapi: 3.1.0
+info:
+  title: Ocean Bedrock Shared Filesystem API
+  version: 0.1.0
+  description: Token-authenticated HTTP shared filesystem for agents and coworkers.
+servers:
+  - url: http://localhost:8080
+security:
+  - bearerAuth: []
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  schemas:
+    FileInfo:
+      type: object
+      properties:
+        path: { type: string }
+        name: { type: string }
+        type: { type: string, enum: [file, directory, symlink, other] }
+        size: { type: integer }
+        mtime: { type: string, format: date-time }
+        ctime: { type: string, format: date-time }
+        etag: { type: string }
+    Error:
+      type: object
+      properties:
+        ok: { type: boolean, const: false }
+        error: { type: string }
+        details: {}
+    RoomMember:
+      type: object
+      description: >-
+        Safe public projection of a federated room member. Internal fields
+        (owner_principal_token_id, registration_key, removed_by, bearer
+        material) are never serialized.
+      properties:
+        member_id: { type: string, format: uuid }
+        actor_type: { type: string, enum: [user, agent] }
+        role_in_room: { type: string, enum: [owner, member] }
+        display_name: { type: string }
+        joined_at: { type: string, format: date-time }
+        owner_member_id: { type: string, format: uuid, description: Present on agent rows only. }
+        public_agent_descriptor:
+          type: object
+          description: Safe subset only — display_name, description, model_alias, skills_count, subagent_names.
+paths:
+  /health:
+    get:
+      security: []
+      summary: Public health check
+      responses:
+        '200': { description: OK }
+  /api/v1/info:
+    get:
+      summary: Instance info and authenticated principal
+      responses:
+        '200': { description: Info }
+  /api/v1/openapi.yaml:
+    get:
+      security: []
+      summary: OpenAPI document
+      responses:
+        '200': { description: OpenAPI YAML }
+  /api/v1/list:
+    get:
+      summary: List directory entries
+      parameters:
+        - in: query
+          name: path
+          schema: { type: string, default: / }
+        - in: query
+          name: depth
+          schema: { type: integer, default: 1, minimum: 1, maximum: 20 }
+      responses:
+        '200':
+          description: Directory listing
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  root: { $ref: '#/components/schemas/FileInfo' }
+                  entries:
+                    type: array
+                    items: { $ref: '#/components/schemas/FileInfo' }
+  /api/v1/tree:
+    get:
+      summary: Recursive directory listing
+      parameters:
+        - in: query
+          name: path
+          schema: { type: string, default: / }
+        - in: query
+          name: depth
+          schema: { type: integer, default: 5, minimum: 1, maximum: 20 }
+      responses:
+        '200': { description: Directory tree }
+  /api/v1/stat:
+    get:
+      summary: Stat file or directory
+      parameters:
+        - in: query
+          name: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: File metadata
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FileInfo' }
+  /api/v1/file:
+    get:
+      summary: Download/read file
+      parameters:
+        - in: query
+          name: path
+          required: true
+          schema: { type: string }
+        - in: query
+          name: inline
+          schema: { type: string, enum: ['1'] }
+      responses:
+        '200': { description: File bytes }
+    put:
+      summary: Create or replace file with raw body
+      parameters:
+        - in: query
+          name: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        '200':
+          description: Written file metadata
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FileInfo' }
+    delete:
+      summary: Delete file or directory
+      parameters:
+        - in: query
+          name: path
+          required: true
+          schema: { type: string }
+        - in: query
+          name: recursive
+          schema: { type: boolean, default: false }
+      responses:
+        '200': { description: Deleted }
+  /api/v1/mkdir:
+    post:
+      summary: Create directory recursively
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [path]
+              properties:
+                path: { type: string }
+      responses:
+        '201': { description: Created directory }
+  /api/v1/move:
+    post:
+      summary: Move/rename path
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [from, to]
+              properties:
+                from: { type: string }
+                to: { type: string }
+                overwrite: { type: boolean, default: false }
+      responses:
+        '200': { description: Moved }
+  /api/v1/copy:
+    post:
+      summary: Copy path recursively
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [from, to]
+              properties:
+                from: { type: string }
+                to: { type: string }
+                overwrite: { type: boolean, default: false }
+      responses:
+        '201': { description: Copied }
+  /api/v1/search:
+    get:
+      summary: Text search scoped files
+      parameters:
+        - in: query
+          name: q
+          required: true
+          schema: { type: string }
+        - in: query
+          name: path
+          schema: { type: string, default: / }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 50, maximum: 200 }
+      responses:
+        '200': { description: Search results }
+  /api/v1/ledger/events:
+    get:
+      summary: List Ocean Ledger events visible to the token
+      description: >-
+        Registered-room gating (Gate-2 R-8): identifying a registered room by
+        correlation_id or a /rooms/{room_id} path (descendants included)
+        requires room scope + ACTIVE membership; a registered-room
+        correlation paired with any disagreeing path is 400. Broad reads
+        suppress registered-room rows per-event for non-members — admin does
+        not bypass.
+      parameters:
+        - in: query
+          name: correlation_id
+          schema: { type: string }
+        - in: query
+          name: actor_id
+          schema: { type: string }
+        - in: query
+          name: actor_name
+          schema: { type: string }
+        - in: query
+          name: actor_type
+          schema: { type: string }
+        - in: query
+          name: event_type
+          schema: { type: string }
+        - in: query
+          name: source_id
+          schema: { type: string }
+        - in: query
+          name: path
+          schema: { type: string }
+        - in: query
+          name: after_sequence
+          schema: { type: string, pattern: '^(0|[1-9][0-9]*)$' }
+          description: >-
+            Cursor (Gate-2 S1B): canonical decimal sequence STRING. Returns
+            events with sequence strictly greater, ordered ASCENDING, bounded
+            by limit; pass the last returned sequence to continue. Absent =
+            existing newest-window behavior unchanged.
+        - in: query
+          name: limit
+          schema: { type: integer, default: 100, maximum: 5000 }
+      responses:
+        '200': { description: Ledger events (registered-room rows filtered by membership) }
+        '400': { description: Registered-room correlation with a disagreeing path, or non-canonical after_sequence }
+        '403': { description: Registered-room identified without active membership }
+    post:
+      summary: Append an Ocean Ledger event
+      description: >-
+        Registered-room writes (Gate-2 R-8) require the canonical pair
+        correlation_id = room_id AND virtual_path = /rooms/{room_id}
+        (descendant/noncanonical paths are 400) plus an actor_member_id owned
+        by the calling principal (missing or unowned is 403; malformed UUID is
+        400). Non-room appends are unchanged.
+        Room MESSAGE events (S2 blockers B2, resolved event_type "message")
+        additionally carry an authenticated strict payload
+        {client_event_id, author_member_id, body[, mention_member_ids]} —
+        extra payload keys are 400, author_member_id must equal the
+        authorized actor_member_id (403 member_actor_mismatch), and every
+        mention must be a unique ACTIVE member (400); membership freshness is
+        re-proven inside the append transaction. The validated actor member
+        id is retained on the hash-chained row (actor_member_id). All chain
+        sequence fields serialize as canonical decimal u64 STRINGS (B3).
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [event_type]
+              properties:
+                event_type: { type: string }
+                correlation_id: { type: string }
+                lab: { type: string }
+                virtual_path: { type: string }
+                payload: { type: object }
+                visible_context: {}
+                context_snapshot: {}
+                clearance: { type: string, enum: [PUBLIC, UNCLASSIFIED, CONFIDENTIAL, SECRET, TOP_SECRET], default: UNCLASSIFIED }
+                actor_member_id: { type: string, format: uuid, description: Required for registered-room writes; must be an active member owned by the caller. }
+                tags:
+                  type: array
+                  items: { type: string }
+      responses:
+        '201': { description: Appended event (or the prior event on an identical producer retry) }
+        '400': { description: Noncanonical room pair, malformed actor_member_id, or invalid room source_sequence }
+        '403': { description: Missing/unowned actor_member_id or no active membership }
+        '409': { description: 'Producer conflict: (source_id, source_sequence) reused with different content' }
+  /api/v1/ledger/trace:
+    get:
+      summary: Trace an Ocean Ledger correlation chain
+      description: >-
+        Tracing a registered-room correlation (Gate-2 R-8) requires room scope
+        + ACTIVE membership; admin does not bypass. Non-room traces are
+        unchanged.
+      parameters:
+        - in: query
+          name: correlation_id
+          required: true
+          schema: { type: string }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 1000, maximum: 5000 }
+      responses:
+        '200': { description: Correlated event chain }
+        '403': { description: Registered room traced without active membership }
+  /api/v1/ledger/snapshots:
+    post:
+      summary: Create a context snapshot event
+      description: >-
+        A snapshot identifying a registered room (Gate-2 R-8) is a room WRITE:
+        canonical correlation_id = room_id + virtual_path = /rooms/{room_id}
+        pair required (disagreement 400) plus an actor_member_id owned by the
+        calling principal (missing/unowned 403). Non-room snapshots unchanged.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                snapshot_type: { type: string, default: context }
+                correlation_id: { type: string }
+                virtual_path: { type: string }
+                files:
+                  type: array
+                  items: { type: string }
+                events:
+                  type: array
+                  items: { type: string }
+                summary: { type: string }
+                metadata: { type: object }
+                clearance: { type: string, enum: [PUBLIC, UNCLASSIFIED, CONFIDENTIAL, SECRET, TOP_SECRET], default: CONFIDENTIAL }
+                actor_member_id: { type: string, format: uuid, description: Required for registered-room snapshots; must be an active member owned by the caller. }
+      responses:
+        '201': { description: Snapshot event created }
+        '400': { description: Noncanonical room pair or malformed actor_member_id }
+        '403': { description: Missing/unowned actor_member_id or no active membership }
+  /api/v1/ledger/verify:
+    get:
+      summary: Verify local Ocean Ledger hash chain, admin only
+      responses:
+        '200': { description: Verification result }
+  /api/v1/semantic/search:
+    get:
+      summary: Semantic Vectorize search over scoped chunks
+      parameters:
+        - in: query
+          name: q
+          required: true
+          schema: { type: string }
+        - in: query
+          name: path
+          schema: { type: string, default: / }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 10, maximum: 50 }
+        - in: query
+          name: mode
+          schema: { type: string, enum: [semantic, lexical] }
+      responses:
+        '200': { description: Semantic search results }
+  /api/v1/graph/nodes:
+    get:
+      summary: List graph nodes under a scoped path
+      parameters:
+        - in: query
+          name: path
+          schema: { type: string, default: / }
+        - in: query
+          name: type
+          schema: { type: string }
+        - in: query
+          name: q
+          schema: { type: string }
+      responses:
+        '200': { description: Graph nodes }
+  /api/v1/graph/neighborhood:
+    get:
+      summary: Get graph neighborhood by scoped path or node id
+      parameters:
+        - in: query
+          name: path
+          schema: { type: string }
+        - in: query
+          name: nodeId
+          schema: { type: string }
+        - in: query
+          name: depth
+          schema: { type: integer, default: 1, maximum: 3 }
+      responses:
+        '200': { description: Graph neighborhood }
+  /api/v1/ocean-context/triage/daily:
+    post:
+      summary: Run Ocean Context daily triage and write report/ledger event
+      responses:
+        '201': { description: Triage report generated }
+  /api/v1/toolbox/manifest:
+    get:
+      summary: Get Ocean Toolbox manifest for MCP/local companion setup
+      responses:
+        '200': { description: Toolbox manifest }
+  /api/v1/sources/adapters:
+    get:
+      summary: List source adapter definitions
+      responses:
+        '200': { description: Source adapters }
+  /api/v1/sources/instances:
+    get:
+      summary: List source instances visible to the token
+      parameters:
+        - in: query
+          name: adapter_id
+          schema: { type: string }
+        - in: query
+          name: owner_name
+          schema: { type: string }
+        - in: query
+          name: status
+          schema: { type: string }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 200, maximum: 1000 }
+      responses:
+        '200': { description: Source instances }
+    post:
+      summary: Create or update a source instance
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [adapter_id, name, remote_prefix]
+              properties:
+                adapter_id: { type: string }
+                name: { type: string }
+                owner_name: { type: string }
+                remote_prefix: { type: string }
+                config: { type: object }
+                clearance: { type: string, enum: [PUBLIC, UNCLASSIFIED, CONFIDENTIAL, SECRET, TOP_SECRET], default: CONFIDENTIAL }
+      responses:
+        '201': { description: Source instance created or updated }
+  /api/v1/sources/instances/{id}:
+    get:
+      summary: Get source instance with streams and recent sync runs
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Source instance }
+    patch:
+      summary: Update source instance
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Updated source instance }
+  /api/v1/sources/streams:
+    get:
+      summary: List source streams visible to the token
+      responses:
+        '200': { description: Source streams }
+    post:
+      summary: Create or update a source stream
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [source_instance_id, stream_key, remote_prefix]
+              properties:
+                source_instance_id: { type: string }
+                stream_key: { type: string }
+                stream_type: { type: string, default: folder }
+                remote_prefix: { type: string }
+                selection: { type: object }
+                cursor: { type: object }
+      responses:
+        '201': { description: Source stream created or updated }
+  /api/v1/sources/streams/{id}:
+    patch:
+      summary: Update source stream
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Updated source stream }
+  /api/v1/sync-runs:
+    get:
+      summary: List source sync runs
+      responses:
+        '200': { description: Sync runs }
+    post:
+      summary: Start source sync run
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [source_instance_id]
+              properties:
+                source_instance_id: { type: string }
+                stream_id: { type: string }
+                metadata: { type: object }
+      responses:
+        '201': { description: Sync run started }
+  /api/v1/sync-runs/{id}:
+    get:
+      summary: Get source sync run
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Sync run }
+  /api/v1/sync-runs/{id}/complete:
+    post:
+      summary: Complete source sync run
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Sync run completed }
+  /api/v1/sync-runs/{id}/fail:
+    post:
+      summary: Mark source sync run failed
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Sync run failed }
+  /api/v1/sync/local-folder/plan:
+    post:
+      summary: Register local-folder source, streams, and start a sync run
+      responses:
+        '201': { description: Local folder sync plan }
+  /api/v1/sync/local-folder/records:batch:
+    post:
+      summary: Upsert local-folder source records in a batch
+      responses:
+        '200': { description: Batch upserted }
+        '207': { description: Batch partially upserted }
+  /api/v1/sync/local-folder/commit:
+    post:
+      summary: Commit local-folder sync run stats
+      responses:
+        '200': { description: Local folder sync committed }
+  /api/v1/locks:
+    get:
+      summary: List active locks
+      parameters:
+        - in: query
+          name: path
+          schema: { type: string }
+      responses:
+        '200': { description: Locks }
+    post:
+      summary: Acquire a lock lease
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [path]
+              properties:
+                path: { type: string }
+                ttlSeconds: { type: integer, default: 900, minimum: 30, maximum: 86400 }
+                note: { type: string }
+      responses:
+        '201': { description: Lock acquired }
+  /api/v1/locks/{lockId}:
+    delete:
+      summary: Release lock
+      parameters:
+        - in: path
+          name: lockId
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Released }
+  /api/v1/tokens:
+    get:
+      summary: List token records, admin only
+      responses:
+        '200': { description: Tokens }
+    post:
+      summary: Issue token, admin only
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                role: { type: string, enum: [readonly, contributor, agent, readwrite, admin], default: contributor }
+                scopes:
+                  type: array
+                  items: { type: string }
+                ttlDays: { type: number }
+                expiresAt: { type: string, format: date-time }
+      responses:
+        '201': { description: Created token; token secret is returned once }
+  /api/v1/tokens/{tokenId}:
+    delete:
+      summary: Revoke token, admin only
+      parameters:
+        - in: path
+          name: tokenId
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Revoked }
+  /api/v1/audit:
+    get:
+      summary: Recent audit events, admin only
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, default: 100, maximum: 1000 }
+      responses:
+        '200': { description: Audit events }
+  /api/v1/invites:
+    post:
+      summary: Create an invite (generic admin, or Gate-2 room-owner branch)
+      description: >-
+        Without room_id: the existing generic admin invite (contract
+        unchanged). With room_id: an ACTIVE room owner mints a single-use
+        contributor invite whose role and exact /rooms/{room_id} scope are
+        DERIVED server-side; client-supplied role/scopes are 400. TTL default
+        1440 minutes, bounds 1..10080. The room branch requires the single
+        shared Postgres authority (503 otherwise).
+      requestBody:
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - title: Generic admin invite (unchanged contract)
+                  type: object
+                  not: { required: [room_id] }
+                  properties:
+                    name: { type: string }
+                    role: { type: string }
+                    scopes:
+                      type: array
+                      items: { type: string }
+                    ttlMinutes: { type: integer }
+                - title: Room-owner invite (Gate-2, strict)
+                  type: object
+                  additionalProperties: false
+                  required: [room_id]
+                  properties:
+                    room_id: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$', description: Canonicalized to lowercase server-side. }
+                    recipient_name: { type: string }
+                    ttl_minutes: { type: integer, minimum: 1, maximum: 10080, default: 1440 }
+      responses:
+        '201': { description: '{ code, invite } — safe fields, no hash/bearer material' }
+        '400': { description: Supplied role/scopes, bad TTL, or non-object body }
+        '403': { description: Caller is not an active owner of the room }
+        '503': { description: Federation unavailable (split/file/JSONL config) }
+  /api/v1/invites/redeem:
+    post:
+      summary: Redeem an invite (legacy one-shot, or S2 idempotent form)
+      description: >-
+        Legacy {code}-only (unchanged, both store modes): consumes the invite
+        and returns a server-minted bearer ONCE — non-retryable. Idempotent
+        form (S2 blockers B1, federation/Postgres only — 503 otherwise): the
+        caller durably persists a self-generated bearer and redemption_id
+        BEFORE calling and sends {code, redemption_id, token}; Bedrock stores
+        only the sha-256 token hash. First consume is 201 {invite, record};
+        an EXACT replay (same code + redemption_id + token hash) is 200 with
+        the same safe record, surviving response loss, caller restart, and
+        even later invite expiry. A differing redemption_id or token hash —
+        or the same redemption_id against another invite — is 403. No
+        response of the idempotent form ever carries a token.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - title: Legacy one-shot (unchanged contract)
+                  type: object
+                  not: { anyOf: [ { required: [redemption_id] }, { required: [token] } ] }
+                  required: [code]
+                  properties:
+                    code: { type: string }
+                - title: Idempotent redemption (S2 B1, strict)
+                  type: object
+                  additionalProperties: false
+                  required: [code, redemption_id, token]
+                  properties:
+                    code: { type: string }
+                    redemption_id: { type: string, format: uuid }
+                    token: { type: string, pattern: '^[A-Za-z0-9_-]{43}$', description: Caller-generated 32-byte base64url bearer; only its hash is stored. }
+      responses:
+        '201': { description: 'Legacy: { token, invite, record }. Idempotent first consume: { invite, record } — no token.' }
+        '200': { description: 'Idempotent exact replay: same { invite, record }, no state change, no token.' }
+        '400': { description: Missing code, malformed redemption_id/token, or stray keys on the idempotent form }
+        '403': { description: Invalid/expired/consumed invite, or a non-exact replay (different redemption_id/token, reused redemption_id) }
+        '503': { description: Idempotent form without the single shared Postgres authority }
+  /api/v1/rooms/{room_id}/register:
+    post:
+      summary: Register a federated room (bootstrap; admin + room scope)
+      description: >-
+        One transaction claims the ledger correlation (id = room_id, metadata
+        federation_kind=room) and creates the owner human row from the
+        authenticated principal. Retry identity is (room_id, principal). An
+        unrelated pre-existing correlation is never silently claimed.
+      parameters:
+        - { in: path, name: room_id, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                title: { type: string }
+      responses:
+        '201': { description: '{ room_id, owner: RoomMember }' }
+        '200': { description: Same-principal retry — existing owner returned }
+        '400': { description: Invalid room id / non-title keys / non-object body }
+        '409': { description: Unrelated correlation, different principal, or concurrent loser }
+        '503': { description: Federation unavailable }
+  /api/v1/rooms/{room_id}/members/self:
+    post:
+      summary: Self-join after invite redeem (no body fields, ever)
+      description: >-
+        Requires the active contributor token minted by a CONSUMED invite
+        scoped exactly to this room (provenance proven inside the join
+        transaction). Identity derives from the principal; any nonempty body
+        is 400. A removed principal's same token gets 403 membership_revoked
+        — only a new invite readmits.
+      parameters:
+        - { in: path, name: room_id, required: true, schema: { type: string } }
+      responses:
+        '201': { description: '{ member: RoomMember }' }
+        '200': { description: Same-principal retry — existing member returned }
+        '400': { description: Nonempty/non-object body or invalid room id }
+        '403': { description: Wrong token role/scope/provenance, or membership_revoked }
+        '503': { description: Federation unavailable }
+  /api/v1/rooms/{room_id}/members/agents:
+    post:
+      summary: Register own agents (safe descriptors + registration keys)
+      description: >-
+        Caller must hold an ACTIVE human row (locked for the transaction).
+        One transaction, all-or-nothing, max 32 per batch, response preserves
+        request order. registration_key is the idempotency identity; exact
+        retry returns existing rows (200), all-new is 201, same key with
+        different content is 409. Local paths, tools, and credentials are
+        rejected outright — Bedrock never accepts them.
+      parameters:
+        - { in: path, name: room_id, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [agents]
+              properties:
+                agents:
+                  type: array
+                  minItems: 1
+                  maxItems: 32
+                  items:
+                    type: object
+                    additionalProperties: false
+                    required: [registration_key, display_name]
+                    properties:
+                      registration_key: { type: string, minLength: 1, maxLength: 128 }
+                      display_name: { type: string, minLength: 1 }
+                      description: { type: string, description: Truncated to 2048 chars server-side (not rejected). }
+                      model_alias: { type: string, description: Truncated to 128 chars server-side (not rejected). }
+                      skills_count: { type: integer, minimum: 0, maximum: 4294967295 }
+                      subagent_names: { type: array, items: { type: string, description: Each truncated to 128 chars server-side. } }
+      responses:
+        '201': { description: 'All rows new — { members: [RoomMember] }' }
+        '200': { description: Idempotent retry / mixed — full list, request order }
+        '400': { description: Forbidden/unknown fields, duplicate keys, bad batch }
+        '403': { description: No active human membership }
+        '409': { description: registration_key reuse with different content }
+        '503': { description: Federation unavailable }
+  /api/v1/rooms/{room_id}/members:
+    get:
+      summary: Active roster (shared, safe projections only)
+      description: Requires valid token + room scope + ACTIVE membership.
+      parameters:
+        - { in: path, name: room_id, required: true, schema: { type: string } }
+      responses:
+        '200': { description: '{ members: [RoomMember] } — all active human+agent rows' }
+        '400': { description: Invalid room id }
+        '403': { description: No active membership (membership_revoked when tombstoned) }
+        '503': { description: Federation unavailable }
+  /api/v1/rooms/{room_id}/members/{member_id}:
+    delete:
+      summary: Remove a member (soft removal, atomic with owned agents)
+      description: >-
+        Owner removes any other member — a human's owned agents go in the same
+        transaction; a member removes only self; owner self-leave is 409.
+        Repeat delete by a still-authorized caller is idempotent 200
+        {removed: []}; a self-removed caller gets 403 membership_revoked.
+        Registered-room ledger access is separately gated — writes require the
+        canonical correlation_id = room_id + virtual_path = /rooms/{room_id}
+        pair and an actor_member_id owned by the caller.
+      parameters:
+        - { in: path, name: room_id, required: true, schema: { type: string } }
+        - { in: path, name: member_id, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: '{ removed: [member_id] }' }
+        '400': { description: Invalid room id or malformed member UUID }
+        '403': { description: Not authorized / membership_revoked }
+        '409': { description: Owner self-leave denied }
+        '503': { description: Federation unavailable }
+  /api/v1/rooms/{room_id}/events:
+    get:
+      summary: Authenticated durable room event stream (SSE, Gate-2 S1C)
+      description: >-
+        Server-Sent Events tail of a registered room. Header-bearer ONLY —
+        a ?token= query credential is never read (401 unused). Gate order:
+        header authenticate, federation (503 in split/file/JSONL), room
+        normalization, read permission, exact room scope, ACTIVE membership;
+        no admin bypass. Cursor: a canonical-decimal Last-Event-ID header
+        wins when present, else after_sequence, else '0'; a malformed
+        selected cursor is 400 before any read. Every ledger read this
+        stream performs carries BOTH correlation_id=<room_id> and the exact
+        path=/rooms/<room_id>. Protocol: high water H from ONE cursorless
+        scoped tail read (limit 1); hello {room_id, snapshot_high_water};
+        bounded snapshot of visible rows through H; ONE immediate live read
+        from max(cursor, H); then one durable forward-poll LOOP — repeated
+        1s ±100ms polls with 500-row paging and yielded catch-up, at most
+        one read in flight. room_event frames carry SSE id = sequence and
+        the native ledger row as data. Control payloads are exact and carry
+        NO id (only room_event has one): hello
+        {room_id, snapshot_high_water}; heartbeat {sequence: <last accepted
+        id>}; resync_required {after_sequence: <last accepted id>}; revoked
+        {reason: membership_revoked | token_invalid}. Every 15s the
+        heartbeat is enqueued to the single writer FIRST, then the FULL gate
+        re-runs immediately from the stored raw bearer without awaiting
+        socket drain: authz denial queues a terminal revoked frame;
+        infrastructure failure closes as transport without one. Overflow is
+        exact: when the visible-event queue already HOLDS 1024 entries and
+        a next visible row exists (headroom probe) — the queue never
+        exceeds 1024 — the stream sends best-effort resync_required and
+        closes; reconnect with that cursor to heal. Rows are filtered
+        per-principal (path scope + clearance), identical to
+        GET /api/v1/ledger/events visibility.
+      parameters:
+        - { in: path, name: room_id, required: true, schema: { type: string } }
+        - in: query
+          name: after_sequence
+          schema: { type: string, pattern: '^(0|[1-9][0-9]*)$' }
+          description: Canonical decimal cursor; superseded by a Last-Event-ID header.
+        - in: header
+          name: Last-Event-ID
+          schema: { type: string, pattern: '^(0|[1-9][0-9]*)$' }
+          description: Standard SSE reconnect cursor; wins over after_sequence.
+      responses:
+        '200':
+          description: 'SSE frame stream: hello, room_event (id = sequence), heartbeat, resync_required, revoked'
+          content:
+            text/event-stream:
+              schema: { type: string }
+        '400': { description: Invalid room id or malformed selected cursor }
+        '401': { description: Missing/whitespace bearer, or a query-ONLY credential (unused; a query token alongside a valid Authorization header is ignored, not rejected) }
+        '403': { description: Invalid/revoked token, missing read permission or room scope, or no active membership (no admin bypass) — a connect-time 403 is an HTTP error, not a revoked frame }
+        '503': { description: Federation unavailable }

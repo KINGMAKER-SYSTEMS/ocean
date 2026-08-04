@@ -1,0 +1,41 @@
+{
+  "name": "ocean-bedrock",
+  "version": "0.1.0",
+  "description": "Cloud-box substrate for Ocean Longhouse support: authenticated shared files, context ingest, ledger, and knowledge-layer bootstrap.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node src/server.mjs",
+    "dev": "OCEAN_BEDROCK_BOOTSTRAP_TOKEN=dev-token-change-me node src/server.mjs",
+    "token:create": "node scripts/issue-token.mjs",
+    "invite:create": "node scripts/issue-invite.mjs",
+    "ocean:bootstrap": "node scripts/ocean-bootstrap.mjs",
+    "ocean:ingest": "node scripts/ocean-ingest-local.mjs",
+    "ocean:app": "node scripts/ocean-local-app.mjs",
+    "ocean:worker": "node scripts/ocean-ingest-worker.mjs",
+    "ocean:triage": "node scripts/ocean-context-triage.mjs",
+    "ocean:jobs": "node scripts/ocean-failed-jobs.mjs",
+    "ocean:semantic:backfill": "node scripts/ocean-semantic-backfill.mjs",
+    "ocean:backfill:binary": "node scripts/ocean-binary-backfill.mjs",
+    "source:check": "node scripts/source-runner-check.mjs",
+    "secret:scan": "node scripts/secret-scan.mjs",
+    "secret:globs:check": "node scripts/check-secret-globs.mjs",
+    "local-app:ack:check": "node scripts/check-local-app-ack.mjs",
+    "mcp": "node scripts/ocean-bedrock-mcp.mjs",
+    "db:check": "node scripts/check-postgres.mjs",
+    "db:migrate": "node scripts/migrate.mjs",
+    "smoke": "node scripts/smoke-test.mjs",
+    "rooms:pg-smoke": "node scripts/rooms-postgres-smoke.mjs",
+    "rooms:protocol-gate": "node scripts/rooms-protocol-harness.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "mammoth": "^1.12.0",
+    "pg": "^8.21.0",
+    "unpdf": "^1.6.2",
+    "ws": "^8.21.0"
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "scope": {
+    "project": "rt-nas",
+    "service": "ocean-bedrock",
+    "cwd": "/root/rt-nas/rt-nas",
+    "global": false,
+    "note": "Project-scoped roster only. Does not rename agents in other mesh directories."
+  },
+  "authoredFromSession": {
+    "agent": "Navigator",
+    "callsign": "NAV",
+    "expertise": "Orchestration, routing, assignment management, cross-agent coordination",
+    "note": "Authoring context only. Live session identity comes from pi_messenger status/list."
+  },
+  "agents": [
+    { "agent": "Navigator", "callsign": "NAV", "expertise": "Orchestration, routing, assignment management, cross-agent coordination" },
+    { "agent": "Anchor", "callsign": "ANK", "expertise": "Databases, durable storage, source-of-truth rules, schema ownership" },
+    { "agent": "Sonar", "callsign": "SNR", "expertise": "Search, retrieval, knowledge indexing, context discovery" },
+    { "agent": "Reef", "callsign": "REF", "expertise": "Docs, SOPs, knowledge-base structure, internal maps" },
+    { "agent": "Current", "callsign": "CUR", "expertise": "Automations, event-driven workflows, scheduled jobs, integration flows" },
+    { "agent": "Beacon", "callsign": "BCN", "expertise": "Monitoring, logs, health checks, alerts, reliability signals" },
+    { "agent": "Harbor", "callsign": "HBR", "expertise": "Intake, triage, human handoffs, approval boundaries" },
+    { "agent": "Coral", "callsign": "CRL", "expertise": "Dashboard/UI, web surfaces, operator-facing tools" },
+    { "agent": "Keel", "callsign": "KEL", "expertise": "DevOps, deployments, Railway/Cloudflare, infrastructure operations" },
+    { "agent": "Wake", "callsign": "WAK", "expertise": "Research, synthesis, summaries, external/context analysis" },
+    { "agent": "Swell", "callsign": "SWL", "expertise": "Sales, lead qualification, CRM updates, follow-ups" },
+    { "agent": "Surge", "callsign": "SRG", "expertise": "Content drafting, rewriting, publishing preparation" },
+    { "agent": "Drift", "callsign": "DRF", "expertise": "File organization, asset movement, cleanup, NAS hygiene" },
+    { "agent": "Tidewatch", "callsign": "TDW", "expertise": "Analytics, reporting, metrics, performance tracking" }
+  ]
+}

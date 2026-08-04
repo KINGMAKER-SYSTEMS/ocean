@@ -1,0 +1,10 @@
+Inter
+(c) Rasmus Andersson
+Licensed under the SIL Open Font License 1.1.
+
+Source: https://rsms.me/inter/  (font files: https://rsms.me/inter/font-files/)
+License: https://scripts.sil.org/OFL
+
+The SIL Open Font License 1.1 permits use, study, modification, and
+redistribution. The variable woff2 served here (InterVariable.woff2) is the
+upstream variable axis (weight 100-900), unmodified.

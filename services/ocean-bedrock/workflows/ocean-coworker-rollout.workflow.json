@@ -1,0 +1,379 @@
+{
+  "id": "ocean-coworker-rollout",
+  "name": "Ocean Coworker Rollout Prep",
+  "version": 1,
+  "status": "draft-ready",
+  "createdAt": "2026-06-14T02:19:17.838Z",
+  "firingOrder": 4,
+  "dependsOnWorkflows": [
+    "ocean-longhouse-router"
+  ],
+  "purpose": "Take the V0 local sync GUI (scripts/ocean-local-app.mjs) and raw-token-paste onboarding to a safe, repeatable coworker rollout: replace raw-token-paste with a one-time server-issued invite code redeemed for a scoped token; add default secret-exclusion globs so credentials/keys never sync; give the dry-run a real skipped/sensitive-file review surface before first upload; issue contributor-only scoped tokens (delete already blocked) and verify the scope/clearance gates; harden the token registry from volume-JSON (src/auth.mjs + data/.ocean-bedrock/tokens.json) to a Postgres-backed table (db/004) so multi-replica is possible; package or document the GUI install; and ship a written operator onboarding + revoke/rotate runbook.",
+  "canonicalBoundaries": {
+    "oceanDaemon": "Local runtime/body and execution authority. Owns local sessions, events, tools, provider execution, local filesystem/shell/destructive permissions.",
+    "oceanLonghouse": "Hive brain / coordination layer per ocean-os/docs/LONGHOUSE.md. Coordinates skills, SOPs, routines, MCP discovery, memory, subagents, quorum/council logic. Does not bypass daemon permissions.",
+    "oceanBedrock": "Cloud-box support substrate for shared files, context ingest, ledger/event store, Postgres/R2/Vectorize/KV, MCP-facing infrastructure, and coworker bootstrap. Does not redefine Longhouse."
+  },
+  "currentState": "Onboarding today is raw-token-paste: scripts/ocean-local-app.mjs renders a password field \"Paste token once\" and stores the literal bearer in ~/.config/ocean-bedrock/bootstrap.json (mode 0600); requireConfigured() even says \"Paste and save your invite/token first\" but no invite redemption exists — authenticate() in src/server.mjs (line ~225) only calls findToken(auth, token) against the volume-JSON registry. The token registry is file-based (src/auth.mjs loadAuthFile/addToken/revokeToken over data/.ocean-bedrock/tokens.json), sha256-hashed, 5 roles (readonly/contributor/readwrite/agent/admin) with contributor=read/write/lock (delete already blocked) and CONFIDENTIAL max clearance; server token admin routes GET/POST /api/v1/tokens and DELETE /api/v1/tokens/:id (lines ~1652-1676) all require admin. There is NO Postgres token table — db/ ends at 003_source_adapters.sql — so the registry is single-replica-only. Secret exclusion does NOT exist: DEFAULT_IGNORES in scripts/ocean-ingest-local.mjs, scripts/ocean-local-app.mjs, and scripts/ocean-bootstrap.mjs only filter build dirs (.git, node_modules, dist...) — there are no globs for .env, *.pem, id_rsa, *.key, credentials, .aws/.ssh. The ingest --dry-run builds a manifest with totals.skipped and per-source skipped counts but never records WHICH files were skipped or flags sensitive matches, so there is no review surface before first upload.",
+  "modelRoster": {
+    "strategic_orchestrator": {
+      "model": "chatgpt-5.5",
+      "useFor": [
+        "final plan arbitration",
+        "cross-system architecture",
+        "launch go/no-go",
+        "high-impact review"
+      ]
+    },
+    "architecture_reviewer": {
+      "model": "chatgpt-5.4",
+      "useFor": [
+        "canonical Ocean boundary checks",
+        "API design review",
+        "data model review"
+      ]
+    },
+    "implementation_worker": {
+      "model": "chatgpt-5.4-mini",
+      "useFor": [
+        "small code changes",
+        "scripts",
+        "config edits",
+        "repeatable task execution"
+      ]
+    },
+    "docs_onboarding": {
+      "model": "chatgpt-5.3-spark",
+      "useFor": [
+        "coworker docs",
+        "runbooks",
+        "checklists",
+        "operator summaries"
+      ]
+    },
+    "security_reviewer": {
+      "model": "deepseek-v4-pro",
+      "useFor": [
+        "auth review",
+        "token scope review",
+        "secret-handling review",
+        "destructive action gates"
+      ]
+    },
+    "test_triage": {
+      "model": "deepseek-v4-flash",
+      "useFor": [
+        "smoke tests",
+        "log triage",
+        "fast failure analysis",
+        "regression checks"
+      ]
+    },
+    "integration_engineer": {
+      "model": "kimi-k2.6",
+      "useFor": [
+        "Railway/Cloudflare integration",
+        "MCP wiring",
+        "edge-case implementation review"
+      ]
+    },
+    "mcp_interface_designer": {
+      "model": "minimax-m3",
+      "useFor": [
+        "MCP tool/resource contract",
+        "agent ergonomics",
+        "tool naming and schemas"
+      ]
+    },
+    "ingestion_courier_designer": {
+      "model": "minimax-m2.7",
+      "useFor": [
+        "local-folder bootstrap flow",
+        "courier UX",
+        "lightweight ingest worker drafts"
+      ]
+    }
+  },
+  "phases": [
+    {
+      "id": "phase-0-boundary-guardrail",
+      "title": "Pin canonical boundaries and live source-of-truth",
+      "ownerRole": "architecture_reviewer",
+      "reviewRole": "",
+      "dependsOn": [],
+      "tasks": [
+        "Re-read CANONICAL BOUNDARY: ocean-daemon = local runtime/body/execution authority; ocean-longhouse = hive brain/coordination layer; ocean-bedrock = cloud-box support substrate. This track touches ONLY Bedrock onboarding/auth/ingest — do not redefine Longhouse or claim Bedrock is the quorum engine.",
+        "Confirm the live token model against running code, not stale docs: src/auth.mjs roles (readonly/contributor/readwrite/agent/admin), contributor permissions = read/write/lock with delete already blocked (src/server.mjs ROLE_PERMISSIONS line ~70), CONFIDENTIAL max clearance (ROLE_MAX_CLEARANCE line ~188).",
+        "Record that the token registry is currently volume-JSON (data/.ocean-bedrock/tokens.json) and therefore single-replica-only; this is the gap Postgres hardening closes.",
+        "Treat 'invite exchange' and 'GUI packaging choice' as open decisions to resolve in-spec, not pre-decided facts; capture any product-naming uncertainty as an open decision."
+      ],
+      "acceptance": [
+        "Spec text never claims Bedrock is Longhouse or the quorum engine.",
+        "Phase docs state the registry is volume-JSON single-replica today and Postgres is the target.",
+        "No raw token, invite secret, or DATABASE_URL value is written into any committed artifact."
+      ]
+    },
+    {
+      "id": "phase-1-scope-and-contributor-token-verify",
+      "title": "Verify contributor-only scopes, clearance, and delete-block",
+      "ownerRole": "security_reviewer",
+      "reviewRole": "architecture_reviewer",
+      "dependsOn": [
+        "phase-0-boundary-guardrail"
+      ],
+      "tasks": [
+        "Issue a real contributor token scoped to /coworkers/<name>, /sessions/<name>, /context/ocean-bedrock via POST /api/v1/tokens (admin) or npm run token:create -- --role contributor --scope ...; capture the raw token only over a secure channel.",
+        "Confirm requirePathScope (src/server.mjs line ~174) rejects writes outside the granted scopes and requirePermission blocks delete for contributor (ROLE_PERMISSIONS.contributor has no 'delete').",
+        "Confirm requireClearance caps the contributor token at CONFIDENTIAL and TOP_SECRET/SECRET-tagged ledger events are not visible (ledgerEventVisibleToPrincipal line ~210).",
+        "Document the canonical coworker scope convention in docs/COWORKER-BOOTSTRAP.md security section, replacing the current generic note.",
+        "List the 9 historical failed ingest_jobs and 8 registry-only adapters as out-of-scope-for-onboarding so a new coworker is not blocked by them."
+      ],
+      "acceptance": [
+        "A contributor token can PUT under /coworkers/<name>/... and is rejected (403) writing to /vault or another coworker's prefix.",
+        "DELETE /api/v1/file with the contributor token returns 403 (delete blocked).",
+        "A SECRET/TOP_SECRET ledger event is not returned to the contributor token.",
+        "docs/COWORKER-BOOTSTRAP.md states the exact scope set issued to coworkers."
+      ]
+    },
+    {
+      "id": "phase-2-secret-exclusion-globs",
+      "title": "Default secret-exclusion globs for ingest",
+      "ownerRole": "security_reviewer",
+      "reviewRole": "ingestion_courier_designer",
+      "dependsOn": [
+        "phase-1-scope-and-contributor-token-verify"
+      ],
+      "tasks": [
+        "Add a shared DEFAULT_SECRET_PATTERNS list (new module src/ingest-filters.mjs) covering: .env and .env.* , *.pem, *.key, *.p12, *.pfx, id_rsa/id_dsa/id_ecdsa/id_ed25519 (+ .pub off, private on), *.keystore, credentials, *.tfstate, .npmrc, .pypirc, .netrc, .htpasswd, .aws/, .ssh/, .gnupg/, *.kdbx (KeePass), service-account*.json, *secret*, *credential* (case-insensitive).",
+        "Wire DEFAULT_SECRET_PATTERNS into scripts/ocean-ingest-local.mjs shouldIncludeFile/walk and into the DEFAULT_IGNORES of scripts/ocean-local-app.mjs + scripts/ocean-bootstrap.mjs so the same filter applies in dry-run, GUI sync, and CLI bootstrap.",
+        "Classify two outcomes per excluded file: 'noise' (build dirs, already ignored) vs 'sensitive' (matched a secret pattern) so the dry-run can warn loudly on sensitive matches.",
+        "Make the secret filter NON-overridable by --all-files / all-files mode (size/extension override is fine; secrets stay excluded unless an explicit, separately-named --include-secrets flag is passed).",
+        "Add a unit-style check in scripts/smoke-test.mjs (or a new scripts/check-secret-globs.mjs) asserting a temp dir with .env, id_rsa, secrets.json is fully excluded by default."
+      ],
+      "acceptance": [
+        "A folder containing .env, id_rsa, aws-credentials, secret.pem, app.kdbx ingests ZERO of those files by default (dry-run totals show them under skipped/sensitive).",
+        "--all-files still excludes the secret set; only the explicit --include-secrets flag changes that.",
+        "The check script exits 0 and reports each blocked sensitive file with its matched pattern.",
+        "DEFAULT_SECRET_PATTERNS is defined once (src/ingest-filters.mjs) and imported by all three scripts (no copy-paste divergence)."
+      ]
+    },
+    {
+      "id": "phase-3-dryrun-review-surface",
+      "title": "Dry-run skipped/sensitive-file review before first upload",
+      "ownerRole": "ingestion_courier_designer",
+      "reviewRole": "security_reviewer",
+      "dependsOn": [
+        "phase-2-secret-exclusion-globs"
+      ],
+      "tasks": [
+        "Extend the ingest manifest in scripts/ocean-ingest-local.mjs to record a skippedFiles array per source: { rel, reason: 'size'|'extension'|'ignore'|'sensitive', matchedPattern? }, gated to dry-run or a --report flag to avoid bloating real-run manifests.",
+        "Add a --review (or reuse --dry-run) summary block to the JSON output: counts by reason plus the full list of 'sensitive' matches surfaced first, so an operator sees credentials-that-would-have-synced before any upload.",
+        "In scripts/ocean-local-app.mjs add a 'Dry-run / Preview' button and /api/preview endpoint that runs ingest with --dry-run and renders changed-file count, skipped-by-reason counts, and a red 'Sensitive files excluded' panel listing matched paths.",
+        "Block the GUI 'Sync now' / first real upload behind an explicit 'I reviewed the preview' acknowledgement when any sensitive match was found in the latest preview.",
+        "Keep raw file bytes out of the preview payload — surface paths and reasons only, never file contents."
+      ],
+      "acceptance": [
+        "npm run ocean:ingest -- --dry-run prints a skippedFiles list with reason and matchedPattern for each sensitive hit.",
+        "GET/POST /api/preview in the local app returns changed count + skipped-by-reason counts + sensitive matches and renders the red panel.",
+        "When a sensitive match is present, the GUI requires explicit acknowledgement before enabling the first real sync.",
+        "Preview output contains paths/reasons only, no file contents."
+      ]
+    },
+    {
+      "id": "phase-4-token-registry-postgres",
+      "title": "Harden token registry from volume-JSON to Postgres",
+      "ownerRole": "implementation_worker",
+      "reviewRole": "security_reviewer",
+      "dependsOn": [
+        "phase-1-scope-and-contributor-token-verify"
+      ],
+      "tasks": [
+        "Author db/004_auth_tokens.sql creating longhouse.auth_tokens (id TEXT PK, name, hash TEXT UNIQUE NOT NULL, role TEXT, scopes JSONB/TEXT[], created_at, created_by, expires_at, revoked_at, revoked_by) with an index on hash; keep sha256: hash format identical to src/auth.mjs hashToken so existing tokens stay valid.",
+        "Add a Postgres backend to src/auth.mjs behind the SAME function signatures (loadAuthFile/findToken/addToken/revokeToken/publicTokenRecord) — introduce a store abstraction selected by OCEAN_AUTH_STORE (postgres when DATABASE_URL set, else json), preserving sha256 hashing, roles, normalizeScopes, expiry, timing-safe compare.",
+        "Write scripts/migrate-tokens-to-postgres.mjs that backfills every record from data/.ocean-bedrock/tokens.json into longhouse.auth_tokens idempotently (ON CONFLICT (hash) DO NOTHING), preserving id/role/scopes/createdAt/revokedAt; require --yes like scripts/migrate.mjs.",
+        "Update db/003-style migration list in scripts/migrate.mjs default files to include db/004; keep findToken on a hot path query (indexed hash lookup), not a full table scan.",
+        "Update docs/HANDOFF.md to mark the token registry as Postgres-backed and multi-replica-capable once cut over, and note OCEAN_AUTH_STORE env."
+      ],
+      "acceptance": [
+        "npm run db:migrate -- --yes db/004_auth_tokens.sql applies cleanly; longhouse.auth_tokens exists with a UNIQUE index on hash.",
+        "With OCEAN_AUTH_STORE=postgres, authenticate() resolves a known token via DB and an unknown/revoked token returns 403 (parity with JSON backend).",
+        "scripts/migrate-tokens-to-postgres.mjs backfills all current tokens.json rows; re-running is a no-op (row count unchanged).",
+        "Token create/revoke via /api/v1/tokens writes to Postgres and is visible after a simulated second-replica read (fresh connection)."
+      ]
+    },
+    {
+      "id": "phase-5-invite-exchange",
+      "title": "One-time invite code redeemed for a scoped token",
+      "ownerRole": "security_reviewer",
+      "reviewRole": "architecture_reviewer",
+      "dependsOn": [
+        "phase-4-token-registry-postgres"
+      ],
+      "tasks": [
+        "Design a short-lived single-use invite: admin POST /api/v1/invites { name, role:'contributor', scopes, ttlMinutes } returns an invite CODE (high-entropy, stored sha256-hashed in a new longhouse.auth_invites table in db/004 alongside tokens) with expires_at and consumed_at NULL; the raw scoped token is NOT created until redemption.",
+        "Add public-ish POST /api/v1/invites/redeem { code } that, if the invite is unconsumed and unexpired, atomically marks it consumed and mints a contributor token (addToken with the invite's role/scopes), returning the raw token ONCE; reject reuse, expired, or unknown codes.",
+        "Replace raw-token-paste in scripts/ocean-local-app.mjs: add a 'Redeem invite' field that POSTs the code to /api/v1/invites/redeem, then stores the returned scoped token in bootstrap.json (mode 0600) — coworker never sees or pastes a long raw token.",
+        "Update requireConfigured() messaging and docs so the path is 'paste invite code once' not 'paste token'; keep a fallback raw-token path for admins/agents.",
+        "Ensure invite codes and minted tokens are never written to shared manifests or ledger payloads — only token id/name/role/scopes metadata."
+      ],
+      "acceptance": [
+        "POST /api/v1/invites (admin) returns an invite code and persists a hashed row; the code is shown once.",
+        "POST /api/v1/invites/redeem with a valid code mints a contributor token and returns it once; a second redeem of the same code returns 4xx (single-use).",
+        "An expired invite code is rejected with 4xx.",
+        "The local app 'Redeem invite' flow stores a working scoped token and never displays the raw token after redemption.",
+        "No invite code or raw token appears in any /context manifest or ledger payload."
+      ]
+    },
+    {
+      "id": "phase-6-package-and-runbook",
+      "title": "Package/install the GUI and write the operator runbook",
+      "ownerRole": "docs_onboarding",
+      "reviewRole": "ingestion_courier_designer",
+      "dependsOn": [
+        "phase-3-dryrun-review-surface",
+        "phase-5-invite-exchange"
+      ],
+      "tasks": [
+        "Weigh GUI packaging options and record the decision: (A) documented 'node scripts/ocean-local-app.mjs via npx/npm run ocean:app' with a one-line installer script (lowest effort, recommended for first rollout), (B) Electron/Tauri double-click .app/.exe (higher effort, defer). Default to (A) for this wave and capture (B) as a follow-up.",
+        "Create scripts/ocean-install.sh (and a Windows note) that checks Node >=22, clones/pulls the repo or installs a published tarball, runs npm install, and prints the ocean:app command — no token baked in.",
+        "Write docs/COWORKER-ONBOARDING-RUNBOOK.md (operator-facing): create invite (POST /api/v1/invites), send code over secure channel, coworker installs + redeems + chooses folders + runs preview + reviews sensitive panel + first sync; include the exact contributor scope set.",
+        "Add a revoke/rotate section: list tokens (GET /api/v1/tokens), revoke (DELETE /api/v1/tokens/:id), reissue via new invite; note that revoke is immediate because authenticate() rechecks the registry each request.",
+        "Update docs/LOCAL-GUI-APP.md and docs/OCEAN-TOOLBOX-BOOTSTRAP.md to reflect invite-exchange + preview + secret exclusion, removing 'paste raw token' language."
+      ],
+      "acceptance": [
+        "scripts/ocean-install.sh runs on a clean machine (or documented manual steps) and ends at a runnable ocean:app without embedding any token.",
+        "docs/COWORKER-ONBOARDING-RUNBOOK.md walks operator from invite creation to verified first sync with the sensitive-file review step.",
+        "Revoke/rotate steps are documented and a revoked token is rejected on the next request.",
+        "docs no longer instruct coworkers to paste a raw token; GUI packaging decision (A vs B) is recorded with rationale."
+      ]
+    },
+    {
+      "id": "phase-7-security-launch-review",
+      "title": "Security and launch review for coworker rollout",
+      "ownerRole": "security_reviewer",
+      "reviewRole": "strategic_orchestrator",
+      "dependsOn": [
+        "phase-2-secret-exclusion-globs",
+        "phase-4-token-registry-postgres",
+        "phase-5-invite-exchange",
+        "phase-6-package-and-runbook"
+      ],
+      "tasks": [
+        "Run an end-to-end rehearsal: admin issues invite -> fresh device redeems -> chooses a real folder containing planted secrets -> preview shows sensitive panel -> first sync uploads only safe files under /coworkers/<name>/<device> -> delete attempt returns 403.",
+        "Confirm secret exclusion holds in all three entry points (CLI bootstrap, CLI ingest, GUI) and cannot be bypassed without the explicit --include-secrets flag.",
+        "Confirm token registry parity: same token authenticates against Postgres and JSON backends, revocation propagates, no secrets in tokens table beyond sha256 hash.",
+        "Confirm no invite code, raw token, or DATABASE_URL is present in committed code, manifests, ledger payloads, or docs; confirm bootstrap.json remains mode 0600.",
+        "Produce a go/no-go checklist and document remaining gaps (e.g., deferred Electron packaging, no OS background daemon) as blocked/future, not implied complete."
+      ],
+      "acceptance": [
+        "End-to-end rehearsal passes: invite redeemed, sensitive files excluded and surfaced, only safe files synced, delete 403.",
+        "Secret exclusion verified across CLI bootstrap, CLI ingest, and GUI with no default bypass.",
+        "Postgres/JSON token parity and immediate revocation verified.",
+        "Security checklist passes with zero raw secrets in any artifact; deferred items explicitly listed as future."
+      ]
+    }
+  ],
+  "fileTargets": [
+    {
+      "path": "scripts/ocean-local-app.mjs",
+      "action": "modify",
+      "note": "Replace raw-token password field with 'Redeem invite' flow calling /api/v1/invites/redeem; add Dry-run/Preview button + /api/preview endpoint with sensitive-file red panel; gate first sync behind review acknowledgement; wire shared secret globs into DEFAULT_IGNORES."
+    },
+    {
+      "path": "scripts/ocean-ingest-local.mjs",
+      "action": "modify",
+      "note": "Import DEFAULT_SECRET_PATTERNS; classify skips as size/extension/ignore/sensitive; record skippedFiles[] with matchedPattern in dry-run/--report manifest; secret filter non-overridable except explicit --include-secrets."
+    },
+    {
+      "path": "scripts/ocean-bootstrap.mjs",
+      "action": "modify",
+      "note": "Wire shared secret-exclusion globs into DEFAULT_IGNORES so CLI bootstrap matches ingest/GUI filtering."
+    },
+    {
+      "path": "src/ingest-filters.mjs",
+      "action": "create",
+      "note": "New shared module: DEFAULT_SECRET_PATTERNS (.env, *.pem, *.key, id_rsa, credentials, .aws, .ssh, *.kdbx, *secret*, *credential*...) + classify(file) helper imported by all three ingest entry points."
+    },
+    {
+      "path": "src/auth.mjs",
+      "action": "modify",
+      "note": "Add Postgres store behind same loadAuthFile/findToken/addToken/revokeToken signatures, selected by OCEAN_AUTH_STORE; preserve sha256 hashToken, roles, normalizeScopes, expiry, timing-safe compare; add invite create/redeem helpers."
+    },
+    {
+      "path": "db/004_auth_tokens.sql",
+      "action": "create",
+      "note": "New migration: longhouse.auth_tokens (hash UNIQUE, role, scopes, expiry, revoked) + longhouse.auth_invites (code hash, role, scopes, expires_at, consumed_at) with indexes; preserves sha256: hash format."
+    },
+    {
+      "path": "scripts/migrate-tokens-to-postgres.mjs",
+      "action": "create",
+      "note": "Idempotent backfill from data/.ocean-bedrock/tokens.json into longhouse.auth_tokens (ON CONFLICT(hash) DO NOTHING); requires --yes."
+    },
+    {
+      "path": "scripts/migrate.mjs",
+      "action": "modify",
+      "note": "Add db/004_auth_tokens.sql to the default migration file list."
+    },
+    {
+      "path": "src/server.mjs",
+      "action": "modify",
+      "note": "Add POST /api/v1/invites (admin) + POST /api/v1/invites/redeem (public mint-once); confirm existing /api/v1/tokens and /api/v1/file scope/permission/clearance gates for contributor; route auth store selection."
+    },
+    {
+      "path": "scripts/check-secret-globs.mjs",
+      "action": "create",
+      "note": "Standalone check (or smoke-test addition) asserting a temp dir of planted secrets (.env, id_rsa, secrets.json, *.kdbx) is fully excluded by default and reports matched patterns."
+    },
+    {
+      "path": "scripts/ocean-install.sh",
+      "action": "create",
+      "note": "Coworker installer: verify Node>=22, fetch repo/tarball, npm install, print ocean:app command; no token embedded. Plus a Windows note in docs."
+    },
+    {
+      "path": "docs/COWORKER-ONBOARDING-RUNBOOK.md",
+      "action": "create",
+      "note": "Operator runbook: create invite -> send code -> install -> redeem -> choose folders -> preview/review sensitive panel -> first sync -> revoke/rotate steps."
+    },
+    {
+      "path": "docs/COWORKER-BOOTSTRAP.md",
+      "action": "modify",
+      "note": "Document canonical contributor scope set; replace 'paste raw token' with invite-redeem; add secret-exclusion and preview-review notes."
+    },
+    {
+      "path": "docs/LOCAL-GUI-APP.md",
+      "action": "modify",
+      "note": "Update token model to invite-exchange, add preview/sensitive-review behavior, record GUI packaging decision (A documented run vs B Electron deferred)."
+    },
+    {
+      "path": "docs/HANDOFF.md",
+      "action": "modify",
+      "note": "Mark token registry Postgres-backed/multi-replica-capable post cutover; note OCEAN_AUTH_STORE; update P2 status as rollout prep lands."
+    }
+  ],
+  "launchDefinitionOfDone": [
+    "A coworker onboards with a one-time invite code (no raw token paste): admin issues invite, coworker redeems it in the GUI, and a scoped contributor token is stored at mode 0600.",
+    "Default secret-exclusion globs (.env, *.pem, *.key, id_rsa, credentials, .aws/.ssh, *.kdbx, *secret*) exclude credentials in CLI bootstrap, CLI ingest, and GUI, with no default bypass.",
+    "Dry-run/preview surfaces skipped files by reason and loudly flags sensitive matches before the first upload; GUI requires acknowledgement when sensitive files are found.",
+    "Contributor tokens are scoped (/coworkers/<name>, /sessions/<name>, /context/ocean-bedrock), capped at CONFIDENTIAL, and delete returns 403.",
+    "Token registry is backed by Postgres (longhouse.auth_tokens) behind unchanged src/auth.mjs signatures, with JSON->Postgres backfill verified idempotent, enabling multi-replica.",
+    "Operator runbook documents create-invite, install, redeem, review, first-sync, and revoke/rotate; revocation is rejected on the next request.",
+    "Security review passes end-to-end with zero raw secrets in any committed artifact, manifest, or ledger payload."
+  ],
+  "openDecisions": [
+    "GUI packaging: ship documented 'npm run ocean:app' + installer script now (low effort, recommended) vs build Electron/Tauri double-click .app/.exe (higher effort) — spec defaults to documented run and defers the desktop build.",
+    "Invite redemption endpoint exposure: fully public POST /api/v1/invites/redeem vs requiring a low-privilege bootstrap token; single-use + short TTL + sha256-hashed code chosen as the mitigation either way.",
+    "Auth store cutover strategy: run Postgres and JSON in parallel (dual-read) during transition vs hard switch via OCEAN_AUTH_STORE — affects whether the bootstrap-admin env token must be re-seeded into Postgres.",
+    "Whether the explicit --include-secrets escape hatch should exist at all, or secret exclusion should be absolute (no override) for coworker-issued tokens.",
+    "This track is sequenced firingOrder=4 dependsOnWorkflows=[ocean-longhouse-router] as assigned; in practice the auth/invite/secret-exclusion/packaging work has NO hard dependency on the Longhouse data-plane router and could run in parallel — the only real coupling is that multi-mount routing would change where coworker files land. Flagged, but firingOrder kept as given.",
+    "Whether contributor scope should also include a per-coworker /handoffs or /vault-readonly prefix, or stay strictly to coworkers/sessions/context."
+  ],
+  "risks": [
+    "Secret-exclusion globs are heuristic; a non-standard secret filename (e.g. a custom config holding API keys) can still sync. The preview/sensitive panel and contributor-only scope are the compensating controls, not a guarantee.",
+    "Postgres auth-store migration touches the authentication hot path (authenticate() runs per request). A regression or slow indexed lookup could lock everyone out or add latency; parity tests and an indexed hash lookup are required before cutover.",
+    "The bootstrap-admin token is currently seeded from env into tokens.json (src/server.mjs bootstrapAuth); the JSON->Postgres backfill must carry it or admin access is lost after cutover.",
+    "Invite endpoint is a new public-facing surface; without strict single-use + short TTL + rate limiting it becomes a token-minting vector. Must reject reuse/expired atomically.",
+    "Local app sync and scheduling only run while the GUI is open (no OS daemon); a coworker may believe sync is continuous. Runbook must state this explicitly.",
+    "Token registry hardening to Postgres assumes the same prod DATABASE_URL already used by ledger/sources; if Bedrock runs without DATABASE_URL the auth store must fall back to JSON cleanly or auth breaks.",
+    "Assigned dependency on ocean-longhouse-router is weak; if that wave slips, this track's auth/secret/packaging work is needlessly blocked unless the orchestrator allows it to proceed in parallel."
+  ]
+}

@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark" />
+  <title>Ocean Bedrock - Local Sync</title>
+  <link rel="preload" href="/design/fonts/InterVariable.woff2" as="font" type="font/woff2" crossorigin />
+  <link rel="stylesheet" href="/design/tokens.css" />
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; }
+    body {
+      background: var(--ocean-bg-base, #050914);
+      color: var(--ocean-text, #edf6ff);
+      font-family: var(--ocean-font, Inter, ui-sans-serif, system-ui, sans-serif);
+      font-size: 14px;
+      line-height: 1.5;
+      padding: 32px 20px 64px;
+    }
+    main { max-width: 860px; margin: 0 auto; display: grid; gap: 16px; }
+    header { display: flex; align-items: baseline; gap: 14px; margin-bottom: 8px; flex-wrap: wrap; }
+    .wordmark { font-weight: 800; letter-spacing: 0.44em; font-size: 13px; color: var(--ocean-accent, #7fd1ff); }
+    .subtitle { text-transform: uppercase; letter-spacing: var(--ocean-track-label, 0.16em); font-size: 11px; color: var(--ocean-text-muted, #6f8aa3); }
+    header .pill-status { margin-left: auto; }
+    .card {
+      background: var(--ocean-glass-fill, rgba(8, 20, 36, 0.82));
+      border: 1px solid var(--ocean-glass-border, rgba(98, 157, 207, 0.22));
+      border-radius: var(--ocean-radius-card, 24px);
+      padding: 20px 22px;
+    }
+    .card h2 {
+      margin: 0 0 14px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: var(--ocean-track-label, 0.16em);
+      color: var(--ocean-text-muted, #6f8aa3);
+    }
+    .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+    .row:last-child { margin-bottom: 0; }
+    label { font-size: 12px; color: var(--ocean-text-muted, #6f8aa3); min-width: 82px; }
+    input[type="text"], input[type="password"], input[type="number"] {
+      flex: 1; min-width: 180px;
+      background: rgba(5, 9, 20, 0.6);
+      border: 1px solid var(--ocean-glass-border, rgba(98, 157, 207, 0.22));
+      border-radius: 10px;
+      color: var(--ocean-text, #edf6ff);
+      font: inherit;
+      padding: 8px 12px;
+    }
+    input:focus-visible, button:focus-visible { outline: 2px solid var(--ocean-focus, #57b5ff); outline-offset: 1px; }
+    button {
+      background: transparent;
+      border: 1px solid var(--ocean-glass-border, rgba(98, 157, 207, 0.22));
+      border-radius: var(--ocean-radius-pill, 999px);
+      color: var(--ocean-accent, #7fd1ff);
+      font: inherit; font-size: 13px;
+      padding: 7px 18px;
+      cursor: pointer;
+    }
+    button:hover { border-color: var(--ocean-accent, #7fd1ff); }
+    button.primary { background: var(--ocean-accent, #7fd1ff); color: #05121f; border-color: transparent; font-weight: 600; }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    .pill-status {
+      display: inline-block;
+      border-radius: var(--ocean-radius-pill, 999px);
+      border: 1px solid var(--ocean-glass-border, rgba(98, 157, 207, 0.22));
+      padding: 4px 14px;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: var(--ocean-track-label, 0.16em);
+      color: var(--ocean-text-muted, #6f8aa3);
+    }
+    .pill-status.ok { color: var(--ocean-accent, #7fd1ff); border-color: var(--ocean-accent, #7fd1ff); }
+    ul.plain { list-style: none; margin: 0; padding: 0; }
+    ul.plain li { padding: 6px 0; border-bottom: 1px solid rgba(98, 157, 207, 0.10); display: flex; gap: 10px; align-items: baseline; }
+    ul.plain li:last-child { border-bottom: 0; }
+    .muted { color: var(--ocean-text-muted, #6f8aa3); font-size: 12px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+    #log { max-height: 220px; overflow-y: auto; }
+    #log li { border-bottom: 0; padding: 2px 0; }
+    #flash { min-height: 18px; font-size: 12px; color: var(--ocean-focus, #57b5ff); }
+    #flash.error { color: #ff9d9d; }
+    a { color: var(--ocean-accent, #7fd1ff); }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <span class="wordmark">OCEAN</span>
+      <span class="subtitle">Bedrock local sync</span>
+      <span id="gate-pill" class="pill-status">loading</span>
+    </header>
+    <div id="flash" role="status" aria-live="polite"></div>
+
+    <section class="card" aria-labelledby="h-conn">
+      <h2 id="h-conn">Connection</h2>
+      <div class="row"><label for="serverUrl">Server</label><input type="text" id="serverUrl" placeholder="https://..." /></div>
+      <div class="row"><label for="ownerName">Name</label><input type="text" id="ownerName" placeholder="your coworker name" /></div>
+      <div class="row"><label for="invite">Invite code</label><input type="text" id="invite" placeholder="one-time invite code" /><button id="redeem">Redeem invite</button></div>
+      <div class="row"><label for="token">Token</label><input type="password" id="token" placeholder="scoped bearer token (fallback)" /><button id="saveConfig">Save</button><button id="test">Test connection</button></div>
+      <div class="row"><span id="conn-result" class="muted"></span></div>
+    </section>
+
+    <section class="card" aria-labelledby="h-folders">
+      <h2 id="h-folders">Folders</h2>
+      <ul id="folders" class="plain"><li class="muted">none yet</li></ul>
+      <div class="row" style="margin-top:12px">
+        <input type="text" id="folderPath" placeholder="/path/to/folder" />
+        <button id="addFolder">Add</button>
+        <button id="pickFolder">Choose folder</button>
+      </div>
+    </section>
+
+    <section class="card" aria-labelledby="h-preview">
+      <h2 id="h-preview">Preview and sync gate</h2>
+      <div class="row">
+        <button id="runPreview" class="primary">Run dry-run preview</button>
+        <span id="preview-summary" class="muted">no preview yet</span>
+      </div>
+      <div class="row">
+        <button id="ack" disabled>I reviewed this preview - unlock sync</button>
+        <span id="ack-status" class="muted"></span>
+      </div>
+    </section>
+
+    <section class="card" aria-labelledby="h-sync">
+      <h2 id="h-sync">Sync</h2>
+      <div class="row">
+        <button id="syncNow" class="primary" disabled>Sync now</button>
+        <button id="manifest">Write source manifest</button>
+        <span id="sync-status" class="muted"></span>
+      </div>
+      <div class="row">
+        <label for="schedEnabled">Schedule</label>
+        <input type="checkbox" id="schedEnabled" />
+        <label for="schedInterval" style="min-width:auto">every</label>
+        <input type="number" id="schedInterval" min="5" value="60" style="flex:0 0 90px" />
+        <span class="muted">minutes</span>
+        <button id="saveSchedule">Apply</button>
+        <span id="sched-next" class="muted"></span>
+      </div>
+    </section>
+
+    <section class="card" aria-labelledby="h-activity">
+      <h2 id="h-activity">Activity</h2>
+      <ul id="log" class="plain mono"><li class="muted">no activity yet</li></ul>
+    </section>
+
+    <p class="muted">Coworker onboarding ceremony lives at <a href="/onboarding">/onboarding</a>. This panel is the operator app.</p>
+  </main>
+
+  <script>
+    'use strict';
+    const $ = (id) => document.getElementById(id);
+    const flash = (msg, isError) => {
+      const el = $('flash');
+      el.textContent = msg || '';
+      el.className = isError ? 'error' : '';
+    };
+    async function api(pathname, body) {
+      const res = await fetch(pathname, body === undefined
+        ? undefined
+        : { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+      const json = await res.json().catch(() => ({ ok: false, error: 'bad response' }));
+      if (!res.ok || json.ok === false) throw new Error(json.error || ('HTTP ' + res.status));
+      return json;
+    }
+
+    let lastState = null;
+    function render(state) {
+      lastState = state;
+      const cfg = state.config || {};
+      if (document.activeElement === document.body || document.activeElement === null) {
+        $('serverUrl').value = cfg.serverUrl || '';
+        $('ownerName').value = cfg.ownerName || '';
+      }
+      $('gate-pill').textContent = state.syncUnlocked ? 'sync unlocked' : 'sync locked';
+      $('gate-pill').className = 'pill-status' + (state.syncUnlocked ? ' ok' : '');
+
+      const folders = Array.isArray(cfg.sources) ? cfg.sources : [];
+      const fl = $('folders');
+      fl.innerHTML = '';
+      if (!folders.length) fl.innerHTML = '<li class="muted">none yet</li>';
+      for (const f of folders) {
+        const li = document.createElement('li');
+        const label = typeof f === 'string' ? f : (f.label || f.localPath || JSON.stringify(f));
+        const p = typeof f === 'object' && f && f.localPath ? f.localPath : '';
+        li.innerHTML = '<span></span><span class="muted mono"></span>';
+        li.children[0].textContent = label;
+        li.children[1].textContent = p && p !== label ? p : '';
+        fl.appendChild(li);
+      }
+
+      const preview = state.appState && state.appState.lastPreview;
+      if (preview) {
+        $('preview-summary').textContent =
+          (preview.ok ? 'preview ok' : 'preview failed') +
+          (preview.completedAt ? ' at ' + preview.completedAt : '') +
+          (preview.planFingerprint === state.syncPlanFingerprint ? '' : ' (stale - folders/settings changed)');
+        $('ack').disabled = !(preview.ok && preview.planFingerprint === state.syncPlanFingerprint);
+      } else {
+        $('preview-summary').textContent = 'no preview yet';
+        $('ack').disabled = true;
+      }
+      const ack = state.appState && state.appState.previewAcknowledgement;
+      $('ack-status').textContent = state.syncUnlocked
+        ? 'acknowledged - sync is unlocked'
+        : (ack ? 'previous acknowledgement no longer matches - re-run preview and re-acknowledge' : 'not acknowledged yet');
+
+      $('syncNow').disabled = !state.syncUnlocked || state.activeSync;
+      $('sync-status').textContent = state.activeSync ? 'sync running...' : '';
+      const sched = cfg.schedule || {};
+      $('schedEnabled').checked = Boolean(sched.enabled);
+      if (document.activeElement !== $('schedInterval')) $('schedInterval').value = sched.intervalMinutes || 60;
+      $('sched-next').textContent = state.scheduleNextAt ? 'next: ' + state.scheduleNextAt : '';
+
+      const logs = Array.isArray(state.logs) ? state.logs : [];
+      const log = $('log');
+      log.innerHTML = '';
+      if (!logs.length) log.innerHTML = '<li class="muted">no activity yet</li>';
+      for (const line of logs.slice().reverse()) {
+        const li = document.createElement('li');
+        li.textContent = typeof line === 'string' ? line : JSON.stringify(line);
+        log.appendChild(li);
+      }
+    }
+
+    async function refresh() {
+      try { render(await api('/api/state')); }
+      catch (err) { flash('state: ' + err.message, true); }
+    }
+    async function act(label, fn) {
+      flash(label + '...');
+      try { await fn(); flash(label + ' done'); }
+      catch (err) { flash(label + ': ' + err.message, true); }
+      await refresh();
+    }
+
+    $('saveConfig').onclick = () => act('save config', () =>
+      api('/api/config', { serverUrl: $('serverUrl').value, ownerName: $('ownerName').value, token: $('token').value || '[saved]' }));
+    $('redeem').onclick = () => act('redeem invite', () =>
+      api('/api/invite/redeem', { serverUrl: $('serverUrl').value, code: $('invite').value }));
+    $('test').onclick = () => act('test connection', async () => {
+      const r = await api('/api/test', {});
+      $('conn-result').textContent = 'health: ' + JSON.stringify(r.health || r).slice(0, 160);
+    });
+    $('pickFolder').onclick = () => act('choose folder', async () => {
+      const r = await api('/api/folder-dialog', {});
+      if (r.path) { $('folderPath').value = r.path; await api('/api/folders', { path: r.path }); }
+    });
+    $('addFolder').onclick = () => act('add folder', () => api('/api/folders', { path: $('folderPath').value }));
+    $('runPreview').onclick = () => act('dry-run preview', () => api('/api/preview', {}));
+    $('ack').onclick = () => act('acknowledge preview', () => api('/api/preview/ack', {}));
+    $('syncNow').onclick = () => act('sync', () => api('/api/sync', {}));
+    $('manifest').onclick = () => act('write manifest', () => api('/api/manifest', {}));
+    $('saveSchedule').onclick = () => act('apply schedule', () =>
+      api('/api/schedule', { enabled: $('schedEnabled').checked, intervalMinutes: Number($('schedInterval').value) }));
+
+    refresh();
+    setInterval(refresh, 5000);
+  </script>
+</body>
+</html>

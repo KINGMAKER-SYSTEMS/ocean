@@ -1,0 +1,159 @@
+import path from 'node:path';
+import { promises as fs } from 'node:fs';
+import { HttpError } from '../adapter.mjs';
+
+function etagFromStat(stat) {
+  return `"${stat.size.toString(16)}-${Math.floor(stat.mtimeMs).toString(16)}"`;
+}
+
+function kindFromStat(stat) {
+  if (stat.isDirectory()) return 'directory';
+  if (stat.isFile()) return 'file';
+  if (stat.isSymbolicLink()) return 'symlink';
+  return 'other';
+}
+
+function fileInfo(apiPath, stat) {
+  return {
+    path: apiPath,
+    name: apiPath === '/' ? '/' : path.posix.basename(apiPath),
+    type: kindFromStat(stat),
+    size: stat.size,
+    mtime: stat.mtime.toISOString(),
+    ctime: stat.ctime.toISOString(),
+    etag: etagFromStat(stat),
+  };
+}
+
+// realpath the deepest EXISTING ancestor of `p` (the target itself may not
+// exist yet, e.g. a write/mkdir). Resolves every symlink along the existing
+// portion of the path, so an intermediate symlink can't hide an escape.
+async function realpathOfNearestExisting(p) {
+  let cur = p;
+  // The mount root always exists, so this terminates.
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    try {
+      return await fs.realpath(cur);
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      const parent = path.dirname(cur);
+      if (parent === cur) throw error; // reached fs root without an existing path
+      cur = parent;
+    }
+  }
+}
+
+async function lstatNoSymlink(diskPath) {
+  let stat;
+  try {
+    stat = await fs.lstat(diskPath);
+  } catch (error) {
+    if (error.code === 'ENOENT') throw new HttpError(404, 'Path not found.');
+    throw error;
+  }
+  if (stat.isSymbolicLink()) throw new HttpError(403, 'Symlinks are not served by Ocean Bedrock.');
+  return stat;
+}
+
+export class LocalStorageAdapter {
+  constructor(mount, absRoot) {
+    this.mount = mount;
+    this.absRoot = absRoot;
+    this.capabilities = mount.capabilities || { read: true, write: true, delete: true, move: true };
+    this.diskRoot = absRoot;
+  }
+
+  async _diskPath(relPath) {
+    const resolved = relPath ? path.resolve(this.absRoot, relPath) : this.absRoot;
+    // Lexical guard first (cheap; rejects `..` that escapes textually).
+    if (resolved !== this.absRoot && !resolved.startsWith(`${this.absRoot}${path.sep}`)) {
+      throw new HttpError(400, 'Resolved path escapes the mount root.');
+    }
+    // Symlink-safe containment: a symlink in an INTERMEDIATE directory can make a
+    // lexically-contained path resolve OUTSIDE the root (the leaf-only
+    // `lstatNoSymlink` check misses it). realpath the deepest existing path
+    // component and re-assert it sits under the (realpath'd) root, so a
+    // planted/synced symlink can't escape the mount jail or a token's path scope.
+    const realRoot = await fs.realpath(this.absRoot);
+    const realProbe = await realpathOfNearestExisting(resolved);
+    if (realProbe !== realRoot && !realProbe.startsWith(`${realRoot}${path.sep}`)) {
+      throw new HttpError(403, 'Resolved path escapes the mount root via a symlink.');
+    }
+    return resolved;
+  }
+
+  async stat(relPath, apiPath) {
+    const diskPath = await this._diskPath(relPath);
+    const stat = await lstatNoSymlink(diskPath);
+    return fileInfo(apiPath, stat);
+  }
+
+  async list(relPath, apiPath, { depth = 1 } = {}) {
+    const diskPath = await this._diskPath(relPath);
+    const stat = await lstatNoSymlink(diskPath);
+    if (!stat.isDirectory()) throw new HttpError(400, `${apiPath} is not a directory.`);
+
+    const entries = [];
+    async function walk(currentApiPath, currentDiskPath, remainingDepth) {
+      const dirents = await fs.readdir(currentDiskPath, { withFileTypes: true });
+      for (const dirent of dirents) {
+        const childApiPath = currentApiPath === '/' ? `/${dirent.name}` : `${currentApiPath}/${dirent.name}`;
+        const childDiskPath = path.join(currentDiskPath, dirent.name);
+        const childStat = await fs.lstat(childDiskPath);
+        entries.push(fileInfo(childApiPath, childStat));
+        if (childStat.isDirectory() && remainingDepth > 1) {
+          await walk(childApiPath, childDiskPath, remainingDepth - 1);
+        }
+      }
+    }
+
+    await walk(apiPath, diskPath, depth);
+    return { root: fileInfo(apiPath, stat), entries };
+  }
+
+  async read(relPath) {
+    const diskPath = await this._diskPath(relPath);
+    return { diskPath };
+  }
+
+  async write(relPath, tmpPath) {
+    const diskPath = await this._diskPath(relPath);
+    await fs.mkdir(path.dirname(diskPath), { recursive: true });
+    await fs.rename(tmpPath, diskPath);
+  }
+
+  async delete(relPath, { recursive = false } = {}) {
+    const diskPath = await this._diskPath(relPath);
+    await fs.rm(diskPath, { recursive, force: false });
+  }
+
+  async move(from, to, { overwrite = false } = {}) {
+    const fromDisk = await this._diskPath(from);
+    const toDisk = await this._diskPath(to);
+    await lstatNoSymlink(fromDisk);
+    let toExists = false;
+    try { await fs.access(toDisk); toExists = true; } catch {}
+    if (toExists && !overwrite) throw new HttpError(409, 'Destination exists. Pass overwrite=true to replace it.');
+    await fs.mkdir(path.dirname(toDisk), { recursive: true });
+    if (overwrite && toExists) await fs.rm(toDisk, { recursive: true, force: true });
+    await fs.rename(fromDisk, toDisk);
+  }
+
+  async copy(from, to, { overwrite = false } = {}) {
+    const fromDisk = await this._diskPath(from);
+    const toDisk = await this._diskPath(to);
+    await lstatNoSymlink(fromDisk);
+    let toExists = false;
+    try { await fs.access(toDisk); toExists = true; } catch {}
+    if (toExists && !overwrite) throw new HttpError(409, 'Destination exists. Pass overwrite=true to replace it.');
+    await fs.mkdir(path.dirname(toDisk), { recursive: true });
+    await fs.cp(fromDisk, toDisk, { recursive: true, force: Boolean(overwrite), errorOnExist: !overwrite });
+  }
+
+  async mkdir(relPath, apiPath) {
+    const diskPath = await this._diskPath(relPath);
+    await fs.mkdir(diskPath, { recursive: true });
+    return this.stat(relPath, apiPath);
+  }
+}

@@ -1,0 +1,195 @@
+{
+  "id": "ocean-bedrock-week-one",
+  "name": "Ocean Bedrock Week-One Launch Workflow",
+  "version": 1,
+  "status": "draft-ready",
+  "createdAt": "2026-06-10T22:38:01.905Z",
+  "purpose": "Make Ocean Bedrock accessible as a functional, authenticated cloud-box tool for coworkers and agents: deploy service, issue tokens, expose MCP, bootstrap local folder feeds, and start ingestion into the Ocean knowledge layer.",
+  "canonicalBoundaries": {
+    "oceanDaemon": "Local runtime/body and execution authority. Owns local sessions, events, tools, provider execution, local filesystem/shell/destructive permissions.",
+    "oceanLonghouse": "Hive brain / coordination layer per ocean-os/docs/LONGHOUSE.md. Coordinates skills, SOPs, routines, MCP discovery, memory, subagents, quorum/council logic. Does not bypass daemon permissions.",
+    "oceanBedrock": "Cloud-box support substrate for shared files, context ingest, ledger/event store, Postgres/R2/Vectorize/KV, MCP-facing infrastructure, and coworker bootstrap. Does not redefine Longhouse."
+  },
+  "modelRoster": {
+    "strategic_orchestrator": {
+      "model": "chatgpt-5.5",
+      "useFor": ["final plan arbitration", "cross-system architecture", "launch go/no-go", "high-impact review"]
+    },
+    "architecture_reviewer": {
+      "model": "chatgpt-5.4",
+      "useFor": ["canonical Ocean boundary checks", "API design review", "data model review"]
+    },
+    "implementation_worker": {
+      "model": "chatgpt-5.4-mini",
+      "useFor": ["small code changes", "scripts", "config edits", "repeatable task execution"]
+    },
+    "docs_onboarding": {
+      "model": "chatgpt-5.3-spark",
+      "useFor": ["coworker docs", "runbooks", "checklists", "operator summaries"]
+    },
+    "security_reviewer": {
+      "model": "deepseek-v4-pro",
+      "useFor": ["auth review", "token scope review", "secret-handling review", "destructive action gates"]
+    },
+    "test_triage": {
+      "model": "deepseek-v4-flash",
+      "useFor": ["smoke tests", "log triage", "fast failure analysis", "regression checks"]
+    },
+    "integration_engineer": {
+      "model": "kimi-k2.6",
+      "useFor": ["Railway/Cloudflare integration", "MCP wiring", "edge-case implementation review"]
+    },
+    "mcp_interface_designer": {
+      "model": "minimax-m3",
+      "useFor": ["MCP tool/resource contract", "agent ergonomics", "tool naming and schemas"]
+    },
+    "ingestion_courier_designer": {
+      "model": "minimax-m2.7",
+      "useFor": ["local-folder bootstrap flow", "courier UX", "lightweight ingest worker drafts"]
+    }
+  },
+  "phases": [
+    {
+      "id": "phase-0-source-of-truth",
+      "title": "Pin canonical boundaries",
+      "ownerModel": "chatgpt-5.4",
+      "dependsOn": [],
+      "tasks": [
+        "Read ocean-os/docs/LONGHOUSE.md and LONGHOUSE_ORCHESTRATION.md before changing Longhouse semantics.",
+        "Keep Ocean Bedrock documented as cloud-box support substrate, not replacement Longhouse.",
+        "Record any uncertain product naming as open decision, not fact."
+      ],
+      "acceptance": [
+        "Docs do not claim Bedrock is the quorum engine.",
+        "Docs state Longhouse is the hive brain / coordination layer.",
+        "README links week-one and coworker bootstrap docs."
+      ]
+    },
+    {
+      "id": "phase-1-deploy-bedrock",
+      "title": "Deploy Ocean Bedrock as reachable HTTPS service",
+      "ownerModel": "kimi-k2.6",
+      "reviewModel": "deepseek-v4-pro",
+      "dependsOn": ["phase-0-source-of-truth"],
+      "tasks": [
+        "Create or configure dedicated Railway service for ocean-bedrock.",
+        "Set PORT, OCEAN_BEDROCK_ROOT, OCEAN_LEDGER_STORE=postgres, DATABASE_URL.",
+        "Apply db/001_longhouse_core.sql and db/002_ocean_ledger.sql if not already ready.",
+        "Expose through Railway/Cloudflare HTTPS route.",
+        "Verify /health and /api/v1/info with bearer token."
+      ],
+      "acceptance": [
+        "Public HTTPS /health returns ok for this service.",
+        "Authenticated /api/v1/info shows instance ocean-bedrock and ledger store postgres.",
+        "npm run db:check reports schemaReady=true."
+      ]
+    },
+    {
+      "id": "phase-2-auth-and-token-ops",
+      "title": "Issue scoped coworker/MCP tokens",
+      "ownerModel": "deepseek-v4-pro",
+      "dependsOn": ["phase-1-deploy-bedrock"],
+      "tasks": [
+        "Define path scope convention: /coworkers/<name>, /sessions/<name>, /context/ocean-bedrock.",
+        "Issue one agent token per coworker/device or per coworker initially.",
+        "Store only token hashes server-side; send raw token once through secure channel.",
+        "Document revoke/rotate procedure."
+      ],
+      "acceptance": [
+        "At least one non-admin scoped token can bootstrap and ingest.",
+        "Admin token is not used by coworker bootstrap.",
+        "Token revocation endpoint verified."
+      ]
+    },
+    {
+      "id": "phase-3-mcp-wrapper",
+      "title": "Expose Ocean Bedrock as MCP tools/resources",
+      "ownerModel": "minimax-m3",
+      "reviewModel": "chatgpt-5.4",
+      "dependsOn": ["phase-1-deploy-bedrock", "phase-2-auth-and-token-ops"],
+      "tasks": [
+        "Add MCP server wrapper around HTTP API using same bearer token.",
+        "Expose resources: ocean-bedrock://docs, /context, /coworkers, /sessions, /handoffs.",
+        "Expose tools: bedrock_list, bedrock_read, bedrock_write, bedrock_search, bedrock_lock, bedrock_unlock, bedrock_trace, bedrock_snapshot.",
+        "Avoid destructive delete by default; require explicit separate permission or admin token."
+      ],
+      "acceptance": [
+        "Agent can list/read/write scoped paths through MCP token.",
+        "Agent can create context snapshot through MCP.",
+        "Unauthorized path access fails."
+      ]
+    },
+    {
+      "id": "phase-4-coworker-bootstrap",
+      "title": "Coworker local-folder selection and first sync",
+      "ownerModel": "minimax-m2.7",
+      "dependsOn": ["phase-2-auth-and-token-ops"],
+      "tasks": [
+        "Use npm run ocean:bootstrap to select folders and save ~/.config/ocean-bedrock/bootstrap.json.",
+        "Use npm run ocean:ingest -- --dry-run before upload.",
+        "Run npm run ocean:ingest for first upload.",
+        "Write redacted source manifest and ingest manifest to /context/ocean-bedrock."
+      ],
+      "acceptance": [
+        "A coworker can choose folders without editing config manually.",
+        "Dry-run reports scan totals.",
+        "First upload writes files under /coworkers/<name>/<device> and emits ledger event."
+      ]
+    },
+    {
+      "id": "phase-5-ingestion-pipeline",
+      "title": "Index files into Ocean knowledge layer",
+      "ownerModel": "kimi-k2.6",
+      "reviewModel": "chatgpt-5.4",
+      "dependsOn": ["phase-4-coworker-bootstrap"],
+      "tasks": [
+        "Create ingest worker loop over longhouse.ingest_jobs.",
+        "On file write/upload, enqueue index_object/embed_object/extract_graph jobs.",
+        "Extract text for plain docs/code first; defer PDFs/Office to later if needed.",
+        "Chunk text, store chunk metadata in Postgres, embed with Cloudflare Workers AI, upsert to Vectorize ocean-longhouse-context.",
+        "Create basic graph nodes/edges for file/source/coworker/project/session relationships.",
+        "Cache hot stats/search in OCEAN_LONGHOUSE_CACHE only as rebuildable cache."
+      ],
+      "acceptance": [
+        "Uploaded markdown/text file becomes searchable semantically or at least chunk-indexed.",
+        "Postgres has object/chunk/job records.",
+        "Vectorize upsert path is verified with a test query."
+      ]
+    },
+    {
+      "id": "phase-6-security-and-launch-review",
+      "title": "Security and launch review",
+      "ownerModel": "deepseek-v4-pro",
+      "reviewModel": "chatgpt-5.5",
+      "dependsOn": ["phase-3-mcp-wrapper", "phase-5-ingestion-pipeline"],
+      "tasks": [
+        "Review token scopes, bootstrap config permissions, secret exclusion defaults, logs, and deletion policy.",
+        "Confirm no raw tokens are written to shared manifests.",
+        "Confirm public endpoints require intended auth except /health/openapi if intentionally public.",
+        "Create operator rollback/revoke steps."
+      ],
+      "acceptance": [
+        "Security checklist passes.",
+        "Coworker onboarding can proceed with scoped tokens.",
+        "Known gaps are documented as blocked/future, not implied complete."
+      ]
+    }
+  ],
+  "launchDefinitionOfDone": [
+    "Ocean Bedrock is reachable over HTTPS.",
+    "Postgres schemaReady=true and ledger store is postgres.",
+    "At least one scoped coworker token works end-to-end.",
+    "MCP wrapper exposes list/read/write/search/snapshot against scoped paths.",
+    "Coworker bootstrap selects local folders and creates config.",
+    "Ingest uploads changed files and emits ledger events.",
+    "At least one uploaded file is indexed into the knowledge layer.",
+    "Security review approves token scope and secret-handling defaults."
+  ],
+  "openDecisions": [
+    "Exact public hostname for Ocean Bedrock.",
+    "Whether MCP server runs inside this Node service or as separate ocean-mcp process.",
+    "Which file types are allowed in week-one automatic ingestion beyond text/code/markdown.",
+    "Whether background sync is user-launched only or installed as a local service/LaunchAgent later.",
+    "Whether /health stays public or requires auth behind Cloudflare."
+  ]
+}

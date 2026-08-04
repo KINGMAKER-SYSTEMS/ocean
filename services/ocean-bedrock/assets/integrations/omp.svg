@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-label="Oh My Pi">
+  <title>Oh My Pi</title>
+  <g fill="none" stroke="#a78bfa" stroke-width="9" stroke-linecap="round">
+    <circle cx="50" cy="50" r="34"/>
+    <path d="M16 50 Q33 33 50 50 T84 50"/>
+  </g>
+</svg>

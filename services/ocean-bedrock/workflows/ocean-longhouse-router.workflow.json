@@ -1,0 +1,332 @@
+{
+  "id": "ocean-longhouse-router",
+  "name": "Ocean Longhouse Data-Plane Mount Router",
+  "version": 1,
+  "status": "draft-ready",
+  "createdAt": "2026-06-14T02:19:17.838Z",
+  "firingOrder": 2,
+  "dependsOnWorkflows": [],
+  "purpose": "Build the documented Ocean Longhouse mount registry + StorageAdapter interface + path router + admin /api/v1/mounts API, and refactor the live file operations off the single hardcoded local-disk root (state.filesRoot / diskPathFor) so storage becomes pluggable. This makes the already-seeded longhouse.mounts table the source of truth for routing and unblocks future R2/s3/github/webdav adapters and source runners, without breaking the live single-mount prod during rollout. Scope is the local-adapter behavior-preserving refactor + registry/router/admin API only; external adapters and DB-backed locks are explicitly deferred.",
+  "canonicalBoundaries": {
+    "oceanDaemon": "Local runtime/body and execution authority. Owns local sessions, events, tools, provider execution, local filesystem/shell/destructive permissions.",
+    "oceanLonghouse": "Hive brain / coordination layer per ocean-os/docs/LONGHOUSE.md. Coordinates skills, SOPs, routines, MCP discovery, memory, subagents, quorum/council logic. Does not bypass daemon permissions.",
+    "oceanBedrock": "Cloud-box support substrate for shared files, context ingest, ledger/event store, Postgres/R2/Vectorize/KV, MCP-facing infrastructure, and coworker bootstrap. Does not redefine Longhouse."
+  },
+  "currentState": "All file ops in src/server.mjs route through a single function diskPathFor(state, apiPath) (line 151) that joins apiPath onto one hardcoded state.filesRoot (= root/files, set line 1267); its 10 callers are listDirectory(425), statPath(453), putFile(471), deletePath(509), createDirectory(533), movePath(557-558), search(643), and the GET /api/v1/file streaming branch (1396), plus seedDefaultFolders(1152-1178), processIngestJob in src/metadata.mjs (line 163), and the ocean-context report writer src/ocean-context.mjs (line 89). recordObjectWrite (src/metadata.mjs line 20) hardcodes mount_id='managed-local' in its INSERT (line 29). Locks are a file-based JSON store (state.locksFile, loadLocks/saveLocks, server.mjs 386-422); there is NO locks table in db/001. db/001_longhouse_core.sql already creates longhouse.mounts and seeds 7 rows (managed-local at prefix '/' priority 100, plus 6 R2 mounts) but NO code reads that table — the documented src/mounts/{registry,router}.mjs + adapters/local.mjs in docs/OCEAN-LONGHOUSE.md (lines 281-299) do not exist. Admin gating elsewhere uses requirePermission(principal,'admin') (e.g. /api/v1/tokens line 1653). The smoke test scripts/smoke-test.mjs (npm run smoke) exercises mkdir/put/read/lock/move on a fresh ephemeral root and must stay green.",
+  "modelRoster": {
+    "strategic_orchestrator": {
+      "model": "chatgpt-5.5",
+      "useFor": [
+        "final plan arbitration",
+        "cross-system architecture",
+        "launch go/no-go",
+        "high-impact review"
+      ]
+    },
+    "architecture_reviewer": {
+      "model": "chatgpt-5.4",
+      "useFor": [
+        "canonical Ocean boundary checks",
+        "API design review",
+        "data model review"
+      ]
+    },
+    "implementation_worker": {
+      "model": "chatgpt-5.4-mini",
+      "useFor": [
+        "small code changes",
+        "scripts",
+        "config edits",
+        "repeatable task execution"
+      ]
+    },
+    "docs_onboarding": {
+      "model": "chatgpt-5.3-spark",
+      "useFor": [
+        "coworker docs",
+        "runbooks",
+        "checklists",
+        "operator summaries"
+      ]
+    },
+    "security_reviewer": {
+      "model": "deepseek-v4-pro",
+      "useFor": [
+        "auth review",
+        "token scope review",
+        "secret-handling review",
+        "destructive action gates"
+      ]
+    },
+    "test_triage": {
+      "model": "deepseek-v4-flash",
+      "useFor": [
+        "smoke tests",
+        "log triage",
+        "fast failure analysis",
+        "regression checks"
+      ]
+    },
+    "integration_engineer": {
+      "model": "kimi-k2.6",
+      "useFor": [
+        "Railway/Cloudflare integration",
+        "MCP wiring",
+        "edge-case implementation review"
+      ]
+    },
+    "mcp_interface_designer": {
+      "model": "minimax-m3",
+      "useFor": [
+        "MCP tool/resource contract",
+        "agent ergonomics",
+        "tool naming and schemas"
+      ]
+    },
+    "ingestion_courier_designer": {
+      "model": "minimax-m2.7",
+      "useFor": [
+        "local-folder bootstrap flow",
+        "courier UX",
+        "lightweight ingest worker drafts"
+      ]
+    }
+  },
+  "phases": [
+    {
+      "id": "phase-0-source-of-truth",
+      "title": "Pin canonical boundaries and data-plane authority",
+      "ownerRole": "architecture_reviewer",
+      "reviewRole": "",
+      "dependsOn": [],
+      "tasks": [
+        "Re-read docs/OCEAN-LONGHOUSE.md (Adapter contract lines 128-156, mount registry example lines 80-125, target file layout lines 281-299) and docs/OCEAN-LONGHOUSE-DATA-PLANE.md (Data ownership lines 50-81) before changing any storage semantics.",
+        "Confirm the canonical boundary: ocean-bedrock is the cloud-box support substrate hosting this router; it does NOT become Longhouse the hive brain and does NOT redefine quorum. Postgres longhouse.mounts is the source of truth for routing; backing mounts own bytes.",
+        "Affirm scope guardrails: this wave delivers registry+router+local adapter+admin API ONLY. Record that external adapters (s3/github/webdav/remote-longhouse) and DB-backed locks are out of scope for this wave (carry as openDecisions), and that the live prod must keep working with exactly one effective mount (managed-local) throughout."
+      ],
+      "acceptance": [
+        "Written boundary note states Postgres longhouse.mounts is routing source-of-truth and backing mounts own bytes, matching docs/OCEAN-LONGHOUSE.md source-of-truth table (lines 50-61).",
+        "Note explicitly defers s3/github/webdav adapters and DB-backed locks to later waves and does not claim Bedrock is Longhouse or the quorum engine.",
+        "Note confirms the rollout invariant: with only managed-local enabled, every existing /api/v1/file* response is byte-for-byte unchanged."
+      ]
+    },
+    {
+      "id": "phase-1-adapter-contract",
+      "title": "Define the StorageAdapter contract and RequestContext",
+      "ownerRole": "architecture_reviewer",
+      "reviewRole": "implementation_worker",
+      "dependsOn": [
+        "phase-0-source-of-truth"
+      ],
+      "tasks": [
+        "In src/mounts/adapter.mjs define the StorageAdapter JS contract mirroring docs/OCEAN-LONGHOUSE.md lines 128-156: methods list(relPath,{depth}), stat(relPath), read(relPath), write(relPath, tmpPathOrBytes, opts), delete(relPath,{recursive}), move(from,to,{overwrite}), copy(from,to,{overwrite}), mkdir(relPath); plus a capabilities object {read,write,delete,move,signedUrls?,maxObjectBytes?}.",
+        "Decide and document the byte-transfer convention so the refactor stays behavior-preserving: write accepts the already-received temp file path (server still does receiveFile into state.tmpRoot and streams responses), and the GET /file branch (server.mjs 1396) gets a resolvePhysical helper or stream handle from the adapter rather than the adapter buffering bytes.",
+        "Define a normalized FileInfo shape identical to the existing fileInfo() output (server.mjs line 250) so list/stat results are unchanged, and define adapter-thrown errors that map cleanly to existing HttpError statuses (404/409/412/423/400)."
+      ],
+      "acceptance": [
+        "src/mounts/adapter.mjs exports the StorageAdapter shape with all methods named in docs/OCEAN-LONGHOUSE.md lines 145-152 plus capabilities.",
+        "Contract documents who streams bytes for PUT and GET so no behavior changes vs current receiveFile/createReadStream path.",
+        "FileInfo fields match the current fileInfo() output keys exactly (path, name, type, size, etag, modified) so list/stat JSON is unchanged."
+      ]
+    },
+    {
+      "id": "phase-2-local-adapter",
+      "title": "Implement the local StorageAdapter (behavior-preserving extraction)",
+      "ownerRole": "implementation_worker",
+      "reviewRole": "architecture_reviewer",
+      "dependsOn": [
+        "phase-1-adapter-contract"
+      ],
+      "tasks": [
+        "Create src/mounts/adapters/local.mjs implementing the contract by extracting the exact logic from server.mjs diskPathFor (151-158), listDirectory walk (424-450), statPath (452-456), putFile disk portion (471-487), deletePath disk portion (509-512), createDirectory (533-535), movePath disk portion (557-567), and the GET /file physical resolution (1396). Construct it from a mount config {root}; reuse the existing escape-guard from diskPathFor (lines 154-156) per mount root, and preserve lstatNoSymlink / symlink handling (do not follow symlinks).",
+        "Keep helpers fileInfo/etagFromStat/kindFromStat/lstatNoSymlink/exists shared (import or re-export) so the adapter produces identical FileInfo; do not change normalizeApiPath traversal rules (server.mjs 138-149).",
+        "Do NOT yet wire the adapter into the router; build it as a standalone module with the same inputs/outputs as the current inline code so the diff is reviewable in isolation."
+      ],
+      "acceptance": [
+        "src/mounts/adapters/local.mjs exists and, given {root: <tmpdir>}, reproduces list/stat/read/write/delete/mkdir/move/copy with FileInfo byte-identical to current fileInfo() output (verified by a small ad-hoc node check or unit harness).",
+        "Per-mount path-escape guard rejects '..' / absolute escapes exactly as the current diskPathFor does (line 154-156).",
+        "Symlink entries are reported but not traversed, matching listDirectory lines 436-439."
+      ]
+    },
+    {
+      "id": "phase-3-registry-and-router",
+      "title": "Build mount registry (reads longhouse.mounts) and prefix router",
+      "ownerRole": "implementation_worker",
+      "reviewRole": "architecture_reviewer",
+      "dependsOn": [
+        "phase-2-local-adapter"
+      ],
+      "tasks": [
+        "Create src/mounts/registry.mjs that loads enabled mounts from longhouse.mounts via getPool() (src/metadata.mjs), instantiates an adapter per row using the type field, and caches with a short TTL + an explicit invalidate() called after admin mutations. When DATABASE_URL is absent (ephemeral smoke), fall back to a single synthetic managed-local mount {id:'managed-local',type:'local',prefix:'/',config:{root:state.filesRoot}} so the smoke test keeps passing with no DB.",
+        "For this wave only the 'local' type is instantiable; for r2/s3/github/webdav rows, register a placeholder adapter that resolves the mount for routing/admin listing but throws HttpError(501,'mount type <t> not yet implemented') on read/write so the seeded R2 rows do not crash boot but also are not silently usable.",
+        "Create src/mounts/router.mjs resolveMount(apiPath) that picks the most-specific matching prefix (longest prefix wins, tie-broken by priority DESC as in docs/OCEAN-LONGHOUSE.md line 125 and mounts_prefix_priority_idx in db/001), returns {mount, adapter, relPath} where relPath is apiPath with the mount prefix stripped, and rejects paths under no enabled mount with HttpError(404).",
+        "Map managed-local config.root='data/files' (db/001 seed line 196) onto state.filesRoot so the absolute on-disk location is unchanged in prod (interpret relative roots against state.root, not literally as repo-relative)."
+      ],
+      "acceptance": [
+        "src/mounts/registry.mjs loads enabled rows from longhouse.mounts and, with no DATABASE_URL, yields exactly one managed-local mount rooted at state.filesRoot.",
+        "router resolveMount('/assets/content-posting-lab/x') resolves to the R2 mount row and resolveMount('/docs/a.md') resolves to managed-local with relPath '/docs/a.md' (longest-prefix wins, verified against the 7 seeded rows).",
+        "Resolving a read/write through a non-local seeded mount throws 501 (not a crash), and managed-local still maps to the same absolute disk path as before (state.root + /files)."
+      ]
+    },
+    {
+      "id": "phase-4-refactor-file-ops",
+      "title": "Route all file ops through the router and migrate recordObjectWrite mount_id",
+      "ownerRole": "integration_engineer",
+      "reviewRole": "security_reviewer",
+      "dependsOn": [
+        "phase-3-registry-and-router"
+      ],
+      "tasks": [
+        "Replace diskPathFor usage in server.mjs at every call site (listDirectory 425, statPath 453, putFile 471, deletePath 509, createDirectory 533, movePath 557-558, search 643, GET /file branch 1396) with resolveMount(apiPath) + adapter calls; keep the HTTP layer responsible for auth, requirePermission, requirePathScope, lock checks, audit, and recordObjectWrite exactly as today (per docs/OCEAN-LONGHOUSE.md line 156: Longhouse owns auth/scopes/locks/audit/routing before adapters).",
+        "For cross-mount move/copy: if from and to resolve to different mounts, either reject with HttpError(400,'cross-mount move not supported yet') or fall back to read+write+delete; choose reject for this wave to stay simple and behavior-preserving for the single-mount prod, and document it.",
+        "Change src/metadata.mjs recordObjectWrite (line 20) to accept the resolved mount id and backend_key from the caller instead of the hardcoded 'managed-local' literal (line 29); pass mount.id and the adapter-relative backend_key from putFile. Default to 'managed-local' only when no mount is supplied so existing rows/FK to longhouse.mounts stay valid.",
+        "Leave seedDefaultFolders (server.mjs 1152), processIngestJob disk read (metadata.mjs 163), and the ocean-context report writer (ocean-context.mjs 89) on the managed-local path for this wave, but route them through resolveMount('/...')/the local adapter where trivial; if not trivial, leave a TODO referencing this workflow and note it as deferred so indexing of non-local mounts is a later wave."
+      ],
+      "acceptance": [
+        "grep for diskPathFor in src/server.mjs returns only the definition (or it is removed); no file-op handler calls the old single-root joiner directly.",
+        "recordObjectWrite no longer contains the hardcoded string 'managed-local' in its INSERT values; mount_id comes from the resolved mount and the value still satisfies the FK to longhouse.mounts.",
+        "Cross-mount move/copy returns a clear 4xx rather than silently corrupting or escaping a mount root."
+      ]
+    },
+    {
+      "id": "phase-5-mounts-admin-api",
+      "title": "Add admin-gated GET/POST/DELETE /api/v1/mounts",
+      "ownerRole": "implementation_worker",
+      "reviewRole": "security_reviewer",
+      "dependsOn": [
+        "phase-3-registry-and-router"
+      ],
+      "tasks": [
+        "Add GET /api/v1/mounts (list enabled+disabled mounts from longhouse.mounts), POST /api/v1/mounts (upsert a mount row: id,type,prefix,mode,priority,config,capabilities,enabled), and DELETE /api/v1/mounts/:id (soft-disable by setting enabled=false rather than hard delete, to avoid breaking objects.mount_id FK references). Gate all three with requirePermission(principal,'admin') matching the /api/v1/tokens pattern (server.mjs line 1653).",
+        "Validate POST input against the db/001 CHECK constraints (type in local|r2|s3|github|webdav|sftp|remote-longhouse, mode in readonly|readwrite|writeonly) and reject creating a second writable 'local' mount whose root would escape state.root; never accept raw secrets in config — require secretRef-style handles only (docs/OCEAN-LONGHOUSE.md lines 106-108), and redact config in GET responses.",
+        "After any successful mutation call registry.invalidate() so the router picks up changes without a restart, and append an audit event (appendAudit, server.mjs 343) for mount.create / mount.update / mount.disable.",
+        "Register the routes in the main router before the final notFound() (after the /api/v1/tokens block ~line 1677) and add /api/v1/mounts to the info/index listing (server.mjs ~1319)."
+      ],
+      "acceptance": [
+        "curl -H 'Authorization: Bearer <admin>' GET /api/v1/mounts returns the 7 seeded rows; a non-admin token gets 403.",
+        "POST /api/v1/mounts with an invalid type or mode is rejected (4xx) and config containing a raw key is rejected or stored only as a secretRef; GET never returns raw secret material.",
+        "DELETE /api/v1/mounts/managed-local soft-disables (enabled=false) rather than violating the objects.mount_id FK, and registry.invalidate() makes the change effective without a process restart (verified by a follow-up resolveMount)."
+      ]
+    },
+    {
+      "id": "phase-6-locks-decision",
+      "title": "Resolve DB-backed locks vs file-based locks for this wave",
+      "ownerRole": "architecture_reviewer",
+      "reviewRole": "security_reviewer",
+      "dependsOn": [
+        "phase-4-refactor-file-ops"
+      ],
+      "tasks": [
+        "Confirm the file-based lock store (server.mjs loadLocks/saveLocks 386-410, state.locksFile) stays AS-IS this wave: db/001 has no locks table, the service is single-replica, and adding a DB lock table is orthogonal to the mount refactor. Do not migrate locks in this wave.",
+        "Document why: DB-backed locks are only required once there are multiple replicas or edge nodes (docs/OCEAN-LONGHOUSE-DATA-PLANE.md line 15 — 'Longhouse DB now; Durable Objects later'); record a follow-up to add a longhouse.locks table + migration when multi-replica is needed.",
+        "Verify lock semantics are mount-agnostic (locks key off virtual apiPath via pathsIntersect, server.mjs 382-383) so the router refactor does not change lock behavior — locks still apply across whichever mount serves the path."
+      ],
+      "acceptance": [
+        "Decision recorded in openDecisions/risks: file-based locks retained this wave; DB-backed locks deferred with a named trigger (multi-replica/edge).",
+        "Lock create/release/conflict behavior in the smoke test is unchanged after the refactor (locks operate on virtual paths, not mount roots).",
+        "No new locks table is added to db/ in this wave."
+      ]
+    },
+    {
+      "id": "phase-7-security-and-launch-review",
+      "title": "Security review, smoke regression, and staged prod rollout",
+      "ownerRole": "security_reviewer",
+      "reviewRole": "strategic_orchestrator",
+      "dependsOn": [
+        "phase-4-refactor-file-ops",
+        "phase-5-mounts-admin-api",
+        "phase-6-locks-decision"
+      ],
+      "tasks": [
+        "Run npm run smoke and confirm it stays green end-to-end (mkdir, put, read-back, lock, move) on the ephemeral no-DB path served by the synthetic managed-local mount.",
+        "Audit the router for path-escape and mount-confusion: confirm relPath stripping cannot escape a mount root, that resolveMount cannot be tricked into serving one mount's bytes under another mount's prefix, and that the per-mount escape guard (carried from diskPathFor 154-156) is applied in the local adapter.",
+        "Confirm /api/v1/mounts is admin-only, config secrets are never returned, and no raw secrets land in audit events or logs (per top-level guardrail).",
+        "Define and document the staged prod rollout: deploy with ONLY managed-local effectively enabled (R2 rows remain non-local placeholders returning 501), verify /api/v1/file* responses are unchanged against prod, then deploy via 'railway up' (docs/HANDOFF.md sec 12). Provide a rollback: revert the commit / redeploy prior HEAD, since the schema (db/001) is already applied and unchanged by this wave.",
+        "Confirm db/001 longhouse.mounts is unchanged by this wave (no migration required) and the live ledger/objects FK to mounts still holds."
+      ],
+      "acceptance": [
+        "npm run smoke passes with zero failures after the full refactor.",
+        "Security checklist passes: no cross-mount byte leakage, mounts admin is admin-gated, no raw secrets in GET /mounts responses, audit, or logs.",
+        "Staged-rollout doc shows managed-local-only behavior is byte-identical to current prod and lists a concrete redeploy-prior-HEAD rollback; no new DB migration is required for this wave."
+      ]
+    }
+  ],
+  "fileTargets": [
+    {
+      "path": "src/mounts/adapter.mjs",
+      "action": "create",
+      "note": "StorageAdapter contract + capabilities + FileInfo/error shape, mirroring docs/OCEAN-LONGHOUSE.md lines 128-156."
+    },
+    {
+      "path": "src/mounts/adapters/local.mjs",
+      "action": "create",
+      "note": "Local adapter extracted behavior-preserving from server.mjs diskPathFor + file-op disk logic; per-mount root + escape guard + no-symlink-follow."
+    },
+    {
+      "path": "src/mounts/registry.mjs",
+      "action": "create",
+      "note": "Loads enabled mounts from longhouse.mounts via getPool(); instantiates adapters by type; TTL cache + invalidate(); synthetic managed-local fallback when no DATABASE_URL."
+    },
+    {
+      "path": "src/mounts/router.mjs",
+      "action": "create",
+      "note": "resolveMount(apiPath): longest-prefix + priority DESC wins; returns {mount,adapter,relPath}; 404 when no mount, 501 for non-local types this wave."
+    },
+    {
+      "path": "src/server.mjs",
+      "action": "modify",
+      "note": "Replace diskPathFor + 10 call sites (listDirectory/statPath/putFile/deletePath/createDirectory/movePath/search/GET-file 1396) with resolveMount+adapter; add admin-gated GET/POST/DELETE /api/v1/mounts near line 1677; add to info index ~1319; pass mount.id/backend_key into recordObjectWrite; reject cross-mount move/copy."
+    },
+    {
+      "path": "src/metadata.mjs",
+      "action": "modify",
+      "note": "recordObjectWrite (line 20-29): accept resolved mount_id + backend_key instead of hardcoded 'managed-local'; default to managed-local only when unspecified to keep FK valid."
+    },
+    {
+      "path": "src/ocean-context.mjs",
+      "action": "investigate",
+      "note": "Line 89 report writer joins state.filesRoot directly; route through managed-local adapter or leave TODO referencing this wave (deferred)."
+    },
+    {
+      "path": "db/001_longhouse_core.sql",
+      "action": "investigate",
+      "note": "Source of truth for mounts table + 7 seeded rows (lines 16-27, 194-203); confirm no migration needed and managed-local config.root='data/files' maps onto state.filesRoot."
+    },
+    {
+      "path": "scripts/smoke-test.mjs",
+      "action": "investigate",
+      "note": "Ephemeral no-DB smoke (mkdir/put/read/lock/move) that must stay green via the synthetic managed-local fallback; may extend with a mounts-admin assertion."
+    },
+    {
+      "path": "docs/OCEAN-LONGHOUSE.md",
+      "action": "modify",
+      "note": "Update Phase 1 checklist (lines 246-253, 277-299) to mark mount registry + local adapter + /api/v1/mounts as implemented once shipped."
+    }
+  ],
+  "launchDefinitionOfDone": [
+    "src/mounts/{adapter,registry,router}.mjs and src/mounts/adapters/local.mjs exist and the local adapter implements the full StorageAdapter contract.",
+    "All file-op handlers in src/server.mjs route through resolveMount()+adapter; diskPathFor no longer has direct callers.",
+    "longhouse.mounts is the routing source of truth: the router reads enabled rows and picks most-specific prefix (priority DESC tiebreak); with no DATABASE_URL it falls back to a single managed-local mount.",
+    "recordObjectWrite records the resolved mount_id/backend_key (no hardcoded 'managed-local' literal) while keeping the FK to longhouse.mounts valid.",
+    "Admin-gated GET/POST/DELETE /api/v1/mounts work, validate type/mode, redact secrets, soft-disable on delete, and invalidate the registry cache.",
+    "npm run smoke passes green after the refactor.",
+    "Prod rollout keeps managed-local-only behavior byte-identical to current; R2 rows stay non-functional placeholders (501); a redeploy-prior-HEAD rollback is documented; no new DB migration required.",
+    "File-based locks retained this wave; DB-backed locks explicitly deferred with a named trigger."
+  ],
+  "openDecisions": [
+    "Cross-mount move/copy: reject with 4xx this wave (chosen) vs implement read+write+delete fallback later.",
+    "Whether to soft-disable (enabled=false) or hard-delete on DELETE /api/v1/mounts — soft-disable chosen to protect objects.mount_id FK; revisit when a mount-eviction/migration flow exists.",
+    "DB-backed locks vs file-based locks: deferred this wave; trigger to migrate is multi-replica or edge-node deployment (docs/OCEAN-LONGHOUSE-DATA-PLANE.md line 15).",
+    "Interpretation of seeded managed-local config.root='data/files' relative to state.root vs literal repo path — chosen to map onto state.filesRoot for prod parity; confirm with operator.",
+    "Whether seedDefaultFolders / processIngestJob disk read / ocean-context report writer get fully routed through the adapter now or remain managed-local-direct with a TODO (leaning deferred to keep this wave tight).",
+    "Firing order: this wave is assigned firingOrder=2 with no upstream dependency, which is correct — the router is foundational and does not need the triage scheduler (wave 1). It could even precede wave 1; kept as assigned per instruction."
+  ],
+  "risks": [
+    "Behavior-preserving refactor risk: the local adapter must reproduce diskPathFor escape guards, symlink non-follow, etag/FileInfo, and If-Match/If-None-Match semantics exactly, or live prod file ops regress. Mitigation: extract logic verbatim, keep smoke green, deploy managed-local-only first.",
+    "The 6 seeded R2 mounts currently have no adapter; if the router makes them resolvable without a 501 placeholder, reads/writes under /assets,/previews,/sales,/finance,/archive could crash or 500 in prod. Mitigation: placeholder adapter returns 501 and admin can keep them disabled until wave 3.",
+    "recordObjectWrite mount_id change must keep satisfying the FK longhouse.objects.mount_id -> longhouse.mounts(id); passing a mount id absent from the table would break writes. Mitigation: default to managed-local and validate the resolved id exists.",
+    "Registry caching against a stale longhouse.mounts after admin mutation could route incorrectly; mitigation is explicit invalidate() on every mutation plus a short TTL.",
+    "Single-replica file-based locks remain; if a second replica is ever added before DB-backed locks land, lock guarantees break. Mitigation: documented trigger and the canonical note that token registry + locks are single-replica-only today.",
+    "Admin /api/v1/mounts could become a secret-exfil or path-escape surface (a malicious 'local' mount with root outside state.root). Mitigation: validate roots stay within state.root, require secretRef handles not raw secrets, redact config in responses, admin-only gate, audit every mutation."
+  ]
+}

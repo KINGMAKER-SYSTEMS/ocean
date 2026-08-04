@@ -1,0 +1,327 @@
+{
+  "id": "ocean-triage-scheduler",
+  "name": "Ocean Triage Scheduler + Ingest Job Cleanup",
+  "version": 1,
+  "status": "draft-ready",
+  "createdAt": "2026-06-14T02:19:17.838Z",
+  "firingOrder": 1,
+  "dependsOnWorkflows": [],
+  "purpose": "Make the daily Ocean Context triage run automatically (today it is manual and last ran 2026-06-12), route triage findings somewhere an operator actually sees instead of only a ledger event plus a /context report file, and give operators tooling to inspect, retry, or abandon the 9 historical failed longhouse.ingest_jobs rows so the ingest queue is healthy. Hardens HANDOFF Priority 1 without redefining canonical Ocean boundaries: Bedrock remains the cloud-box support substrate that runs the triage ritual and exposes operator tooling; it is not the quorum engine.",
+  "canonicalBoundaries": {
+    "oceanDaemon": "Local runtime/body and execution authority. Owns local sessions, events, tools, provider execution, local filesystem/shell/destructive permissions.",
+    "oceanLonghouse": "Hive brain / coordination layer per ocean-os/docs/LONGHOUSE.md. Coordinates skills, SOPs, routines, MCP discovery, memory, subagents, quorum/council logic. Does not bypass daemon permissions.",
+    "oceanBedrock": "Cloud-box support substrate for shared files, context ingest, ledger/event store, Postgres/R2/Vectorize/KV, MCP-facing infrastructure, and coworker bootstrap. Does not redefine Longhouse."
+  },
+  "currentState": "Daily triage is fully implemented and live as a one-shot but is MANUAL: runOceanContextTriage (src/ocean-context.mjs:76) writes /context/ocean-bedrock/triage/YYYY-MM-DD.md, calls recordObjectWrite, and appends an ocean_context.triage.completed ledger event; it is reached via POST /api/v1/ocean-context/triage/daily (handleOceanContextTriage, src/server.mjs:1138, requiring write + /context/ocean-bedrock scope + CONFIDENTIAL clearance) and the HTTP-client script scripts/ocean-context-triage.mjs (npm run ocean:triage). There is NO scheduler deployed (HANDOFF.md sec 11/13 confirm: last ran 06-12). Findings reach NO operator surface beyond the ledger event and report file; thresholds are hardcoded in triageFindings (src/ocean-context.mjs:57-70): failedJobs>0 and queuedJobs>50. The ingest worker (scripts/ocean-ingest-worker.mjs) and claimNextIngestJob (src/metadata.mjs:118) only touch status='queued'; nothing inspects or requeues the 9 failed rows, and completeIngestJob can mark 'failed' but there is no un-fail/retry/abandon path. Railway cron (per use-railway docs) runs a service start command on a crontab and skips overlapping executions when the prior run is still Active, which fits the single-replica constraint.",
+  "modelRoster": {
+    "strategic_orchestrator": {
+      "model": "chatgpt-5.5",
+      "useFor": [
+        "final plan arbitration",
+        "cross-system architecture",
+        "launch go/no-go",
+        "high-impact review"
+      ]
+    },
+    "architecture_reviewer": {
+      "model": "chatgpt-5.4",
+      "useFor": [
+        "canonical Ocean boundary checks",
+        "API design review",
+        "data model review"
+      ]
+    },
+    "implementation_worker": {
+      "model": "chatgpt-5.4-mini",
+      "useFor": [
+        "small code changes",
+        "scripts",
+        "config edits",
+        "repeatable task execution"
+      ]
+    },
+    "docs_onboarding": {
+      "model": "chatgpt-5.3-spark",
+      "useFor": [
+        "coworker docs",
+        "runbooks",
+        "checklists",
+        "operator summaries"
+      ]
+    },
+    "security_reviewer": {
+      "model": "deepseek-v4-pro",
+      "useFor": [
+        "auth review",
+        "token scope review",
+        "secret-handling review",
+        "destructive action gates"
+      ]
+    },
+    "test_triage": {
+      "model": "deepseek-v4-flash",
+      "useFor": [
+        "smoke tests",
+        "log triage",
+        "fast failure analysis",
+        "regression checks"
+      ]
+    },
+    "integration_engineer": {
+      "model": "kimi-k2.6",
+      "useFor": [
+        "Railway/Cloudflare integration",
+        "MCP wiring",
+        "edge-case implementation review"
+      ]
+    },
+    "mcp_interface_designer": {
+      "model": "minimax-m3",
+      "useFor": [
+        "MCP tool/resource contract",
+        "agent ergonomics",
+        "tool naming and schemas"
+      ]
+    },
+    "ingestion_courier_designer": {
+      "model": "minimax-m2.7",
+      "useFor": [
+        "local-folder bootstrap flow",
+        "courier UX",
+        "lightweight ingest worker drafts"
+      ]
+    }
+  },
+  "phases": [
+    {
+      "id": "phase-0-source-of-truth",
+      "title": "Pin canonical boundaries and verified live triage state",
+      "ownerRole": "architecture_reviewer",
+      "reviewRole": "strategic_orchestrator",
+      "dependsOn": [],
+      "tasks": [
+        "Confirm the canonical boundary in all new artifacts: ocean-daemon = local runtime/body/execution authority, ocean-longhouse = hive brain/coordination layer, ocean-bedrock = cloud-box support substrate that hosts the triage ritual and operator tooling. Do NOT claim Bedrock is the quorum engine or redefine Longhouse.",
+        "Record the VERIFIED LIVE baseline as ground truth over stale docs: triage code is deployed and one-shot-working (src/ocean-context.mjs runOceanContextTriage, POST /api/v1/ocean-context/triage/daily at src/server.mjs:1559), last run 2026-06-12, NO scheduler. Semantic search is already live/populated (do not plan to build embeddings). Ledger is live on Postgres.",
+        "Confirm the 9 failed rows live in longhouse.ingest_jobs with status='failed' (historical, never cleaned/retried) and that no tooling currently targets them; the worker and claimNextIngestJob only select status='queued'.",
+        "Decide and document, as the single source of truth for this wave, that triage findings must reach at least one operator surface beyond the existing ledger event + report file.",
+        "Flag any product naming or product-surface ambiguity (e.g. 'operator dashboard') as an open decision, not fact."
+      ],
+      "acceptance": [
+        "A short BOUNDARY note in the new docs/OCEAN-TRIAGE-OPS.md states the three-layer boundary verbatim and that Bedrock is not the quorum engine.",
+        "Confirm the failed-job count from prod WITHOUT local psql (the env DATABASE_URL is Railway-internal and will NOT resolve off-Railway): either run 'railway run -- node scripts/check-postgres.mjs' from inside the project, or read dbCounts.failedJobs from the latest /context/ocean-bedrock/triage/<date>.md report / ocean_context.triage.completed ledger event via the authenticated API. Record the current count (was 9 on 2026-06-12).",
+        "No artifact claims embeddings need to be built or that triage is 'not yet live' as a one-shot."
+      ]
+    },
+    {
+      "id": "phase-1-scheduler-mechanism",
+      "title": "Choose and provision the triage scheduler mechanism",
+      "ownerRole": "integration_engineer",
+      "reviewRole": "architecture_reviewer",
+      "dependsOn": [
+        "phase-0-source-of-truth"
+      ],
+      "tasks": [
+        "Adopt a DEDICATED Railway cron service (default decision) named ocean-bedrock-triage-cron over an in-server setInterval, because: (a) single-replica web service must not gain a 24/7 timer that double-fires on restart/redeploy; (b) Railway cron skips overlapping executions when the prior run is still Active, giving a free duplicate-run guard; (c) the existing scripts/ocean-context-triage.mjs already exits cleanly after one POST, satisfying Railway's 'exit on completion, leave no open resources' requirement.",
+        "Create the cron service in the SAME Railway project/environment as ocean-bedrock-production, start command 'npm run ocean:triage', Cron Schedule '0 6,18 * * *' UTC = TWICE DAILY at ~06:00 and ~18:00 UTC (a single cron expression that fires twice/day; operator may later shift the two hours). >=5min granularity and UTC-only per Railway cron docs. Do NOT point Nixpacks at a long-running server.",
+        "Set cron-service env: OCEAN_BEDROCK_URL=https://ocean-bedrock-production.up.railway.app and OCEAN_BEDROCK_TOKEN supplied via a Railway service variable (NOT committed). The token must be a scoped contributor token with write + /context/ocean-bedrock path scope + CONFIDENTIAL clearance, matching handleOceanContextTriage requirements (src/server.mjs:1139-1142). No raw secret in any repo artifact.",
+        "Add docs/HANDOFF.md sec 12-style runbook entry for the cron service (create, set schedule, set variable, redeploy) into the new docs/OCEAN-TRIAGE-OPS.md.",
+        "As a documented fallback ONLY (not the default), describe an in-server setInterval gated by OCEAN_TRIAGE_SCHEDULER=1 with a DB advisory-lock guard, to be used if a separate cron service is rejected; keep it OFF by default."
+      ],
+      "acceptance": [
+        "Railway service ocean-bedrock-triage-cron exists in the production environment with start command 'npm run ocean:triage' and a saved Cron Schedule (verifiable via railway get_service_config / list_services).",
+        "The cron service has OCEAN_BEDROCK_URL and OCEAN_BEDROCK_TOKEN variables set, and neither token value nor any raw secret appears in git (grep of the repo for the token returns nothing).",
+        "A manual one-off run of the cron service produces a non-error deployment that exits, and a new /context/ocean-bedrock/triage/<today>.md report plus an ocean_context.triage.completed ledger event appear (verify via GET file + ledger read)."
+      ]
+    },
+    {
+      "id": "phase-2-duplicate-run-guard",
+      "title": "Guard against duplicate / overlapping triage runs",
+      "ownerRole": "implementation_worker",
+      "reviewRole": "architecture_reviewer",
+      "dependsOn": [
+        "phase-1-scheduler-mechanism"
+      ],
+      "tasks": [
+        "Make a triage run idempotent PER SCHEDULED SLOT (NOT per calendar day, since the cron fires twice daily): key the marker source_sequence='triage:<dayStamp>:<slot>' where <slot> is the UTC hour bucket of the run (e.g. '06'/'18', or a configurable OCEAN_TRIAGE_SLOT). In runOceanContextTriage (src/ocean-context.mjs:76), before doing work, check for an existing ocean_context.triage.completed event with that per-slot source_sequence and, unless options.force is set, short-circuit returning {ok:true, skipped:'already-ran-this-slot', reportPath}. This lets the 06:00 and 18:00 runs BOTH proceed while still deduping an accidental re-fire within the same slot.",
+        "Thread a force flag through handleOceanContextTriage (src/server.mjs:1138) and scripts/ocean-context-triage.mjs (add --force) so an operator can still force a re-run.",
+        "Rely on Railway cron's built-in overlap skip (prior Active execution blocks the next) as the cross-process guard; document that the in-server fallback path must instead take a pg advisory lock (pg_try_advisory_lock) around the run for the same protection.",
+        "Ensure the short-circuit still works when the DB is reachable but the report file already exists, and that a forced re-run overwrites the same dated report path deterministically."
+      ],
+      "acceptance": [
+        "The two scheduled slots (06:00 and 18:00 UTC) each produce their own ocean_context.triage.completed event (distinct per-slot source_sequence), but running the SAME slot twice without --force yields exactly one event for that slot and the second invocation returns skipped.",
+        "npm run ocean:triage -- --force re-runs and overwrites today's report, producing a second completed event only when forced.",
+        "Code review confirms no unguarded setInterval ships enabled by default."
+      ]
+    },
+    {
+      "id": "phase-3-operator-notification",
+      "title": "Route triage findings to an operator surface with thresholds",
+      "ownerRole": "implementation_worker",
+      "reviewRole": "architecture_reviewer",
+      "dependsOn": [
+        "phase-2-duplicate-run-guard"
+      ],
+      "tasks": [
+        "Add a notification step to runOceanContextTriage that fires only when actionable findings exist (any finding with severity in {high,medium}, or queuedJobs>OCEAN_TRIAGE_QUEUE_ALERT default 50, or failedJobs>OCEAN_TRIAGE_FAILED_ALERT default 0). Make the two thresholds env-configurable instead of the current hardcoded values in triageFindings (src/ocean-context.mjs:61-62).",
+        "OPERATOR DECISION (resolved 2026-06-14): the PRIMARY alert surface for this wave is the DIGEST FILE ONLY — no external notifier is provisioned. Implement src/notify.mjs as a thin dispatcher whose only ACTIVE channel is an operator digest written to /context/ocean-bedrock/triage/_alerts/<dayStamp>-<slot>.md (slot-stamped so the 06:00 and 18:00 runs do NOT clobber each other) and recorded via recordObjectWrite, so the operator has one place to look. Leave Telegram (OCEAN_TRIAGE_TELEGRAM_*) and generic-webhook (OCEAN_TRIAGE_WEBHOOK_URL) as DEFERRED, code-stubbed channels that stay OFF unless their env is set later — do NOT require any external credential this wave. Never log raw tokens.",
+        "Keep the existing ledger event and dated report as-is; the notification is additive. Include in the alert: dayStamp, the severity-sorted findings list, and key counts (failedJobs, queuedJobs, pendingChunks, failedSyncRuns).",
+        "Make notification failures non-fatal to the triage run (catch + record a low-severity note) so a flaky Telegram/webhook never blocks the report/ledger write.",
+        "Document the chosen default surface and env vars in docs/OCEAN-TRIAGE-OPS.md; record 'Telegram vs webhook vs dashboard file as the primary operator surface' as an open decision if the operator has not committed to one."
+      ],
+      "acceptance": [
+        "A triage run with actionable findings writes /context/ocean-bedrock/triage/_alerts/<today>-<slot>.md and records it as an object (verify file GET + longhouse.objects row); the 06:00 and 18:00 digests coexist without clobbering.",
+        "OCEAN_TRIAGE_QUEUE_ALERT and OCEAN_TRIAGE_FAILED_ALERT change which findings are emitted (manual check: set OCEAN_TRIAGE_FAILED_ALERT=100 and confirm a 9-failed-jobs DB no longer triggers an alert).",
+        "The deferred Telegram/webhook channels stay inert when their env is unset (no external call attempted), and a digest-write error is non-fatal (report + ledger event still produced)."
+      ]
+    },
+    {
+      "id": "phase-4-failed-job-tooling",
+      "title": "Inspect, retry, and abandon failed ingest jobs",
+      "ownerRole": "implementation_worker",
+      "reviewRole": "architecture_reviewer",
+      "dependsOn": [
+        "phase-0-source-of-truth"
+      ],
+      "tasks": [
+        "Add metadata helpers in src/metadata.mjs: listFailedIngestJobs({limit}) (SELECT id, job_type, status, virtual_path, attempts, max_attempts, error, updated_at FROM longhouse.ingest_jobs WHERE status='failed' ORDER BY updated_at DESC), requeueIngestJob(id, {resetAttempts}) (UPDATE ... SET status='queued', locked_by=null, locked_at=null, run_after=now(), attempts = CASE WHEN resetAttempts THEN 0 ELSE attempts END, error=null), and abandonIngestJob(id, reason) (UPDATE ... SET status='cancelled', error=reason) — using only states already in the db/001 CHECK constraint (queued|running|done|failed|cancelled), so NO new migration is required.",
+        "Create scripts/ocean-failed-jobs.mjs (npm run ocean:jobs) with subcommands: list (default), retry <id|--all> [--reset-attempts], abandon <id|--all> --reason <text>, and inspect <id> (prints the full row incl. error + payload). Default to a dry-run/print for --all retry/abandon and require an explicit --yes to mutate, matching the cautious posture of the destructive-action gates in the week-one workflow.",
+        "Wire abandon/retry actions to also append a ledger event (e.g. ocean_context.ingest.job_requeued / job_abandoned) so operator actions on the queue are auditable in the same timeline as triage.",
+        "Run the new tool against prod to triage the 9 historical failed rows: inspect each, retry the ones whose error is transient (so the existing worker scripts/ocean-ingest-worker.mjs can pick them up since claimNextIngestJob selects status='queued'), and abandon the ones whose virtual_path/object no longer exists; record the disposition in docs/OCEAN-TRIAGE-OPS.md.",
+        "Have triage surface a follow-up: extend the ingest finding in triageFindings to note when failed jobs are stale (failed and not retried for N days) so the cleanup loop is self-reminding."
+      ],
+      "acceptance": [
+        "npm run ocean:jobs list prints the failed rows with id/job_type/virtual_path/error; npm run ocean:jobs inspect <id> prints the full error + payload.",
+        "After running retry/abandon on the 9 rows, SELECT count(*) FROM longhouse.ingest_jobs WHERE status='failed' returns 0, with each row now either 'queued' (and subsequently processed to 'done' by the worker) or 'cancelled'.",
+        "Each retry/abandon action produced a corresponding ledger event (verify via ledger read filtered to ingest.job_* event types), and --all without --yes performed no mutation (dry-run only)."
+      ]
+    },
+    {
+      "id": "phase-5-docs-and-runbook",
+      "title": "Operator runbook and handoff updates",
+      "ownerRole": "docs_onboarding",
+      "reviewRole": "architecture_reviewer",
+      "dependsOn": [
+        "phase-1-scheduler-mechanism",
+        "phase-3-operator-notification",
+        "phase-4-failed-job-tooling"
+      ],
+      "tasks": [
+        "Author docs/OCEAN-TRIAGE-OPS.md: the boundary note, the cron-service mechanism + schedule + env, the notification surfaces + thresholds, the npm run ocean:jobs lifecycle (list/inspect/retry/abandon), and a daily operator loop that ties triage findings -> notification -> failed-job cleanup.",
+        "Update docs/OCEAN-CONTEXT.md 'Current limits' (line ~134) to state the dedicated scheduler IS now deployed (remove the 'next production hardening step' wording) and link the new ops doc.",
+        "Update docs/HANDOFF.md sec 11 Priority 1 and sec 13 known-issue #9 to mark the scheduler deployed, findings routed, and failed-job tooling shipped; record the disposition of the 9 historical rows.",
+        "Add the ocean:jobs script to package.json scripts and to the README script list so it is discoverable."
+      ],
+      "acceptance": [
+        "docs/OCEAN-TRIAGE-OPS.md exists and documents scheduler, notification, and ocean:jobs with concrete commands.",
+        "docs/HANDOFF.md sec 13 item 9 and sec 11 Priority 1 no longer describe the scheduler/cleanup as missing.",
+        "package.json contains an ocean:jobs script and npm run ocean:jobs list executes."
+      ]
+    },
+    {
+      "id": "phase-6-security-and-launch-review",
+      "title": "Security and launch review",
+      "ownerRole": "security_reviewer",
+      "reviewRole": "strategic_orchestrator",
+      "dependsOn": [
+        "phase-2-duplicate-run-guard",
+        "phase-3-operator-notification",
+        "phase-4-failed-job-tooling",
+        "phase-5-docs-and-runbook"
+      ],
+      "tasks": [
+        "Confirm the cron service token is a scoped contributor token (write + /context/ocean-bedrock + CONFIDENTIAL only), is delivered via a Railway variable, and never appears in repo, logs, the report, or the alert digest.",
+        "Confirm notifier code (src/notify.mjs) never logs OCEAN_TRIAGE_TELEGRAM_BOT_TOKEN / webhook auth, and that notification payloads do not leak secrets or full ledger contents beyond findings + counts.",
+        "Confirm the failed-job tooling defaults to non-destructive (dry-run on --all, explicit --yes to mutate), only uses ingest_jobs states already permitted by the db/001 CHECK constraint, and that abandon does not delete underlying objects.",
+        "Confirm the duplicate-run guard cannot be bypassed by the cron service silently (overlap skip + same-day idempotency) and that the in-server fallback, if ever enabled, takes an advisory lock.",
+        "Produce an operator rollback: how to disable the cron service (pause/delete schedule), revoke/rotate the cron token, and re-fail or re-queue jobs if a bulk retry misbehaves."
+      ],
+      "acceptance": [
+        "Security checklist passes: no raw token/secret in repo, logs, report, or alert digest (grep + log review).",
+        "A dry-run of the rollback steps is documented and the cron service can be paused without affecting ocean-bedrock-production web service.",
+        "Known residual gaps (e.g. token registry is volume-JSON single-replica per src/auth.mjs; chosen notification surface still provisional) are recorded as blocked/future, not implied complete."
+      ]
+    }
+  ],
+  "fileTargets": [
+    {
+      "path": "docs/OCEAN-TRIAGE-OPS.md",
+      "action": "create",
+      "note": "New operator runbook: boundary note, cron-service scheduler + schedule/env, notification surfaces + thresholds, ocean:jobs lifecycle, daily operator loop, rollback."
+    },
+    {
+      "path": "src/ocean-context.mjs",
+      "action": "modify",
+      "note": "Add same-day idempotency / force short-circuit in runOceanContextTriage (line 76); make queuedJobs/failedJobs thresholds env-configurable in triageFindings (lines 61-62); add stale-failed-jobs finding; invoke the notifier."
+    },
+    {
+      "path": "src/notify.mjs",
+      "action": "create",
+      "note": "Thin dispatcher whose only ACTIVE channel this wave is the slot-stamped digest file /context/ocean-bedrock/triage/_alerts/<day>-<slot>.md (operator chose digest-only). Telegram/webhook left as deferred OFF stubs. Failures non-fatal. Never log secrets."
+    },
+    {
+      "path": "src/metadata.mjs",
+      "action": "modify",
+      "note": "Add listFailedIngestJobs, requeueIngestJob (status->queued, reset locks/error/run_after), abandonIngestJob (status->cancelled) using existing CHECK states; no new migration."
+    },
+    {
+      "path": "scripts/ocean-failed-jobs.mjs",
+      "action": "create",
+      "note": "CLI for failed ingest jobs: list/inspect/retry/abandon, dry-run default on --all, --yes to mutate, appends ledger events for actions."
+    },
+    {
+      "path": "scripts/ocean-context-triage.mjs",
+      "action": "modify",
+      "note": "Add --force flag plumbed to handler so operators can override same-day idempotency; remains the cron start command (npm run ocean:triage)."
+    },
+    {
+      "path": "src/server.mjs",
+      "action": "modify",
+      "note": "Thread force flag through handleOceanContextTriage (line 1138) into runOceanContextTriage; keep write + /context/ocean-bedrock scope + CONFIDENTIAL clearance requirements."
+    },
+    {
+      "path": "package.json",
+      "action": "modify",
+      "note": "Add ocean:jobs script -> node scripts/ocean-failed-jobs.mjs (alongside ocean:triage line 15)."
+    },
+    {
+      "path": "docs/OCEAN-CONTEXT.md",
+      "action": "modify",
+      "note": "Update 'Current limits' (line ~134) to mark the dedicated scheduler deployed and link the ops runbook."
+    },
+    {
+      "path": "docs/HANDOFF.md",
+      "action": "modify",
+      "note": "Update sec 11 Priority 1 and sec 13 known-issue #9: scheduler deployed, findings routed, failed-job tooling shipped, 9 historical rows dispositioned."
+    },
+    {
+      "path": "src/ocean-context.mjs",
+      "action": "investigate",
+      "note": "Confirm dayStamp/source_sequence shape used by the existing completed event (lines 97/103) so the idempotency check matches the real ledger marker."
+    }
+  ],
+  "launchDefinitionOfDone": [
+    "A dedicated Railway cron service ocean-bedrock-triage-cron runs 'npm run ocean:triage' TWICE DAILY ('0 6,18 * * *' UTC) in the production environment, exits cleanly each run, and is not the long-running web service.",
+    "The cron service authenticates with a scoped contributor token (write + /context/ocean-bedrock + CONFIDENTIAL) delivered via a Railway variable, with no raw secret in the repo.",
+    "Triage is idempotent per scheduled slot (the 06:00 and 18:00 runs each produce one event; a re-fire within a slot dedupes without --force) and overlapping runs are prevented via Railway cron overlap-skip.",
+    "Actionable triage findings reach the operator via a slot-stamped /context/ocean-bedrock/triage/_alerts/<day>-<slot>.md digest object (the chosen primary surface; Telegram/webhook deferred OFF); thresholds for queued/failed jobs are env-configurable.",
+    "npm run ocean:jobs can list/inspect/retry/abandon failed ingest jobs, defaulting to dry-run for bulk ops and emitting ledger events for actions.",
+    "The 9 historical failed longhouse.ingest_jobs rows are dispositioned so SELECT count(*) WHERE status='failed' returns 0 (each retried-and-done or cancelled).",
+    "docs/OCEAN-TRIAGE-OPS.md exists and HANDOFF sec 11/13 + OCEAN-CONTEXT limits are updated to reflect the deployed scheduler and tooling.",
+    "Security review confirms no token/secret leakage in repo/logs/report/digest, non-destructive defaults on bulk job ops, and a documented rollback."
+  ],
+  "openDecisions": [
+    "RESOLVED (operator, 2026-06-14): primary alert surface = the /context/ocean-bedrock/triage/_alerts/<day>-<slot>.md digest file ONLY; Telegram/webhook deferred OFF (no external notifier secret this wave).",
+    "RESOLVED (operator, 2026-06-14): cadence = twice daily, cron '0 6,18 * * *' UTC (~06:00 and 18:00); operator may later shift the two hours.",
+    "Whether to keep the in-server setInterval fallback (OCEAN_TRIAGE_SCHEDULER flag + advisory lock) in the codebase at all, or rely solely on the dedicated cron service. Default keeps it present but OFF.",
+    "Retry policy for the 9 failed rows: blanket requeue-with-reset-attempts vs per-row inspection. Spec defaults to per-row inspect-then-decide.",
+    "Whether to later promote the file-based alert digest into a real operator dashboard surface (out of scope for this wave; the longhouse data-plane router is wave 2)."
+  ],
+  "risks": [
+    "Single-replica constraint: an in-server setInterval scheduler would double-fire on redeploy/restart and the token registry is volume-JSON (src/auth.mjs) safe only for one replica; this is why the spec mandates a separate cron service and same-day idempotency rather than an in-process timer.",
+    "Railway cron has >=5min granularity, UTC-only, and a few-minutes imprecision; not suitable if sub-day or precise-time triage is later required.",
+    "The cron service needs a live, scoped token; if the token is mis-scoped (missing /context/ocean-bedrock or CONFIDENTIAL clearance) the run 403s. Token rotation must be handled via Railway variables, not committed.",
+    "Retrying a failed ingest job whose underlying file/object no longer exists (e.g. deleted from state.filesRoot) will just re-fail in processIngestJob (src/metadata.mjs:150) since file ops resolve a single hardcoded local disk root; such rows should be abandoned, not retried.",
+    "With digest-only chosen, NO new external notifier secret is introduced this wave (the deferred Telegram/webhook stubs need no creds while OFF), removing that leak surface. If those channels are enabled later, treat their tokens as new secrets (non-fatal notifier, never log values).",
+    "Ordering note for openDecisions: this track is assigned firingOrder=1 with dependsOnWorkflows=[] as instructed and that holds, because nothing here requires the longhouse data-plane router (wave 2) or source runners (wave 3). The failed-job retry path does depend on the existing local-disk worker, so some of the 9 rows may only be cleanable by abandon until wave-2 mounts land; this is a soft dependency captured here, not a change to firing order."
+  ]
+}
