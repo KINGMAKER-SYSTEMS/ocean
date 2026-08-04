@@ -1,0 +1,95 @@
+//! Client-side conversation model.
+//!
+//! These types mirror what the TUI uses (`PmTurn` / `PmBlock` in
+//! crates/ocean-tui/src/main.rs) so the rendering semantics stay consistent
+//! across surfaces. They're shaped from the daemon's `AgentTurnEvent` stream.
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+pub type TurnId = String;
+pub type CallId = String;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Role {
+    User,
+    Assistant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ToolStatus {
+    Running,
+    Ok,
+    Err,
+}
+
+/// Where a rendered component should appear in the surface. Most components
+/// render inline in the transcript (`Inline`, the default). A `Pinned`
+/// component docks into the persistent pinned rail instead — it stays visible
+/// across turns, outside the chat scroll. Parsed from the component payload's
+/// `props.placement` (see `daemon::component_placement`); defaults to inline so
+/// every existing render is unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ComponentPlacement {
+    #[default]
+    Inline,
+    Pinned,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Block {
+    Text(String),
+    Thinking {
+        content: String,
+        expanded: bool,
+    },
+    ToolCall {
+        call_id: CallId,
+        name: String,
+        args_preview: String,
+        output: String,
+        status: ToolStatus,
+        expanded: bool,
+    },
+    /// A live UI component rendered by the agent.
+    Component {
+        component_id: String,
+        kind: String,
+        props: Value,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Turn {
+    pub turn_id: Option<TurnId>,
+    pub role: Role,
+    pub blocks: Vec<Block>,
+}
+
+impl Turn {
+    pub fn user(text: impl Into<String>) -> Self {
+        Self {
+            turn_id: None,
+            role: Role::User,
+            blocks: vec![Block::Text(text.into())],
+        }
+    }
+
+    pub fn assistant(turn_id: TurnId) -> Self {
+        Self {
+            turn_id: Some(turn_id),
+            role: Role::Assistant,
+            blocks: Vec::new(),
+        }
+    }
+
+    #[allow(dead_code)] // used by model-swap / status messages in later phases
+    pub fn system(text: impl Into<String>) -> Self {
+        Self {
+            turn_id: None,
+            role: Role::Assistant,
+            blocks: vec![Block::Text(text.into())],
+        }
+    }
+}

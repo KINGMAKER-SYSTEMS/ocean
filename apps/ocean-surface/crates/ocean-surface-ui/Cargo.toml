@@ -1,0 +1,123 @@
+[package]
+name = "ocean-surface-ui"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+# A Trunk CSR app is a plain binary crate: src/main.rs + fn main() that
+# mounts the Leptos app. No [lib] needed.
+
+[dependencies]
+leptos        = { version = "0.8", features = ["csr"] }
+serde         = { version = "1", features = ["derive"] }
+serde_json    = "1"
+wasm-bindgen  = "0.2"
+wasm-bindgen-futures = "0.4"
+gloo-net      = { version = "0.6", features = ["http", "eventsource"] }
+gloo-timers   = { version = "0.3", features = ["futures"] }
+futures-util  = "0.3"
+console_error_panic_hook = "0.1"
+console_log   = "1"
+log           = "0.4"
+base64        = "0.22"
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+web-sys = { version = "0.3", features = [
+  "Window",
+  "Performance",
+  "Location",
+  "Document",
+  "Element",
+  "HtmlElement",
+  "HtmlInputElement",
+  "File",
+  "FileList",
+  "ClipboardEvent",
+  "DataTransfer",
+  "Selection",
+  "HtmlTextAreaElement",
+  "HtmlFormElement",
+  "Storage",
+  "console",
+  # Code component copy-to-clipboard
+  "Clipboard",
+  # Voice capture (push-to-talk → STT)
+  "Navigator",
+  "MediaDevices",
+  "MediaStream",
+  "MediaStreamConstraints",
+  "MediaStreamTrack",
+  "MediaRecorder",
+  "MediaRecorderOptions",
+  "BlobEvent",
+  "Blob",
+  "BlobPropertyBag",
+  "Event",
+  "Url",
+  # TTS playback
+  "HtmlAudioElement",
+  # Continuous VAD listening (hands-free modes)
+  "AudioContext",
+  "BaseAudioContext",
+  "AudioNode",
+  "AnalyserNode",
+  "MediaStreamAudioSourceNode",
+  "PointerEvent",
+  # CSPRNG for minting per-turn decision tokens (OCEAN-314).
+  "Crypto",
+  # Floating widget: depth-fade animation (get_bounding_client_rect, query_selector_all)
+  "DomRect",
+  "NodeList",
+  # Reduced-motion check + path-node iteration for the wave-badge rAF loop
+  "MediaQueryList",
+  "Node",
+  # OS presence (host.rs): native notify on Tauri (the notification plugin
+  # polyfills window.Notification), standard Web Notifications on the PWA.
+  "Notification",
+  "NotificationOptions",
+  "NotificationPermission",
+  # Workspace browser pane (workspace_browser.rs): stream the agent daemon's
+  # Chrome over SSE (EventSource + MessageEvent) and forward pointer/keyboard
+  # input back over CDP (MouseEvent/WheelEvent/KeyboardEvent → POST).
+  "EventSource",
+  "MessageEvent",
+  "EventTarget",
+  "HtmlDivElement",
+  "MouseEvent",
+  "WheelEvent",
+  "KeyboardEvent",
+  # Realtime voice chat (voice phases 2/3): WebRTC peer connection to
+  # OpenAI's Realtime API + data-channel tool calls (voice/realtime.rs).
+  "RtcPeerConnection",
+  "RtcSessionDescription",
+  "RtcSessionDescriptionInit",
+  "RtcSdpType",
+  "RtcDataChannel",
+  "RtcTrackEvent",
+  "RtcRtpSender",
+  "RtcIceGatheringState",
+  # ── WebGL loader plate (loader.rs) ────────────────────────────────
+  "HtmlCanvasElement",
+  "CanvasRenderingContext2d",
+  "ResizeObserver",
+  "CanvasGradient",
+  "TextMetrics",
+  "CssStyleDeclaration",
+  "WebGlRenderingContext",
+  "WebGlProgram",
+  "WebGlShader",
+  "WebGlBuffer",
+  "WebGlTexture",
+  "WebGlUniformLocation",
+  "WebGlActiveInfo",
+  "WebglLoseContext",
+  "WebGlContextEvent",
+] }
+js-sys = "0.3"
+# Satisfies on_cleanup's Send+Sync bound for the wave-badge rAF Rc state
+# (sound on wasm's single thread).
+send_wrapper = "0.6"
+
+[features]
+default = []

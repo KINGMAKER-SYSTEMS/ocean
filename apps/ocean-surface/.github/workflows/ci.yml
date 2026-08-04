@@ -1,0 +1,193 @@
+name: CI
+
+# The ocean-surface workspace gate. Runs on every PR and on pushes to main so a
+# breaking change can't merge unchecked. Mirrors the ocean-os CI (OCEAN-191),
+# adapted for this repo's mixed native/wasm/GPUI workspace (see scope note below).
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: build / test / clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable + clippy + wasm target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+          # ocean-surface-ui is a wasm-only Leptos CSR app — it is "checked"
+          # against its real target, not built natively.
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+
+      # --------------------------------------------------------------------
+      # SCOPE NOTE — why this gate is not a plain `cargo build --workspace`:
+      #
+      # The workspace has four crates with very different build profiles:
+      #   * ocean-surface-proxy — native axum binary (the only default member).
+      #     Builds/tests/lints fine headless. This is the real CI target.
+      #   * ocean-surface-ui    — wasm-only Leptos CSR app. Its shipped ARTIFACT
+      #     is wasm, so it is *checked* against wasm32-unknown-unknown. Its
+      #     TESTS run natively and always could: they are pure-logic predicates,
+      #     serde wire-shape round-trips, and source assertions — no DOM, no
+      #     browser, no wasm. This note previously read "a native build is
+      #     meaningless", which conflated build with test and left 796
+      #     assertions (every rooms gate among them) enforced by nothing.
+      #   * ocean-gui           — native GPUI desktop face (gpui + livekit/
+      #     libwebrtc + rfd/GTK + wry). A full *build* of this
+      #     crate links GPUI's blade/Vulkan renderer and the prebuilt libwebrtc
+      #     and realistically wants a display/GPU-capable runner, so a full
+      #     build/test stays out of the headless gate. A `cargo check`, however,
+      #     compiles the source + the webrtc-sys C++ bindings and emits link
+      #     metadata WITHOUT performing the final GPU/render link, which is
+      #     viable headless — see the dedicated `gui-check` job below.
+      #   * ocean-tauri        — the macOS desktop shell. NOT GATED HERE, and
+      #     that gap is why it accumulated 6 clippy errors unnoticed until
+      #     TASK-81. Gating it needs two things this runner does not have:
+      #     (1) a `dist/` directory — `tauri::generate_context!` panics at
+      #         compile time when `frontendDist` ("../../dist") is missing, so
+      #         even `cargo check` fails in a bare checkout. A stub
+      #         (`mkdir -p dist && touch dist/index.html`) is enough for a
+      #         lint/check gate since the bundle itself is not built here.
+      #     (2) the webkit2gtk/libsoup system deps Tauri needs on ubuntu, or a
+      #         macOS runner (the shell is macOS-targeted in practice).
+      #     Until one of those is arranged, ocean-tauri is lint-checked locally
+      #     only. Whoever adds the job: TASK-81 left the crate clippy-clean, so
+      #     it should go green on the first run — if it does not, the runner
+      #     setup is the problem, not the source.
+      # --------------------------------------------------------------------
+
+      # ocean-surface-proxy: the native crate — full build/test/clippy gate.
+      - name: Build (ocean-surface-proxy)
+        run: cargo build -p ocean-surface-proxy
+
+      - name: Test (ocean-surface-proxy)
+        run: cargo test -p ocean-surface-proxy
+
+      # ocean-surface-ui: wasm artifact is checked against wasm32; the tests
+      # run natively. Both are required — the wasm check alone cannot fail on a
+      # broken assertion, only on a broken compile.
+      - name: Check (ocean-surface-ui, wasm32)
+        run: cargo check -p ocean-surface-ui --target wasm32-unknown-unknown
+
+      - name: Test (ocean-surface-ui)
+        run: cargo test -p ocean-surface-ui
+
+      # Clippy with -D warnings: all style/correctness lints are hard errors,
+      # matching ocean-os (OCEAN-309). Pre-existing warnings fixed in OCEAN-325.
+      - name: Clippy (ocean-surface-proxy, all targets)
+        run: cargo clippy -p ocean-surface-proxy --all-targets -- -D warnings
+
+      - name: Clippy (ocean-surface-ui, wasm32)
+        run: cargo clippy -p ocean-surface-ui --target wasm32-unknown-unknown -- -D warnings
+
+      # Formatting gate — closes the OCEAN-195 fmt deferral. The one-time
+      # `cargo fmt --all` sweep was landed in OCEAN-324; this step enforces it
+      # going forward. Any unformatted commit will fail CI here.
+      - name: Fmt check
+        run: cargo fmt --all -- --check
+
+      - name: Surface deployment contract
+        run: node scripts/surface-auto-deploy.test.mjs
+
+  # ----------------------------------------------------------------------
+  # ocean-gui (GPUI native desktop face) — `cargo check` only, SEPARATE job.
+  #
+  # Kept off the main `check` job on purpose: ocean-gui pulls in the full
+  # GPUI + livekit/libwebrtc native stack, so a dependency/system-lib problem
+  # here must NOT block the proxy/ui gate. This job is allowed to be the
+  # canary for native-face compile breaks.
+  #
+  # Two passes, because `livekit` is now an opt-in feature (the default build
+  # deliberately has NO native WebRTC so the canvas/shell compiles fast):
+  #   1. default            — the fast, webrtc-free path the canvas build uses.
+  #   2. --features livekit  — the voice/video panel; this is the pass that
+  #      actually exercises webrtc-sys (the libwebrtc download + C++ FFI shims),
+  #      keeping the native path from silently rotting.
+  #
+  # Why `check` is viable headless (no GPU, no display):
+  #   * `cargo check` compiles the crate's source and runs build scripts —
+  #     including (under `--features livekit`) webrtc-sys's, which downloads a
+  #     PUBLIC, unauthenticated prebuilt libwebrtc from the livekit/rust-sdks
+  #     GitHub releases (webrtc-{triple}.zip) and compiles the C++ FFI shims —
+  #     but it does NOT perform the final binary link of GPUI's blade/Vulkan
+  #     renderer. So no real GPU or X/Wayland display is needed to `check`.
+  #   * The macOS-only `wry` dep is gated behind cfg(target_os = "macos") and
+  #     is not compiled on this ubuntu runner.
+  #
+  # apt deps below are the GPUI/Zed Linux set (per zed.dev script/linux),
+  # plus a C/C++ toolchain (build-essential, clang, cmake, pkg-config) for
+  # webrtc-sys's native bindings and gtk/xkb/wayland headers for rfd + gpui's
+  # x11/wayland backends. If the runner log shows a missing -dev header,
+  # extend this list rather than dropping the job.
+  gui-check:
+    name: gui-check (ocean-gui, cargo check)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install GPUI / livekit system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake clang lld llvm pkg-config \
+            libasound2-dev libfontconfig-dev libfreetype6-dev libssl-dev \
+            libva-dev libvulkan1 libvulkan-dev mesa-vulkan-drivers \
+            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libx11-xcb-dev libxcb1-dev \
+            libgtk-3-dev libglib2.0-dev libzstd-dev
+
+      - name: Install Rust toolchain (stable + clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Distinct cache so the heavy GPUI/libwebrtc artifacts don't evict
+          # the lean proxy/ui cache (and vice versa).
+          key: gui-check
+
+      # Pass 1 — default: the fast, webrtc-free path the canvas build uses.
+      - name: Check (ocean-gui, default — no native webrtc)
+        run: cargo check -p ocean-gui
+
+      # Pass 2 — livekit: compiles source + webrtc-sys C++ bindings and
+      # downloads the public prebuilt libwebrtc, without the GPU/render link.
+      # This keeps the native voice/video path under CI now that it is opt-in.
+      - name: Check (ocean-gui, --features livekit — native webrtc)
+        run: cargo check -p ocean-gui --features livekit
+
+      # Clippy gate (OCEAN-376): ocean-gui is heavy enough to live in its own
+      # job, but it still earns the same -D warnings bar as the rest of the
+      # workspace (mirrors the `check` job's proxy/ui clippy lanes). Any new
+      # clippy warning (style or correctness, any target incl. tests) fails CI.
+      - name: Clippy (ocean-gui, -D warnings)
+        run: cargo clippy -p ocean-gui --all-targets -- -D warnings
+
+      # Test gate (OCEAN-379): the lib tests are pure logic (shell model,
+      # canvas persistence, workspace, watcher) — they need no GPU/display and
+      # run in well under a second headless, so the same job that already
+      # compiles ocean-gui can cheaply run them. `--lib` deliberately excludes
+      # any GPU/render-dependent integration tests from the headless gate.
+      - name: Test (ocean-gui, lib only)
+        run: cargo test -p ocean-gui --lib

@@ -1,0 +1,55 @@
+[package]
+name = "ocean-tauri"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Risingtides-dev"]
+rust-version = "1.82"
+description = "Tauri 2.x native shell that hosts the ocean-surface Leptos WASM bundle."
+
+# Standalone Tauri project: intentionally NOT a member of the ocean-surface
+# workspace. `cargo tauri` manages this crate's own build graph, and keeping it
+# out of the workspace avoids a native/wasm compile race with ocean-surface-ui.
+
+[workspace]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-global-shortcut = "2"
+# Native notifications: polyfills `window.Notification` in the webview so the
+# wasm bundle's standard Web Notifications path routes through macOS natively.
+tauri-plugin-notification = "2"
+tauri-plugin-deep-link = "2"
+tauri-plugin-opener = "2"
+# Single-instance guard (QA-005): a second launch — dev binary re-run while a
+# prior instance sits hidden in the tray, or the packaged .app beside a dev
+# run — forwards to the running instance (which summons its window) and exits
+# instead of opening a rival "Ocean Desktop" window.
+tauri-plugin-single-instance = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Filesystem notifications. notify 6.x exposes no `serde` cargo feature (its
+# types already depend on serde unconditionally); we map raw events onto our own
+# serde-derived `PathEvent`, so no feature flag is needed here.
+notify = "6"
+# Sync locks held briefly (never across `.await`) — parking_lot avoids the
+parking_lot = "0.12"
+# `macros` powers the `tokio::select!` debounce loop; `sync`+`time` the channel
+# and the 200ms quiet window.
+tokio = { version = "1", features = ["sync", "time", "macros"] }
+# Local git repository inspection (repo_state command).  `vendored-libgit2`
+# bundles libgit2 so we don't depend on the system package.
+git2 = { version = "0.20", features = ["vendored-libgit2"] }
+# Open a file with the OS default application (B0: Open Externally).
+opener = "0.7"
+
+[dev-dependencies]
+tempfile = "3"
+
+[[bin]]
+name = "ocean-tauri"
+path = "src/main.rs"

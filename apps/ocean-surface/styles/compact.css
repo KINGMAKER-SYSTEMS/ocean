@@ -1,0 +1,691 @@
+/* Chrome side-panel (MV3) compact layout — structural overrides only.
+   The domain styles own color; this file only tightens geometry in the
+   `.ocean-surface--extension` root emitted by the Leptos app. */
+
+.ocean-surface--extension {
+  max-width: none;
+  width: 100%;
+}
+
+/* Header stays one row in the side panel; context chips truncate before the
+   chrome wraps into a second busy toolbar. */
+.ocean-surface--extension .ocean-header {
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+}
+
+.ocean-surface--extension .ocean-brand {
+  min-width: 0;
+}
+
+
+.ocean-surface--extension .ocean-header__right {
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-wrap: nowrap;
+  gap: 4px;
+  justify-content: flex-end;
+}
+
+.ocean-surface--extension .ocean-runtime {
+  flex: 0 1 auto;
+  min-width: 0;
+  gap: 6px;
+  padding-left: 0;
+  box-shadow: none;
+}
+
+.ocean-surface--extension .ocean-runtime .ocean-tokens {
+  display: none;
+}
+
+.ocean-surface--extension .ocean-browser-control {
+  width: var(--ctl-h-sm);
+  padding: 0;
+  justify-content: center;
+}
+
+.ocean-surface--extension .ocean-browser-control__label {
+  display: none;
+}
+
+.ocean-surface--extension .ocean-runtime .ocean-status {
+  flex: 0 1 auto;
+  max-width: 96px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Header controls and per-turn selectors use compact control height. */
+  .ocean-surface--extension .ocean-sessions-trigger,
+  .ocean-surface--extension .ocean-thinking,
+  .ocean-surface--extension .ocean-model-override {
+    min-height: var(--ctl-h-sm);
+    height: var(--ctl-h-sm);
+  }
+
+.ocean-surface--extension .ocean-thinking,
+.ocean-surface--extension .ocean-model-override {
+  max-width: 46vw;
+}
+
+/* Transcript and canvas regions keep readable gutters in a narrow column. */
+.ocean-surface--extension .transcript {
+  padding: 12px 14px;
+  gap: 12px;
+}
+
+.ocean-surface--extension .block--text {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.ocean-surface--extension .ocean-canvas {
+  margin: 8px 10px 0;
+}
+
+.ocean-surface--extension .ocean-canvas__head,
+.ocean-surface--extension .ocean-canvas__tabs {
+  padding-right: 10px;
+  padding-left: 10px;
+}
+
+/* Composer compresses without changing the base control recipes. */
+.ocean-surface--extension .ocean-composer {
+  padding: 8px 10px 10px;
+  column-gap: 8px;
+  row-gap: 4px;
+}
+
+.ocean-surface--extension .voice-wrap {
+  gap: 6px;
+}
+
+.ocean-surface--extension .voice-orb {
+  width: 32px;
+  height: 32px;
+  font-size: 16px;
+}
+
+.ocean-surface--extension .voice-hint {
+  display: none;
+}
+
+/* Voice menu + live chip fit the narrow side panel; the chip collapses to
+   its pulsing dot at this width, and the trigger keeps a findable floor. */
+.ocean-surface--extension .voice-menu {
+  max-width: min(224px, calc(100vw - 24px));
+}
+
+.ocean-surface--extension .voice-live-chip {
+  font-size: 0;
+  gap: 0;
+  padding: 4px;
+}
+
+.ocean-surface--extension .voice-trigger {
+  opacity: 0.35;
+}
+
+.ocean-surface--extension .ocean-composer__input {
+  min-width: 0;
+}
+
+.ocean-surface--extension .ocean-composer__halt,
+.ocean-surface--extension .ocean-composer__send {
+  min-height: var(--ctl-h-sm);
+  height: var(--ctl-h-sm);
+}
+
+/* ── Normal web surface compact mode (header chips + composer first) ── */
+@media (max-width: 720px) {
+  /* Root: fill viewport, drop the central max-width gutter -------------- */
+  .ocean-surface {
+    max-width: none;
+    width: 100%;
+  }
+
+  /* Header: single row, chips truncate before a 2nd toolbar wraps ----- */
+  .ocean-surface .ocean-header {
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+  }
+
+  .ocean-surface .ocean-brand {
+    min-width: 0;
+  }
+
+  .ocean-surface .ocean-header__right {
+    flex: 1 1 auto;
+    min-width: 0;
+    flex-wrap: nowrap;
+    gap: 4px;
+    justify-content: flex-end;
+  }
+
+  .ocean-surface .ocean-runtime {
+    flex: 0 1 auto;
+    min-width: 0;
+    gap: 6px;
+    padding-left: 0;
+    box-shadow: none;
+  }
+
+  .ocean-surface .ocean-runtime .ocean-tokens {
+    display: none;
+  }
+
+  .ocean-surface .ocean-browser-control {
+    width: var(--ctl-h-sm);
+    padding: 0;
+    justify-content: center;
+  }
+
+  .ocean-surface .ocean-browser-control__label {
+    display: none;
+  }
+
+  .ocean-surface .ocean-runtime .ocean-status {
+    flex: 0 1 auto;
+    max-width: 96px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* Controls: compact height, capped chip widths ---------------------- */
+  .ocean-surface .ocean-sessions-trigger,
+  .ocean-surface .ocean-thinking,
+  .ocean-surface .ocean-model-override {
+    min-height: var(--ctl-h-sm);
+    height: var(--ctl-h-sm);
+  }
+
+  .ocean-surface .ocean-thinking,
+  .ocean-surface .ocean-model-override {
+    max-width: 46vw;
+  }
+
+  /* Transcript & canvas: readable gutters ---------------------------- */
+  .ocean-surface .transcript {
+    padding: 12px 14px;
+    gap: 12px;
+  }
+
+  .ocean-surface .block--text {
+    max-width: 100%;
+    overflow-x: auto;
+  }
+
+  .ocean-surface .ocean-canvas {
+    margin: 8px 10px 0;
+  }
+
+  .ocean-surface .ocean-canvas__head,
+  .ocean-surface .ocean-canvas__tabs {
+    padding-right: 10px;
+    padding-left: 10px;
+  }
+
+  /* Composer: tighter padding, smaller orb, no hint ---------------- */
+  .ocean-surface .ocean-composer {
+    padding: 8px 10px 10px;
+    column-gap: 8px;
+    row-gap: 4px;
+  }
+
+  .ocean-surface .voice-wrap {
+    gap: 6px;
+  }
+
+  .ocean-surface .voice-orb {
+    width: 32px;
+    height: 32px;
+    font-size: 16px;
+  }
+
+  .ocean-surface .voice-hint {
+    display: none;
+  }
+
+  /* Voice menu + trigger keep their narrow-width behavior under 720px. */
+  .ocean-surface .voice-menu {
+    max-width: min(224px, calc(100vw - 24px));
+  }
+
+  .ocean-surface .voice-trigger {
+    opacity: 0.35;
+  }
+
+  .ocean-surface .voice-live-chip {
+    gap: 0;
+    padding: 4px;
+    font-size: 0;
+  }
+
+  /* iOS Safari auto-zooms focused form controls whose computed text size is
+     below 16px, then leaves the transcript/composer viewport enlarged. Keep
+     the mobile composer readable without disabling user pinch zoom. */
+  .ocean-surface .ocean-composer__input {
+    min-width: 0;
+    font-size: 16px;
+  }
+
+  .ocean-surface .ocean-composer__halt,
+  .ocean-surface .ocean-composer__send {
+    min-height: var(--ctl-h-sm);
+    height: var(--ctl-h-sm);
+  }
+
+  /* Rich content: clip instead of widening viewport ------------------ */
+  .ocean-surface pre,
+  .ocean-surface img,
+  .ocean-surface table {
+    max-width: 100%;
+    overflow-x: auto;
+  }
+}
+
+/* ── Touch-device focus stability ────────────────────────────────────
+   iOS Safari auto-zooms the viewport when a focused control's computed
+   font-size is below 16px, which makes engaging the prompt input lurch
+   instead of feeling native. Touch devices therefore get a 16px floor on
+   the composer input; width is irrelevant (iPads zoom too), so this keys
+   on pointer coarseness, not the compact breakpoint. */
+@media (pointer: coarse) {
+  .ocean-surface .ocean-composer__input {
+    font-size: 16px;
+  }
+}
+
+/* Wide rich content clips in the side panel instead of widening it. */
+.ocean-surface--extension pre,
+.ocean-surface--extension img,
+.ocean-surface--extension table {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+/* ── Narrow component reflow (≤480px) — stack kanban, cardify tables,
+   full-width charts, single-col stats/dashboards. True reflow, not
+   overflow-x band-aids. ─────────────────────────────────────────────── */
+@media (max-width: 480px) {
+  /* Container: prevent turn body from growing past viewport --------- */
+  .ocean-surface .turn--assistant .turn__body {
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  /* All component wrappers: fill the turn body, don't push offscreen */
+  .ocean-surface .component-kanban,
+  .ocean-surface .component-form,
+  .ocean-surface .component-table,
+  .ocean-surface .component-progress,
+  .ocean-surface .component-markdown,
+  .ocean-surface .component-dashboard,
+  .ocean-surface .component-chart,
+  .ocean-surface .component-timeline,
+  .ocean-surface .component-stats,
+  .ocean-surface .component-filetree,
+  .ocean-surface .component-diff,
+  .ocean-surface .component-code,
+  .ocean-surface .component-callout,
+  .ocean-surface .component-gallery,
+  .ocean-surface .component-confirm,
+  .ocean-surface .block--map,
+  .ocean-surface .block--video,
+  .ocean-surface .block--component-unknown {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+  }
+
+  /* Kanban: stack columns vertically -------------------------------- */
+  .ocean-surface .kanban-columns {
+    flex-direction: column;
+    gap: 12px;
+    max-height: none;
+    overflow-x: visible;
+  }
+  .ocean-surface .kanban-column {
+    min-width: 0;
+    max-width: none;
+    flex: 1 1 auto;
+    width: 100%;
+  }
+
+  /* Table: cardify rows — hide thead, display tr/td as blocks ----- */
+  .ocean-surface .component-table {
+    overflow-x: visible;
+  }
+  .ocean-surface .data-table {
+    display: block;
+    min-width: 0;
+    width: 100%;
+  }
+  .ocean-surface .data-table thead {
+    display: none;
+  }
+  .ocean-surface .data-table tbody {
+    display: block;
+  }
+  .ocean-surface .data-table__row {
+    display: block;
+    margin-bottom: 6px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius);
+  }
+  .ocean-surface .data-table td {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 8px;
+    padding: 6px 12px;
+    border-bottom: none;
+    text-align: right;
+  }
+  .ocean-surface .data-table td:not(:last-child) {
+    border-bottom: 1px solid var(--border-subtle);
+  }
+  .ocean-surface .data-table td::before {
+    content: attr(data-label);
+    flex: 0 0 auto;
+    color: var(--fg-3);
+    font-size: 11px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .ocean-surface .data-table__footer {
+    margin-top: 4px;
+    border-top: 1px solid var(--border-subtle);
+  }
+
+  /* Chart: label wraps to full row, track follows ------------------- */
+  .ocean-surface .chart-row {
+    flex-wrap: wrap;
+    gap: 4px 8px;
+    min-height: auto;
+    padding: 4px 6px;
+  }
+  .ocean-surface .chart-row__label {
+    flex: 1 1 100%;
+    max-width: none;
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+  }
+  .ocean-surface .chart-row__track {
+    flex: 1 1 auto;
+  }
+
+  /* Stats: single column -------------------------------------------- */
+  .ocean-surface .component-stats {
+    grid-template-columns: 1fr;
+  }
+  .ocean-surface .stat-card {
+    min-width: 0;
+  }
+
+  /* Form: full width ------------------------------------------------ */
+  .ocean-surface .component-form form {
+    width: 100%;
+  }
+
+  /* Progress: full width -------------------------------------------- */
+  .ocean-surface .component-progress {
+    width: 100%;
+  }
+
+  /* Gallery: tighter grid ------------------------------------------- */
+  .ocean-surface .component-gallery {
+    grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+  }
+
+  /* Dashboard: single column (override inline grid-template-columns) */
+  .ocean-surface .component-dashboard {
+    grid-template-columns: 1fr !important;
+    overflow-x: visible;
+  }
+  .ocean-surface .dashboard-cell {
+    min-width: 0;
+  }
+
+  /* Confirm: wrap action buttons ------------------------------------ */
+  .ocean-surface .confirm__actions {
+    flex-wrap: wrap;
+  }
+
+}
+
+/* ── Extension: always-compact component reflow ───────────────────────
+   The Chrome side-panel is always narrow (~361–420px); components must
+   reflow regardless of any viewport media query. */
+.ocean-surface--extension .turn--assistant .turn__body {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.ocean-surface--extension .component-kanban,
+.ocean-surface--extension .component-form,
+.ocean-surface--extension .component-table,
+.ocean-surface--extension .component-progress,
+.ocean-surface--extension .component-markdown,
+.ocean-surface--extension .component-dashboard,
+.ocean-surface--extension .component-chart,
+.ocean-surface--extension .component-timeline,
+.ocean-surface--extension .component-stats,
+.ocean-surface--extension .component-filetree,
+.ocean-surface--extension .component-diff,
+.ocean-surface--extension .component-code,
+.ocean-surface--extension .component-callout,
+.ocean-surface--extension .component-gallery,
+.ocean-surface--extension .component-confirm,
+.ocean-surface--extension .block--map,
+.ocean-surface--extension .block--video,
+.ocean-surface--extension .block--component-unknown {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+/* Extension kanban: stack columns */
+.ocean-surface--extension .kanban-columns {
+  flex-direction: column;
+  gap: 12px;
+  max-height: none;
+  overflow-x: visible;
+}
+.ocean-surface--extension .kanban-column {
+  min-width: 0;
+  max-width: none;
+  flex: 1 1 auto;
+  width: 100%;
+}
+
+/* Extension table: cardify */
+.ocean-surface--extension .component-table {
+  overflow-x: visible;
+}
+.ocean-surface--extension .data-table {
+  display: block;
+  min-width: 0;
+  width: 100%;
+}
+.ocean-surface--extension .data-table thead {
+  display: none;
+}
+.ocean-surface--extension .data-table tbody {
+  display: block;
+}
+.ocean-surface--extension .data-table__row {
+  display: block;
+  margin-bottom: 6px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+}
+.ocean-surface--extension .data-table td {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 12px;
+  border-bottom: none;
+  text-align: right;
+}
+.ocean-surface--extension .data-table td:not(:last-child) {
+  border-bottom: 1px solid var(--border-subtle);
+}
+.ocean-surface--extension .data-table td::before {
+  content: attr(data-label);
+  flex: 0 0 auto;
+  color: var(--fg-3);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.ocean-surface--extension .data-table__footer {
+  margin-top: 4px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+/* Extension chart: label wraps */
+.ocean-surface--extension .chart-row {
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  min-height: auto;
+  padding: 4px 6px;
+}
+.ocean-surface--extension .chart-row__label {
+  flex: 1 1 100%;
+  max-width: none;
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+}
+.ocean-surface--extension .chart-row__track {
+  flex: 1 1 auto;
+}
+
+/* Extension stats: single column */
+.ocean-surface--extension .component-stats {
+  grid-template-columns: 1fr;
+}
+.ocean-surface--extension .stat-card {
+  min-width: 0;
+}
+
+/* Extension form: full width */
+.ocean-surface--extension .component-form form {
+  width: 100%;
+}
+
+/* Extension progress: full width */
+.ocean-surface--extension .component-progress {
+  width: 100%;
+}
+
+/* Extension gallery: tighter grid */
+.ocean-surface--extension .component-gallery {
+  grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+}
+
+/* Extension dashboard: single column */
+.ocean-surface--extension .component-dashboard {
+  grid-template-columns: 1fr !important;
+  overflow-x: visible;
+}
+.ocean-surface--extension .dashboard-cell {
+  min-width: 0;
+}
+
+/* Extension confirm: wrap actions */
+.ocean-surface--extension .confirm__actions {
+  flex-wrap: wrap;
+}
+
+
+/* Pinned rail on touch/compact: full-bleed swipe strip; unpin always
+   visible (no hover on touch). */
+@media (max-width: 720px) {
+  .pinned-rail {
+    top: 58px;
+    left: 8px;
+    right: 8px;
+    gap: 8px;
+    max-height: 30vh;
+  }
+
+  .pinned-card {
+    flex: 0 0 78vw;
+  }
+
+  .pinned-card__unpin {
+    opacity: 1;
+  }
+}
+
+/* Voice Planner keeps frozen roots readable in extension and phone widths. */
+.ocean-surface--extension .voice-plan {
+  max-width: calc(100vw - 20px);
+  margin-right: 10px;
+  margin-left: 10px;
+}
+
+.ocean-surface--extension .voice-plan__picker,
+.ocean-surface--extension .voice-plan__actions {
+  grid-template-columns: minmax(0, 1fr);
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.ocean-surface--extension .voice-plan__context dd,
+.ocean-surface--extension .voice-plan__brief p,
+.ocean-surface--extension .voice-plan__brief li {
+  overflow-wrap: anywhere;
+}
+
+.ocean-surface--extension .voice-plan__actions button {
+  width: 100%;
+}
+
+@media (max-width: 720px) {
+  .voice-plan {
+    max-width: calc(100vw - 20px);
+    margin-right: 10px;
+    margin-left: 10px;
+    padding: 12px;
+  }
+
+  .voice-plan__picker {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .voice-plan__context div {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .voice-plan__context dd,
+  .voice-plan__brief p,
+  .voice-plan__brief li {
+    overflow-wrap: anywhere;
+  }
+
+  .voice-plan__actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .voice-plan__actions button,
+  .voice-plan__picker button {
+    width: 100%;
+    min-height: 44px;
+  }
+}
