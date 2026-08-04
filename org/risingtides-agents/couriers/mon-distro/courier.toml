@@ -1,0 +1,21 @@
+# Courier manifest — the routing contract for this courier.
+# The hub router (../hub/router.py) reads every courier.toml to build the
+# slash-command → courier table.
+
+name = "mon-distro"
+description = "Read-first ops window into the Mon Rovia evergreen distro engine (Rust backend, launchd, :3000 → Facebook Reels via Postiz)."
+
+# deterministic = the router runs the harness directly (no LLM spawn).
+mode = "deterministic"
+
+# Entry point the router invokes, relative to this manifest's directory.
+entry = "bin/courier"
+
+# One slash, many verbs: no `subcommand` here, so the router passes the
+# operator's args verbatim to bin/courier, which dispatches to verified engine
+# invocations (queue/status inspection first; `post-now` exists but stays fully
+# behind the engine's own latches — DRY_RUN, POSTING_LOCKED, --enable-posting).
+[[commands]]
+slash = "/distro"
+summary = "Inspect the Mon Rovia distro engine: service status, queue health, upcoming slots, Postiz connectivity"
+usage = "/distro <health|status|queue|preview|upcoming|readiness|activity|verify-postiz|post-now> [args]"

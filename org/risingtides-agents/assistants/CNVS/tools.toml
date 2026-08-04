@@ -1,0 +1,46 @@
+# CNVS — canvas surface tool configuration (design spec §6, §8).
+#
+# Declares the tools / APIs / MCPs an agent is granted while on the [CNVS]
+# (spatial / tldraw canvas) surface. The CNVS surface profile
+# (assistants/CNVS/system.md) tells the agent to "drive board I/O through the
+# granted tools/transport" — this file is what grants those tools. Without it a
+# canvas-surface turn has no declared render path.
+#
+# Per spec §7 (self-learning / hot-reconfigure), this file is DATA: an operator
+# grants a new capability by editing it and resetting the agent (fresh
+# session_id) so the daemon re-reads the profile on the next turn — no rebuild.
+# It is a DECLARATION the daemon's permission gate reads, not a live wiring.
+#
+# NOTE — house-surface grant. CNVS is a *house surface profile* (composed DRY
+# from assistants/_base/CNVS/*.md), not a named specialist like content-agent,
+# so there is no agent manifest (content-agent.toml) pointing at this file. It is
+# the default tool grant for ANY agent loaded on the [CNVS] surface, mirroring
+# the assistants/content-agent/SLACK/tools.toml schema.
+
+[agent]
+# House profile, not a named agent — the [CNVS] surface itself owns this grant.
+name = "CNVS"
+surface = "CNVS"
+# A reset = new session_id; the daemon rebuilds the system prompt from this
+# (possibly edited) profile on the next turn.
+reset = "new-session"
+
+# ---------------------------------------------------------------------------
+# Built-in runtime tools the agent may call on the canvas. The daemon is
+# permission-gated; these are the ones a canvas-surface agent is allowed.
+# ---------------------------------------------------------------------------
+[builtin]
+# surface_patch — the agent-native canvas mutation tool (ocean-os
+# crates/ocean-runtime/src/tools/surface.rs). This is the PRIMARY board-I/O path:
+# the agent emits structured patches (upsert/move/group/delete elements) against
+# a canvas_id and the daemon's SurfacePatch SSE bridge renders them. This is what
+# CNVS/system.md means by "drive board I/O through the granted tools/transport".
+# Declared first because, per the CNVS profile, durable visual artifacts on the
+# board are the whole point of this surface.
+surface_patch = true
+# Escape hatch for anything the patch tool doesn't cover (e.g. fetching content
+# to place on the board). Mirrors the sibling SLACK profile's `fetch`/`bash`
+# grant; kept conservative — additive board ops are safe, destructive ones are
+# confirmed per the CNVS house rules before the agent acts.
+fetch = true
+bash = true

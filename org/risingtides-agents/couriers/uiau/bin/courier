@@ -1,0 +1,104 @@
+#!/bin/sh
+# Ocean uiau courier — window + explicit levers into the "Us In Another
+# Universe" Rust content engine (single `uiau` binary: Apify/yt-dlp scrape,
+# ffmpeg 9:16 montages on Mon Rovia hero sections, Slack + Drive publish,
+# Slack↔Drive reconciliation).
+# Usage:
+#   courier status                        # read-only: binary/pool/output/manifest/songs/sync-job/channel
+#   courier tribe <video>                 # TRIBE brain-encoding score for one file (browser-only today; fails fast)
+#   courier init                          # create local dirs + the Drive folder (idempotent)
+#   courier scrape [--limit N] [--platform tiktok|instagram|both] [--query "…"]
+#   courier build --song <name> [--start auto|45|1:12] [--dur 24] [--clip-dur 3] [--count N]
+#   courier cook [--keepers 6] [--rounds 16] [--judge none|claude|tribe] [--min-score 78] [--songs a,b] [--dur 24]
+#   courier sync                          # reconcile Slack deletions → Drive (launchd already runs this every 5 min)
+set -eu
+
+HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+PKG=$(CDPATH= cd -- "$HERE/.." && pwd)
+COURIERS=$(CDPATH= cd -- "$PKG/.." && pwd)
+
+# Local config (never committed): shared class-level env first, then the
+# package-level file overrides it. Same convention as file-courier/mon-distro.
+set -a
+[ -f "$COURIERS/courier.env" ] && . "$COURIERS/courier.env"
+[ -f "$PKG/courier.env" ] && . "$PKG/courier.env"
+set +a
+
+# The engine path contains spaces — keep every expansion quoted.
+ENGINE_DIR=${OCEAN_UIAU_ENGINE_DIR:-"/Users/ericcromartie/Documents/Development/Us In Another Universe Agent"}
+# Shared Mon Rovia song factory (engine default in src/config.rs).
+AUDIO_DIR=${OCEAN_UIAU_AUDIO_DIR:-"/Users/ericcromartie/Documents/Development/Mon Hopecore Agent/factory/audio"}
+BIN="$ENGINE_DIR/target/release/uiau"
+
+usage() { sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; }
+
+need_bin() {
+  if [ ! -x "$BIN" ]; then
+    echo "engine binary not found: $BIN" >&2
+    echo "build it: (cd \"$ENGINE_DIR\" && cargo build --release)" >&2
+    exit 1
+  fi
+  # clips/, manifest.json, config.json all resolve off UIAU_HOME in the engine.
+  UIAU_HOME="$ENGINE_DIR"; export UIAU_HOME
+  cd "$ENGINE_DIR"
+}
+
+# Count media by file NAME only — never opens the media itself.
+count_media() {
+  [ -d "$1" ] || { echo 0; return; }
+  find "$1" -maxdepth 1 -type f \
+    \( -name '*.mp4' -o -name '*.webm' -o -name '*.mov' -o -name '*.mkv' \) \
+    | wc -l | tr -d ' '
+}
+
+status() {
+  echo "engine  : $ENGINE_DIR"
+  if [ -x "$BIN" ]; then
+    echo "binary  : built"
+  else
+    echo "binary  : NOT BUILT — (cd \"$ENGINE_DIR\" && cargo build --release)"
+  fi
+  echo "pool    : $(count_media "$ENGINE_DIR/clips/raw") raw clips (clips/raw — refresh with \`scrape\`)"
+  echo "output  : $(count_media "$ENGINE_DIR/clips/out") rendered montages (clips/out)"
+  if [ -f "$ENGINE_DIR/manifest.json" ]; then
+    live=$(grep -c '"deleted": false' "$ENGINE_DIR/manifest.json" || true)
+    echo "manifest: ${live:-0} active Slack↔Drive links"
+  else
+    echo "manifest: none yet (nothing published)"
+  fi
+  if [ -d "$AUDIO_DIR" ]; then
+    songs=$(find "$AUDIO_DIR" -maxdepth 1 -type f \
+      \( -name '*.mp3' -o -name '*.wav' -o -name '*.m4a' \) \
+      -exec basename {} \; | sed 's/\.[^.]*$//' | sort | tr '\n' ' ')
+    echo "songs   : ${songs:-none} ($AUDIO_DIR)"
+  else
+    echo "songs   : audio factory missing: $AUDIO_DIR"
+  fi
+  if launchctl list 2>/dev/null | grep -q com.risingtides.uiau-sync; then
+    echo "sync    : launchd job com.risingtides.uiau-sync loaded (runs every 5 min)"
+  else
+    echo "sync    : launchd job com.risingtides.uiau-sync NOT loaded"
+  fi
+  if [ -f "$ENGINE_DIR/config.json" ]; then
+    chan=$(sed -n 's/.*"channel"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$ENGINE_DIR/config.json")
+    echo "channel : ${chan:-unset} (Slack review channel from config.json)"
+  else
+    echo "channel : config.json missing — run \`init\` first"
+  fi
+}
+
+cmd=${1:-}
+[ $# -gt 0 ] && shift
+
+case "$cmd" in
+  status)
+    status ;;
+  tribe|init|scrape|build|cook|sync)
+    need_bin
+    exec "$BIN" "$cmd" "$@" ;;
+  ""|-h|--help|help)
+    usage ;;
+  *)
+    echo "unknown verb: $cmd (try: status|tribe|init|scrape|build|cook|sync)" >&2
+    exit 1 ;;
+esac

@@ -1,0 +1,94 @@
+name: assistants-compose-check
+
+# Drift gate for the base-profile composition (OCEAN-89, on top of OCEAN-80).
+#
+# The Ocean daemon loads ONE published file per surface — assistants/<SURFACE>/system.md.
+# That file is a COMPOSED ARTIFACT assembled by assistants/tools/compose_profile.py
+# from _shared/system.md + _base/<SURFACE>/*.md (+ optional agent overrides). If
+# someone hand-edits a published system.md without updating its _base sources (or
+# forgets to re-run the composer after editing the sources), the published file
+# drifts from its source of truth. This job catches that drift and fails the build,
+# so the daemon never ships a stale or hand-mutated profile.
+
+on:
+  push:
+    paths:
+      - "assistants/**"
+      - ".github/workflows/assistants-compose-check.yml"
+  pull_request:
+    paths:
+      - "assistants/**"
+      - ".github/workflows/assistants-compose-check.yml"
+
+jobs:
+  compose-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Compile the composer (syntax gate)
+        run: python3 -m py_compile assistants/tools/compose_profile.py
+
+      - name: Check every surface profile is current with its _base sources
+        # `--check` with no surface argument verifies EVERY authored surface and
+        # exits non-zero on the first drift, failing the job.
+        run: python3 assistants/tools/compose_profile.py --check
+
+      - name: Confirm every published system.md is non-empty (daemon depends on it)
+        run: |
+          set -euo pipefail
+          fail=0
+          for f in $(git ls-files 'assistants/*/system.md'); do
+            case "$f" in
+              assistants/_base/*|assistants/_shared/*) continue ;;
+            esac
+            if [ ! -s "$f" ]; then
+              echo "EMPTY published profile (daemon would load blank): $f"
+              fail=1
+            else
+              echo "OK non-empty: $f ($(wc -l < "$f") lines)"
+            fi
+          done
+          exit $fail
+
+  test-runner:
+    # Runs the Python unittest suite + a full py_compile syntax sweep.
+    # Pairs with the compose-check job above to give risingtides-agents a real PR test gate.
+    #
+    # The suite (assistants/bridge/tests/test_socket_pipeline.py) is pure stdlib +
+    # unittest — no pytest, no slack_sdk, no network. It exercises the Socket Mode
+    # bridge pipeline end-to-end with a mocked Slack client and a mocked daemon.
+    # 19 tests, verified green on clean main before this workflow was authored (OCEAN-328).
+    #
+    # Import path: the test file injects BRIDGE_DIR into sys.path itself, so
+    # `python3 -m unittest assistants.bridge.tests.test_socket_pipeline` works from
+    # repo root via Python 3.3+ namespace-package discovery — no __init__.py needed.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run unittest suite (assistants.bridge.tests.test_socket_pipeline)
+        run: python3 -m unittest assistants.bridge.tests.test_socket_pipeline -v
+
+      - name: py_compile sweep — all Python sources under assistants/
+        run: |
+          set -euo pipefail
+          fail=0
+          while IFS= read -r -d '' f; do
+            if ! python3 -m py_compile "$f"; then
+              echo "SYNTAX ERROR: $f"
+              fail=1
+            fi
+          done < <(find assistants -name "*.py" -print0)
+          echo "py_compile sweep done (exit $fail)"
+          exit $fail

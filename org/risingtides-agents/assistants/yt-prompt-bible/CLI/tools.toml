@@ -1,0 +1,69 @@
+# yt-prompt-bible — CLI surface tool configuration.
+#
+# Grants yt-prompt-bible's tools on the [CLI] surface (terminal / Claude-Code-
+# style clients). Same self-learning contract as prompt-lab's CLI/tools.toml:
+# this is DATA — an operator grants a capability by editing it and resetting the
+# agent (fresh session_id), no rebuild. The engine stays in place; nothing is
+# forked. Markdown is the product; the workflows are tooling.
+
+[agent]
+name = "yt-prompt-bible"
+surface = "CLI"
+reset = "new-session"
+
+# Built-in runtime tools allowed on the CLI surface.
+[builtin]
+read  = true   # engine docs + evidence: registry, protocols, _system/, styles/, research/
+write = true   # kit artifacts, JUDGE-LOG sign-offs, recon rows, new style dirs (audit trail)
+edit  = true   # contract-governed edits — via PROTOCOL / ENHANCE-PROTOCOL only, never silent
+bash  = true   # recon (yt-dlp/ffmpeg), engine shell/Node tooling (gemini-watch.sh, harvest-titles.sh)
+grep  = true   # search masters, anti-slop rules, judge logs, recon tables
+glob  = true   # locate styles/<slug>/, frames/, research/ artifacts
+fetch = false  # no deployed API — the bible is files + engine workflows
+
+# The bible engine — protocols + masters + evidence, in place at
+# $OCEAN_YT_PROMPT_BIBLE_ENGINE_DIR. Reference, never fork; the registry,
+# contracts, masters, and judge logs live HERE, not in the package.
+[tool.engine]
+kind        = "engine"
+dir_env     = "OCEAN_YT_PROMPT_BIBLE_ENGINE_DIR"
+dir_default = "/Users/ericcromartie/Documents/Development/yt-longform-prompt-bible"
+summary     = "Spawn channel kits by codename (5-step pipeline), deconstruct→QA→promote new formats, audit against the 11-section contract + 10 anti-slop rules."
+docs = [
+  "README.md",                     # Style Registry — the format index (10 HARDENED)
+  "PROTOCOL.md",                   # drop-a-channel → deconstruct → QA → promote
+  "ENHANCE-PROTOCOL.md",           # hostile review loop for generators/masters
+  "TITLE-PROTOCOL.md",
+  "THUMBNAIL-PROTOCOL.md",
+  "RETENTION-PROTOCOL.md",         # post-publish feedback loop
+  "HANDOFF.md",                    # resume pointer / current state
+  "_system/prompt-architecture.md",# the 11-section contract
+  "_system/anti-slop-rules.md",    # the 10 global rules (auto-fails when judging)
+  "_system/topic-validator.md",    # pipeline step 1 (front door)
+  "_system/script-generator.md",   # pipeline step 2 (title+thumbnail+script lock)
+  "_system/viral-title-generator.md",
+  "_system/thumbnail-principles.md",
+  "_system/upload-packager.md",    # pipeline step 4 (last mile)
+]
+# Per-format building blocks: styles/<slug>/{MASTER-PROMPT.md, THUMBNAIL.md,
+# DISSECTION.md, JUDGE-LOG.md, MOTION-TRUTH.md, frames/}. Judge logs append-only.
+styles = "styles/<slug>/"
+
+# Workflow-tool scripts live ENGINE-SIDE and run from the engine dir (args may
+# arrive as a JSON string — the scripts guard for it). Not part of this package.
+[tool.workflows]
+kind = "engine-scripts"
+dir  = "workflows/"
+commands = [
+  "workflows/deconstruct-format.js",  # PROTOCOL phase 3 (Workflow tool; Sonnet/Opus subagents)
+  "workflows/refine-format.js",       # optional belt-and-suspenders refine (Gemini re-watch + judges)
+  "workflows/gemini-watch.sh",        # motion truth — Gemini watches source videos
+  "workflows/harvest-titles.sh",      # title dataset harvester
+  "workflows/title-bible.js",         # title generation workflow
+]
+
+# Gemini video analysis (motion truth) — env NAME only; the key is read by the
+# engine's scripts at runtime (1Password fallback engine-side). Never read or
+# paste the engine's .env into context.
+[api.gemini]
+api_key_env = "GEMINI_API_KEY"

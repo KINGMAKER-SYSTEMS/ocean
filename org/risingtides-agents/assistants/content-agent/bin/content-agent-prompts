@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Thin CLI wrapper for the content-agent prompt library.
+# Usage:
+#   bin/content-agent-prompts formats
+#   bin/content-agent-prompts master <format>
+#   bin/content-agent-prompts top <format> [--n 15]
+#   bin/content-agent-prompts assign <page> <format> [--prompt-id ID] [--note ...]
+#   bin/content-agent-prompts page <page>
+#   bin/content-agent-prompts export [--format md|json]
+set -euo pipefail
+HERE="$(cd "$(dirname "$0")/.." && pwd)"
+exec python3 "$HERE/harness/prompt_library.py" "$@"

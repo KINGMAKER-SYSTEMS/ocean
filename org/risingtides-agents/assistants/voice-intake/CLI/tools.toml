@@ -1,0 +1,46 @@
+# voice-intake — CLI surface tool configuration.
+#
+# Grants voice-intake's tools on the [CLI] surface (terminal / Claude-Code-style
+# clients). Same self-learning contract as content-agent's tools.toml: this is
+# DATA — an operator grants a capability by editing it and resetting the agent
+# (fresh session_id), no rebuild. Secrets are referenced by env NAME only —
+# never a value.
+
+[agent]
+name = "voice-intake"
+surface = "CLI"
+reset = "new-session"
+
+# Built-in runtime tools allowed on the CLI surface.
+[builtin]
+bash  = true   # mlx-whisper harness, gh, curl to Linear GraphQL, shasum for the ledger
+read  = true   # ledger, transcripts, GOAL-PROMPT.md, anchor files
+write = true   # ledger updates, transcripts, per-run intake reports
+grep  = true   # anchor-lookup across repos / vault
+glob  = true   # find new *.m4a memos in ~/Downloads + the engine dir
+
+# mlx-whisper — the GPU transcription harness (driven via bash; NEVER the model).
+[tool.mlx_whisper]
+kind    = "harness"
+python  = "/tmp/mlxw-env/bin/python"
+model   = "mlx-community/whisper-small-mlx"
+summary = "Transcribe voice memos on-GPU in minutes; transcription never happens on the model."
+
+# Idempotency ledger — lives in the ENGINE dir (see voice-intake.toml [engine]),
+# not in this package. Keyed by file SHA; a re-run must not double-create tickets.
+[tool.ledger]
+kind    = "file"
+dir_env = "OCEAN_VOICE_INTAKE_ENGINE_DIR"
+path    = ".processed-memos.json"
+summary = "SHA-keyed processed-memo ledger; read before ingesting, append after minting."
+
+# Linear GraphQL — ticket store for teams SALE / OUT / CAMP / CONT / OCEAN.
+[api.linear]
+base_url    = "https://api.linear.app/graphql"
+api_key_env = "LINEAR_API_KEY"   # raw Authorization header; by env name only
+
+# GitHub — issues pipeline (rt-yt-substrate) + anchor/dedupe search via `gh`.
+# Auth is gh's own login; canonical org for dedupe/anchors is Risingtides-dev.
+[api.github]
+cli   = "gh"
+repos = ["ecfromthedc/rt-yt-substrate"]

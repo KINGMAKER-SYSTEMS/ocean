@@ -1,0 +1,50 @@
+# creator-research — assistant manifest (mirrors the courier.toml pattern).
+#
+# Declares the campaign creator-research specialist as a brain-in-the-loop
+# assistant: its identity entry, its surfaces, and how a turn is scoped to it.
+# It builds and maintains the authoritative campaign Google Sheet (target list,
+# rate model, analytics, CPV value ranking) — it never sources more creators
+# once a campaign's list is locked.
+
+name = "creator-research"
+class = "assistant"            # vs. "courier" — brain-in-the-loop, not outbound-only
+description = "Campaign creator-research specialist: build/maintain the authoritative campaign Sheet (Target List, Rate Reference, Analytics, Value Ranking), apply the documented rate model, rank creators by CPV."
+
+# agentic = every turn is reasoned by the Ocean daemon (POST /v1/prompt) scoped to
+# this dir; the daemon auto-loads CLAUDE.md/AGENTS.md via load_project_prompt.
+mode = "agentic"
+
+# Entry identity files the daemon ancestor-walk picks up when cwd is this dir.
+entry = "CLAUDE.md"
+
+# Surfaces this assistant is authored for. CLI = the terminal / Claude-Code-style
+# surface — sheet builds are operator-driven shell work (gws CLI + engine scripts).
+surfaces = ["CLI"]
+
+# --- CLI surface binding (terminal / Claude Code) --------------------------
+[surface.CLI]
+# Ocean OS client_type → surface map: cli → [CLI] (ocean-os surface_dir).
+client_type = "cli"
+cwd = "assistants/creator-research"
+tools = "CLI/tools.toml"
+profile = "CLI/system.md"
+session_key = "cli:creator-research:{cwd}"
+
+# --- Engine access -----------------------------------------------------------
+# The research ENGINE stays in place — build scripts, views cache, handles,
+# scrape workflow, and the authoritative HANDOFF.md all live in the engine dir;
+# this package is identity + protocol only. Nothing is forked or copied; the
+# package references the engine via env.
+[engine]
+# Where the engine lives on disk (build_sheet2.py, build_analytics.py,
+# build_value_rank.py, ingest_views.py, views_scrape_workflow.js, handles.json,
+# views_cache.json, HANDOFF.md, rust/creator-research-readonly).
+dir_env     = "OCEAN_CREATOR_RESEARCH_ENGINE_DIR"
+dir_default = "/Users/ericcromartie/Documents/Development/Creator Research Agent"
+
+# Perplexity API — rate benchmarks ONLY (proven useless for per-creator views:
+# 0/327). Env NAME only — the value comes from the environment / 1Password,
+# never from this file.
+credential_envs = [
+  "PERPLEXITY_API_KEY",   # rate-benchmark lookups (sonar-pro); never echo it
+]

@@ -1,0 +1,172 @@
+#!/bin/sh
+# Ocean core-music-editor (Core Core route) — thin wrapper over the standalone engine.
+# Usage:
+#   courier where                 # read-only: resolved engine dir + entry checks
+#   courier status                # read-only: batch / reels / mirror / candidates / ledger / scoreboard
+#   courier run <stage> [args…]   # exec a real engine entry from the engine's factory/
+#
+# Stages: pipeline [--no-deliver] | cuts | blackfix | review | sync |
+#         harvest | pinterest | twitter | miner | archive | pexels | ingest
+#
+# The engine ('Core Core Music Editor Agent') already runs in production. This
+# wrapper only adds an on-demand path into it: it execs the engine's own
+# scripts and NEVER touches the engine's batch, ledger, or research files.
+# Stage run:   courier run pipeline --no-deliver   (render only — the review gate)
+# Deliver run: courier run pipeline                (previews → Slack review + Drive mirror)
+set -eu
+
+HERE=$(cd "$(dirname "$0")" && pwd)
+PKG=$(cd "$HERE/.." && pwd)
+COURIERS=$(cd "$PKG/.." && pwd)
+
+# Load env if present — never committed. Shared class-level env first, then
+# package-level overrides it (same convention as the other couriers).
+set -a
+[ -f "$COURIERS/courier.env" ] && . "$COURIERS/courier.env"
+[ -f "$PKG/courier.env" ] && . "$PKG/courier.env"
+set +a
+
+# Engine dir contains spaces — keep it quoted everywhere.
+ENGINE_DIR="${OCEAN_CORE_MUSIC_EDITOR_ENGINE_DIR:-/Users/ericcromartie/Documents/Development/Core Core Music Editor Agent}"
+FACTORY="$ENGINE_DIR/factory"
+PIPELINE="$FACTORY/reel_pipeline.py"
+# The Lab venv carries the scrapers' browser-capture deps (per engine docs);
+# everything else runs on plain python3 exactly as the engine docs do.
+LAB_PY="${OCEAN_CORE_MUSIC_EDITOR_PYTHON:-$HOME/Projects/active/content-posting-lab/venv/bin/python}"
+[ -x "$LAB_PY" ] || LAB_PY=python3
+
+if [ "$#" -gt 0 ]; then cmd="$1"; shift; else cmd=""; fi
+
+run_stage() {
+  # $1 = script filename, $2 = interpreter; remaining args pass through.
+  script="$1"; py="$2"; shift 2
+  if [ ! -f "$FACTORY/$script" ]; then
+    echo "engine entry not found: $FACTORY/$script" >&2
+    echo "set OCEAN_CORE_MUSIC_EDITOR_ENGINE_DIR (see courier.env.example)" >&2
+    exit 1
+  fi
+  # Engine scripts self-load the repo-root .env and expect factory/ as cwd
+  # (per the engine docs). Just exec them there.
+  cd "$FACTORY"
+  exec "$py" "$FACTORY/$script" "$@"
+}
+
+case "$cmd" in
+  run)
+    if [ "$#" -gt 0 ]; then stage="$1"; shift; else stage=""; fi
+    case "$stage" in
+      pipeline)  run_stage reel_pipeline.py            python3 "$@" ;;
+      cuts)      run_stage gemini_cuts.py              python3 "$@" ;;
+      blackfix)  run_stage fix_black_windows.py        python3 "$@" ;;
+      review)    run_stage gemini_review.py            python3 "$@" ;;
+      sync)      run_stage drive_sync.py               python3 "$@" ;;
+      harvest)   run_stage harvest_liminal_sources.py  python3 "$@" ;;
+      pinterest) run_stage scrape_pinterest_liminal.py "$LAB_PY" "$@" ;;
+      twitter)   run_stage scrape_twitter_liminal.py   "$LAB_PY" "$@" ;;
+      miner)     run_stage grok_liminal_miner.py       python3 "$@" ;;  # PAID — ledger-capped; --status first
+      archive)   run_stage source_liminal_archive.py   python3 "$@" ;;
+      pexels)    run_stage source_liminal_pexels.py    python3 "$@" ;;
+      ingest)    run_stage ingest_candidate_to_lab.py  python3 "$@" ;;
+      *)
+        echo "unknown stage: '$stage'" >&2
+        echo "try: pipeline | cuts | blackfix | review | sync | harvest |" >&2
+        echo "     pinterest | twitter | miner | archive | pexels | ingest" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  status)
+    echo "engine : $ENGINE_DIR"
+    if [ ! -d "$FACTORY" ]; then
+      echo "factory dir not found: $FACTORY (set OCEAN_CORE_MUSIC_EDITOR_ENGINE_DIR)" >&2
+      exit 1
+    fi
+    # Read-only summary of the engine's own state files (stdlib json only —
+    # no Lab venv needed to look). Renders nothing, spends nothing.
+    python3 - "$FACTORY" <<'PY'
+import glob
+import json
+import os
+import sys
+
+fac = sys.argv[1]
+
+def load(name):
+    p = os.path.join(fac, name)
+    if not os.path.exists(p):
+        return None
+    try:
+        with open(p) as fh:
+            return json.load(fh)
+    except Exception as e:  # unreadable state is a report, not a crash
+        print(f"{name}: unreadable ({e})")
+        return None
+
+batch = load("batch.json")
+jobs = batch.get("jobs") if isinstance(batch, dict) else batch
+if isinstance(jobs, list) and jobs:
+    print(f"batch  : {len(jobs)} job(s) staged")
+    for j in jobs[:8]:
+        if isinstance(j, dict):
+            segs = j.get("segments") or []
+            lim = sum(1 for s in segs if isinstance(s, dict) and s.get("kind") == "liminal")
+            print(f"         {j.get('id','?'):<10} {j.get('song','?')}  ({len(segs)} segs, {lim} liminal)")
+    if len(jobs) > 8:
+        print(f"         … +{len(jobs) - 8} more")
+else:
+    print("batch  : none staged (batch.json missing/empty)")
+
+reels = glob.glob(os.path.join(fac, "reels", "*.mp4"))
+print(f"reels  : {len(reels)} finished render(s) in factory/reels/")
+
+man = load("sync_manifest.json")
+entries = man.get("entries") if isinstance(man, dict) else man
+if isinstance(entries, list):
+    print(f"drive  : {len(entries)} reel(s) tracked in sync_manifest.json")
+else:
+    print("drive  : no sync manifest yet")
+
+cand = load("liminal_candidates.json")
+items = cand.get("candidates") if isinstance(cand, dict) else cand
+if isinstance(items, list):
+    vids = sum(1 for c in items if isinstance(c, dict) and c.get("media_type") == "video")
+    print(f"cands  : {len(items)} candidate(s) on the board ({vids} video)")
+else:
+    print("cands  : no candidate board yet")
+
+led = load("grok_liminal_spend.json")
+if isinstance(led, dict):
+    spent = led.get("spent_usd", 0.0)
+    cap = led.get("cap_usd", 0.0)
+    print(f"grok   : ${spent:.4f} spent / ${cap:.2f} cap ({len(led.get('calls') or [])} call(s)) — never bypass the ledger")
+else:
+    print("grok   : no spend ledger yet (miner unused)")
+
+loop = os.path.join(fac, "research", "loop_state.md")
+if os.path.exists(loop):
+    with open(loop) as fh:
+        lines = fh.read().splitlines()
+    print(f"loop   : research/loop_state.md ({len(lines)} lines) — tail:")
+    for ln in lines[-12:]:
+        print(f"         {ln}")
+else:
+    print("loop   : no loop_state.md yet")
+PY
+    ;;
+  where)
+    if [ -f "$PIPELINE" ]; then pipe_ok="(ok)"; else pipe_ok="(MISSING)"; fi
+    if [ -x "$LAB_PY" ] || [ "$LAB_PY" = python3 ]; then py_ok="(ok)"; else py_ok="(MISSING)"; fi
+    echo "engine dir : $ENGINE_DIR"
+    echo "factory    : $FACTORY"
+    echo "pipeline   : $PIPELINE $pipe_ok"
+    echo "scraper py : $LAB_PY $py_ok"
+    echo "canon docs : $ENGINE_DIR/CLAUDE.md + factory/FORMAT-SPEC.md + factory/research/loop_state.md"
+    ;;
+  ""|-h|--help|help)
+    sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
+    ;;
+  *)
+    echo "unknown subcommand: $cmd (try: run | status | where)" >&2
+    exit 1
+    ;;
+esac

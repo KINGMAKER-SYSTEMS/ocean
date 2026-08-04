@@ -1,0 +1,66 @@
+#!/bin/sh
+# Ocean mon-email-watcher — thin wrapper over the mon-rovia-watcher Rust engine.
+# Usage:
+#   courier preview       # dry-run the daily sweep: Gmail reads only — no calendar writes, no Slack, no state change
+#   courier sweep         # one real daily sweep: Gmail → calendar markers + Slack drafts, state saved
+#   courier boaz-preview  # dry-run the historical Boaz/Wasserman extraction (read-only)
+#   courier boaz-sync     # real historical Boaz/Wasserman backfill (calendar writes)
+#
+# Engine dir: $OCEAN_MON_EMAIL_WATCHER_ENGINE_DIR
+# (default /Users/ericcromartie/Documents/Development/mon-rovia-email-watcher).
+# The engine's daily 9 AM launchd job is untouched — this is the on-demand path only.
+set -eu
+
+HERE=$(cd "$(dirname "$0")" && pwd)
+PKG=$(cd "$HERE/.." && pwd)
+COURIERS=$(cd "$PKG/.." && pwd)
+
+# Load env if present — never committed. Shared class-level env first, then
+# package-level overrides it.
+set -a
+[ -f "$COURIERS/courier.env" ] && . "$COURIERS/courier.env"
+[ -f "$PKG/courier.env" ] && . "$PKG/courier.env"
+set +a
+
+ENGINE_DIR="${OCEAN_MON_EMAIL_WATCHER_ENGINE_DIR:-/Users/ericcromartie/Documents/Development/mon-rovia-email-watcher}"
+BIN="$ENGINE_DIR/target/release/mon-rovia-watcher"
+
+cmd="${1:-}"; shift 2>/dev/null || true
+
+# Help never needs a built engine — answer it before the engine checks.
+case "$cmd" in
+  ""|-h|--help|help)
+    sed -n '2,11p' "$HERE/courier" | sed 's/^# \{0,1\}//'
+    exit 0
+    ;;
+esac
+
+if [ ! -d "$ENGINE_DIR" ]; then
+  echo "mon-email-watcher: engine dir not found: $ENGINE_DIR (set OCEAN_MON_EMAIL_WATCHER_ENGINE_DIR)" >&2
+  exit 1
+fi
+if [ ! -x "$BIN" ]; then
+  echo "mon-email-watcher: engine binary not built: $BIN" >&2
+  echo "mon-email-watcher: build it with: (cd \"$ENGINE_DIR\" && cargo build --release)" >&2
+  exit 1
+fi
+
+# The engine resolves watcher_config.json, token.json, and .mon_watcher/ state
+# relative to its cwd — run from anywhere else it would spawn fresh, divergent
+# state. Always execute from the engine dir.
+cd "$ENGINE_DIR"
+
+case "$cmd" in
+  preview)      exec "$BIN" sweep-preview "$@" ;;
+  sweep)        exec "$BIN" sweep "$@" ;;
+  boaz-preview) exec "$BIN" boaz-preview "$@" ;;
+  boaz-sync)    exec "$BIN" boaz-sync "$@" ;;
+  install-launchd|uninstall-launchd)
+    echo "mon-email-watcher: launchd install/uninstall is operator-only, in the engine dir — not exposed through this courier" >&2
+    exit 1
+    ;;
+  *)
+    echo "unknown subcommand: $cmd (try: preview | sweep | boaz-preview | boaz-sync)" >&2
+    exit 1
+    ;;
+esac

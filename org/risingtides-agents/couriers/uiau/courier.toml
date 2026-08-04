@@ -1,0 +1,22 @@
+# Courier manifest — the routing contract for this courier.
+# The hub router (../hub/router.py) reads every courier.toml to build the
+# slash-command → courier table.
+
+name = "uiau"
+description = "Us In Another Universe content engine (Rust `uiau` binary): scrape viral clips, cut 9:16 montages to Mon Rovia hero sections, post to Slack for curation, mirror to Drive."
+
+# deterministic = the router runs the harness directly (no LLM spawn).
+mode = "deterministic"
+
+# Entry point the router invokes, relative to this manifest's directory.
+entry = "bin/courier"
+
+# One slash, many verbs: no `subcommand` here, so the router passes the
+# operator's args verbatim to bin/courier, which dispatches to verified engine
+# subcommands (Init/Scrape/Build/Cook/Tribe/Sync in src/main.rs). Read-only
+# inspection first (`status`, `tribe`); `cook` is the explicit action verb
+# (ralph loop — default `--judge none` = post variants, Eric curates in Slack).
+[[commands]]
+slash = "/uiau"
+summary = "Drive the Us In Another Universe engine: status/pool inspection first; cook is the explicit ralph-loop action"
+usage = "/uiau <status|tribe|init|scrape|build|cook|sync> [args]"

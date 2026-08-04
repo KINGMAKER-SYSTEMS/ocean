@@ -1,0 +1,253 @@
+# Machine-readable build register for the risingtides-agents side of the Agent
+# Filesystem direction. The architecture doc may summarize this, but this file
+# is the source of truth for package-side builds.
+
+version = 2
+repo = "risingtides-agents"
+runtime_repo = "ocean-os"
+architecture_doc = "docs/AGENT_FILESYSTEM_ARCHITECTURE.md"
+migration_doc = "docs/PYTHON_TO_RUST_MIGRATION.md"
+
+# Reality check: risingtides-agents currently has zero real primitive-native builds.
+# What exists here today is filesystem content and Python parity harnesses. The
+# typed primitive implementations and runtime enforcement live in ocean-os.
+primitive_native_builds = 0
+runtime_enforced_in_this_repo = false
+
+status_vocab = ["filesystem_convention", "transitional_harness", "proposed"]
+
+[[build]]
+id = "A1"
+name = "typed-package-manifests"
+status = "filesystem_convention"
+primitive_native = false
+owns = ["couriers/*/courier.toml", "assistants/*/*.toml"]
+acceptance = [
+  "Every assistant and courier declares class, mode, surface or route bindings, cwd, profile path, tool grants, and workflow-contract hooks.",
+  "The Rust runtime can parse the manifests without Python discovery.",
+]
+depends_on = []
+runtime_reads = ["AgentManifest", "CourierManifest"]
+
+[[build]]
+id = "A2"
+name = "surface-profile-catalog"
+status = "filesystem_convention"
+primitive_native = false
+owns = [
+  "assistants/_shared/",
+  "assistants/_base/<SURFACE>/",
+  "assistants/<SURFACE>/system.md",
+]
+acceptance = [
+  "Every authored surface has source files plus a non-empty generated profile.",
+  "make assistants-check proves generated profiles have no drift.",
+  "New surfaces are added as data, not daemon rebuilds.",
+]
+depends_on = []
+verification = ["make assistants-check"]
+
+[[build]]
+id = "A3"
+name = "named-assistant-packages"
+status = "filesystem_convention"
+primitive_native = false
+owns = ["assistants/bonzai/", "assistants/content-agent/"]
+acceptance = [
+  "bonzai remains a complete git-hygiene specialist.",
+  "content-agent graduates from scaffold to live Slack assistant with generate, status, gallery, and canvas flows grounded in its manifest, tools, and SOPs.",
+]
+depends_on = ["A1", "A2", "A6"]
+
+[[build]]
+id = "A4"
+name = "courier-package-catalog"
+status = "filesystem_convention"
+primitive_native = false
+owns = ["couriers/<courier>/courier.toml", "couriers/<courier>/CLAUDE.md", "couriers/<courier>/AGENTS.md"]
+acceptance = [
+  "file-courier stays the reference package.",
+  "Each new courier is a folder with a manifest, destination-confirmation rules, an input/output contract, and no router edit.",
+]
+depends_on = ["A1"]
+
+[[build]]
+id = "A5"
+name = "slack-bridge-validation-pack"
+status = "transitional_harness"
+primitive_native = false
+owns = ["assistants/bridge/", "couriers/transport/slack.py"]
+acceptance = [
+  "The current Python bridge remains the live parity harness while ocean-slack lands.",
+  "Inbound mention or DM reaches a daemon turn and replies in-thread.",
+  "Canvas-op fulfillment passes once the daemon emits the SlackCanvas SSE event.",
+  "The Python bridge is retired only after the Rust path passes the same tests live.",
+]
+depends_on = ["A1", "A2"]
+verification = ["python3 -m unittest discover -s assistants/bridge/tests -v"]
+retired_by = "ocean-slack"
+
+[[build]]
+id = "A6"
+name = "tool-sop-skill-declarations"
+status = "filesystem_convention"
+primitive_native = false
+owns = ["assistants/*/tools.toml", "assistants/*/sops/", "skills/<name>/"]
+acceptance = [
+  "Tool grants and SOPs are explicit filesystem data.",
+  "Reusable SOPs become typed skills with trigger semantics, declared inputs, and provenance once the Skill schema lands.",
+]
+depends_on = ["A1"]
+runtime_reads = ["Skill", "ToolGrant"]
+
+[[build]]
+id = "A7"
+name = "memory-mount-declarations"
+status = "proposed"
+primitive_native = false
+owns = ["future manifest stanzas"]
+acceptance = [
+  "Agent packages declare expected memory scopes: Agent, Operator, Shared.",
+  "Agent packages declare allowed access modes: Infer or Query.",
+  "Actual storage remains in ocean-memory, not this repo.",
+]
+depends_on = ["A1"]
+runtime_reads = ["MemoryScope", "MemoryAccess"]
+
+[[build]]
+id = "A8"
+name = "workflow-contract-fixtures"
+status = "proposed"
+primitive_native = false
+owns = ["per-agent JSON Schema fixtures", "per-courier JSON Schema fixtures", "future manifest stanzas"]
+acceptance = [
+  "Workflow-invoked steps can call a courier or assistant through a typed Contract instead of a free prompt.",
+  "Fixtures are testable without a live workflow run.",
+]
+depends_on = ["A1", "A3", "A4"]
+runtime_reads = ["Contract"]
+
+[[build]]
+id = "A9"
+name = "verification-gates"
+status = "transitional_harness"
+primitive_native = false
+owns = ["Makefile", "assistants/bridge/tests/", "future manifest linter"]
+acceptance = [
+  "Existing checks stay green.",
+  "A manifest/schema linter exists before Python discovery is deleted.",
+]
+depends_on = ["A1", "A2", "A5"]
+verification = [
+  "make assistants-check",
+  "python3 -m unittest discover -s assistants/bridge/tests -v",
+  "python3 couriers/hub/router.py list",
+]
+
+[[build]]
+id = "A10"
+name = "pure-content-cutover"
+status = "proposed"
+primitive_native = false
+owns = ["docs/PYTHON_TO_RUST_MIGRATION.md deletion gates"]
+acceptance = [
+  "After verified Rust replacements are live, Python bridge, router, and harness code are removed.",
+  "risingtides-agents contains manifests, profiles, skills, SOPs, and test fixtures only.",
+]
+depends_on = ["A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8", "A9"]
+
+# ---------------------------------------------------------------------------
+# Knowledge-first repositioning — decided 2026-07-10.
+#
+# risingtides-agents is the DEPLOYMENT LAYER for Rising Tides' agents, not a demo
+# folder. Two agent classes:
+#   - interactive assistants  (operator-invoked, brain-in-the-loop, surface-bound)
+#   - automation agents       (workflow-invoked, non-interactive, typed Contract)
+# The differentiator is baked-in company knowledge: bedrock mounts resolved by
+# the runtime at turn time + continuously accumulated typed memory — never
+# hand-maintained prompt prose. The courier framing (/ship, /say as "agents")
+# is retired: transport actions become tool grants; the courier class is
+# re-typed as automation agents.
+
+[positioning]
+decided = "2026-07-10"
+north_star = "Any Rising Tides staff member interacting with a deployed agent finds it already knows the company's operational underpinnings — because the runtime injects bedrock knowledge and accumulated typed memory at turn time, not because someone maintained a prompt."
+reference_package = "assistants/content-agent"  # prompt library (sqlite) + canon SOPs + bedrock publishing = the pattern every new agent copies
+
+# Runtime foundation this plan depends on. These land in ocean-os (see
+# AGENT_FILESYSTEM_ARCHITECTURE.md §9.1); tracked here only as dependencies —
+# this repo does not grow a second runtime.
+
+[[runtime_dependency]]
+id = "R1"
+name = "ocean-memory"
+repo = "ocean-os"
+provides = ["Memory", "MemoryScope", "MemoryAccess", "SqliteMemoryStore (MVCC)"]
+
+[[runtime_dependency]]
+id = "R2"
+name = "memory-ingest-bridge"
+repo = "ocean-os"
+provides = ["extract->cheap-model->sqlite pipeline", "HookEvent::MemoryIngest"]
+depends_on = ["R1"]
+
+[[runtime_dependency]]
+id = "R3"
+name = "portable-db-mount"
+repo = "ocean-os"
+provides = ["mount_portable_memory()", "Infer->Query room elevation"]
+depends_on = ["R1"]
+
+[[runtime_dependency]]
+id = "R4"
+name = "typed-agent-traits"
+repo = "ocean-os"
+provides = ["Agent", "Assistant", "Courier->AutomationAgent classification"]
+
+[[runtime_dependency]]
+id = "R5"
+name = "workflow-engine"
+repo = "ocean-os"
+provides = ["Workflow", "Step", "Contract", "sqlite run-state, retries, closeouts"]
+depends_on = ["R4"]
+
+[[build]]
+id = "A11"
+name = "bedrock-context-mounts"
+status = "proposed"
+primitive_native = false
+owns = ["assistants/*/context.toml", "future [context] manifest stanzas"]
+acceptance = [
+  "Every agent package declares which bedrock namespaces it mounts: /context, /handoffs, /docs, prompt-library, ledger.",
+  "The runtime resolves declared mounts at turn time (semantic search + direct reads) and injects results as first-class context — knowledge access is a manifest fact, not prompt prose.",
+  "content-agent's prompt-library publishing to bedrock /context is the reference instance of the pattern.",
+]
+depends_on = ["A1"]
+runtime_reads = ["ContextMount"]
+
+[[build]]
+id = "A12"
+name = "automation-agent-retyping"
+status = "proposed"
+primitive_native = false
+owns = ["couriers/* migration to automation-agent packages", "agent.toml class + contract stanzas"]
+acceptance = [
+  "The courier framing is retired: /ship, /say, /resolve become tool grants on the transport layer, not standalone agents.",
+  "Each automation agent is a folder declaring a typed Contract (input schema -> output schema, retry, closeout) invoked by workflows/schedules through the daemon — never by the Python router.",
+  "file-courier is either re-typed as the first automation agent or absorbed into tool grants; no new couriers are authored after this lands.",
+]
+depends_on = ["A1", "A8"]
+runtime_reads = ["Contract", "AutomationAgent"]
+
+[[build]]
+id = "A13"
+name = "knowledge-parity-gate"
+status = "proposed"
+primitive_native = false
+owns = ["per-agent knowledge fixture suites", "future gate in Makefile"]
+acceptance = [
+  "Each deployed agent ships a fixture suite of company-operations questions it must answer correctly using ONLY its declared bedrock mounts + accumulated memory — with the answers absent from its system.md.",
+  "The gate proves the mystification effect is runtime-supplied knowledge, reproducible and consistent, not prompt memorization.",
+  "A new agent cannot be registered as deployed until its knowledge-parity suite passes.",
+]
+depends_on = ["A11"]

@@ -1,0 +1,48 @@
+# yt-prompt-bible — assistant manifest (mirrors the courier.toml pattern).
+#
+# Declares the long-form YouTube prompt bible as a brain-in-the-loop specialist:
+# its identity entry, its surfaces, and how a turn is scoped to it. Where
+# prompt-lab crowns SHORT-form video prompts, yt-prompt-bible is the LONG-form
+# format registrar: 10 hardened master-prompt formats for faceless YouTube
+# animation channels, spawned by codename, governed by protocol.
+
+name = "yt-prompt-bible"
+class = "assistant"            # vs. "courier" — brain-in-the-loop, not outbound-only
+description = "Long-form format registrar: 10 hardened master-prompt formats for faceless YouTube animation channels — spawn channel kits by codename, run deconstruct→QA→promote on new formats, enforce the 11-section contract + 10 anti-slop rules."
+
+# agentic = every turn is reasoned by the Ocean daemon (POST /v1/prompt) scoped to
+# this dir; the daemon auto-loads CLAUDE.md/AGENTS.md via load_project_prompt.
+mode = "agentic"
+
+# Entry identity files the daemon ancestor-walk picks up when cwd is this dir.
+entry = "CLAUDE.md"
+
+# Surfaces this assistant is authored for. CLI = the terminal / Claude-Code-style
+# surface — the bible is operator-driven file work (registry, kits, protocols).
+surfaces = ["CLI"]
+
+# --- CLI surface binding (terminal / Claude Code) --------------------------
+[surface.CLI]
+# Ocean OS client_type → surface map: cli → [CLI] (ocean-os surface_dir).
+client_type = "cli"
+cwd = "assistants/yt-prompt-bible"
+tools = "CLI/tools.toml"
+profile = "CLI/system.md"
+session_key = "cli:yt-prompt-bible:{cwd}"
+
+# --- Engine access -----------------------------------------------------------
+# The bible ENGINE stays in place — the Style Registry (README.md), the protocols
+# (PROTOCOL.md, ENHANCE-PROTOCOL.md, TITLE/THUMBNAIL/RETENTION-PROTOCOL.md), the
+# _system/ contracts + generators, styles/<slug>/ masters, workflows/, research/.
+# Markdown IS the product there; this package is identity + protocol only.
+# Nothing is forked or copied; the package references the engine via env.
+[engine]
+dir_env     = "OCEAN_YT_PROMPT_BIBLE_ENGINE_DIR"
+dir_default = "/Users/ericcromartie/Documents/Development/yt-longform-prompt-bible"
+
+# Credentials the engine's workflows read at runtime from their own environment
+# (names only, never values, never read into context).
+credential_envs = [
+  "GEMINI_API_KEY",   # workflows/gemini-watch.sh — motion truth (Gemini watches
+                      # source videos); falls back to 1Password engine-side.
+]

@@ -1,0 +1,52 @@
+#!/bin/sh
+# Ocean sound-watcher — thin wrapper over the Warner Sound Watcher engine.
+# Usage:
+#   courier sweep      # one real cycle: poll sheet → diff → Slack writes → republish Sound Board (engine run.sh)
+#   courier preview    # dry-run: list new links since last state; no Slack writes, no publish, no state change
+#
+# Engine dir: $OCEAN_SOUND_WATCHER_ENGINE_DIR (default ~/Projects/active/warner-sound-watcher).
+# The engine's launchd job is untouched — this is the on-demand path only.
+set -eu
+
+HERE=$(cd "$(dirname "$0")" && pwd)
+PKG=$(cd "$HERE/.." && pwd)
+COURIERS=$(cd "$PKG/.." && pwd)
+
+# Load env if present — never committed. Shared class-level env first, then
+# package-level overrides it.
+set -a
+[ -f "$COURIERS/courier.env" ] && . "$COURIERS/courier.env"
+[ -f "$PKG/courier.env" ] && . "$PKG/courier.env"
+set +a
+
+ENGINE_DIR="${OCEAN_SOUND_WATCHER_ENGINE_DIR:-/Users/ericcromartie/Projects/active/warner-sound-watcher}"
+if [ ! -d "$ENGINE_DIR" ]; then
+  echo "sound-watcher: engine dir not found: $ENGINE_DIR (set OCEAN_SOUND_WATCHER_ENGINE_DIR)" >&2
+  exit 1
+fi
+
+# launchd-parity PATH: the engine shells out to `gws` (homebrew) for sheet reads.
+PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"; export PATH
+
+cmd="${1:-}"; shift 2>/dev/null || true
+
+case "$cmd" in
+  sweep)
+    # The engine's real production entry — exactly what launchd runs hourly:
+    # watcher.py cycle, then publish.sh (Sound Board rebuild + push). run.sh
+    # sources the Slack bot env itself; no secrets handled here.
+    exec "$ENGINE_DIR/run.sh" "$@"
+    ;;
+  preview)
+    # The engine's own dry-run flag. Reads the sheet, diffs vs state.json,
+    # prints what WOULD post. Skips Slack entirely and never saves state.
+    exec python3 "$ENGINE_DIR/watcher.py" --dry-run "$@"
+    ;;
+  ""|-h|--help|help)
+    sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'
+    ;;
+  *)
+    echo "unknown subcommand: $cmd (try: sweep | preview)" >&2
+    exit 1
+    ;;
+esac

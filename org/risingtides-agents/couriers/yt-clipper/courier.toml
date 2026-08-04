@@ -1,0 +1,64 @@
+# Courier manifest — the routing contract for this courier.
+# The hub router (../hub/router.py) reads every courier.toml to build the
+# slash-command → courier table.
+#
+# This courier is a *package* over a standalone engine that already runs in
+# production: the youtube-clipping repo (`ycp` — Python venv CLI + launchd
+# autopilot). The engine, its venv, and its schedule stay untouched; this
+# manifest adds identity + an on-demand path into it.
+
+name = "yt-clipper"
+description = "Closed-loop clip factory — run one ycp autopilot pass (source → clip → Slack QC → capture → brief → scoreboard) over the youtube-clipping engine, or read the Race-to-$15K scoreboard."
+
+# agentic = the router POSTs a scoped prompt to the Ocean daemon with
+# cwd = this dir; the daemon agent loads CLAUDE.md here and drives bin/courier.
+# Agentic because an autopilot pass needs judgment (reading the pass, surfacing
+# blockers, respecting the Slack ✅ QC gate). The router's mode is
+# manifest-level — it can't mix deterministic and agentic commands — so the
+# read-only scoreboard command is also agentic, with a prompt that pins it to
+# read-only.
+mode = "agentic"
+
+# Harness the agent drives (agentic couriers don't get exec'd by the router,
+# but the entry is still the canonical way in).
+entry = "bin/courier"
+
+[[commands]]
+slash = "/ycp"
+summary = "Run one yt-clipper autopilot pass (source → clip → QC-post → capture → brief → scoreboard)"
+usage = "/ycp [--max-videos N] [--skip-source] [--no-clip]"
+prompt = """
+You are the yt-clipper courier. Before acting, load the operating protocol in
+this directory's CLAUDE.md and follow it exactly. Run ONE autopilot pass over
+the youtube-clipping engine by driving the harness — do not hand-roll yt-dlp,
+ffmpeg, whisper, Postiz, or Slack calls:
+
+1. Run `bin/courier scoreboard` first and note the game state.
+2. Run `bin/courier autopilot` (append any operator args verbatim). The engine
+   owns the whole pass: sourcing, clipping, captioning, posting clips to the
+   Slack QC channel, capture, brief, scoreboard. It does NOT publish — nothing
+   reaches distribution until Eric taps ✅ in Slack. Never bypass, simulate, or
+   pre-approve that gate.
+3. Run `bin/courier scoreboard` again and reply with a short status: what was
+   sourced/clipped, what is now waiting on Slack QC, scoreboard movement, and
+   any blocker (missing venv, empty niches.yaml, Postiz unconfigured) in the
+   engine's own words.
+
+Hard rules (absolute): never hand-edit the engine's SQLite DB, .env, or
+auto-generated docs; never flip qc.auto or any distribution latch; never act
+on Postiz posts by state (shared account); never run the engine's pytest here
+(a smoke test hangs under the agent sandbox).
+"""
+
+[[commands]]
+slash = "/ycp-scoreboard"
+summary = "Read the Race-to-$15K scoreboard (read-only — starts nothing)"
+usage = "/ycp-scoreboard"
+prompt = """
+You are the yt-clipper courier in read-only mode. Load this directory's
+CLAUDE.md for context, then run `bin/courier scoreboard` ONLY — never
+`bin/courier autopilot`, no writes, no engine edits, no pytest. Summarize the
+game state for the operator: level, $/month vs the $15K north star, clip
+counts, and what the scoreboard says is next. If the engine venv is missing,
+relay the wrapper's error verbatim and stop.
+"""

@@ -1,0 +1,126 @@
+#!/bin/sh
+# Ocean hopecore (Mon Rovîa hopecore route) — thin wrapper over the standalone engine.
+# Usage:
+#   courier where                  # resolved engine dir + entry checks (read-only)
+#   courier status                 # read-only: bank / candidates / spend ledgers / scoreboard tail
+#   courier run <stage> [args...]  # exec a real engine entry from its factory/:
+#       render    -> hopecore_render.py       (hero/broll composer; --auto-moment = Gemini cut)
+#       moment    -> gemini_moment.py         (dry-run the moment finder)
+#       deliver   -> deliver_hopecore.py      (Slack review delivery)
+#       harvest   -> harvest_to_bank.py       (clean + Ollama score -> candidates.json)
+#       pinterest -> scrape_pinterest.py      (FREE headed-Chrome miner)
+#       twitter   -> scrape_twitter.py        (FREE headed-Chrome miner)
+#       tiktok    -> scrape_tiktok_captions.py (FREE yt-dlp caption enumerator)
+#       miner     -> grok_miner.py            (PAID X-search, $10 ledger cap)
+#       ocr       -> ocr_tiktok.py            (PAID Grok-vision OCR, $5 ledger cap)
+#
+# The engine already runs in production. This wrapper only adds an on-demand
+# path into it: it execs the engine's own scripts and NEVER touches the hook
+# bank, spend ledgers, or scoreboard itself.
+set -eu
+
+HERE=$(cd "$(dirname "$0")" && pwd)
+PKG=$(cd "$HERE/.." && pwd)
+COURIERS=$(cd "$PKG/.." && pwd)
+
+# Load env if present — never committed. Shared class-level env first, then
+# package-level overrides it (same convention as file-courier).
+set -a
+[ -f "$COURIERS/courier.env" ] && . "$COURIERS/courier.env"
+[ -f "$PKG/courier.env" ] && . "$PKG/courier.env"
+set +a
+
+ENGINE_DIR="${OCEAN_HOPECORE_ENGINE_DIR:-/Users/ericcromartie/Documents/Development/Mon Hopecore Agent}"
+FACTORY="$ENGINE_DIR/factory"
+BANK="$FACTORY/hopecore_hooks.json"
+CANDIDATES="$FACTORY/candidates.json"
+MINER_LEDGER="$FACTORY/grok_spend.json"
+OCR_LEDGER="$FACTORY/grok_ocr_spend.json"
+SCOREBOARD="$FACTORY/RALPH-LOOP.md"
+
+# Engine scripts want the Lab venv (PIL, cv2, playwright); fall back to python3.
+LAB_PY="$HOME/Projects/active/content-posting-lab/venv/bin/python"
+if [ -x "$LAB_PY" ]; then PY="$LAB_PY"; else PY="python3"; fi
+
+count_json() {
+  # count_json <file> <label> — read-only element count, never fails the wrapper
+  if [ -f "$1" ]; then
+    n=$(python3 -c "import json,sys;d=json.load(open(sys.argv[1]));print(len(d) if isinstance(d,list) else len(d.get('hooks',d.get('candidates',d))))" "$1" 2>/dev/null) || n="?"
+    echo "$2 : $n entries ($1)"
+  else
+    echo "$2 : (missing: $1)"
+  fi
+}
+
+show_ledger() {
+  # show_ledger <file> <label> — read-only cat of a tiny spend ledger
+  if [ -f "$1" ]; then
+    echo "-- $2 ($1) --"
+    cat "$1"
+    echo
+  else
+    echo "-- $2 : (no ledger yet at $1) --"
+  fi
+}
+
+if [ "$#" -gt 0 ]; then cmd="$1"; shift; else cmd=""; fi
+
+case "$cmd" in
+  where)
+    if [ -d "$FACTORY" ]; then dir_ok="(ok)"; else dir_ok="(MISSING)"; fi
+    echo "engine dir : $ENGINE_DIR $dir_ok"
+    echo "python     : $PY"
+    for s in hopecore_render.py gemini_moment.py deliver_hopecore.py harvest_to_bank.py; do
+      if [ -f "$FACTORY/$s" ]; then ok="(ok)"; else ok="(MISSING)"; fi
+      echo "entry      : factory/$s $ok"
+    done
+    ;;
+  status)
+    echo "engine : $ENGINE_DIR"
+    echo
+    count_json "$BANK" "hook bank "
+    count_json "$CANDIDATES" "candidates"
+    echo
+    show_ledger "$MINER_LEDGER" "grok X-miner ledger (\$10 cap)"
+    show_ledger "$OCR_LEDGER" "grok OCR ledger (\$5 cap)"
+    if [ -f "$SCOREBOARD" ]; then
+      echo "== scoreboard tail ($SCOREBOARD) =="
+      tail -n 30 "$SCOREBOARD"
+    else
+      echo "(no scoreboard yet at $SCOREBOARD)"
+    fi
+    ;;
+  run)
+    if [ "$#" -gt 0 ]; then stage="$1"; shift; else stage=""; fi
+    case "$stage" in
+      render)    script="hopecore_render.py" ;;
+      moment)    script="gemini_moment.py" ;;
+      deliver)   script="deliver_hopecore.py" ;;
+      harvest)   script="harvest_to_bank.py" ;;
+      pinterest) script="scrape_pinterest.py" ;;
+      twitter)   script="scrape_twitter.py" ;;
+      tiktok)    script="scrape_tiktok_captions.py" ;;
+      miner)     script="grok_miner.py" ;;
+      ocr)       script="ocr_tiktok.py" ;;
+      *)
+        echo "unknown stage: '$stage' (try: render | moment | deliver | harvest | pinterest | twitter | tiktok | miner | ocr)" >&2
+        exit 1 ;;
+    esac
+    if [ ! -f "$FACTORY/$script" ]; then
+      echo "engine entry not found: $FACTORY/$script" >&2
+      echo "set OCEAN_HOPECORE_ENGINE_DIR (see courier.env.example)" >&2
+      exit 1
+    fi
+    # Run from factory/ (scripts resolve siblings + outputs relative to it).
+    # The engine owns caps, ledgers, keys, and delivery — just exec it.
+    cd "$FACTORY"
+    exec "$PY" "$script" "$@"
+    ;;
+  ""|-h|--help|help)
+    sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
+    ;;
+  *)
+    echo "unknown subcommand: $cmd (try: where | status | run)" >&2
+    exit 1
+    ;;
+esac

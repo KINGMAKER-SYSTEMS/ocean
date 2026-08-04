@@ -1,0 +1,114 @@
+# content-agent — Slack surface tool configuration (design spec §6, §8).
+#
+# Declares the tools / APIs / MCPs content-agent is granted while on the [SLACK]
+# surface. Per spec §7 (self-learning / hot-reconfigure), this file is DATA: an
+# operator grants a new capability by editing it and resetting the agent (fresh
+# session_id) so the daemon re-reads the profile on the next turn — no rebuild.
+#
+# v1 ordering (spec §6): content-lab HTTP API first, bash/fetch escape hatch for
+# the rest, a content-pipeline MCP deferred. This is a DECLARATION the daemon's
+# permission gate reads; it is not itself a live wiring of the tools.
+
+[agent]
+name = "content-agent"
+surface = "SLACK"
+# A reset = new session_id for this agent+thread; the daemon rebuilds the system
+# prompt from this (possibly edited) profile on the next turn.
+reset = "new-session"
+
+# ---------------------------------------------------------------------------
+# Built-in runtime tools the agent may call on Slack. The daemon is
+# permission-gated; these are the ones content-agent is allowed.
+# ---------------------------------------------------------------------------
+[builtin]
+# HTTP to the content-lab API + any escape-hatch fetches (Replicate/R2/gallery).
+fetch = true
+# Escape hatch for anything the API doesn't cover (drive workers/CLIs directly).
+bash = true
+# Slack message/canvas/file I/O is driven through couriers/transport/slack.py,
+# invoked via bash; the agent never re-implements Slack calls.
+
+# ---------------------------------------------------------------------------
+# content-posting-lab HTTP API — the PRIMARY pipeline path (spec §6.1).
+# Reachable at $CONTENT_LAB_API_URL, credentialed via $CONTENT_LAB_API_KEY
+# (see content-agent.env.example). Endpoints are called over the `fetch` builtin.
+# ---------------------------------------------------------------------------
+[api.content_lab]
+base_url_env = "CONTENT_LAB_API_URL"
+api_key_env  = "CONTENT_LAB_API_KEY"
+
+# Endpoints content-agent is allowed to call. append/read-only by default;
+# no destructive (delete/repost) endpoints are granted in v1 (spec §9).
+[[api.content_lab.endpoints]]
+name    = "generate_video"
+method  = "POST"
+path    = "/api/video/generate"
+summary = "Kick off a video generation from a prompt."
+sop     = "sops/generate.md"
+
+[[api.content_lab.endpoints]]
+name    = "video_status"
+method  = "GET"
+path    = "/api/video/status/{job_id}"
+summary = "Poll the status of a generation job."
+sop     = "sops/status.md"
+
+[[api.content_lab.endpoints]]
+name    = "gallery_list"
+method  = "GET"
+path    = "/api/gallery"
+summary = "List generated clips in the gallery (links + metadata)."
+sop     = "sops/gallery.md"
+
+[[api.content_lab.endpoints]]
+name    = "queue_status"
+method  = "GET"
+path    = "/api/status"
+summary = "Report pipeline / queue status."
+sop     = "sops/status.md"
+
+# ---------------------------------------------------------------------------
+# Prompt library — deterministic local harness (the crowned MASTER prompt per
+# content format + top production performers + page assignments). Driven over the
+# `bash` builtin; owns the *what to generate*, feeding proven prompts + exact run
+# settings into the generate flow. Self-contained: local SQLite, no network.
+# SOP: sops/prompt-library.md.
+# ---------------------------------------------------------------------------
+[tool.prompt_library]
+kind    = "harness"
+bin     = "bin/content-agent-prompts"
+harness = "harness/prompt_library.py"
+db      = "data/prompt_library.db"
+seed    = "data/prompt_library.seed.json"
+sop     = "sops/prompt-library.md"
+summary = "Read a format's master prompt, compose modular rotated scenes (CANON), list top performers, assign to a page."
+commands = [
+  "formats",                                   # list formats + crowned masters
+  "master <format>",                           # master prompt + copy-paste run settings
+  "compose <format> [--n 10] [--json]",        # CANON: modular scenes (fixed spine + rotated slots, no repeats)
+  "top <format> [--n 15]",                     # top production performers
+  "assign <page> <format> [--prompt-id ID]",   # bind a format's prompt to a page
+  "page <page>",                               # a page's full run-ready kit
+  "add-winner <format> --json '{...}'",        # promote a new winner / master
+  "export [--format md|json]",                 # dump the library
+  "publish-bedrock [--dry-run]",               # mirror to ocean-bedrock /context (org-wide reuse)
+]
+# Modular prompting is CANON (SOP: sops/modular-prompting.md). Never run one prompt N times
+# — compose rotated scenes off a fixed spine. Truck format = MiniMax hailuo + crop_mode 'both'
+# (5-way crop → 5 clips/gen, ~$0.056/clip). Batch loop: harness/modular_batch.py <format> <n>.
+modular_sop     = "sops/modular-prompting.md"
+modular_harness = "harness/modular_batch.py"
+# Org-wide publish target: ocean-bedrock /context/content-prompts. Env-gated
+# (OCEAN_BEDROCK_URL + OCEAN_BEDROCK_TOKEN, write scope on /context); the in-repo
+# SQLite stays source of truth, bedrock is the readable/searchable mirror.
+bedrock_url_env   = "OCEAN_BEDROCK_URL"
+bedrock_token_env = "OCEAN_BEDROCK_TOKEN"
+bedrock_dest      = "/context/content-prompts"
+
+# ---------------------------------------------------------------------------
+# Deferred: a typed content-pipeline MCP (spec §6.3). Not wired in v1 — listed
+# here so the upgrade path is explicit. Enable by editing + reset, once it exists.
+# ---------------------------------------------------------------------------
+[mcp.content_pipeline]
+enabled = false
+note    = "Deferred per spec §6.3 — wrap generate/poll/review/upload/gallery-status as typed MCP tools once the surface stabilizes."

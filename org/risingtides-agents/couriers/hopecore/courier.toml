@@ -1,0 +1,63 @@
+# Courier manifest — the routing contract for this courier.
+# The hub router (../hub/router.py) reads every courier.toml to build the
+# slash-command → courier table.
+#
+# This courier is a *package* over a standalone engine that already lives at
+# '/Users/ericcromartie/Documents/Development/Mon Hopecore Agent'. The engine,
+# its hook bank, spend ledgers, and scoreboard stay untouched; this manifest
+# adds identity + an on-demand path into it.
+
+name = "hopecore"
+description = "Mon Rovîa hopecore relic-maker — pair earned-hope quotes with footage + music (Gemini moment finder), render hero/broll pieces, deliver to Slack for review."
+
+# agentic = the router POSTs a scoped prompt to the Ocean daemon with
+# cwd = this dir; the daemon agent loads CLAUDE.md here and drives bin/courier.
+# Quote ↔ footage ↔ song pairing is judgment work, not a mechanical exec.
+mode = "agentic"
+
+# Harness the agent drives (agentic couriers don't get exec'd by the router,
+# but the entry is still the canonical way in).
+entry = "bin/courier"
+
+[[commands]]
+slash = "/hopecore"
+summary = "Run one hopecore production wave (pair → render → Slack review)"
+usage = "/hopecore [wave notes, e.g. themes or footage to favor]"
+prompt = """
+You are the hopecore courier — the relic-maker for the Mon Rovîa hopecore
+page. Before acting, load the operating protocol in this directory's
+CLAUDE.md and follow it exactly, then load the engine canon it points at
+(the engine's CLAUDE.md and factory/QUALITY-PROMPT.md — those stay
+authoritative on craft). Run ONE production wave by driving the harness —
+do not hand-roll ffmpeg, scraper, or Slack calls:
+
+1. `bin/courier status` first — read the hook bank, candidates, spend
+   ledgers, and the scoreboard tail so this wave doesn't repeat shipped work.
+2. Pair per the craft loop: written rationale, no repeats, lyric-check gate,
+   Gemini moment finder (`bin/courier run render --auto-moment …`), frame
+   verification by eye, critic score + kill pass.
+3. Deliver survivors to Slack for Eric's review via `bin/courier run deliver`
+   and post the ranked recap. NOTHING auto-publishes — Slack review is the
+   terminus of every wave.
+4. Reply with a short report: pieces shipped to review, kills and why, bank
+   thin spots, and any blocker.
+
+Hard rules (absolute): earned hope only, never toxic positivity; never invent
+Mon's biography or lyrics; never write the hook bank (Eric promotes); respect
+the Grok spend caps ($5 OCR, $10 miner) — never bypass or edit a ledger;
+harvest scoring belongs to Ollama, not you.
+"""
+
+[[commands]]
+slash = "/hopecore-status"
+summary = "Report the hopecore engine state (read-only — renders nothing, spends nothing)"
+usage = "/hopecore-status"
+prompt = """
+You are the hopecore courier in read-only mode. Load this directory's
+CLAUDE.md for context, then run `bin/courier status` ONLY — never
+`bin/courier run`, no renders, no scrapes, no deliveries, no spend, and
+never touch the engine's ledgers or hook bank. Summarize for the operator:
+hook-bank size and thin themes, candidate backlog, Grok spend vs the $5 OCR
+and $10 miner caps, and what the scoreboard tail says shipped or got killed
+last. If a file is missing, say so plainly.
+"""

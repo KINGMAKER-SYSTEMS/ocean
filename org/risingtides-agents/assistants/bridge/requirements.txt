@@ -1,0 +1,11 @@
+# content-agent Slack bridge — inbound dependency (OCEAN-112).
+#
+# The rest of the repo is deliberately pure-stdlib (couriers/transport/slack.py
+# does outbound Slack with urllib alone). The ONE thing stdlib can't do cleanly is
+# the Socket Mode WebSocket + envelope ack handshake — so the inbound listener
+# (bridge/socket_listener.py `run()`) uses slack_sdk's Socket Mode client.
+#
+# Everything else — dedupe, context resolution, turn building, daemon dispatch
+# (reused from OCEAN-84's router), and the reply path — stays pure stdlib and is
+# unit-tested without this dependency (tests/test_socket_pipeline.py).
+slack_sdk>=3.27.0
