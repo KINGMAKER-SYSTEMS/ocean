@@ -231,6 +231,13 @@ Web surface session UI:
   `docs/specs/2026-08-13-ocean-rooms-post-g3-product-depth.md`. A share link is
   only the admission rail; do not describe Rooms as complete before its
   two-human/two-machine/two-sovereign-agent acceptance gate passes.
+- The standalone `risingtides-dev/ocean-surface` history through `f91195f`
+  (2026-08-14) was restored into the authoritative monorepo on 2026-08-16.
+  Its durable Slack-style density, unread recovery, one-level threads,
+  markdown/action rail, deterministic identity, mention completion, and compact
+  Tauri navigation are accepted Rooms baseline behavior. Do not regress or
+  replace them with the stale 2026-08-04 subtree snapshot; new work lands only
+  in this monorepo.
 
 - Every successful `GET /v1/rooms/persistent/{key}` carries a required
   `RoomAccessProjection`, including explicit `Local` for G1 rooms. Surface

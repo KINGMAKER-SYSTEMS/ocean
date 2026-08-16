@@ -1572,7 +1572,7 @@ pub fn RoomsWorkspace(
 
             // ═══ CENTER RAIL — header + transcript + composer ═══════════
             <div class="rooms-workspace__center">
-                {move || rooms.pending_invite.get().map(|pending| {
+                {move || rooms.pending_invite.get().map(|_| {
                     view! {
                         <div class="rooms-workspace__pending-invite" role="dialog" aria-label="Room invitation">
                             <div class="rooms-workspace__pending-invite-copy">

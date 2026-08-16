@@ -2863,3 +2863,18 @@ the July implementation plan as landed historical baseline rather than active.
 Hardened R1 cold launch with a bounded Tauri deep-link FIFO/readiness handshake;
 redemption now opens the daemon-authoritative response room rather than trusting
 the editable link path. Tauri 30/30 and Surface 767/767 tests pass.
+_________________________________________________________________________________
+time:      [14:25] [16-08-26]
+agent:     [ocean] [gpt-5.6]
+worktree:  [feat/restore-latest-rooms-ui]
+type:      [recovery]
+area:      [rooms]
+
+Recovered the standalone Surface mainline through f91195f into the authoritative
+monorepo after proving the August 4 subtree snapshot had omitted ten days of
+landed Rooms work. Restored durable read/unread recovery, timeline density and
+day/gap grouping, new-message jump, markdown/action rail, deterministic identity,
+full timestamps, roster-truth mention completion with agent metadata, and compact
+Tauri navigation. Replayed secure native share links on top rather than replacing
+that accepted baseline. Surface 855/855, Tauri 30/30, persistent Rooms 53/53,
+strict WASM/daemon/Tauri Clippy, release Trunk, and docs checks pass.
