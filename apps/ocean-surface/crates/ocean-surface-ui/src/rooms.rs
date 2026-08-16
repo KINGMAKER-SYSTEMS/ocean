@@ -23,6 +23,8 @@
 //! than threading rooms state through the `Daemon` handle — so it never touches
 //! the live agent loop / session SSE code.
 
+use std::collections::HashMap;
+
 use futures_util::future::Either;
 use futures_util::StreamExt;
 use gloo_net::eventsource::futures::EventSource;
@@ -203,6 +205,20 @@ pub struct PublicAgentDescriptor {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomReadCursorProjection {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mirrored_upstream_read_seq: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RoomReadSummary {
+    pub latest_seq: Option<u64>,
+    pub read_seq: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoomOutboxItem {
     pub client_event_id: String,
     pub source_id: String,
@@ -284,14 +300,50 @@ pub struct Room {
 
 // ---- Response envelopes (the daemon's `json!({ "ok": .., .. })` shapes) ------
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 struct RoomsListResponse {
     #[serde(default)]
     ok: bool,
     #[serde(default)]
     rooms: Vec<Room>,
     #[serde(default)]
+    read_states: Vec<RoomReadStateWire>,
+    #[serde(default)]
     error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct RoomReadStateWire {
+    room_id: String,
+    #[serde(default)]
+    latest_seq: Option<String>,
+    #[serde(default)]
+    read_seq: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+struct ReadCursorPatchBody {
+    read_seq: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct ReadCursorPatchEnvelope {
+    #[serde(default)]
+    ok: bool,
+    cursor: RoomReadCursorBody,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct RoomReadCursorBody {
+    room_id: String,
+    #[serde(default)]
+    read_seq: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadCursorProjectionTarget {
+    Local,
+    MirroredUpstream,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -499,10 +551,29 @@ pub struct Rooms {
     /// Required access projection for the open room. `None` means loading or
     /// no room is open; local rooms carry `Some(state = Local)`.
     pub access: RwSignal<Option<RoomAccessProjection>>,
-    /// Typed operation-id pair for create-room: (next_op_id, last_outcome).
+    /// Per-room durable unread summary from the daemon room list.
+    pub read_summaries: RwSignal<HashMap<String, RoomReadSummary>>,
+    /// Durable read cursor for the currently open room.
+    pub open_read_cursor: RwSignal<Option<RoomReadCursorProjection>>,
+    /// Monotonic in-flight guard for PATCH /read-cursor on the open room.
+    read_cursor_in_flight: RwSignal<Option<u64>>,
+    /// Last read cursor value attempted for the open room; dedupes monotonic re-sends.
+    last_sent_read_cursor: RwSignal<Option<u64>>,
     /// Surfaces snapshot the op_id before dispatching and gate only on the
     /// outcome carrying a matching id — concurrent submits never cross-resolve.
     pub create_op: RwSignal<(u64, Option<CreateOutcome>)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RoomsFetchMode {
+    Interactive,
+    Silent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RoomsListSuccess {
+    rooms: Vec<Room>,
+    read_summaries: HashMap<String, RoomReadSummary>,
 }
 
 impl Rooms {
@@ -534,6 +605,10 @@ impl Rooms {
             available_agents: RwSignal::new(Vec::new()),
             agents_loaded: RwSignal::new(false),
             access: RwSignal::new(None),
+            read_summaries: RwSignal::new(HashMap::new()),
+            open_read_cursor: RwSignal::new(None),
+            read_cursor_in_flight: RwSignal::new(None),
+            last_sent_read_cursor: RwSignal::new(None),
             create_op: RwSignal::new((0, None)),
         }
     }
@@ -550,13 +625,29 @@ impl Rooms {
     /// Current-room predicate over the live `generation` and `open_key`
     /// signals. Async tail work checks it before any non-frame state write;
     /// decoded frames pass through `accept_room_tail_frame` below.
-    fn room_is_current(&self, generation_id: u64, key: &str) -> bool {
+    ///
+    /// `pub(crate)` so sibling modules (`rooms_workspace.rs`) holding a
+    /// previously-captured `(generation, key)` pair — e.g. a pending
+    /// read-advance request built while a room was open — can re-validate it
+    /// before dispatching a mutating request. A same-key close/reopen bumps
+    /// `generation`, so a stale pair is rejected even though the key still
+    /// matches the newly-reopened room.
+    pub(crate) fn room_is_current(&self, generation_id: u64, key: &str) -> bool {
         room_request_is_current(
             generation_id,
             self.generation.get_untracked(),
             key,
             self.open_key.get_untracked().as_deref(),
         )
+    }
+
+    /// `pub(crate)` snapshot of the live room-identity generation counter —
+    /// bumped by every `open_room`/`close_room`. Exposed so a caller building
+    /// state that outlives one render (e.g. `ReadAdvanceRequest`) can stamp it
+    /// with "as of which room admission" it was computed, then re-validate
+    /// via `room_is_current` before acting on it later.
+    pub(crate) fn generation_snapshot(&self) -> u64 {
+        self.generation.get_untracked()
     }
 
     /// Synchronously clear the open-room signals and pin `tail_state` to
@@ -566,6 +657,9 @@ impl Rooms {
         self.open_room.set(None);
         self.transcript.set(Vec::new());
         self.access.set(None);
+        self.open_read_cursor.set(None);
+        self.read_cursor_in_flight.set(None);
+        self.last_sent_read_cursor.set(None);
         self.tail_state.set(TailState::Replaying);
     }
 
@@ -584,17 +678,36 @@ impl Rooms {
     /// are latest-wins: an older completion cannot publish any list lifecycle
     /// state after a newer request has started.
     pub fn fetch_rooms(&self) {
+        self.fetch_rooms_with_mode(RoomsFetchMode::Interactive);
+    }
+
+    pub fn fetch_rooms_silent(&self) {
+        self.fetch_rooms_with_mode(RoomsFetchMode::Silent);
+    }
+
+    fn fetch_rooms_with_mode(&self, mode: RoomsFetchMode) {
+        if should_skip_rooms_fetch(mode, self.rooms_loading.get_untracked()) {
+            return;
+        }
         let base = self.base();
         let me = *self;
         let ticket = self.list_request_ticket.get_untracked().wrapping_add(1);
         self.list_request_ticket.set(ticket);
-        self.rooms_loading.set(true);
-        self.rooms_error.set(None);
+        if matches!(mode, RoomsFetchMode::Interactive) {
+            self.rooms_loading.set(true);
+            self.rooms_error.set(None);
+        }
         spawn_local(async move {
             let get_url = format!("{base}/v1/rooms/persistent");
             let result = match Request::get(&get_url).send().await {
                 Ok(resp) => match resp.json::<RoomsListResponse>().await {
-                    Ok(r) if r.ok => Ok(r.rooms),
+                    Ok(r) if r.ok => match read_summaries_from_wire(&r.read_states) {
+                        Ok(read_summaries) => Ok(RoomsListSuccess {
+                            rooms: r.rooms,
+                            read_summaries,
+                        }),
+                        Err(error) => Err(format!("rooms decode error: {error}")),
+                    },
                     Ok(r) => Err(format!(
                         "rooms list failed: {}",
                         r.error.unwrap_or_else(|| "unknown error".into())
@@ -603,21 +716,31 @@ impl Rooms {
                 },
                 Err(err) => Err(format!("rooms fetch error: {err}")),
             };
-            if !list_request_is_current(ticket, me.list_request_ticket.get_untracked()) {
+            let is_current =
+                list_request_is_current(ticket, me.list_request_ticket.get_untracked());
+            finish_rooms_fetch(&me.rooms_loaded, &me.rooms_loading, mode, is_current);
+            if !is_current {
                 return;
             }
             match result {
-                Ok(rooms) => {
-                    me.list.set(rooms);
+                Ok(success) => {
+                    me.list.set(success.rooms.clone());
+                    me.read_summaries.update(|current| {
+                        *current = merge_room_read_summaries(
+                            current,
+                            &success.rooms,
+                            &success.read_summaries,
+                        );
+                    });
                     me.rooms_error.set(None);
                 }
                 Err(error) => {
-                    me.status.set(error.clone());
-                    me.rooms_error.set(Some(error));
+                    if matches!(mode, RoomsFetchMode::Interactive) {
+                        me.status.set(error.clone());
+                        me.rooms_error.set(Some(error));
+                    }
                 }
             }
-            me.rooms_loaded.set(true);
-            me.rooms_loading.set(false);
         });
     }
 
@@ -838,8 +961,15 @@ impl Rooms {
             match result {
                 Ok((room, transcript, access)) => {
                     me.open_room.set(room);
-                    me.transcript.set(transcript);
-                    me.access.set(Some(access));
+                    me.transcript.set(transcript.clone());
+                    me.access.set(Some(access.clone()));
+                    update_open_summary_from_open_room(
+                        &me.read_summaries,
+                        me.open_key.get_untracked().as_deref(),
+                        &transcript,
+                        Some(&access),
+                        me.open_read_cursor.get_untracked().as_ref(),
+                    );
                     me.status.set(String::new());
                     me.fetch_agents();
                     me.start_live_tail(key, generation_id);
@@ -1187,14 +1317,27 @@ impl Rooms {
                     }
                 };
                 let message_sub = match es.subscribe("room_message") {
-                    Ok(s) => s,
+                    Ok(s) => s
+                        .map(|event| event.map(|msg| ("room_message", msg)))
+                        .boxed_local(),
                     Err(_) => {
                         gloo_timers::future::TimeoutFuture::new(2_000).await;
                         continue;
                     }
                 };
                 let access_sub = match es.subscribe("room_access") {
-                    Ok(s) => s,
+                    Ok(s) => s
+                        .map(|event| event.map(|msg| ("room_access", msg)))
+                        .boxed_local(),
+                    Err(_) => {
+                        gloo_timers::future::TimeoutFuture::new(2_000).await;
+                        continue;
+                    }
+                };
+                let read_cursor_sub = match es.subscribe("room_read_cursor") {
+                    Ok(s) => s
+                        .map(|event| event.map(|msg| ("room_read_cursor", msg)))
+                        .boxed_local(),
                     Err(_) => {
                         gloo_timers::future::TimeoutFuture::new(2_000).await;
                         continue;
@@ -1211,7 +1354,10 @@ impl Rooms {
                         gloo_net::eventsource::State::Closed => TailState::Reconnecting,
                     });
                 }
-                let mut stream = futures_util::stream::select(message_sub, access_sub);
+                let mut stream = futures_util::stream::select(
+                    futures_util::stream::select(message_sub, access_sub),
+                    read_cursor_sub,
+                );
                 // Race stream.next() against a 2 s timeout so room close/switch
                 // can cancel a stalled connection (blame: gloo EventSource errors
                 // are suppressed during CONNECTING, so Reconnecting never fires
@@ -1253,10 +1399,10 @@ impl Rooms {
                         }
                     };
                     let Ok((name, msg)) = msg else { continue };
-                    let Some(data) = msg.data().as_string() else {
+                    let Some(data) = msg.1.data().as_string() else {
                         continue;
                     };
-                    let Some(frame) = decode_room_tail_frame(&name, &data) else {
+                    let Some(frame) = decode_room_tail_frame(name, &data, &key) else {
                         continue;
                     };
                     let Some(frame) = accept_room_tail_frame(
@@ -1271,7 +1417,31 @@ impl Rooms {
                     tail_state.set(TailState::Live);
                     match frame {
                         RoomTailFrame::Access(access) => {
-                            apply_access_projection(&me.access, access);
+                            apply_access_projection(&me.access, access.clone());
+                            update_open_summary_from_open_room(
+                                &me.read_summaries,
+                                Some(&key),
+                                &me.transcript.get_untracked(),
+                                Some(&access),
+                                me.open_read_cursor.get_untracked().as_ref(),
+                            );
+                        }
+                        RoomTailFrame::ReadCursor(cursor) => {
+                            // Mirrored SSE cursors merge monotonically with the
+                            // cursor already held for this room+generation, so a
+                            // lagging frame cannot lower the durable read.
+                            let merged = merge_read_cursor_projection(
+                                me.open_read_cursor.get_untracked().as_ref(),
+                                cursor,
+                            );
+                            me.open_read_cursor.set(Some(merged.clone()));
+                            update_open_summary_from_open_room(
+                                &me.read_summaries,
+                                Some(&key),
+                                &me.transcript.get_untracked(),
+                                me.access.get_untracked().as_ref(),
+                                Some(&merged),
+                            );
                         }
                         RoomTailFrame::Message(entry) => {
                             if entry.seq > last_seq.get_untracked() {
@@ -1288,6 +1458,13 @@ impl Rooms {
                                 }
                                 t.push(entry);
                             });
+                            update_open_summary_from_open_room(
+                                &me.read_summaries,
+                                Some(&key),
+                                &me.transcript.get_untracked(),
+                                me.access.get_untracked().as_ref(),
+                                me.open_read_cursor.get_untracked().as_ref(),
+                            );
                             // Refresh the room record (roster) on join/leave frames
                             // so other clients see an accurate participant list.
                             if is_roster_change {
@@ -1330,6 +1507,112 @@ impl Rooms {
             }
         });
     }
+
+    pub fn mark_open_read_if_current(&self, candidate_read_seq: u64) {
+        let Some(key) = self.open_key.get_untracked() else {
+            return;
+        };
+        let current_summary = self
+            .read_summaries
+            .get_untracked()
+            .get(&key)
+            .copied()
+            .unwrap_or(RoomReadSummary {
+                latest_seq: None,
+                read_seq: None,
+            });
+        let durable_read_seq = self
+            .open_read_cursor
+            .get_untracked()
+            .as_ref()
+            .and_then(current_durable_read_seq);
+        let applied_read_seq = applied_open_read_seq(current_summary.read_seq, durable_read_seq);
+        if candidate_read_seq <= applied_read_seq {
+            return;
+        }
+        if self
+            .read_cursor_in_flight
+            .get_untracked()
+            .is_some_and(|seq| seq >= candidate_read_seq)
+        {
+            return;
+        }
+        if self
+            .last_sent_read_cursor
+            .get_untracked()
+            .is_some_and(|seq| seq >= candidate_read_seq)
+        {
+            return;
+        }
+
+        let base = self.base();
+        let me = *self;
+        let generation_id = self.generation.get_untracked();
+        self.read_cursor_in_flight.set(Some(candidate_read_seq));
+        self.last_sent_read_cursor.set(Some(candidate_read_seq));
+        spawn_local(async move {
+            let patch_url = format!("{base}/v1/rooms/persistent/{}/read-cursor", encode(&key));
+            let body = ReadCursorPatchBody {
+                read_seq: candidate_read_seq,
+            };
+            let result = match Request::patch(&patch_url)
+                .header("content-type", "application/json")
+                .json(&body)
+            {
+                Ok(req) => match req.send().await {
+                    Ok(resp) if resp.ok() => match resp.json::<ReadCursorPatchEnvelope>().await {
+                        Ok(envelope) if envelope.ok => {
+                            parse_patch_read_cursor_response(&key, envelope.cursor)
+                        }
+                        Ok(_) => Err("read cursor failed: unknown error".into()),
+                        Err(err) => Err(format!("read cursor decode error: {err}")),
+                    },
+                    Ok(resp) => match resp.json::<RoomErrorResponse>().await {
+                        Ok(error) => Err(format!(
+                            "read cursor failed: {}",
+                            error
+                                .error
+                                .unwrap_or_else(|| format!("HTTP {}", resp.status()))
+                        )),
+                        Err(err) => Err(format!(
+                            "read cursor failed: HTTP {} ({err})",
+                            resp.status()
+                        )),
+                    },
+                    Err(err) => Err(format!("read cursor patch error: {err}")),
+                },
+                Err(err) => Err(format!("read cursor encode error: {err}")),
+            };
+            if !me.room_is_current(generation_id, &key) {
+                return;
+            }
+            match result {
+                Ok(cursor) => {
+                    let merged = merge_read_cursor_projection(
+                        me.open_read_cursor.get_untracked().as_ref(),
+                        cursor,
+                    );
+                    me.open_read_cursor.set(Some(merged));
+                    update_open_summary_from_open_room(
+                        &me.read_summaries,
+                        Some(&key),
+                        &me.transcript.get_untracked(),
+                        me.access.get_untracked().as_ref(),
+                        me.open_read_cursor.get_untracked().as_ref(),
+                    );
+                    me.read_cursor_in_flight.set(None);
+                }
+                Err(_) => {
+                    if me.read_cursor_in_flight.get_untracked() == Some(candidate_read_seq) {
+                        me.read_cursor_in_flight.set(None);
+                    }
+                    if me.last_sent_read_cursor.get_untracked() == Some(candidate_read_seq) {
+                        me.last_sent_read_cursor.set(None);
+                    }
+                }
+            }
+        });
+    }
 }
 
 // ---- Helpers ----------------------------------------------------------------
@@ -1338,12 +1621,31 @@ impl Rooms {
 enum RoomTailFrame {
     Message(RoomMessage),
     Access(RoomAccessProjection),
+    ReadCursor(RoomReadCursorProjection),
 }
 
-fn decode_room_tail_frame(name: &str, data: &str) -> Option<RoomTailFrame> {
+fn decode_room_tail_frame(
+    name: &str,
+    data: &str,
+    expected_room_key: &str,
+) -> Option<RoomTailFrame> {
     match name {
         "room_message" => serde_json::from_str(data).ok().map(RoomTailFrame::Message),
         "room_access" => serde_json::from_str(data).ok().map(RoomTailFrame::Access),
+        // Cursor frames carry a durable read position, so room identity is
+        // validated by construction here: the expected key is required and the
+        // frame is dropped unless the wire `room_id` matches it exactly.
+        "room_read_cursor" => serde_json::from_str::<RoomReadCursorBody>(data)
+            .ok()
+            .and_then(|body| {
+                parse_room_read_cursor_projection(
+                    expected_room_key,
+                    ReadCursorProjectionTarget::MirroredUpstream,
+                    body,
+                )
+                .ok()
+            })
+            .map(RoomTailFrame::ReadCursor),
         _ => None,
     }
 }
@@ -1365,6 +1667,210 @@ fn accept_room_tail_frame(
         current_key,
     )
     .then_some(frame)
+}
+
+fn read_summaries_from_wire(
+    read_states: &[RoomReadStateWire],
+) -> Result<HashMap<String, RoomReadSummary>, String> {
+    let mut summaries = HashMap::with_capacity(read_states.len());
+    for state in read_states {
+        let latest_seq = parse_optional_decimal_u64(state.latest_seq.as_deref())?;
+        let read_seq = parse_optional_decimal_u64(state.read_seq.as_deref())?;
+        if summaries
+            .insert(
+                state.room_id.clone(),
+                RoomReadSummary {
+                    latest_seq,
+                    read_seq,
+                },
+            )
+            .is_some()
+        {
+            return Err(format!("duplicate read state for room '{}'", state.room_id));
+        }
+    }
+    Ok(summaries)
+}
+
+fn parse_optional_decimal_u64(raw: Option<&str>) -> Result<Option<u64>, String> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("empty decimal read state".into());
+    }
+    trimmed
+        .parse::<u64>()
+        .map(Some)
+        .map_err(|_| format!("invalid decimal read state '{trimmed}'"))
+}
+
+fn parse_room_read_cursor_projection(
+    expected_room_key: &str,
+    target: ReadCursorProjectionTarget,
+    body: RoomReadCursorBody,
+) -> Result<RoomReadCursorProjection, String> {
+    let room_id = body.room_id.trim();
+    if room_id.is_empty() {
+        return Err("read cursor decode error: empty room_id".into());
+    }
+    if room_id != expected_room_key {
+        return Err(format!(
+            "read cursor decode error: wrong room_id '{room_id}' for '{expected_room_key}'"
+        ));
+    }
+    let read_seq = parse_optional_decimal_u64(body.read_seq.as_deref())?;
+    Ok(match target {
+        ReadCursorProjectionTarget::Local => RoomReadCursorProjection {
+            read_seq,
+            mirrored_upstream_read_seq: None,
+        },
+        ReadCursorProjectionTarget::MirroredUpstream => RoomReadCursorProjection {
+            read_seq: None,
+            mirrored_upstream_read_seq: read_seq,
+        },
+    })
+}
+
+fn parse_patch_read_cursor_response(
+    expected_room_key: &str,
+    response: RoomReadCursorBody,
+) -> Result<RoomReadCursorProjection, String> {
+    parse_room_read_cursor_projection(
+        expected_room_key,
+        ReadCursorProjectionTarget::Local,
+        response,
+    )
+}
+
+/// Fold a newly observed cursor projection into the one already held for the
+/// open room. Both the local (PATCH-confirmed) and mirrored (SSE) positions
+/// advance monotonically, so a lagging mirrored frame can neither lower the
+/// durable read, drop a locally confirmed read, nor resurrect unread — while a
+/// later, higher mirrored frame still corrects the durable read upward.
+fn merge_read_cursor_projection(
+    current: Option<&RoomReadCursorProjection>,
+    incoming: RoomReadCursorProjection,
+) -> RoomReadCursorProjection {
+    let Some(current) = current else {
+        return incoming;
+    };
+    RoomReadCursorProjection {
+        read_seq: max_optional_u64(current.read_seq, incoming.read_seq),
+        mirrored_upstream_read_seq: max_optional_u64(
+            current.mirrored_upstream_read_seq,
+            incoming.mirrored_upstream_read_seq,
+        ),
+    }
+}
+
+/// The durable read position is the furthest confirmed read across both the
+/// local PATCH projection and the mirrored upstream projection.
+fn current_durable_read_seq(cursor: &RoomReadCursorProjection) -> Option<u64> {
+    max_optional_u64(cursor.read_seq, cursor.mirrored_upstream_read_seq)
+}
+
+/// The read position already applied for the open room: the furthest of the
+/// summary's confirmed read and the durable cursor projection. Folding with a
+/// monotonic max (rather than preferring the summary when present) keeps a
+/// lagging summary from re-sending a PATCH the durable cursor already covers.
+fn applied_open_read_seq(summary_read_seq: Option<u64>, durable_read_seq: Option<u64>) -> u64 {
+    max_optional_u64(summary_read_seq, durable_read_seq).unwrap_or(0)
+}
+
+fn latest_summary_seq_for_open_room(
+    transcript: &[RoomMessage],
+    access: Option<&RoomAccessProjection>,
+) -> Option<u64> {
+    match access.map(|projection| projection.state) {
+        Some(RoomAccessState::Live) => {
+            access.and_then(|projection| projection.last_confirmed_global_sequence)
+        }
+        _ => transcript.last().map(|message| message.seq),
+    }
+}
+
+fn merged_room_read_summary(
+    current: Option<&RoomReadSummary>,
+    incoming: Option<&RoomReadSummary>,
+) -> Option<RoomReadSummary> {
+    match (current, incoming) {
+        (None, None) => None,
+        (Some(current), None) => Some(*current),
+        (None, Some(incoming)) => Some(*incoming),
+        (Some(current), Some(incoming)) => Some(RoomReadSummary {
+            latest_seq: max_optional_u64(current.latest_seq, incoming.latest_seq),
+            read_seq: max_optional_u64(current.read_seq, incoming.read_seq),
+        }),
+    }
+}
+
+fn max_optional_u64(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (Some(left), None) => Some(left),
+        (None, Some(right)) => Some(right),
+        (None, None) => None,
+    }
+}
+
+fn merge_room_read_summaries(
+    current: &HashMap<String, RoomReadSummary>,
+    rooms: &[Room],
+    incoming: &HashMap<String, RoomReadSummary>,
+) -> HashMap<String, RoomReadSummary> {
+    let mut merged = HashMap::with_capacity(rooms.len());
+    for room in rooms {
+        let room_id = room.id.clone();
+        if let Some(summary) =
+            merged_room_read_summary(current.get(&room_id), incoming.get(&room_id))
+        {
+            merged.insert(room_id, summary);
+        }
+    }
+    merged
+}
+
+fn update_open_summary_from_open_room(
+    summaries: &RwSignal<HashMap<String, RoomReadSummary>>,
+    open_key: Option<&str>,
+    transcript: &[RoomMessage],
+    access: Option<&RoomAccessProjection>,
+    cursor: Option<&RoomReadCursorProjection>,
+) {
+    let Some(open_key) = open_key else {
+        return;
+    };
+    let latest_seq = latest_summary_seq_for_open_room(transcript, access);
+    let existing = summaries.get_untracked().get(open_key).copied();
+    let read_seq = max_optional_u64(
+        cursor.and_then(current_durable_read_seq),
+        existing.and_then(|summary| summary.read_seq),
+    );
+    summaries.update(|map| {
+        map.insert(
+            open_key.to_string(),
+            RoomReadSummary {
+                latest_seq: max_optional_u64(
+                    existing.and_then(|summary| summary.latest_seq),
+                    latest_seq,
+                ),
+                read_seq,
+            },
+        );
+    });
+}
+
+pub(crate) fn room_has_durable_unread(summary: Option<&RoomReadSummary>) -> bool {
+    let Some(summary) = summary else {
+        return false;
+    };
+    match (summary.latest_seq, summary.read_seq) {
+        (Some(latest), Some(read)) => latest > read,
+        (Some(_), None) => true,
+        _ => false,
+    }
 }
 
 fn apply_access_projection(
@@ -1396,6 +1902,25 @@ fn last_transcript_seq(transcript: &[RoomMessage]) -> u64 {
 
 fn list_request_is_current(expected_ticket: u64, current_ticket: u64) -> bool {
     expected_ticket == current_ticket
+}
+
+fn should_skip_rooms_fetch(mode: RoomsFetchMode, rooms_loading: bool) -> bool {
+    matches!(mode, RoomsFetchMode::Silent) && rooms_loading
+}
+
+fn finish_rooms_fetch(
+    rooms_loaded: &RwSignal<bool>,
+    rooms_loading: &RwSignal<bool>,
+    mode: RoomsFetchMode,
+    is_current: bool,
+) {
+    if !is_current {
+        return;
+    }
+    rooms_loaded.set(true);
+    if matches!(mode, RoomsFetchMode::Interactive) {
+        rooms_loading.set(false);
+    }
 }
 
 fn joined_open_for(
@@ -1463,7 +1988,11 @@ fn show_no_agents(agents_loaded: bool, agent_count: usize) -> bool {
     agents_loaded && agent_count == 0
 }
 
-fn room_request_is_current(
+/// Pure predicate: is `expected_generation`/`expected_key` still the current
+/// room admission? `pub(crate)` so sibling modules (`rooms_workspace.rs`) can
+/// unit-test the exact rejection logic behind [`Rooms::room_is_current`]
+/// without needing a live `Rooms` handle (which requires a browser runtime).
+pub(crate) fn room_request_is_current(
     expected_generation: u64,
     current_generation: u64,
     expected_key: &str,
@@ -1907,7 +2436,7 @@ mod tests {
     fn tail_frame_decoder_tags_access_and_messages_without_cursor_blending() {
         let access =
             serde_json::to_string(&access_projection(RoomAccessState::Recovering)).unwrap();
-        let frame = decode_room_tail_frame("room_access", &access).unwrap();
+        let frame = decode_room_tail_frame("room_access", &access, "room-1").unwrap();
         assert_eq!(
             frame,
             RoomTailFrame::Access(access_projection(RoomAccessState::Recovering))
@@ -1916,13 +2445,15 @@ mod tests {
         let frame = decode_room_tail_frame(
             "room_message",
             r#"{"seq":8,"author_id":"member-1","author_kind":"human","kind":"message","body":"hello","created_at":"2026-07-16T22:00:00Z"}"#,
+            "room-1",
         )
         .unwrap();
         match frame {
             RoomTailFrame::Message(message) => assert_eq!(message.seq, 8),
             RoomTailFrame::Access(_) => panic!("message frame decoded as access"),
+            RoomTailFrame::ReadCursor(_) => panic!("message frame decoded as read cursor"),
         }
-        assert!(decode_room_tail_frame("unknown", "{}").is_none());
+        assert!(decode_room_tail_frame("unknown", "{}", "room-1").is_none());
     }
 
     #[test]
@@ -1971,6 +2502,45 @@ mod tests {
         assert!(!room_request_is_current(4, 5, "room-1", Some("room-1")));
         assert!(!room_request_is_current(4, 4, "room-1", Some("room-2")));
         assert!(!room_request_is_current(4, 4, "room-1", None));
+    }
+
+    /// Regression: a request scheduled while room "A" is open at generation N
+    /// must be rejected once "A" is closed and reopened under the SAME key —
+    /// which bumps the generation to N+1 without changing `open_key`. Key
+    /// equality alone (the pre-fix guard) would wrongly admit this stale
+    /// request; `room_request_is_current` — the exact predicate backing the
+    /// pub(crate) `Rooms::room_is_current` exposed for `rooms_workspace.rs` —
+    /// must reject it.
+    #[test]
+    fn room_request_is_current_rejects_stale_generation_across_same_key_close_reopen() {
+        let key = "room-a";
+        let scheduled_generation = 3; // captured "gen N" while room-a was open
+
+        // Sanity: the schedule-time snapshot is admitted against itself.
+        assert!(room_request_is_current(
+            scheduled_generation,
+            scheduled_generation,
+            key,
+            Some(key),
+        ));
+
+        // Close + reopen the SAME key: generation advances to N+1, `open_key`
+        // is still "room-a" — the pre-fix key-only guard would wrongly admit
+        // the stale request here.
+        let generation_after_close_reopen = scheduled_generation + 1;
+        assert!(!room_request_is_current(
+            scheduled_generation,
+            generation_after_close_reopen,
+            key,
+            Some(key),
+        ));
+        // A freshly-stamped request for the new admission is admitted.
+        assert!(room_request_is_current(
+            generation_after_close_reopen,
+            generation_after_close_reopen,
+            key,
+            Some(key),
+        ));
     }
 
     #[test]
@@ -2103,55 +2673,430 @@ mod tests {
     }
 
     #[test]
-    fn production_room_is_current_and_reset_use_shared_predicate() {
-        let rooms = Rooms {
-            url: RwSignal::new(String::new()),
-            list: RwSignal::new(Vec::new()),
-            rooms_loaded: RwSignal::new(false),
-            rooms_loading: RwSignal::new(false),
-            rooms_error: RwSignal::new(None),
-            list_request_ticket: RwSignal::new(0),
-            open_key: RwSignal::new(None),
-            open_room: RwSignal::new(None),
-            transcript: RwSignal::new(Vec::new()),
-            status: RwSignal::new(String::new()),
-            generation: RwSignal::new(0),
-            identity_id: RwSignal::new("test-member"),
-            identity_name: RwSignal::new("Test Member"),
-            tail_state: RwSignal::new(TailState::Replaying),
-            available_agents: RwSignal::new(Vec::new()),
-            agents_loaded: RwSignal::new(false),
-            access: RwSignal::new(None),
-            create_op: RwSignal::new((0, None)),
-        };
+    fn read_summaries_fail_closed_on_duplicate_room_ids() {
+        let duplicate = vec![
+            RoomReadStateWire {
+                room_id: "room-1".into(),
+                latest_seq: Some("7".into()),
+                read_seq: Some("3".into()),
+            },
+            RoomReadStateWire {
+                room_id: "room-1".into(),
+                latest_seq: Some("8".into()),
+                read_seq: Some("4".into()),
+            },
+        ];
+        assert!(read_summaries_from_wire(&duplicate).is_err());
+    }
 
-        // Not-yet-opened: no key, gen=0 → room_is_current rejects.
-        assert!(!rooms.room_is_current(0, "room-1"));
-        assert!(!rooms.room_is_current(13, "room-1"));
+    #[test]
+    fn read_summaries_fail_closed_on_malformed_decimal() {
+        let malformed = vec![RoomReadStateWire {
+            room_id: "room-1".into(),
+            latest_seq: Some("oops".into()),
+            read_seq: Some("1".into()),
+        }];
+        assert!(read_summaries_from_wire(&malformed).is_err());
+    }
 
-        // Manually set open_key + gen to simulate an open room.
-        rooms.generation.set(42);
-        rooms.open_key.set(Some("room-1".into()));
-        assert!(rooms.room_is_current(42, "room-1"));
-        assert!(!rooms.room_is_current(41, "room-1")); // wrong gen
-        assert!(!rooms.room_is_current(42, "room-2")); // wrong key
-
-        // Seed some state, then call reset_room_state and assert it's cleared.
-        rooms.open_room.set(Some(local_room()));
-        rooms.transcript.set(vec![message(1)]);
-        rooms
-            .access
-            .set(Some(access_projection(RoomAccessState::Local)));
-        rooms.tail_state.set(TailState::Live);
-
-        rooms.reset_room_state();
-        assert!(rooms.open_room.get_untracked().is_none());
-        assert!(rooms.transcript.get_untracked().is_empty());
-        assert!(rooms.access.get_untracked().is_none());
+    #[test]
+    fn patch_response_parses_canonical_cursor_body_exactly() {
+        let local: ReadCursorPatchEnvelope = serde_json::from_value(serde_json::json!({
+            "ok": true,
+            "cursor": {
+                "room_id": "room-1",
+                "read_seq": "9"
+            }
+        }))
+        .unwrap();
+        assert!(local.ok);
         assert_eq!(
-            rooms.tail_state.get_untracked(),
-            TailState::Replaying,
-            "reset_room_state must pin tail_state to Replaying"
+            parse_patch_read_cursor_response("room-1", local.cursor).unwrap(),
+            RoomReadCursorProjection {
+                read_seq: Some(9),
+                mirrored_upstream_read_seq: None,
+            }
         );
+    }
+
+    #[test]
+    fn patch_response_parses_js_safe_decimal_strings_and_null() {
+        let big: ReadCursorPatchEnvelope = serde_json::from_value(serde_json::json!({
+            "ok": true,
+            "cursor": {
+                "room_id": "room-1",
+                "read_seq": "9007199254740993"
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            parse_patch_read_cursor_response("room-1", big.cursor).unwrap(),
+            RoomReadCursorProjection {
+                read_seq: Some(9_007_199_254_740_993),
+                mirrored_upstream_read_seq: None,
+            }
+        );
+
+        let null: ReadCursorPatchEnvelope = serde_json::from_value(serde_json::json!({
+            "ok": true,
+            "cursor": {
+                "room_id": "room-1",
+                "read_seq": null
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            parse_patch_read_cursor_response("room-1", null.cursor).unwrap(),
+            RoomReadCursorProjection {
+                read_seq: None,
+                mirrored_upstream_read_seq: None,
+            }
+        );
+    }
+
+    #[test]
+    fn patch_response_rejects_bad_decimal_string() {
+        let live: ReadCursorPatchEnvelope = serde_json::from_value(serde_json::json!({
+            "ok": true,
+            "cursor": {
+                "room_id": "room-1",
+                "read_seq": "NaN"
+            }
+        }))
+        .unwrap();
+        assert!(parse_patch_read_cursor_response("room-1", live.cursor).is_err());
+    }
+
+    #[test]
+    fn patch_response_rejects_wrong_or_empty_room_id() {
+        let wrong: ReadCursorPatchEnvelope = serde_json::from_value(serde_json::json!({
+            "ok": true,
+            "cursor": {
+                "room_id": "room-2",
+                "read_seq": "44"
+            }
+        }))
+        .unwrap();
+        assert!(parse_patch_read_cursor_response("room-1", wrong.cursor).is_err());
+
+        let empty: ReadCursorPatchEnvelope = serde_json::from_value(serde_json::json!({
+            "ok": true,
+            "cursor": {
+                "room_id": "",
+                "read_seq": "44"
+            }
+        }))
+        .unwrap();
+        assert!(parse_patch_read_cursor_response("room-1", empty.cursor).is_err());
+    }
+
+    #[test]
+    fn sse_read_cursor_decodes_canonical_wire_and_rejects_malformed_or_wrong_room_id() {
+        assert_eq!(
+            decode_room_tail_frame(
+                "room_read_cursor",
+                r#"{"room_id":"room-1","read_seq":"9007199254740993"}"#,
+                "room-1",
+            ),
+            Some(RoomTailFrame::ReadCursor(RoomReadCursorProjection {
+                read_seq: None,
+                mirrored_upstream_read_seq: Some(9_007_199_254_740_993),
+            }))
+        );
+
+        assert_eq!(
+            decode_room_tail_frame(
+                "room_read_cursor",
+                r#"{"room_id":"room-1","read_seq":null}"#,
+                "room-1",
+            ),
+            Some(RoomTailFrame::ReadCursor(RoomReadCursorProjection {
+                read_seq: None,
+                mirrored_upstream_read_seq: None,
+            }))
+        );
+
+        assert_eq!(
+            decode_room_tail_frame(
+                "room_read_cursor",
+                r#"{"room_id":"room-2","read_seq":"44"}"#,
+                "room-1",
+            ),
+            None
+        );
+        assert_eq!(
+            decode_room_tail_frame(
+                "room_read_cursor",
+                r#"{"room_id":"","read_seq":"44"}"#,
+                "room-1",
+            ),
+            None
+        );
+        assert_eq!(
+            decode_room_tail_frame(
+                "room_read_cursor",
+                r#"{"room_id":"room-1","read_seq":"oops"}"#,
+                "room-1",
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn open_hydration_preserves_existing_read_seq_until_cursor_arrives() {
+        let summaries = RwSignal::new(HashMap::from([(
+            "room-1".to_string(),
+            RoomReadSummary {
+                latest_seq: Some(3),
+                read_seq: Some(2),
+            },
+        )]));
+        let transcript = vec![message(7)];
+        let access = access_projection(RoomAccessState::Local);
+
+        update_open_summary_from_open_room(
+            &summaries,
+            Some("room-1"),
+            &transcript,
+            Some(&access),
+            None,
+        );
+
+        assert_eq!(
+            summaries.get_untracked().get("room-1"),
+            Some(&RoomReadSummary {
+                latest_seq: Some(7),
+                read_seq: Some(2),
+            })
+        );
+    }
+
+    #[test]
+    fn lagging_mirrored_sse_cursor_cannot_lower_local_confirmed_read() {
+        // Local PATCH confirms read 100.
+        let local = parse_patch_read_cursor_response(
+            "room-1",
+            RoomReadCursorBody {
+                room_id: "room-1".into(),
+                read_seq: Some("100".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            local,
+            RoomReadCursorProjection {
+                read_seq: Some(100),
+                mirrored_upstream_read_seq: None,
+            }
+        );
+        assert_eq!(current_durable_read_seq(&local), Some(100));
+
+        // A lagging mirrored SSE frame reports 90.
+        let Some(RoomTailFrame::ReadCursor(lagging)) = decode_room_tail_frame(
+            "room_read_cursor",
+            r#"{"room_id":"room-1","read_seq":"90"}"#,
+            "room-1",
+        ) else {
+            panic!("mirrored cursor frame should decode");
+        };
+        let merged = merge_read_cursor_projection(Some(&local), lagging);
+        assert_eq!(
+            merged,
+            RoomReadCursorProjection {
+                read_seq: Some(100),
+                mirrored_upstream_read_seq: Some(90),
+            }
+        );
+        assert_eq!(current_durable_read_seq(&merged), Some(100));
+
+        // The room summary keeps the confirmed read; unread stays cleared.
+        let summaries = RwSignal::new(HashMap::from([(
+            "room-1".to_string(),
+            RoomReadSummary {
+                latest_seq: Some(100),
+                read_seq: Some(100),
+            },
+        )]));
+        update_open_summary_from_open_room(
+            &summaries,
+            Some("room-1"),
+            &[message(100)],
+            Some(&access_projection(RoomAccessState::Local)),
+            Some(&merged),
+        );
+        assert_eq!(
+            summaries.get_untracked().get("room-1"),
+            Some(&RoomReadSummary {
+                latest_seq: Some(100),
+                read_seq: Some(100),
+            })
+        );
+        assert!(!room_has_durable_unread(
+            summaries.get_untracked().get("room-1")
+        ));
+
+        // A later, higher mirrored frame still corrects the durable read up.
+        let Some(RoomTailFrame::ReadCursor(ahead)) = decode_room_tail_frame(
+            "room_read_cursor",
+            r#"{"room_id":"room-1","read_seq":"110"}"#,
+            "room-1",
+        ) else {
+            panic!("mirrored cursor frame should decode");
+        };
+        let corrected = merge_read_cursor_projection(Some(&merged), ahead);
+        assert_eq!(
+            corrected,
+            RoomReadCursorProjection {
+                read_seq: Some(100),
+                mirrored_upstream_read_seq: Some(110),
+            }
+        );
+        assert_eq!(current_durable_read_seq(&corrected), Some(110));
+
+        update_open_summary_from_open_room(
+            &summaries,
+            Some("room-1"),
+            &[message(110)],
+            Some(&access_projection(RoomAccessState::Local)),
+            Some(&corrected),
+        );
+        assert_eq!(
+            summaries.get_untracked().get("room-1"),
+            Some(&RoomReadSummary {
+                latest_seq: Some(110),
+                read_seq: Some(110),
+            })
+        );
+        assert!(!room_has_durable_unread(
+            summaries.get_untracked().get("room-1")
+        ));
+    }
+
+    #[test]
+    fn read_cursor_merge_seeds_from_empty_and_never_clears_known_positions() {
+        let mirrored = RoomReadCursorProjection {
+            read_seq: None,
+            mirrored_upstream_read_seq: Some(7),
+        };
+        assert_eq!(
+            merge_read_cursor_projection(None, mirrored.clone()),
+            mirrored
+        );
+
+        // An empty (null read_seq) frame cannot erase either known position.
+        let known = RoomReadCursorProjection {
+            read_seq: Some(12),
+            mirrored_upstream_read_seq: Some(9),
+        };
+        let Some(RoomTailFrame::ReadCursor(empty)) = decode_room_tail_frame(
+            "room_read_cursor",
+            r#"{"room_id":"room-1","read_seq":null}"#,
+            "room-1",
+        ) else {
+            panic!("null cursor frame should decode");
+        };
+        assert_eq!(merge_read_cursor_projection(Some(&known), empty), known);
+    }
+
+    #[test]
+    fn applied_open_read_seq_folds_summary_and_durable_cursor_monotonically() {
+        // Absent on both sides keeps the historical zero floor.
+        assert_eq!(applied_open_read_seq(None, None), 0);
+        // Either side alone still applies.
+        assert_eq!(applied_open_read_seq(Some(5), None), 5);
+        assert_eq!(applied_open_read_seq(None, Some(9)), 9);
+        // A lagging summary can no longer mask a further durable cursor.
+        assert_eq!(applied_open_read_seq(Some(5), Some(100)), 100);
+        // A further summary still wins over a lagging durable cursor.
+        assert_eq!(applied_open_read_seq(Some(100), Some(5)), 100);
+    }
+
+    #[test]
+    fn merge_room_read_summaries_is_monotonic_and_removes_deleted_rooms() {
+        let current = HashMap::from([
+            (
+                "room-1".to_string(),
+                RoomReadSummary {
+                    latest_seq: Some(9),
+                    read_seq: Some(4),
+                },
+            ),
+            (
+                "room-2".to_string(),
+                RoomReadSummary {
+                    latest_seq: Some(8),
+                    read_seq: Some(6),
+                },
+            ),
+        ]);
+        let incoming = HashMap::from([(
+            "room-1".to_string(),
+            RoomReadSummary {
+                latest_seq: Some(5),
+                read_seq: None,
+            },
+        )]);
+        let rooms = vec![Room {
+            id: "room-1".into(),
+            name: "Room One".into(),
+            participants: Vec::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            trigger_policy: None,
+        }];
+
+        let merged = merge_room_read_summaries(&current, &rooms, &incoming);
+
+        assert_eq!(
+            merged.get("room-1"),
+            Some(&RoomReadSummary {
+                latest_seq: Some(9),
+                read_seq: Some(4),
+            })
+        );
+        assert!(!merged.contains_key("room-2"));
+    }
+
+    #[test]
+    fn silent_fetch_skips_during_interactive_loading_and_cleanup_is_ticket_safe() {
+        assert!(should_skip_rooms_fetch(RoomsFetchMode::Silent, true));
+        assert!(!should_skip_rooms_fetch(RoomsFetchMode::Silent, false));
+        assert!(!should_skip_rooms_fetch(RoomsFetchMode::Interactive, true));
+
+        let rooms_loaded = RwSignal::new(false);
+        let rooms_loading = RwSignal::new(true);
+        finish_rooms_fetch(
+            &rooms_loaded,
+            &rooms_loading,
+            RoomsFetchMode::Interactive,
+            false,
+        );
+        assert!(!rooms_loaded.get_untracked());
+        assert!(rooms_loading.get_untracked());
+
+        finish_rooms_fetch(
+            &rooms_loaded,
+            &rooms_loading,
+            RoomsFetchMode::Interactive,
+            true,
+        );
+        assert!(rooms_loaded.get_untracked());
+        assert!(!rooms_loading.get_untracked());
+    }
+
+    #[test]
+    fn unread_dot_helper_requires_latest_ahead_of_read() {
+        assert!(room_has_durable_unread(Some(&RoomReadSummary {
+            latest_seq: Some(5),
+            read_seq: Some(4),
+        })));
+        assert!(room_has_durable_unread(Some(&RoomReadSummary {
+            latest_seq: Some(5),
+            read_seq: None,
+        })));
+        assert!(!room_has_durable_unread(Some(&RoomReadSummary {
+            latest_seq: Some(5),
+            read_seq: Some(5),
+        })));
     }
 }
