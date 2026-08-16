@@ -6086,3 +6086,15 @@ both the same-global create-time pin fix and the new exact GLM 5.3 route.
 Verified full ocean-agent (207) and ocean-daemon (686) tests, all 46
 ocean-providers tests, workspace strict clippy/check, formatting, diff check,
 and docs-check before publication.
+_________________________________________________________________________________
+time:      [16:45] [16-08-26]
+agent:     [ocean] [gpt-5.6]
+worktree:  [feat/restore-latest-rooms-ui]
+type:      [recovery]
+area:      [rooms]
+
+Restored standalone ocean-os main through 342c79b after proving the monorepo's
+August 4 subtree snapshot omitted the daemon/store read-cursor contracts required
+by the recovered Surface Rooms UI. Aligned mention parsing with canonical dotted
+agent participant ids. Persistent Rooms 69/69, strict daemon Clippy, formatting,
+and docs checks pass.

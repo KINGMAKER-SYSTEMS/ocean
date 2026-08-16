@@ -3326,6 +3326,14 @@ fn is_valid_deep_link_token(value: &str, max: usize) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
+fn is_valid_room_key(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+}
+
 fn query_param<'a>(query: &'a str, name: &str) -> Option<&'a str> {
     query.split('&').find_map(|pair| {
         let (key, value) = pair.split_once('=')?;
@@ -3350,7 +3358,7 @@ pub(crate) fn parse_deep_link(raw: &str) -> Option<DeepLinkAction> {
     }
     let rest = path.strip_prefix("ocean://room/")?;
     let room_key = rest.strip_suffix("/join")?;
-    if room_key.contains('/') || !is_valid_deep_link_token(room_key, 128) {
+    if room_key.contains('/') || !is_valid_room_key(room_key) {
         return None;
     }
     let code = query_param(query, "code")?;
@@ -3985,6 +3993,13 @@ mod tests {
             Some(DeepLinkAction::RedeemRoomInvite {
                 room_key: "design-review".into(),
                 code: "abc_DEF-123".into(),
+            })
+        );
+        assert_eq!(
+            parse_deep_link("ocean://room/team.ops_review/join?code=secret"),
+            Some(DeepLinkAction::RedeemRoomInvite {
+                room_key: "team.ops_review".into(),
+                code: "secret".into(),
             })
         );
         assert_eq!(

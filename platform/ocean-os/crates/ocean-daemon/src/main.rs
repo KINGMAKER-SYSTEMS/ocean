@@ -12642,6 +12642,14 @@ mod tests {
     }
 
     #[test]
+    fn parse_mentions_accepts_canonical_dotted_agent_ids() {
+        assert_eq!(
+            parse_mentions("ask @ops.reviewer then @other_agent"),
+            vec!["ops.reviewer".to_string(), "other_agent".to_string()]
+        );
+    }
+
+    #[test]
     fn parse_mentions_handles_no_mentions_and_punctuation() {
         assert!(parse_mentions("just a plain line").is_empty());
         // trailing punctuation terminates the id.

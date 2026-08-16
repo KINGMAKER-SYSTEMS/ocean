@@ -1008,12 +1008,14 @@ impl Rooms {
     /// Stage an attacker-triggerable native invite for explicit confirmation.
     /// Opening a link never consumes a single-use invite by itself.
     pub fn stage_invite(&self, room_key: String, code: String) {
+        self.status.set(String::new());
         self.pending_invite
             .set(Some(PendingRoomInvite { room_key, code }));
     }
 
     pub fn dismiss_pending_invite(&self) {
         self.pending_invite.set(None);
+        self.status.set(String::new());
     }
 
     /// Redeem a deep-linked invite through the local daemon, then open the

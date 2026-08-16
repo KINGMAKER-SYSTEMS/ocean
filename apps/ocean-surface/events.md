@@ -2878,3 +2878,17 @@ full timestamps, roster-truth mention completion with agent metadata, and compac
 Tauri navigation. Replayed secure native share links on top rather than replacing
 that accepted baseline. Surface 855/855, Tauri 30/30, persistent Rooms 53/53,
 strict WASM/daemon/Tauri Clippy, release Trunk, and docs checks pass.
+_________________________________________________________________________________
+time:      [16:45] [16-08-26]
+agent:     [ocean] [gpt-5.6]
+worktree:  [feat/restore-latest-rooms-ui]
+type:      [fix]
+area:      [rooms-integration]
+
+Closed the independent restore review against the matching post-migration daemon:
+kept federated thread replies fail-closed until Bedrock carries parent sequences,
+reset send latches across room/thread identity changes, surfaced deep-link redeem
+failures in the confirmation rail, delegated room links to the Tauri host opener,
+accepted canonical dotted room keys, awaited clipboard completion truthfully, and
+aligned mention completion with dotted daemon participant ids. Surface 856/856,
+Tauri 30/30, strict WASM/Tauri checks, release Trunk, and extension gates pass.

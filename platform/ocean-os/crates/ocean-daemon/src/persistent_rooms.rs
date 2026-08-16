@@ -1639,7 +1639,7 @@ pub(super) async fn run_federated_trigger_dispatcher(
 }
 
 /// Extract `@id` mentions from a message body. A mention is `@` followed by a
-/// run of id-safe characters (alphanumerics, `-`, `_`). Returns ids without the
+/// run of id-safe characters (alphanumerics, `-`, `_`, `.`). Returns ids without the
 /// leading `@`, de-duplicated in first-seen order.
 pub(super) fn parse_mentions(body: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
@@ -1651,7 +1651,7 @@ pub(super) fn parse_mentions(body: &str) -> Vec<String> {
             let mut j = start;
             while j < bytes.len() {
                 let c = bytes[j];
-                if c.is_ascii_alphanumeric() || c == b'-' || c == b'_' {
+                if c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.') {
                     j += 1;
                 } else {
                     break;

@@ -326,6 +326,7 @@ pub fn body_view(body: String, members: Memo<HashSet<String>>) -> impl IntoView 
                         href=href
                         target="_blank"
                         rel="noopener noreferrer nofollow"
+                        on:click=crate::host::open_external_link_click
                     >
                         {label}
                     </a>

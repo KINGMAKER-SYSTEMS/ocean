@@ -92,6 +92,10 @@ fn access_allows_writes(access: Option<&RoomAccessProjection>) -> bool {
     )
 }
 
+fn access_allows_thread_writes(access: Option<&RoomAccessProjection>) -> bool {
+    matches!(access.map(|a| a.state), Some(RoomAccessState::Local))
+}
+
 /// Render a compact clock label from the canonical RFC3339 wire timestamp.
 /// Extracts the shared `HH:MM` prefix for `Z`, fractional-second, and offset
 /// variants without converting timezones or localizing; invalid/non-canonical
@@ -756,6 +760,7 @@ pub fn RoomsWorkspace(
     let selected_thread_root_seq = RwSignal::new(None::<u64>);
     let thread_send_in_flight = RwSignal::new(false);
     let invite_copied = RwSignal::new(false);
+    let invite_copy_error = RwSignal::new(None::<String>);
     let thread_last_sent_draft = RwSignal::new(String::new());
     let thread_last_sent_wire = RwSignal::new(String::new());
     let thread_last_sent_seq = RwSignal::new(0u64);
@@ -1148,6 +1153,32 @@ pub fn RoomsWorkspace(
     let last_sent_wire = RwSignal::new(String::new());
     let last_sent_seq = RwSignal::new(0u64);
     let send_in_flight = RwSignal::new(false);
+
+    // A completion from a prior room/thread is intentionally discarded by the
+    // Rooms generation guard. Reset the matching local latch on context changes
+    // so the newly selected conversation can never inherit a disabled composer.
+    Effect::new(move |previous: Option<(Option<String>, Option<u64>)>| {
+        let current = (rooms.open_key.get(), selected_thread_root_seq.get());
+        if let Some((previous_room, previous_root)) = previous {
+            if previous_room != current.0 {
+                send_in_flight.set(false);
+                last_sent_draft.set(String::new());
+                last_sent_wire.set(String::new());
+                last_sent_seq.set(0);
+                thread_send_in_flight.set(false);
+                thread_last_sent_draft.set(String::new());
+                thread_last_sent_wire.set(String::new());
+                thread_last_sent_seq.set(0);
+            } else if previous_root != current.1 {
+                thread_send_in_flight.set(false);
+                thread_last_sent_draft.set(String::new());
+                thread_last_sent_wire.set(String::new());
+                thread_last_sent_seq.set(0);
+            }
+        }
+        current
+    });
+
     let do_send = move || {
         let draft = composer.get_untracked();
         if !message_send_admitted(
@@ -1182,7 +1213,7 @@ pub fn RoomsWorkspace(
         if !message_send_admitted(
             thread_send_in_flight.get_untracked(),
             send_in_flight.get_untracked(),
-            access_allows_writes(rooms.access.get_untracked().as_ref()),
+            access_allows_thread_writes(rooms.access.get_untracked().as_ref()),
             &draft,
         ) {
             return;
@@ -1579,6 +1610,12 @@ pub fn RoomsWorkspace(
                                 <strong>"Join shared room?"</strong>
                                 <span>"Review and join it through this Ocean."</span>
                             </div>
+                            {move || {
+                                let status = rooms.status.get();
+                                (!status.is_empty()).then(|| view! {
+                                    <div class="rooms-workspace__status" role="status">{status}</div>
+                                })
+                            }}
                             <button
                                 class="rooms-workspace__invite-button"
                                 type="button"
@@ -1739,14 +1776,31 @@ pub fn RoomsWorkspace(
                                                     class="rooms-workspace__invite-button"
                                                     type="button"
                                                     on:click=move |_| {
+                                                        invite_copied.set(false);
+                                                        invite_copy_error.set(None);
+                                                        let text = copy_link.clone();
                                                         if let Some(window) = web_sys::window() {
-                                                            let _ = window.navigator().clipboard().write_text(&copy_link);
-                                                            invite_copied.set(true);
+                                                            let promise = window.navigator().clipboard().write_text(&text);
+                                                            wasm_bindgen_futures::spawn_local(async move {
+                                                                match wasm_bindgen_futures::JsFuture::from(promise).await {
+                                                                    Ok(_) => invite_copied.set(true),
+                                                                    Err(_) => invite_copy_error.set(Some(
+                                                                        "Copy failed—select the link manually.".into(),
+                                                                    )),
+                                                                }
+                                                            });
+                                                        } else {
+                                                            invite_copy_error.set(Some(
+                                                                "Copy failed—select the link manually.".into(),
+                                                            ));
                                                         }
                                                     }
                                                 >
                                                     {move || if invite_copied.get() { "Copied" } else { "Copy link" }}
                                                 </button>
+                                                {move || invite_copy_error.get().map(|error| view! {
+                                                    <span class="rooms-workspace__invite-label" role="alert">{error}</span>
+                                                })}
                                             </div>
                                         }.into_any()
                                     } else if let Some(error) = rooms.invite_error.get() {
@@ -2380,7 +2434,16 @@ pub fn RoomsWorkspace(
                                                 class="rooms-workspace__composer-input"
                                                 type="text"
                                                 aria-label="Thread reply"
-                                                placeholder="Reply in thread…"
+                                                placeholder=move || {
+                                                    if matches!(
+                                                        rooms.access.get().map(|access| access.state),
+                                                        Some(RoomAccessState::Live)
+                                                    ) {
+                                                        "Federated thread replies unavailable"
+                                                    } else {
+                                                        "Reply in thread…"
+                                                    }
+                                                }
                                                 node_ref=thread_input_ref
                                                 role="combobox"
                                                 aria-autocomplete="list"
@@ -2472,7 +2535,7 @@ pub fn RoomsWorkspace(
                                                     }
                                                 }
                                                 on:blur=move |_| thread_mention_ctx.set(None)
-                                                disabled=move || !access_allows_writes(rooms.access.get().as_ref())
+                                                disabled=move || !access_allows_thread_writes(rooms.access.get().as_ref())
                                             />
                                             {move || {
                                                 let items = thread_mention_items.get();
@@ -2548,7 +2611,7 @@ pub fn RoomsWorkspace(
                                                 disabled=move || {
                                                     thread_send_in_flight.get()
                                                         || thread_composer.get().trim().is_empty()
-                                                        || !access_allows_writes(rooms.access.get().as_ref())
+                                                        || !access_allows_thread_writes(rooms.access.get().as_ref())
                                                 }
                                             >
                                                 {move || if thread_send_in_flight.get() { "Sending…" } else { "Reply" }}
@@ -3387,6 +3450,16 @@ mod tests {
     #[test]
     fn access_allows_writes_live() {
         assert!(access_allows_writes(Some(&test_access(
+            RoomAccessState::Live
+        ))));
+    }
+
+    #[test]
+    fn thread_writes_remain_local_until_federation_preserves_parent_sequence() {
+        assert!(access_allows_thread_writes(Some(&test_access(
+            RoomAccessState::Local
+        ))));
+        assert!(!access_allows_thread_writes(Some(&test_access(
             RoomAccessState::Live
         ))));
     }

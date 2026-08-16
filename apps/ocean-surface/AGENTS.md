@@ -253,6 +253,12 @@ Web surface session UI:
 - The browser PWA proxy must forward `/v1/agents` as JSON and stream room SSE
   unbuffered while preserving `Last-Event-ID`; Tauri reaches the same daemon
   endpoints directly.
+- Canonical room keys use alphanumeric, `-`, `_`, and `.`; native invite
+  parsing keeps that alphabet separate from the narrower session-id and
+  invite-code alphabets.
+- One-level thread replies are writable only in Local rooms. Live federated
+  rooms may render threads, but keep the reply composer disabled until the
+  Bedrock message contract preserves `thread_parent_seq` end-to-end.
 - Agent participants are selected from daemon-owned `/v1/agents` identities
   and remain subject to daemon join validation. Free-text agent creation does
   not belong in the surface.
