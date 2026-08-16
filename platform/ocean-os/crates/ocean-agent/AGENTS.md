@@ -14,9 +14,18 @@ This crate owns Ocean's agent session/history layer and project prompt loading. 
 
 - Preserve session compatibility unless a migration is documented.
 - Session-config model pins update model/provider together under the same
-  per-session lock as turn persistence. Optional config reads must distinguish
+  per-session lock as turn persistence and increment the persisted monotonic
+  `config_revision`; explicit creation may atomically seed one already-resolved
+  model/provider pair at revision one, while legacy session files deserialize
+  that revision as zero.
+  Detail and bounded sync projections carry the same revision. Optional config reads must distinguish
   an absent session from unreadable/corrupt storage so daemon adapters map only
   genuine absence to 404.
+- Session model-pin provenance uses the existing monotonic `config_revision`:
+  a positive revision proves an explicit config mutation, while revision zero
+  (new inherited or legacy) retains the former model-difference fallback. The
+  shared `SessionModelConfig` resolver is the sole authority for config
+  projection and turn selection; global-model equality must not erase a pin.
 - Permission-mode persistence atomically writes the authoritative three-state
   file and reports write failures. Load old booleans as automatic/skip-all; the
   legacy `yolo_pref` is a best-effort downgrade mirror, while current boolean

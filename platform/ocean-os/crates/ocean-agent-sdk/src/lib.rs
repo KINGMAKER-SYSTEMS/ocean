@@ -441,6 +441,10 @@ pub struct AgentSessionCreateRequest {
     /// the daemon falls back to the project's own `workspace_root`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<Uuid>,
+    /// Optional catalog model to pin atomically with session creation. This
+    /// avoids a create-then-PATCH acknowledgement gap before the first turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     /// Identifies the client surface so the agent can tailor responses on the
     /// first turn. Known values include "tui", "surface-web",
     /// "surface-tauri", "surface-extension", "cli", and "leo-voice".
@@ -572,6 +576,32 @@ pub enum AgentTurnEvent {
         effective: String,
         reason: String,
     },
+    /// A provider call failed transiently and is being retried after `delay_ms`.
+    ///
+    /// Emitted *before* the backoff sleep so a surface can show "reconnecting
+    /// (2/8) — connection failed" while the wait is happening. Retries were
+    /// previously log-only: on a degraded link a turn could spend minutes
+    /// silently reconnecting behind an unchanging "working" indicator, which
+    /// reads as a hung agent rather than a bad network.
+    ///
+    /// `reason` is a short classified phrase from a fixed vocabulary
+    /// ("connection failed", "rate limited", "server error", "transient error",
+    /// "stream dropped") — never raw provider text. Clients should treat this as
+    /// transient status, not transcript content: a turn that recovers emits no
+    /// further notice, so surfaces should clear it on the next delta or on
+    /// `TurnFinished`.
+    ProviderRetrying {
+        session_id: AgentSessionId,
+        turn_id: AgentTurnId,
+        /// The attempt that just failed (1-based).
+        attempt: u32,
+        max_attempts: u32,
+        delay_ms: u64,
+        reason: String,
+        /// `"request"` (the HTTP call is being re-issued) or `"round"` (a
+        /// mid-stream drop is being replayed).
+        scope: String,
+    },
     /// Incremental assistant text delta.  Clients append to their output buffer.
     AssistantTextDelta {
         session_id: AgentSessionId,
@@ -651,6 +681,9 @@ pub enum AgentTurnEvent {
         session_id: AgentSessionId,
         model: String,
         provider: String,
+        /// Monotonic persisted config authority; legacy events deserialize at 0.
+        #[serde(default)]
+        config_revision: u64,
     },
     /// The agent wants the client to mount or update an interactive component.
     /// Clients maintain a component registry per session and render these
@@ -757,6 +790,7 @@ impl AgentTurnEvent {
         match self {
             AgentTurnEvent::TurnStarted { session_id, .. }
             | AgentTurnEvent::ModelRerouted { session_id, .. }
+            | AgentTurnEvent::ProviderRetrying { session_id, .. }
             | AgentTurnEvent::AssistantTextDelta { session_id, .. }
             | AgentTurnEvent::ThinkingDelta { session_id, .. }
             | AgentTurnEvent::ToolCallStarted { session_id, .. }
@@ -1084,6 +1118,25 @@ mod tests {
     }
 
     #[test]
+    fn legacy_session_config_event_defaults_revision_to_zero() {
+        let session_id = AgentSessionId::new_v4();
+        let event: AgentTurnEvent = serde_json::from_value(serde_json::json!({
+            "type": "session_config_changed",
+            "session_id": session_id,
+            "model": "legacy-model",
+            "provider": "legacy-provider"
+        }))
+        .expect("legacy event remains readable");
+        assert!(matches!(
+            event,
+            AgentTurnEvent::SessionConfigChanged {
+                config_revision: 0,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn session_id_accessor_extracts_session_for_filtering() {
         // The daemon's per-session SSE filter relies on this accessor. A
         // session-bearing event returns its id; a council-wide Extension (no
@@ -1167,6 +1220,33 @@ mod tests {
         assert!(LonghouseEvent::from_turn_event(&not_lh).is_none());
     }
 
+    /// Wire-compat pin: this is a byte-for-byte frame captured off
+    /// `GET /v1/agent/events` from a live daemon whose provider endpoint was
+    /// unreachable. Clients (TUI, ACP, surface) decode exactly this, so the
+    /// field names are load-bearing — renaming one silently blinds every surface
+    /// to reconnects again, which is the whole failure this event exists to fix.
+    #[test]
+    fn captured_provider_retrying_frame_decodes() {
+        let captured = r#"{"type":"provider_retrying","session_id":"4d37366c-dd8e-44d7-81d9-672410d5d57c","turn_id":"68e68440-3bc4-482a-8aff-d16ce287594e","attempt":1,"max_attempts":4,"delay_ms":400,"reason":"connection failed","scope":"request"}"#;
+
+        let event: AgentTurnEvent = serde_json::from_str(captured).expect("captured frame decodes");
+
+        let AgentTurnEvent::ProviderRetrying {
+            attempt,
+            max_attempts,
+            delay_ms,
+            reason,
+            scope,
+            ..
+        } = event
+        else {
+            panic!("expected ProviderRetrying");
+        };
+        assert_eq!((attempt, max_attempts, delay_ms), (1, 4, 400));
+        assert_eq!(reason, "connection failed");
+        assert_eq!(scope, "request");
+    }
+
     #[test]
     fn agent_turn_event_deserializes_round_trip() {
         let event = AgentTurnEvent::ToolCallFinished {
@@ -1206,6 +1286,15 @@ mod tests {
                 turn_id: tid,
                 session_id: sid,
                 model: Some("deepseek-v4-pro".into()),
+            },
+            AgentTurnEvent::ProviderRetrying {
+                session_id: sid,
+                turn_id: tid,
+                attempt: 2,
+                max_attempts: 8,
+                delay_ms: 800,
+                reason: "connection failed".into(),
+                scope: "request".into(),
             },
             AgentTurnEvent::AssistantTextDelta {
                 session_id: sid,
@@ -1311,6 +1400,7 @@ mod tests {
                 session_id: sid,
                 model: "deepseek-v4-pro".into(),
                 provider: "deepseek".into(),
+                config_revision: 7,
             },
             // Session-scoped Extension: behaves like any session-bearing event.
             AgentTurnEvent::Extension {
@@ -1327,6 +1417,7 @@ mod tests {
             match ev {
                 AgentTurnEvent::TurnStarted { .. }
                 | AgentTurnEvent::ModelRerouted { .. }
+                | AgentTurnEvent::ProviderRetrying { .. }
                 | AgentTurnEvent::AssistantTextDelta { .. }
                 | AgentTurnEvent::ThinkingDelta { .. }
                 | AgentTurnEvent::ToolCallStarted { .. }

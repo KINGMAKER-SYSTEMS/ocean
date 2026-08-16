@@ -196,10 +196,10 @@ use model_roles::resolve_effective_model_id;
 use model_roles::{load_model_roles, resolve_advisor_alias, resolve_turn_model};
 use persistent_rooms::{
     resolve_named_agent, room_create, room_create_invite, room_db_path, room_events, room_get,
-    room_join, room_leave, room_post_message, room_redeem_invite, room_register_agents,
-    room_retry_outbox, room_snapshot, room_transcript, rooms_list_persistent,
-    run_federated_trigger_dispatcher, with_rooms, with_rooms_handle, RoomAccessWakeBus,
-    RoomStoreHandle, RoomWakeBus,
+    room_get_read_cursor, room_join, room_leave, room_patch_read_cursor, room_post_message,
+    room_redeem_invite, room_register_agents, room_retry_outbox, room_snapshot, room_transcript,
+    rooms_list_persistent, run_federated_trigger_dispatcher, with_rooms, with_rooms_handle,
+    RoomAccessWakeBus, RoomReadCursorWakeBus, RoomStoreHandle, RoomWakeBus,
 };
 use project_registry::{
     canonical_git_common_dir, discover_project_worktrees, project_create, project_delete,
@@ -293,10 +293,10 @@ struct AppState {
     /// payload is only `(room, seq)`; SQLite remains authoritative for replay,
     /// live delivery, lag recovery, ordering, and deduplication.
     room_wakes: RoomWakeBus,
-    /// Bounded room-scoped wake hints for access projection changes (S2-P1).
-    /// Separate from `room_wakes` so a heavy transcript tail does not
-    /// back-pressure access-projection subscribers.
+    /// Bounded room-scoped wake hints for access-projection changes.
     room_access_wakes: RoomAccessWakeBus,
+    /// Bounded room-scoped wake hints for read-cursor changes.
+    room_read_cursor_wakes: RoomReadCursorWakeBus,
     /// AppState-owned cloneable outbound Bedrock supervisor. P2-C reuses its
     /// idempotent start/wake/stop seam after redeem and local outbox enqueue.
     room_federation: FederationSupervisor,
@@ -1047,6 +1047,7 @@ async fn main() -> anyhow::Result<()> {
     let rooms = Arc::new(Mutex::new(room_store));
     let room_wakes = RoomWakeBus::default();
     let room_access_wakes = RoomAccessWakeBus::default();
+    let room_read_cursor_wakes = RoomReadCursorWakeBus::default();
     let shutdown = CancellationToken::new();
 
     // Keep the local proxy credential fresh without ever distributing the
@@ -1076,6 +1077,7 @@ async fn main() -> anyhow::Result<()> {
         rooms.clone(),
         room_wakes.clone(),
         room_access_wakes.clone(),
+        room_read_cursor_wakes.clone(),
         federated_trigger_tx,
         shutdown.clone(),
     );
@@ -1093,6 +1095,7 @@ async fn main() -> anyhow::Result<()> {
         rooms,
         room_wakes,
         room_access_wakes,
+        room_read_cursor_wakes,
         room_federation,
         titles: Arc::new(Mutex::new(title_registry)),
         revoker: Arc::new(ocean_longhouse::Revoker::new()),
@@ -1530,8 +1533,14 @@ fn banner_routes() -> &'static [&'static str] {
         "POST /v1/rooms/persistent/invites/redeem",
         "POST /v1/rooms/persistent/{key}/members/agents",
         "GET /v1/rooms/persistent/{key}/transcript",
+        "POST /v1/rooms/persistent/{key}/artifacts",
+        "GET /v1/rooms/persistent/{key}/artifacts",
+        "GET /v1/rooms/persistent/{key}/artifacts/{artifact_id}",
+        "POST /v1/rooms/persistent/{key}/artifacts/{artifact_id}/amend",
         "GET /v1/rooms/persistent/{key}/snapshot",
         "GET /v1/rooms/persistent/{key}/events",
+        "GET /v1/rooms/persistent/{key}/read-cursor",
+        "PATCH /v1/rooms/persistent/{key}/read-cursor",
         "POST /v1/rooms/persistent/{key}/outbox/retry",
         "GET /v1/sessions",
         "GET /v1/sessions/{id}",
@@ -2780,10 +2789,26 @@ fn room_routes() -> Router<AppState> {
             "/v1/rooms/persistent/{key}/transcript",
             get(room_transcript),
         )
+        .route(
+            "/v1/rooms/persistent/{key}/artifacts",
+            post(persistent_rooms::room_create_artifact).get(persistent_rooms::room_list_artifacts),
+        )
+        .route(
+            "/v1/rooms/persistent/{key}/artifacts/{artifact_id}",
+            get(persistent_rooms::room_get_artifact),
+        )
+        .route(
+            "/v1/rooms/persistent/{key}/artifacts/{artifact_id}/amend",
+            post(persistent_rooms::room_amend_artifact),
+        )
         .route("/v1/rooms/persistent/{key}/snapshot", get(room_snapshot))
         // Merged SSE: room_message + room_access frames, with durable replay
         // and access-projection tail (S2-P1).
         .route("/v1/rooms/persistent/{key}/events", get(room_events))
+        .route(
+            "/v1/rooms/persistent/{key}/read-cursor",
+            get(room_get_read_cursor).patch(room_patch_read_cursor),
+        )
         .route(
             "/v1/rooms/persistent/{key}/outbox/retry",
             post(room_retry_outbox),
@@ -5272,6 +5297,37 @@ impl LifecycleTerminalContext {
     }
 }
 
+/// Reconcile the agent-rail terminal frame with the request registry's
+/// authoritative final state. A cancellation can race the runtime result: the
+/// runtime may return `ok: false` (or even finish successfully after the token
+/// trips) while `update_request_finished` correctly settles the request as
+/// `Cancelled`. Surfaces must receive that same cancellation outcome rather
+/// than a stale res-derived `Failed`/`Completed` frame.
+fn align_agent_terminal_frame_with_request_state(
+    final_state: RequestState,
+    mut frame: AgentTurnEvent,
+) -> AgentTurnEvent {
+    if let AgentTurnEvent::TurnFinished { status, error, .. } = &mut frame {
+        match final_state {
+            RequestState::Completed => {
+                *status = AgentTurnStatus::Completed;
+                *error = None;
+            }
+            RequestState::Cancelled => {
+                *status = AgentTurnStatus::Cancelled;
+                *error = None;
+            }
+            RequestState::Errored => {
+                *status = AgentTurnStatus::Failed;
+            }
+            _ => {}
+        }
+    } else {
+        debug_assert!(false, "agent_finished must carry TurnFinished");
+    }
+    frame
+}
+
 /// Close out a finished prompt/turn on the request registry and announce the
 /// outcome on the legacy event bus. `origin` is `Some(EVENT_ORIGIN_AGENT)`
 /// when the caller is the agent-turn path (OCEAN-305): there the full stdout
@@ -5394,12 +5450,17 @@ async fn record_prompt_result_with_lifecycle(
 
             // Agent-bus terminal frame (agent-turn path only; legacy `/v1/prompt`
             // and `/v1/requests` turns have no agent rail and pass `None`). The
-            // frame's status/telemetry are prebuilt by the caller from `res`, so a
-            // cancel-race still ships the res-derived frame exactly as before —
-            // what changed is that it now fires only on a fresh terminal
-            // transition, never a second time behind the orphan guard.
+            // registry transition is authoritative when cancellation races the
+            // runtime result, so align the prebuilt res-derived frame before
+            // emitting it. Telemetry stays intact; only status/error control-flow
+            // truth is reconciled.
             if let Some((session_id, frame)) = agent_finished {
-                emit_agent(&state.events, &state.agent_events, session_id, frame);
+                emit_agent(
+                    &state.events,
+                    &state.agent_events,
+                    session_id,
+                    align_agent_terminal_frame_with_request_state(final_state, frame),
+                );
             }
         },
     )
@@ -5437,13 +5498,15 @@ const ORPHANED_TURN_ERROR: &str = "turn task panicked before completing";
 /// one request state machine, never a second invented here. Its return value is
 /// also the double-emit / cancellation guard: on a real orphaned turn the request
 /// is still `Running` (the task died before `record_prompt_result`), so the call
-/// performs the Running→Errored transition and returns `Some(Errored)`, and only
-/// then do we emit `AgentTurnEvent::TurnFinished{Failed}`. If a cancel already
-/// moved the request to `Cancelling`/`Cancelled`, the primitive returns
-/// `Some(Cancelled)` and we emit nothing — the cancel path owns that terminal
-/// frame. This restores all three correctness points: `GET /v1/agent/sessions`
-/// stops reporting the turn active, an events subscriber receives the terminal
-/// `TurnFinished{Failed}`, and the registry entry becomes GC-eligible.
+/// performs the Running→Errored transition and emits
+/// `AgentTurnEvent::TurnFinished{Failed}`. If a cancel already moved the request
+/// to `Cancelling`/`Cancelled`, the same exact finalizer settles it as Cancelled
+/// and emits `TurnFinished{Cancelled}`. The cancel route itself has no agent-rail
+/// terminal frame, so the orphan guard must close that rail rather than leaving
+/// clients busy forever. This restores all three correctness points:
+/// `GET /v1/agent/sessions` stops reporting the turn active, an events subscriber
+/// receives the authoritative terminal status, and the registry entry becomes
+/// GC-eligible.
 async fn terminate_orphaned_turn_with_lifecycle(
     requests: &RequestRegistry,
     events: &EventBus,
@@ -5461,11 +5524,10 @@ async fn terminate_orphaned_turn_with_lifecycle(
     //
     // `None` session_id preserves whatever `register_running_request` recorded.
     // The closure fires only when THIS call performs the transition (TASK-56's
-    // return-value gate). It then checks for the fresh `Errored` outcome: if a
-    // cancel already settled the entry (`Cancelled`), the cancel path owns the
-    // terminal frame and we emit nothing; a late-but-normal completion that won
-    // the race leaves the entry already terminal, so the closure never runs at
-    // all. Either way the turn gets exactly one terminal frame.
+    // return-value gate). It emits the matching Failed or Cancelled frame; a
+    // late-but-normal completion that won the race leaves the entry already
+    // terminal, so the closure never runs at all. Either way the turn gets
+    // exactly one agent-rail terminal frame.
     update_request_finished(
         requests,
         request_id,
@@ -5490,18 +5552,25 @@ async fn terminate_orphaned_turn_with_lifecycle(
                     output_tokens: None,
                     cache_read_tokens: None,
                     stamp: lifecycle_stamp(),
-                    error: Some(ORPHANED_TURN_ERROR.to_owned()),
+                    error: matches!(final_state, RequestState::Errored)
+                        .then(|| ORPHANED_TURN_ERROR.to_owned()),
                 });
             }
-            if !matches!(final_state, RequestState::Errored) {
-                return;
-            }
+            let (status, error) = match final_state {
+                RequestState::Errored => (
+                    AgentTurnStatus::Failed,
+                    Some(ORPHANED_TURN_ERROR.to_string()),
+                ),
+                RequestState::Cancelled => (AgentTurnStatus::Cancelled, None),
+                _ => return,
+            };
 
             tracing::warn!(
                 %request_id,
                 %session_id,
                 %turn_id,
-                "turn task unwound before recording its result; forcing terminal TurnFinished(Failed)"
+                ?status,
+                "turn task unwound before recording its result; forcing terminal TurnFinished"
             );
 
             emit_agent(
@@ -5511,8 +5580,8 @@ async fn terminate_orphaned_turn_with_lifecycle(
                 AgentTurnEvent::TurnFinished {
                     session_id,
                     turn_id,
-                    status: AgentTurnStatus::Failed,
-                    error: Some(ORPHANED_TURN_ERROR.to_string()),
+                    status,
+                    error,
                     // A panicked turn produced no trustworthy telemetry; omit it
                     // rather than report zeros as if the turn measured them.
                     wall_ms: None,
@@ -6010,20 +6079,19 @@ async fn agent_turn(
     // selection and truthful `TurnStarted` announcement happen after the named
     // agent has resolved, when every precedence input is available.
     let (_provider, global_model) = state.runtime.current_model();
-    // Session-config RPC v1: a resumed session whose persisted model differs
-    // from the global selection pins that model as the turn's default. A pin
-    // equal to the global model is treated as unpinned so pre-RPC sessions
-    // (which all recorded the global model at creation) keep following the
-    // global selection exactly as before.
+    // Session-config RPC v1: a positive config revision proves an explicit pin,
+    // so a pin remains authoritative even when it equals the global model.
+    // Revision-zero records preserve the prior model-difference fallback.
     let session_model: Option<String> = if is_new_session {
         None
     } else {
         state
             .runtime
-            .session_detail(core_sid(session_id))
+            .session_model_config_optional(core_sid(session_id))
             .ok()
-            .map(|detail| detail.model)
-            .filter(|m| !m.trim().is_empty() && *m != global_model)
+            .flatten()
+            .filter(|config| config.is_session_pinned(&global_model))
+            .map(|config| config.model)
     };
 
     // Approval policy is daemon-owned and captured at turn start. The default
@@ -6357,6 +6425,27 @@ async fn agent_turn(
                         requested,
                         effective,
                         reason,
+                    });
+                }
+                // Same honesty rule as the reroute above: a turn that is quietly
+                // reconnecting must say so, or every surface shows a bare
+                // "working" that is indistinguishable from a hang.
+                AgentEvent::ProviderRetrying {
+                    attempt,
+                    max_attempts,
+                    delay_ms,
+                    reason,
+                    scope,
+                    ..
+                } => {
+                    bridge_bus.emit(AgentTurnEvent::ProviderRetrying {
+                        session_id: bridge_session_id,
+                        turn_id: bridge_turn_id,
+                        attempt,
+                        max_attempts,
+                        delay_ms,
+                        reason,
+                        scope: scope.as_str().to_string(),
                     });
                 }
                 AgentEvent::ThinkingDelta { delta, .. } => {
@@ -6832,6 +6921,20 @@ async fn agent_turn(
             lifecycle_terminal,
         )
         .await;
+
+        // The terminal SSE frame carries this text once, but subscribers can
+        // disconnect and the durable session transcript intentionally excludes
+        // provider failures. Retain the sanitized failure in daemon logs instead
+        // of reducing the only postmortem evidence to `ok=false`.
+        if !res.ok {
+            tracing::error!(
+                turn_id = %turn_id,
+                request_id = %request_id,
+                session_id = %session_id,
+                error = %res.stderr,
+                "agent turn failed"
+            );
+        }
 
         tracing::info!(
             turn_id = %turn_id,
@@ -7509,6 +7612,7 @@ async fn agent_sessions_create(
     let AgentSessionCreateRequest {
         workspace_root,
         project_id,
+        model,
         client_type,
     } = req;
 
@@ -7548,7 +7652,31 @@ async fn agent_sessions_create(
         }
     };
 
-    match state.runtime.create_session(&cwd, client_type) {
+    let initial_model = match model {
+        Some(requested) => {
+            let requested = requested.trim();
+            let Some(known) = ocean_agent::known_models()
+                .into_iter()
+                .find(|known| known.id == requested)
+            else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(AgentSessionCreateResponse {
+                        session_id: AgentSessionId::new_v4(),
+                        cwd: String::new(),
+                        client_type: None,
+                    }),
+                );
+            };
+            Some((known.id, known.provider))
+        }
+        None => None,
+    };
+
+    match state
+        .runtime
+        .create_session_with_model(&cwd, client_type, initial_model)
+    {
         Ok((core_id, bound_cwd, stored_client_type)) => {
             let session_id = sdk_sid(core_id);
             let lifecycle_scope = state.extension_lifecycle.source_scope(
@@ -7695,16 +7823,15 @@ async fn agent_session(
 /// forward-compat — read-only in v1). `model_source`
 /// says whether a turn without an explicit `model_id`/`role` would run on the
 /// session's pinned model (`"session"`) or the daemon's global selection
-/// (`"global"`).
+/// (`"global"`). `config_revision` is the persisted monotonic model-authority
+/// fence shared with scoped config events and synchronized snapshots.
 fn session_config_json(
     state: &AppState,
     session_id: AgentSessionId,
-    model: &str,
-    provider: &str,
-    client_type: Option<&str>,
+    config: &ocean_agent::SessionModelConfig,
 ) -> serde_json::Value {
     let (_global_provider, global_model) = state.runtime.current_model();
-    let model_source = if !model.trim().is_empty() && model != global_model {
+    let model_source = if config.is_session_pinned(&global_model) {
         "session"
     } else {
         "global"
@@ -7712,9 +7839,10 @@ fn session_config_json(
     let config_dir = ocean_agent::config_dir_from_env();
     json!({
         "session_id": session_id,
-        "model": model,
-        "provider": provider,
-        "client_type": client_type,
+        "model": &config.model,
+        "provider": &config.provider,
+        "config_revision": config.config_revision,
+        "client_type": config.client_type.as_deref(),
         "permission_mode": {
             "persisted": ocean_agent::load_permission_mode(&config_dir),
             "effective": effective_permission_mode(),
@@ -7730,16 +7858,13 @@ async fn agent_session_config_get(
     State(state): State<AppState>,
     Path(session_id): Path<AgentSessionId>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    match state.runtime.session_detail_optional(core_sid(session_id)) {
-        Ok(Some(detail)) => (
+    match state
+        .runtime
+        .session_model_config_optional(core_sid(session_id))
+    {
+        Ok(Some(config)) => (
             StatusCode::OK,
-            Json(session_config_json(
-                &state,
-                session_id,
-                &detail.model,
-                &detail.provider,
-                detail.client_type.as_deref(),
-            )),
+            Json(session_config_json(&state, session_id, &config)),
         ),
         Ok(None) => (
             StatusCode::NOT_FOUND,
@@ -7814,13 +7939,23 @@ async fn agent_session_config_patch(
             );
         }
     };
-    emit_session_changed(&state.agent_events, session_id);
+    // Model changes have their own scoped `SessionConfigChanged` event below.
+    // Do not also emit the generic transcript-invalidation signal: model
+    // metadata does not mutate transcript history, and forcing `/sync` here can
+    // race a surface's post-save queued-prompt release.
     match state.runtime.set_session_model_with_lease(
         &session_lease,
         known.id.clone(),
         known.provider.clone(),
     ) {
         Ok(Some(detail)) => {
+            let config_revision = detail.config_revision;
+            let config = ocean_agent::SessionModelConfig {
+                model: detail.model,
+                provider: detail.provider,
+                config_revision,
+                client_type: detail.client_type,
+            };
             emit_agent(
                 &state.events,
                 &state.agent_events,
@@ -7829,17 +7964,12 @@ async fn agent_session_config_patch(
                     session_id,
                     model: known.id.clone(),
                     provider: known.provider.clone(),
+                    config_revision,
                 },
             );
             (
                 StatusCode::OK,
-                Json(session_config_json(
-                    &state,
-                    session_id,
-                    &detail.model,
-                    &detail.provider,
-                    detail.client_type.as_deref(),
-                )),
+                Json(session_config_json(&state, session_id, &config)),
             )
         }
         Ok(None) => (
@@ -9100,6 +9230,7 @@ mod tests {
             // Relayed onto the SSE wire (see the bridge match arms).
             AgentEvent::TextDelta { .. }
             | AgentEvent::ModelRerouted { .. }
+            | AgentEvent::ProviderRetrying { .. }
             | AgentEvent::ThinkingDelta { .. }
             | AgentEvent::ToolExecutionStart { .. }
             | AgentEvent::ToolExecutionEnd { .. }
@@ -10662,10 +10793,10 @@ mod tests {
 
     /// The terminal transition reuses `update_request_finished`, so it inherits
     /// the cancel branch: if a cancel already moved the request to `Cancelling`,
-    /// the orphan terminator settles it as `Cancelled` and emits NOTHING — the
-    /// cancel path owns that turn's terminal frame, never a spurious `Failed`.
+    /// the orphan terminator settles it as `Cancelled` and closes the agent rail
+    /// with exactly one matching terminal frame, never a spurious `Failed`.
     #[tokio::test]
-    async fn terminate_orphaned_turn_yields_to_the_cancel_path() {
+    async fn terminate_orphaned_turn_closes_the_cancelled_agent_rail() {
         let request_id = RequestId::new_v4();
         let session_id = AgentSessionId::new_v4();
         let turn_id = AgentTurnId::new_v4();
@@ -10687,9 +10818,30 @@ mod tests {
         )
         .await;
 
+        let terminal = rx
+            .try_recv()
+            .expect("cancelled orphan must close agent rail");
+        assert!(matches!(
+            terminal.event,
+            AgentTurnEvent::TurnFinished {
+                status: AgentTurnStatus::Cancelled,
+                error: None,
+                ..
+            }
+        ));
+
+        terminate_orphaned_turn(
+            &requests,
+            &events,
+            &agent_events,
+            request_id,
+            session_id,
+            turn_id,
+        )
+        .await;
         assert!(
             matches!(rx.try_recv(), Err(broadcast::error::TryRecvError::Empty)),
-            "a cancelled turn must not get a spurious Failed TurnFinished"
+            "cancelled orphan must emit exactly one TurnFinished"
         );
         assert_eq!(
             requests.read().await.get(&request_id).unwrap().status.state,
@@ -10713,6 +10865,47 @@ mod tests {
             tokens_per_second: None,
             context_usage: None,
         }
+    }
+
+    #[test]
+    fn cancelled_request_state_overrides_res_derived_failed_terminal_frame() {
+        let session_id = AgentSessionId::new_v4();
+        let turn_id = AgentTurnId::new_v4();
+        let frame = AgentTurnEvent::TurnFinished {
+            session_id,
+            turn_id,
+            status: AgentTurnStatus::Failed,
+            error: Some("request was cancelled".into()),
+            wall_ms: Some(17),
+            output_tokens: Some(3),
+            input_tokens: Some(5),
+            cache_read_tokens: Some(2),
+            tokens_per_second: Some(1.5),
+            context_usage: None,
+        };
+
+        let aligned = align_agent_terminal_frame_with_request_state(RequestState::Cancelled, frame);
+        let AgentTurnEvent::TurnFinished {
+            status,
+            error,
+            wall_ms,
+            output_tokens,
+            input_tokens,
+            cache_read_tokens,
+            tokens_per_second,
+            ..
+        } = aligned
+        else {
+            panic!("aligned terminal frame must remain TurnFinished");
+        };
+
+        assert_eq!(status, AgentTurnStatus::Cancelled);
+        assert_eq!(error, None, "operator cancellation is not a turn failure");
+        assert_eq!(wall_ms, Some(17));
+        assert_eq!(output_tokens, Some(3));
+        assert_eq!(input_tokens, Some(5));
+        assert_eq!(cache_read_tokens, Some(2));
+        assert_eq!(tokens_per_second, Some(1.5));
     }
 
     /// Count the `TurnFinished` frames for `turn_id` currently in the agent-bus
@@ -11119,8 +11312,8 @@ mod tests {
         let requests = Arc::new(RwLock::new(HashMap::from([(request_id, control)])));
 
         // The cancel-settle branch IS a fresh terminal transition, so the hook
-        // fires — with `Cancelled`, so a caller (the normal path) can emit its
-        // cancel mirror while the orphan path emits nothing on that outcome.
+        // fires with `Cancelled`, so whichever exact terminal owner settles
+        // the request can close its event rail under the same atomic lock.
         let hook_state = std::cell::Cell::new(None);
         let state = update_request_finished(
             &requests,
@@ -11149,6 +11342,45 @@ mod tests {
         assert!(control.status.updated_at.unwrap() > previous_update);
         assert!(control.status.finished_at.unwrap() > previous_update);
         assert!(control.status.updated_at <= control.status.finished_at);
+        assert!(control.handle.is_none());
+    }
+
+    #[tokio::test]
+    async fn finish_already_cancelled_is_idempotent_and_does_not_refire_hook() {
+        let request_id = RequestId::new_v4();
+        let original_session = SessionId::new_v4();
+        let updated_at = Utc::now() - chrono::Duration::minutes(2);
+        let finished_at = Utc::now() - chrono::Duration::minutes(1);
+        let mut control = status(request_id, RequestState::Cancelled);
+        control.status.session_id = Some(original_session);
+        control.status.message = Some("original cancellation".into());
+        control.status.updated_at = Some(updated_at);
+        control.status.finished_at = Some(finished_at);
+        control.handle = Some(tokio::spawn(async {}));
+        let requests = Arc::new(RwLock::new(HashMap::from([(request_id, control)])));
+        let hook_fired = std::cell::Cell::new(false);
+
+        let state = update_request_finished(
+            &requests,
+            request_id,
+            Some(SessionId::new_v4()),
+            RequestState::Errored,
+            "late failure".into(),
+            |_| hook_fired.set(true),
+        )
+        .await;
+
+        assert_eq!(state, Some(RequestState::Cancelled));
+        assert!(!hook_fired.get(), "terminal cancellation finalizes once");
+        let requests = requests.read().await;
+        let control = requests.get(&request_id).unwrap();
+        assert_eq!(control.status.session_id, Some(original_session));
+        assert_eq!(
+            control.status.message.as_deref(),
+            Some("original cancellation")
+        );
+        assert_eq!(control.status.updated_at, Some(updated_at));
+        assert_eq!(control.status.finished_at, Some(finished_at));
         assert!(control.handle.is_none());
     }
 
@@ -11564,6 +11796,7 @@ mod tests {
             updated_ms: 5_000,
             model: "test-model".into(),
             provider: "test".into(),
+            config_revision: 0,
             turns: 2,
             title: "fix the thing".into(),
             state,
@@ -12616,9 +12849,19 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         let list = persistent_room_http_json(&raw);
-        assert_json_object_keys(&list, &["ok", "rooms", "next_cursor", "has_more"]);
+        assert_json_object_keys(
+            &list,
+            &["ok", "rooms", "read_states", "next_cursor", "has_more"],
+        );
         assert_eq!(list["ok"], true);
         assert_eq!(list["rooms"].as_array().unwrap().len(), 1);
+        assert_eq!(list["next_cursor"], serde_json::Value::Null);
+        assert_eq!(
+            list["read_states"],
+            json!([{
+                "room_id": "lifecycle-room"
+            }])
+        );
         assert_eq!(list["rooms"][0]["id"], "lifecycle-room");
         assert_eq!(list["rooms"][0]["name"], "  Verbatim Room Name  ");
         assert!(list["rooms"][0].get("workspace_root").is_none());
@@ -12637,7 +12880,16 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         let detail = persistent_room_http_json(&raw);
-        assert_json_object_keys(&detail, &["access", "ok", "room", "transcript"]);
+        // DELIBERATE envelope change: `agent_owners` was added so a room can
+        // report which WORKER owns which agent participant — the local half of
+        // "a worker persists alongside their agents". It is additive and always
+        // present (empty for every pre-existing room), and this frozen key-set
+        // is updated on purpose, not worked around. The gate did its job: it
+        // caught the wire change on the first run.
+        assert_json_object_keys(
+            &detail,
+            &["access", "agent_owners", "ok", "room", "transcript"],
+        );
         assert_eq!(detail["ok"], true);
         assert_eq!(detail["room"]["id"], "lifecycle-room");
         assert_eq!(detail["room"]["name"], "  Verbatim Room Name  ");
@@ -13718,11 +13970,13 @@ mod tests {
         let rooms = Arc::new(Mutex::new(store));
         let room_wakes = RoomWakeBus::default();
         let room_access_wakes = RoomAccessWakeBus::default();
+        let room_read_cursor_wakes = RoomReadCursorWakeBus::default();
         let shutdown = CancellationToken::new();
         let room_federation = FederationSupervisor::test_disabled(
             rooms.clone(),
             room_wakes.clone(),
             room_access_wakes.clone(),
+            room_read_cursor_wakes.clone(),
             shutdown.clone(),
         );
         AppState {
@@ -13738,6 +13992,7 @@ mod tests {
             rooms,
             room_wakes,
             room_access_wakes,
+            room_read_cursor_wakes: RoomReadCursorWakeBus::default(),
             room_federation,
             titles: Arc::new(Mutex::new(
                 ocean_longhouse::SqliteTitleRegistry::open_in_memory().expect("in-mem titles"),
@@ -14030,11 +14285,16 @@ mod tests {
 
         let state = capped_turn_state(1);
         let workspace = tempfile::tempdir().expect("workspace");
+        let known = ocean_agent::known_models()
+            .into_iter()
+            .next()
+            .expect("catalog model");
         let (status, created) = agent_sessions_create(
             State(state.clone()),
             Json(AgentSessionCreateRequest {
                 workspace_root: workspace.path().to_string_lossy().into_owned(),
                 project_id: None,
+                model: Some(known.id.clone()),
                 client_type: Some("cli".to_owned()),
             }),
         )
@@ -14048,6 +14308,28 @@ mod tests {
             Some(created.session_id.inner())
         );
         assert_eq!(retained[0].scope.turn_id, None);
+        let detail = state
+            .runtime
+            .session_detail(core_sid(created.session_id))
+            .expect("created session");
+        assert_eq!(detail.model, known.id);
+        assert_eq!(detail.provider, known.provider);
+        assert_eq!(detail.config_revision, 1);
+
+        let before = state.runtime.list_sessions(None).unwrap().len();
+        let (status, _) = agent_sessions_create(
+            State(state.clone()),
+            Json(AgentSessionCreateRequest {
+                workspace_root: workspace.path().to_string_lossy().into_owned(),
+                project_id: None,
+                model: Some("not-a-catalog-model".into()),
+                client_type: Some("cli".to_owned()),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(state.runtime.list_sessions(None).unwrap().len(), before);
+        assert_eq!(state.extension_lifecycle.attach().retained.len(), 1);
     }
 
     #[tokio::test]
@@ -14097,6 +14379,7 @@ mod tests {
             Json(AgentSessionCreateRequest {
                 workspace_root: project_a.workspace_root.clone(),
                 project_id: Some(project_b.id),
+                model: None,
                 client_type: Some("test".into()),
             }),
         )
@@ -15445,11 +15728,13 @@ mod tests {
         let rooms = Arc::new(Mutex::new(store));
         let room_wakes = RoomWakeBus::default();
         let room_access_wakes = RoomAccessWakeBus::default();
+        let room_read_cursor_wakes = RoomReadCursorWakeBus::default();
         let shutdown = CancellationToken::new();
         let room_federation = FederationSupervisor::test_disabled(
             rooms.clone(),
             room_wakes.clone(),
             room_access_wakes.clone(),
+            room_read_cursor_wakes.clone(),
             shutdown.clone(),
         );
         AppState {
@@ -15465,6 +15750,7 @@ mod tests {
             rooms,
             room_wakes,
             room_access_wakes,
+            room_read_cursor_wakes: RoomReadCursorWakeBus::default(),
             room_federation,
             titles: Arc::new(Mutex::new(
                 ocean_longhouse::SqliteTitleRegistry::open_in_memory().expect("in-mem titles"),
@@ -15548,6 +15834,7 @@ mod tests {
         assert_eq!(initial["session_id"], json!(sdk_session_id));
         assert_eq!(initial["model"], "fake-ok");
         assert_eq!(initial["provider"], "fake");
+        assert_eq!(initial["config_revision"], 0);
         assert_eq!(initial["client_type"], "surface-web");
         assert_eq!(initial["model_source"], "global");
         assert_eq!(initial["permission_mode"]["env_override"], true);
@@ -15577,17 +15864,20 @@ mod tests {
         let patched = session_config_response_json(&raw);
         assert_eq!(patched["model"], known.id);
         assert_eq!(patched["provider"], known.provider);
+        assert_eq!(patched["config_revision"], 1);
         assert_eq!(patched["model_source"], "session");
 
         let persisted = state.runtime.session_detail(session_id).unwrap();
         assert_eq!(persisted.model, known.id);
         assert_eq!(persisted.provider, known.provider);
+        assert_eq!(persisted.config_revision, 1);
 
         let (status, raw) = session_config_http_request(app, Method::GET, uri, None).await;
         assert_eq!(status, StatusCode::OK);
         let reread = session_config_response_json(&raw);
         assert_eq!(reread["model"], known.id);
         assert_eq!(reread["provider"], known.provider);
+        assert_eq!(reread["config_revision"], 1);
 
         let history = state.agent_events.history.lock().unwrap();
         let changes: Vec<_> = history
@@ -15597,15 +15887,74 @@ mod tests {
                     session_id,
                     model,
                     provider,
-                } => Some((*session_id, model.as_str(), provider.as_str())),
+                    config_revision,
+                } => Some((
+                    *session_id,
+                    model.as_str(),
+                    provider.as_str(),
+                    *config_revision,
+                )),
                 _ => None,
             })
             .collect();
         assert_eq!(
             changes,
-            vec![(sdk_session_id, known.id.as_str(), known.provider.as_str())],
+            vec![(
+                sdk_session_id,
+                known.id.as_str(),
+                known.provider.as_str(),
+                1
+            )],
             "PATCH must emit exactly one change scoped to the patched session"
         );
+        assert!(
+            history.iter().all(|envelope| !matches!(
+                &envelope.event,
+                AgentTurnEvent::Extension { extension, .. }
+                    if extension == "ocean.session_changed"
+            )),
+            "model metadata must not emit a transcript invalidation"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_config_reports_explicit_pin_when_model_equals_global() {
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _env = TestEnvRestore::capture(&[
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+            "OCEAN_LONGHOUSE_PREPARE",
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let state = fake_convene_state(&tmp);
+        let (session_id, _, _) = state
+            .runtime
+            .create_session(tmp.path().to_str().unwrap(), Some("stitchpad".into()))
+            .unwrap();
+        let sdk_session_id = sdk_sid(session_id);
+        let uri = format!("/v1/agent/sessions/{sdk_session_id}/config");
+        let app = app_router(cors_layer(Vec::new())).with_state(state.clone());
+
+        let (status, raw) =
+            session_config_http_request(app.clone(), Method::GET, uri.clone(), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(session_config_response_json(&raw)["model_source"], "global");
+
+        state
+            .runtime
+            .set_session_model(session_id, "fake-ok".into(), "fake".into())
+            .await
+            .unwrap()
+            .expect("session exists");
+
+        let (status, raw) = session_config_http_request(app, Method::GET, uri, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let pinned = session_config_response_json(&raw);
+        assert_eq!(pinned["model"], "fake-ok");
+        assert_eq!(pinned["provider"], "fake");
+        assert_eq!(pinned["config_revision"], 1);
+        assert_eq!(pinned["model_source"], "session");
     }
 
     #[tokio::test]
@@ -15828,11 +16177,13 @@ mod tests {
         let rooms = Arc::new(Mutex::new(store));
         let room_wakes = RoomWakeBus::default();
         let room_access_wakes = RoomAccessWakeBus::default();
+        let room_read_cursor_wakes = RoomReadCursorWakeBus::default();
         let shutdown = CancellationToken::new();
         let room_federation = FederationSupervisor::test_disabled(
             rooms.clone(),
             room_wakes.clone(),
             room_access_wakes.clone(),
+            room_read_cursor_wakes.clone(),
             shutdown.clone(),
         );
         let state = AppState {
@@ -15848,6 +16199,7 @@ mod tests {
             rooms,
             room_wakes,
             room_access_wakes,
+            room_read_cursor_wakes: RoomReadCursorWakeBus::default(),
             room_federation,
             titles: Arc::new(Mutex::new(
                 ocean_longhouse::SqliteTitleRegistry::open_in_memory().expect("in-mem titles"),
@@ -17603,11 +17955,13 @@ mod tests {
         let rooms = Arc::new(Mutex::new(store));
         let room_wakes = RoomWakeBus::default();
         let room_access_wakes = RoomAccessWakeBus::default();
+        let room_read_cursor_wakes = RoomReadCursorWakeBus::default();
         let shutdown = CancellationToken::new();
         let room_federation = FederationSupervisor::test_disabled(
             rooms.clone(),
             room_wakes.clone(),
             room_access_wakes.clone(),
+            room_read_cursor_wakes.clone(),
             shutdown.clone(),
         );
         let titles = ocean_longhouse::SqliteTitleRegistry::open(dir.join("titles.db"))
@@ -17625,6 +17979,7 @@ mod tests {
             rooms,
             room_wakes,
             room_access_wakes,
+            room_read_cursor_wakes: RoomReadCursorWakeBus::default(),
             room_federation,
             titles: Arc::new(Mutex::new(titles)),
             revoker: Arc::new(ocean_longhouse::Revoker::new()),
@@ -24584,6 +24939,10 @@ mod tests {
         }
         for retained in [
             "GET /v1/rooms/persistent",
+            "POST /v1/rooms/persistent/{key}/artifacts",
+            "GET /v1/rooms/persistent/{key}/artifacts",
+            "GET /v1/rooms/persistent/{key}/artifacts/{artifact_id}",
+            "POST /v1/rooms/persistent/{key}/artifacts/{artifact_id}/amend",
             "GET /v1/rooms/persistent/{key}/snapshot",
             "POST /v1/rooms/{room_id}/livekit-token",
         ] {
@@ -24745,9 +25104,16 @@ mod tests {
             registered, banner,
             "live Router::route registrations and GET / discovery must match"
         );
+        // 95 -> 98: room artifacts added POST+GET /artifacts and
+        // POST /artifacts/{artifact_id}/amend.
+        // 99 -> 101: durable read-cursor projection added GET+PATCH
+        // /v1/rooms/persistent/{key}/read-cursor. Moved DELIBERATELY. The
+        // parity assertion above is the real gate — it proves every
+        // advertised route is actually registered — and this count is the
+        // tripwire that forces a human to look when the surface grows.
         assert_eq!(
             banner.len(),
-            95,
+            101,
             "route baseline changed; review the manifest"
         );
 
