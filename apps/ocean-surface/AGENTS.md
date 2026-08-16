@@ -227,6 +227,10 @@ Web surface session UI:
   LiveKit.
 
 ## Rooms Contract
+- The operator-authorized post-G3 product-depth program is governed by
+  `docs/specs/2026-08-13-ocean-rooms-post-g3-product-depth.md`. A share link is
+  only the admission rail; do not describe Rooms as complete before its
+  two-human/two-machine/two-sovereign-agent acceptance gate passes.
 
 - Every successful `GET /v1/rooms/persistent/{key}` carries a required
   `RoomAccessProjection`, including explicit `Local` for G1 rooms. Surface
@@ -252,7 +256,10 @@ Web surface session UI:
   are informational; only failed items expose the daemon retry action, and the
   returned access projection applies immediately behind the room-generation
   guard before any duplicate SSE projection arrives.
-- Invite and redeem UI remains absent until daemon-owned outbound routes exist.
+- Invite creation and redemption use daemon-owned outbound routes. Native
+  `ocean://room/{key}/join?code={code}` links are strict attacker-triggerable
+  input: stage them for explicit confirmation, send codes only in POST bodies,
+  and never log or project a code outside the explicit invite result.
 - Rooms G1 is daemon-native text collaboration. LiveKit controls stay outside
   the room join, leave, roster, and transcript lifecycle until explicitly
   reintroduced behind a reviewed platform contract.

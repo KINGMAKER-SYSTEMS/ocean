@@ -755,6 +755,7 @@ pub fn RoomsWorkspace(
     let thread_composer = RwSignal::new(String::new());
     let selected_thread_root_seq = RwSignal::new(None::<u64>);
     let thread_send_in_flight = RwSignal::new(false);
+    let invite_copied = RwSignal::new(false);
     let thread_last_sent_draft = RwSignal::new(String::new());
     let thread_last_sent_wire = RwSignal::new(String::new());
     let thread_last_sent_seq = RwSignal::new(0u64);
@@ -1571,6 +1572,34 @@ pub fn RoomsWorkspace(
 
             // ═══ CENTER RAIL — header + transcript + composer ═══════════
             <div class="rooms-workspace__center">
+                {move || rooms.pending_invite.get().map(|pending| {
+                    view! {
+                        <div class="rooms-workspace__pending-invite" role="dialog" aria-label="Room invitation">
+                            <div class="rooms-workspace__pending-invite-copy">
+                                <strong>"Join shared room?"</strong>
+                                <span>"Review and join it through this Ocean."</span>
+                            </div>
+                            <button
+                                class="rooms-workspace__invite-button"
+                                type="button"
+                                on:click=move |_| {
+                                    if let Some(invite) = rooms.pending_invite.get_untracked() {
+                                        rooms.redeem_invite(invite.room_key, invite.code);
+                                    }
+                                }
+                            >
+                                "Join room"
+                            </button>
+                            <button
+                                class="rooms-workspace__pending-invite-dismiss"
+                                type="button"
+                                on:click=move |_| rooms.dismiss_pending_invite()
+                            >
+                                "Not now"
+                            </button>
+                        </div>
+                    }
+                })}
                 {move || {
                     let open = rooms.open_room.get();
                     match open {
@@ -1620,6 +1649,18 @@ pub fn RoomsWorkspace(
                                                 </button>
                                             }.into_any()
                                         }}
+                                        <button
+                                            class="rooms-workspace__share-btn"
+                                            type="button"
+                                            disabled=move || rooms.invite_loading.get()
+                                            on:click=move |_| rooms.create_invite()
+                                        >
+                                            {move || if rooms.invite_loading.get() {
+                                                "Creating link…"
+                                            } else {
+                                                "Share"
+                                            }}
+                                        </button>
                                         <button
                                             class="rooms-workspace__center-back"
                                             type="button"
@@ -1673,6 +1714,49 @@ pub fn RoomsWorkspace(
                                             }.into_any()
                                         }
                                         _ => ().into_any(),
+                                    }
+                                }}
+
+                                // Explicit invite result. Codes appear only
+                                // after an owner asks to share and are copied
+                                // as an ocean:// link for the installed app.
+                                {move || {
+                                    if let Some(invite) = rooms.invite.get() {
+                                        let link = format!(
+                                            "ocean://room/{}/join?code={}",
+                                            invite.room_key, invite.code
+                                        );
+                                        let copy_link = link.clone();
+                                        view! {
+                                            <div class="rooms-workspace__invite" role="status">
+                                                <div class="rooms-workspace__invite-copy">
+                                                    <span class="rooms-workspace__invite-label">
+                                                        {format!("Invite expires {}", invite.expires_at)}
+                                                    </span>
+                                                    <code class="rooms-workspace__invite-link">{link}</code>
+                                                </div>
+                                                <button
+                                                    class="rooms-workspace__invite-button"
+                                                    type="button"
+                                                    on:click=move |_| {
+                                                        if let Some(window) = web_sys::window() {
+                                                            let _ = window.navigator().clipboard().write_text(&copy_link);
+                                                            invite_copied.set(true);
+                                                        }
+                                                    }
+                                                >
+                                                    {move || if invite_copied.get() { "Copied" } else { "Copy link" }}
+                                                </button>
+                                            </div>
+                                        }.into_any()
+                                    } else if let Some(error) = rooms.invite_error.get() {
+                                        view! {
+                                            <div class="rooms-workspace__invite rooms-workspace__invite--error" role="alert">
+                                                {error}
+                                            </div>
+                                        }.into_any()
+                                    } else {
+                                        ().into_any()
                                     }
                                 }}
 

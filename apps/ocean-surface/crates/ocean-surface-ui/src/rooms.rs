@@ -258,6 +258,22 @@ pub enum RoomAccessState {
     Recovering,
     Revoked,
 }
+/// Owner-minted, single-use room invitation. The code is intentionally exposed
+/// only by the explicit invite response so the surface can build a share link.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct RoomInvite {
+    pub code: String,
+    pub expires_at: String,
+    pub room_key: String,
+    pub room_name: String,
+}
+/// Unredeemed native invite held only in local UI memory until the operator
+/// explicitly joins or dismisses it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingRoomInvite {
+    pub room_key: String,
+    pub code: String,
+}
 
 /// How a room's agents are auto-woken. Mirrors `ocean_core::RoomTriggerPolicy`.
 /// All flags default off; the daemon reads this on `room_create` and evaluates
@@ -382,6 +398,11 @@ struct TranscriptResponse {
     ok: bool,
     #[serde(default)]
     transcript: Vec<RoomMessage>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RedeemInviteResponse {
+    room_key: String,
 }
 
 // ---- Request bodies (match the daemon's serde::Deserialize structs) ----------
@@ -562,6 +583,14 @@ pub struct Rooms {
     /// Surfaces snapshot the op_id before dispatching and gate only on the
     /// outcome carrying a matching id — concurrent submits never cross-resolve.
     pub create_op: RwSignal<(u64, Option<CreateOutcome>)>,
+    /// Most recently minted invite for the currently open room.
+    pub invite: RwSignal<Option<RoomInvite>>,
+    /// Invite creation lifecycle for the room header affordance.
+    pub invite_loading: RwSignal<bool>,
+    /// Sanitized invite creation failure; never contains the invite code.
+    pub invite_error: RwSignal<Option<String>>,
+    /// Native invite awaiting explicit operator confirmation.
+    pub pending_invite: RwSignal<Option<PendingRoomInvite>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -610,6 +639,10 @@ impl Rooms {
             read_cursor_in_flight: RwSignal::new(None),
             last_sent_read_cursor: RwSignal::new(None),
             create_op: RwSignal::new((0, None)),
+            invite: RwSignal::new(None),
+            invite_loading: RwSignal::new(false),
+            invite_error: RwSignal::new(None),
+            pending_invite: RwSignal::new(None),
         }
     }
 
@@ -661,6 +694,9 @@ impl Rooms {
         self.read_cursor_in_flight.set(None);
         self.last_sent_read_cursor.set(None);
         self.tail_state.set(TailState::Replaying);
+        self.invite.set(None);
+        self.invite_loading.set(false);
+        self.invite_error.set(None);
     }
 
     /// Whether the current identity is joined according to the room's explicit
@@ -919,6 +955,117 @@ impl Rooms {
             }
             None => CreateResolution::Pending,
         }
+    }
+
+    /// Mint a scoped, expiring, single-use invite for the open room. The
+    /// daemon owns Bedrock registration and credential custody; this client
+    /// receives only the intentionally shareable invite response.
+    pub fn create_invite(&self) {
+        if self.invite_loading.get_untracked() {
+            return;
+        }
+        let Some(key) = self.open_key.get_untracked() else {
+            return;
+        };
+        let base = self.base();
+        let me = *self;
+        let generation_id = self.generation.get_untracked();
+        self.invite.set(None);
+        self.invite_error.set(None);
+        self.invite_loading.set(true);
+        spawn_local(async move {
+            let url = format!("{base}/v1/rooms/persistent/{}/invites", encode(&key));
+            let result = match Request::post(&url)
+                .header("content-type", "application/json")
+                .body("{}")
+                .expect("static invite body is valid")
+                .send()
+                .await
+            {
+                Ok(response) if response.ok() => response
+                    .json::<RoomInvite>()
+                    .await
+                    .map_err(|_| "The invitation response was invalid.".to_string()),
+                Ok(response) if response.status() == 503 => {
+                    Err("Room sharing is not configured on this Ocean.".to_string())
+                }
+                Ok(_) => Err("Ocean could not create an invitation.".to_string()),
+                Err(_) => Err("Ocean could not reach the room service.".to_string()),
+            };
+            if !me.room_is_current(generation_id, &key) {
+                return;
+            }
+            me.invite_loading.set(false);
+            match result {
+                Ok(invite) if invite.room_key == key => me.invite.set(Some(invite)),
+                Ok(_) => me
+                    .invite_error
+                    .set(Some("The invitation did not match this room.".into())),
+                Err(error) => me.invite_error.set(Some(error)),
+            }
+        });
+    }
+    /// Stage an attacker-triggerable native invite for explicit confirmation.
+    /// Opening a link never consumes a single-use invite by itself.
+    pub fn stage_invite(&self, room_key: String, code: String) {
+        self.pending_invite
+            .set(Some(PendingRoomInvite { room_key, code }));
+    }
+
+    pub fn dismiss_pending_invite(&self) {
+        self.pending_invite.set(None);
+    }
+
+    /// Redeem a deep-linked invite through the local daemon, then open the
+    /// daemon-authoritative room returned by redemption. The room key embedded
+    /// in the attacker-triggerable link is routing decoration, not authority.
+    /// The invite code stays in the POST body and never enters status text.
+    pub fn redeem_invite(&self, _link_room_key: String, code: String) {
+        let base = self.base();
+        let me = *self;
+        self.status.set("Joining shared room…".into());
+        spawn_local(async move {
+            let body = serde_json::json!({"code": code});
+            let result = Request::post(&format!("{base}/v1/rooms/persistent/invites/redeem"))
+                .header("content-type", "application/json")
+                .json(&body)
+                .expect("invite request serializes")
+                .send()
+                .await;
+            match result {
+                Ok(response) if response.ok() => {
+                    match response.json::<RedeemInviteResponse>().await {
+                        Ok(redeemed) => {
+                            me.pending_invite.set(None);
+                            me.status.set("Shared room joined.".into());
+                            me.fetch_rooms();
+                            me.open_room(redeemed.room_key);
+                        }
+                        Err(_) => me
+                            .status
+                            .set("The shared room response was invalid.".into()),
+                    }
+                }
+                Ok(response) if response.status() == 403 => {
+                    me.status
+                        .set("This invitation is invalid or has expired.".into());
+                }
+                Ok(response) if response.status() == 409 => {
+                    me.status
+                        .set("This room is already linked differently.".into());
+                }
+                Ok(response) if response.status() == 503 => {
+                    me.status
+                        .set("Room sharing is not configured on this Ocean.".into());
+                }
+                Ok(_) => me
+                    .status
+                    .set("Ocean could not join the shared room.".into()),
+                Err(_) => me
+                    .status
+                    .set("Ocean could not reach the room service.".into()),
+            }
+        });
     }
 
     /// Open a room: load its record + full transcript, bump the generation, and
@@ -2112,6 +2259,18 @@ pub(crate) fn livekit_token_path_for_room(key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redeem_response_uses_daemon_authoritative_room_key() {
+        let response: RedeemInviteResponse = serde_json::from_value(serde_json::json!({
+            "room_key": "canonical-room",
+            "state": "connecting",
+            "members": [],
+            "outbox": []
+        }))
+        .unwrap();
+        assert_eq!(response.room_key, "canonical-room");
+    }
 
     #[test]
     fn no_agents_hint_waits_for_agents_fetch() {

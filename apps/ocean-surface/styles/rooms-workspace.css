@@ -345,6 +345,99 @@
   gap: 6px;
 }
 
+.rooms-workspace__share-btn,
+.rooms-workspace__invite-button {
+  appearance: none;
+  min-height: var(--ctl-h-sm);
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--fg-2);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.rooms-workspace__share-btn:hover:not(:disabled),
+.rooms-workspace__invite-button:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  color: var(--fg);
+}
+
+.rooms-workspace__share-btn:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.rooms-workspace__invite,
+.rooms-workspace__pending-invite {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
+}
+
+.rooms-workspace__pending-invite {
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg-elevated));
+}
+
+.rooms-workspace__pending-invite-copy {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.rooms-workspace__pending-invite-copy span {
+  color: var(--fg-3);
+  font-size: 12px;
+}
+
+.rooms-workspace__pending-invite-dismiss {
+  appearance: none;
+  padding: 6px 8px;
+  border: 0;
+  background: transparent;
+  color: var(--fg-3);
+  font: inherit;
+  cursor: pointer;
+}
+
+.rooms-workspace__pending-invite-dismiss:hover {
+  color: var(--fg);
+}
+
+.rooms-workspace__invite--error {
+  color: var(--danger);
+}
+
+.rooms-workspace__invite-copy {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.rooms-workspace__invite-label {
+  color: var(--fg-3);
+  font-size: 11px;
+}
+
+.rooms-workspace__invite-link {
+  overflow: hidden;
+  color: var(--fg-2);
+  font-family: var(--mono);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .rooms-workspace__center-back {
   appearance: none;
   display: inline-flex;

@@ -1083,10 +1083,15 @@ pub(super) async fn room_redeem_invite(
         return invalid_request_response();
     }
     match state.room_federation.redeem_invite(&body.code).await {
-        Ok(access) => (
-            StatusCode::OK,
-            Json(serde_json::to_value(access).expect("RoomAccessProjection serializes")),
-        ),
+        Ok(redeemed) => {
+            let mut value =
+                serde_json::to_value(redeemed.access).expect("RoomAccessProjection serializes");
+            value
+                .as_object_mut()
+                .expect("RoomAccessProjection is an object")
+                .insert("room_key".into(), json!(redeemed.room_key.as_str()));
+            (StatusCode::OK, Json(value))
+        }
         Err(error) => intent_error_response(error),
     }
 }
@@ -2779,6 +2784,7 @@ mod tests {
         assert!(redeem.get("ok").is_none());
         assert!(redeem.get("access").is_none());
         assert!(redeem.get("state").is_some());
+        assert_eq!(redeem["room_key"], "route-redeem");
         let redeem_json = redeem.to_string();
         assert!(!redeem_json.contains("route-code"));
         assert!(!redeem_json.contains("token"));

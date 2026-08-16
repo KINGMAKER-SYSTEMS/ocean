@@ -162,6 +162,12 @@ struct AgentMembersEnvelope {
     members: Vec<ControlEnvelopeMember>,
 }
 
+#[derive(Debug, PartialEq)]
+pub(super) struct RedeemedInvite {
+    pub(super) room_key: RoomKey,
+    pub(super) access: RoomAccessProjection,
+}
+
 #[derive(Serialize)]
 struct AgentRegistrationWire<'a> {
     registration_key: &'a str,
@@ -999,10 +1005,7 @@ impl FederationSupervisor {
         })
     }
 
-    pub(super) async fn redeem_invite(
-        &self,
-        code: &str,
-    ) -> Result<RoomAccessProjection, IntentError> {
+    pub(super) async fn redeem_invite(&self, code: &str) -> Result<RedeemedInvite, IntentError> {
         let code = code.trim();
         if code.is_empty() {
             return Err(IntentError::Invalid);
@@ -1027,7 +1030,7 @@ impl FederationSupervisor {
     async fn recover_pending(
         &self,
         pending: PendingRedemption,
-    ) -> Result<RoomAccessProjection, IntentError> {
+    ) -> Result<RedeemedInvite, IntentError> {
         let client = self.inner.client.clone().ok_or(IntentError::Unavailable)?;
         let url = client
             .endpoint(&["api", "v1", "invites", "redeem"])
@@ -1146,8 +1149,12 @@ impl FederationSupervisor {
         })?;
         publish_room_access_wake_on(&self.inner.access_wakes, &key);
         self.start_room(key.clone()).await;
-        with_rooms_handle(&self.inner.rooms, |store| store.room_access(&key))
-            .map_err(|_| IntentError::Store)
+        let access = with_rooms_handle(&self.inner.rooms, |store| store.room_access(&key))
+            .map_err(|_| IntentError::Store)?;
+        Ok(RedeemedInvite {
+            room_key: key,
+            access,
+        })
     }
 
     fn remove_pending(&self, pending: &PendingRedemption) -> Result<(), IntentError> {
@@ -4136,10 +4143,11 @@ mod tests {
         let (base, server) = start_control_bedrock(fake.clone()).await;
         let supervisor = test_control_supervisor(&base, rooms.clone());
 
-        supervisor
+        let redeemed = supervisor
             .redeem_invite("  share-code  ")
             .await
             .expect("restart-safe redeem succeeds");
+        assert_eq!(redeemed.room_key, key);
         let calls = fake.calls.lock().await.clone();
         let redeem = calls.iter().find(|call| call.path == "redeem").unwrap();
         let redeem_body: Value = serde_json::from_slice(&redeem.body).unwrap();

@@ -2832,3 +2832,34 @@ stylesheet inventories. Verified 755 UI tests plus integration suites, strict
 WASM Clippy, formatting, diff/script hygiene, and a Trunk release bundle; an
 independent exact-commit review returned CLEAR.
 _________________________________________________________________________________
+_________________________________________________________________________________
+time:      [active] [08-13-26]
+agent:     [ocean] [gpt-5.6]
+worktree:  [feat/rooms-share-links]
+type:      [feature]
+area:      [rooms]
+
+Started the operator-authorized Ocean Rooms daily-driver rebuild. R1 adds the
+first installed-client admission rail over existing daemon federation authority:
+room owners can mint and copy an expiring ocean:// invite, native links are
+strictly parsed without percent-decoding untrusted structure, recipients review
+an explicit pending-invite prompt before a POST-body-only redemption, and the
+joined room opens through the existing daemon snapshot/SSE path. Invite codes
+remain absent from logs and status text. Added the ordered R1-R7 product program
+covering conversation parity, durable attention, attachments, sovereign-agent
+depth, administration, and Pasture-grade presence with a two-human/two-machine/
+two-agent acceptance gate. Focused native UI suite passes 767 tests.
+_________________________________________________________________________________
+time:      [23:25] [13-08-26]
+agent:     [ocean] [gpt-5.6]
+worktree:  [feat/rooms-share-links]
+type:      [workflow]
+area:      [rooms]
+
+Reconciled the active product-depth program with the landed Rooms chronology:
+TASK-9–12/G1, Gate 2 federation, TASK-49's three-rail workspace, and G3 integrity
+remain the accepted baseline. Renamed the successor plan accordingly and marked
+the July implementation plan as landed historical baseline rather than active.
+Hardened R1 cold launch with a bounded Tauri deep-link FIFO/readiness handshake;
+redemption now opens the daemon-authoritative response room rather than trusting
+the editable link path. Tauri 30/30 and Surface 767/767 tests pass.

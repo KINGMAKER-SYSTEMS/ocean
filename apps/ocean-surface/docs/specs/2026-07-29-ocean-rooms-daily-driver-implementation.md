@@ -1,7 +1,7 @@
 # Ocean Rooms — Daily-Driver Implementation Plan
 
 **Branch:** `feat/rooms-slack-workspace` (ocean-surface worktree `rooms-workspace`)
-**Status:** draft → executing
+**Status:** Landed baseline; retained as the TASK-9–12/G1 implementation record. Active successor: `2026-08-13-ocean-rooms-post-g3-product-depth.md`.
 **Cap:** 30 minutes to produce this document; per-slice checkpoints at 30-minute cadence.
 
 ## Goal

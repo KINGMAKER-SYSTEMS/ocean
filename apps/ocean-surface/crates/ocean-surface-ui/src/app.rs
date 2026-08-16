@@ -2072,17 +2072,10 @@ pub fn App() -> impl IntoView {
         });
     });
 
-    // Deep links (ocean://...): the Tauri shell brings the window forward and
-    // emits `deep-link` with the raw URL when the OS asks Ocean to open one.
-    // Parse it into an action — v1 understands only `ocean://session/<id>`,
-    // which reuses the exact path a SessionsPanel row click takes
-    // (`Daemon::switch_session`): clear state, set the id, hydrate the
-    // persisted transcript, reconnect the SSE tail. Title is fetched from the
-    // GET /v1/sessions/<id> snapshot inside switch_session, so an empty title
-    // here is overwritten once that returns. Unknown/unparseable URLs are
-    // logged and dropped. No-op off the Tauri shell; the effect reads nothing
-    // reactive, so it registers the listener once at mount (mirrors
-    // on_menu_command above).
+    // Deep links (ocean://...): session links switch the selected session;
+    // room invites redeem through the local daemon and open Rooms. Invite
+    // codes are attacker-triggerable bearer material, so the parser validates
+    // a narrow shape and the handler sends the code only in a POST body.
     let daemon_for_deeplink = daemon.clone();
     Effect::new(move |_| {
         let daemon = daemon_for_deeplink.clone();
@@ -2090,7 +2083,12 @@ pub fn App() -> impl IntoView {
             Some(DeepLinkAction::SelectSession(id)) => {
                 daemon.switch_session(id, String::new());
             }
-            None => log::info!("ignoring unparseable ocean:// deep link: {raw}"),
+            Some(DeepLinkAction::RedeemRoomInvite { room_key, code }) => {
+                show_sessions.set(false);
+                show_rooms.set(true);
+                rooms.stage_invite(room_key, code);
+            }
+            None => log::info!("ignoring unparseable ocean:// deep link"),
         });
     });
 
@@ -3312,71 +3310,57 @@ fn fmt_tokens(n: u64) -> String {
 // ── deep links (ocean://) ───────────────────────────────────────────────
 
 /// What a parsed `ocean://` deep link asks the surface to do.
-///
-/// The Tauri shell forwards each opened URL (host.rs `on_deep_link`); the
-/// surface decides what it means. v1 supports only session selection.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum DeepLinkAction {
     /// `ocean://session/<id>` — switch to the session with this id.
     SelectSession(String),
+    /// `ocean://room/<key>/join?code=<invite>` — redeem then open a room.
+    RedeemRoomInvite { room_key: String, code: String },
 }
 
-/// Parse an `ocean://` deep-link URL into a [`DeepLinkAction`].
-///
-/// The single supported shape is `ocean://session/<id>`, mapping to
-/// [`DeepLinkAction::SelectSession`]. The host must be exactly `session` and
-/// the path exactly one non-empty segment (the session id); a trailing query
-/// (`?…`) or fragment ("#…") is allowed and ignored. Anything else returns
-/// `None` so the caller logs and drops it — an unknown scheme/host/shape is
-/// not an error, just not something v1 acts on.
-///
-/// Pure on purpose: no WASM, fully unit-testable on the native target.
-/// Accept only the shape a daemon-minted session id actually takes: ASCII
-/// alphanumerics plus `-` and `_` (covers both UUIDs and slug ids), bounded in
-/// length. Deliberately strict — see the call site in [`parse_deep_link`] for
-/// why an untrusted id is rejected rather than sanitized.
-fn is_valid_session_id(id: &str) -> bool {
-    // A uuid is 36 chars; allow generous headroom for slug ids without
-    // admitting an unbounded string from an untrusted source.
-    const MAX: usize = 128;
-    !id.is_empty()
-        && id.len() <= MAX
-        && id
+fn is_valid_deep_link_token(value: &str, max: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= max
+        && value
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
+fn query_param<'a>(query: &'a str, name: &str) -> Option<&'a str> {
+    query.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        (key == name).then_some(value)
+    })
+}
+
+/// Parse only the two reviewed native-link shapes. Values are rejected rather
+/// than decoded or sanitized: daemon session ids, canonical room keys, and
+/// URL-safe invite codes all have narrow ASCII alphabets, and accepting percent
+/// encodings here would let untrusted structure reach daemon URL construction.
 pub(crate) fn parse_deep_link(raw: &str) -> Option<DeepLinkAction> {
-    // Drop any query ("?…") / fragment ("#…") so `ocean://session/abc?ref=x`
-    // resolves to the same action as the bare URL.
-    let path = raw.split(['?', '#']).next().unwrap_or("");
-    let rest = path.strip_prefix("ocean://session/")?;
-    // The id is everything after the prefix. Reject an empty id and a
-    // multi-segment path (`ocean://session/a/b`) — a session id is atomic.
-    if rest.is_empty() || rest.contains('/') {
+    let without_fragment = raw.split('#').next().unwrap_or("");
+    let (path, query) = without_fragment
+        .split_once('?')
+        .unwrap_or((without_fragment, ""));
+    if let Some(id) = path.strip_prefix("ocean://session/") {
+        if !id.contains('/') && is_valid_deep_link_token(id, 128) {
+            return Some(DeepLinkAction::SelectSession(id.to_string()));
+        }
         return None;
     }
-    // TASK-80: charset-validate the id before it becomes an action.
-    //
-    // Deep links are ATTACKER-TRIGGERABLE by construction: any web page can
-    // navigate to `ocean://…`, and macOS scheme prompts are per-browser and
-    // commonly suppressed after the first accept. So this string arrives from
-    // an untrusted source and then drives a real state change — foregrounding
-    // the app and switching the operator's active session, which clears state
-    // and reconnects the SSE tail.
-    //
-    // A session id is a daemon-minted opaque token (uuid or slug), so the
-    // legitimate charset is narrow. Anything outside it is either a mistake or
-    // an attempt to smuggle structure — percent-encodings (`%2f`), dot
-    // segments, control characters, whitespace — into a value that is later
-    // interpolated into a daemon URL. TASK-77 percent-encodes at those
-    // format sites; rejecting here as well means a malformed id never becomes
-    // an action in the first place, rather than being safely encoded and then
-    // failing downstream as a confusing 404.
-    if !is_valid_session_id(rest) {
+    let rest = path.strip_prefix("ocean://room/")?;
+    let room_key = rest.strip_suffix("/join")?;
+    if room_key.contains('/') || !is_valid_deep_link_token(room_key, 128) {
         return None;
     }
-    Some(DeepLinkAction::SelectSession(rest.to_string()))
+    let code = query_param(query, "code")?;
+    if !is_valid_deep_link_token(code, 512) {
+        return None;
+    }
+    Some(DeepLinkAction::RedeemRoomInvite {
+        room_key: room_key.to_string(),
+        code: code.to_string(),
+    })
 }
 
 #[cfg(test)]
@@ -3992,6 +3976,26 @@ mod tests {
             parse_deep_link("ocean://session/abc#frag"),
             Some(DeepLinkAction::SelectSession("abc".into()))
         );
+    }
+
+    #[test]
+    fn deep_link_parses_room_invite_without_decoding_structure() {
+        assert_eq!(
+            parse_deep_link("ocean://room/design-review/join?code=abc_DEF-123"),
+            Some(DeepLinkAction::RedeemRoomInvite {
+                room_key: "design-review".into(),
+                code: "abc_DEF-123".into(),
+            })
+        );
+        assert_eq!(
+            parse_deep_link("ocean://room/design-review/join?code=%2Fsecret"),
+            None
+        );
+        assert_eq!(
+            parse_deep_link("ocean://room/design/review/join?code=secret"),
+            None
+        );
+        assert_eq!(parse_deep_link("ocean://room/design-review/join"), None);
     }
 
     /// TASK-80: a deep link is attacker-triggerable — any web page can

@@ -5,6 +5,11 @@ One room = one named space with a participant roster, an append-only transcript,
 and durable state owned by the daemon. The web and desktop surfaces render the
 same room data through the same API contract.
 
+The active ordered rebuild and acceptance gates are defined in
+`specs/2026-08-13-ocean-rooms-post-g3-product-depth.md`. This document describes
+the enduring product contract; it does not imply that every capability is
+already delivered.
+
 **Reference only, never dependencies:** Buzz's VISION_SOVEREIGN + VISION_AGENT
 docs, Stitchpad's daemon-side room loop, Slack/Discord interaction patterns.
 
@@ -41,8 +46,11 @@ The daemon adds the participant to the roster and broadcasts a `room_access`
 event to all connected SSE subscribers, which replaces the surface's access
 projection behind the room-generation guard.
 
-Until invite/redeem routes exist, room membership is open — any surface that
-knows the room key can join. This is acceptable for G1 (trusted team use).
+Federated membership is invitation-gated. Owners mint expiring invites through
+the daemon-owned outbound route; recipients open a strict native or universal
+link, review the pending room invitation, and redeem the code through a local
+daemon POST. Invite codes are bearer material and never belong in logs, status
+text, daemon URL paths, analytics, or ordinary room projections.
 
 ### 3. Opening a Room
 

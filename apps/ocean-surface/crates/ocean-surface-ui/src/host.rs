@@ -364,22 +364,22 @@ pub async fn notify_ui_ready() {
     let _ = tauri_invoke("ui_ready", &JsValue::NULL).await;
 }
 
-/// Subscribe to shell `deep-link` events. The shell emits these — one per
-/// `ocean://` URL the OS asked Ocean to open — carrying the raw URL string as
-/// the payload; the handler parses it into an action (e.g.
-/// `ocean://session/<id>` → select that session). No-op on non-Tauri hosts:
-/// `ocean://` is only registered with the OS for the bundled native app, so
-/// the browser PWA and extension never receive these. As with
-/// `on_path_changed` / `on_menu_command`, multiple subscribers are allowed and
-/// callbacks run on the main thread.
+/// Subscribe to shell `deep-link` events, then acknowledge readiness so the
+/// shell can replay URLs received during cold start. Registration and the
+/// acknowledgement use the webview's FIFO IPC channel, ensuring the listener
+/// exists before replay begins. No-op outside Tauri.
 pub fn on_deep_link(handler: impl Fn(String) + 'static) {
     if !running_in_tauri() {
         return;
     }
-    wasm_bindgen_futures::spawn_local(tauri_listen("deep-link", move |payload| {
-        let url = jsval_to::<String>(&payload);
-        handler(url);
-    }));
+    wasm_bindgen_futures::spawn_local(async move {
+        tauri_listen("deep-link", move |payload| {
+            let url = jsval_to::<String>(&payload);
+            handler(url);
+        })
+        .await;
+        let _ = tauri_invoke("deep_link_ready", &JsValue::NULL).await;
+    });
 }
 
 /// Read local repo state for the repo containing `root`. `None` on non-Tauri

@@ -5935,3 +5935,17 @@ mention+thread-reply dispatch dedup on one row, and agent reply root/session
 attribution with fallback. Verified: 53/53 persistent_rooms, fmt, clippy -D
 warnings (daemon), cargo check --workspace.
 _________________________________________________________________________________
+_________________________________________________________________________________
+time:      [23:25] [13-08-26]
+agent:     [ocean], [gpt-5.6]
+worktree:  [feat/rooms-share-links]
+type:      [workflow]: Bind redeemed invite to daemon room authority
+area:      [backend]: persistent Rooms admission contract
+
+Extended the existing successful local invite-redemption projection with an
+additive `room_key` field. The federation supervisor now carries the canonical
+room discovered from Bedrock's validated exact room scope through the HTTP
+adapter, allowing Surface to ignore attacker-editable deep-link path identity.
+Invite codes remain POST-body-only and absent from response/error projections.
+Updated the route and restart-safe redemption regressions. Focused persistent
+Rooms suite passes 53/53.

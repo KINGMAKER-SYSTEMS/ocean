@@ -54,10 +54,33 @@ struct MenuBridge {
     pending: Vec<String>,
 }
 
+/// Readiness gate for native deep links. The OS can deliver a URL during app
+/// startup before the WASM listener exists; Tauri drops an event with no
+/// subscriber, so retain a small bounded FIFO until `deep_link_ready`.
+struct DeepLinkBridge {
+    ready: bool,
+    pending: Vec<String>,
+}
+
+const MAX_PENDING_DEEP_LINKS: usize = 16;
+const MAX_DEEP_LINK_BYTES: usize = 2048;
+
+fn enqueue_deep_link(bridge: &mut DeepLinkBridge, url: String) -> bool {
+    if url.len() > MAX_DEEP_LINK_BYTES || !url.starts_with("ocean://") {
+        return false;
+    }
+    if bridge.pending.len() == MAX_PENDING_DEEP_LINKS {
+        bridge.pending.remove(0);
+    }
+    bridge.pending.push(url);
+    true
+}
+
 struct AppState {
     watchers: Mutex<HashMap<String, tauri::async_runtime::JoinHandle<()>>>,
     daemon: Arc<DaemonSup>,
     menu: Mutex<MenuBridge>,
+    deep_links: Mutex<DeepLinkBridge>,
 }
 
 fn kind_str(kind: &EventKind) -> &'static str {
@@ -632,6 +655,23 @@ fn ui_ready(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
+/// Mark the WASM `deep-link` listener attached and replay URLs that arrived
+/// during cold start. This is deliberately separate from `ui_ready`: the menu
+/// and deep-link listeners mount in different effects and must not race one
+/// shared readiness signal.
+#[tauri::command]
+fn deep_link_ready(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let pending = {
+        let mut bridge = state.deep_links.lock();
+        bridge.ready = true;
+        std::mem::take(&mut bridge.pending)
+    };
+    for url in pending {
+        let _ = app.emit("deep-link", url);
+    }
+    Ok(())
+}
+
 /// Resize the native window during an explicitly opted-in UI diagnostic run.
 /// The command is unavailable in ordinary launches even though it remains in
 /// the static invoke table, preventing product code from using test authority.
@@ -1138,6 +1178,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cold_start_deep_links_are_bounded_fifo() {
+        let mut bridge = DeepLinkBridge {
+            ready: false,
+            pending: Vec::new(),
+        };
+        for index in 0..(MAX_PENDING_DEEP_LINKS + 2) {
+            assert!(enqueue_deep_link(
+                &mut bridge,
+                format!("ocean://session/{index}")
+            ));
+        }
+        assert_eq!(bridge.pending.len(), MAX_PENDING_DEEP_LINKS);
+        assert_eq!(bridge.pending.first().map(String::as_str), Some("ocean://session/2"));
+        assert_eq!(
+            bridge.pending.last().map(String::as_str),
+            Some("ocean://session/17")
+        );
+    }
+
+    #[test]
+    fn cold_start_deep_link_queue_rejects_wrong_scheme_and_oversize() {
+        let mut bridge = DeepLinkBridge {
+            ready: false,
+            pending: Vec::new(),
+        };
+        assert!(!enqueue_deep_link(&mut bridge, "https://example.com".into()));
+        assert!(!enqueue_deep_link(
+            &mut bridge,
+            format!("ocean://{}", "a".repeat(MAX_DEEP_LINK_BYTES))
+        ));
+        assert!(bridge.pending.is_empty());
+    }
+
+    #[test]
     fn dto_json_shape_matches_wasm_contract() {
         let state = RepoStateDto {
             branch: "main".into(),
@@ -1525,6 +1599,10 @@ pub fn run() {
                 ready: false,
                 pending: Vec::new(),
             }),
+            deep_links: Mutex::new(DeepLinkBridge {
+                ready: false,
+                pending: Vec::new(),
+            }),
         })
         .setup(|app| {
             // Background daemon-supervision liveness poller: probes the daemon
@@ -1564,17 +1642,25 @@ pub fn run() {
                     (_, None) => eprintln!("Ocean UI debug script: main webview unavailable"),
                 }
             }
-            // ocean:// deep links: bring the window forward and forward the
-            // URL to the wasm bundle as a `deep-link` event (host::on_deep_link
-            // parses `ocean://session/<id>` and switches sessions). OS-level
-            // scheme registration requires a bundled app (Info.plist) — dev
-            // builds only receive URLs via the plugin's runtime registration.
+            // ocean:// deep links: bring the window forward, then either emit
+            // immediately or queue until the WASM listener acknowledges it is
+            // attached. This preserves links delivered during a cold launch.
             {
                 let handle = app.handle().clone();
                 app.deep_link().on_open_url(move |event| {
                     show_main_window(&handle);
                     for url in event.urls() {
-                        let _ = handle.emit("deep-link", url.to_string());
+                        let raw = url.to_string();
+                        let state = handle.state::<AppState>();
+                        let mut bridge = state.deep_links.lock();
+                        if bridge.ready {
+                            drop(bridge);
+                            if raw.len() <= MAX_DEEP_LINK_BYTES && raw.starts_with("ocean://") {
+                                let _ = handle.emit("deep-link", raw);
+                            }
+                        } else {
+                            enqueue_deep_link(&mut bridge, raw);
+                        }
                     }
                 });
             }
@@ -1833,6 +1919,7 @@ pub fn run() {
             daemon_stop,
             daemon_restart,
             ui_ready,
+            deep_link_ready,
             ui_debug_resize,
             open_external_url
         ])
