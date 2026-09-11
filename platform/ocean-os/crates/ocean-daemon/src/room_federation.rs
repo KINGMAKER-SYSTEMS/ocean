@@ -129,10 +129,7 @@ fn converge_room_read_cursor_mirror(
             // the whole point of an authoritative clear.
             None => return Ok(cas),
         };
-        let is_newer = match current {
-            Some(existing) => candidate > existing,
-            None => true,
-        };
+        let is_newer = cursor_candidate_is_newer_than_stale_mirror(current, candidate);
         if !is_newer {
             // Our write is not actually newer than what already landed —
             // this is the ordinary, correct "we lost the race and that's
@@ -146,6 +143,17 @@ fn converge_room_read_cursor_mirror(
     with_rooms_handle(rooms, |store| {
         store.set_room_read_cursor_mirror(key, principal_id, expected_prior_mirror, sequence)
     })
+}
+
+/// Whether a losing `Some(candidate)` mirror write is still strictly newer than
+/// the value a stale CAS just observed on disk, and therefore worth retrying.
+///
+/// A stale CAS that observes absence (`None`) means an authoritative clear won
+/// after this writer read its expected `Some` value. That is never retried, or
+/// the clear would be resurrected. An actual initial `None` expectation is
+/// applied by the store on the first attempt and so never reaches this branch.
+fn cursor_candidate_is_newer_than_stale_mirror(current: Option<u64>, candidate: u64) -> bool {
+    current.is_some_and(|existing| candidate > existing)
 }
 
 #[derive(Clone)]

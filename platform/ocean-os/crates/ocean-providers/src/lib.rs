@@ -689,6 +689,7 @@ pub fn known_models() -> Vec<KnownModel> {
         // are about to stop existing.
         m("deepseek-v4-pro", "deepseek", "DeepSeek V4 Pro"),
         m("deepseek-v4-flash", "deepseek", "DeepSeek V4 Flash"),
+        m("gpt-6-astra", "openai-codex", "GPT-6 Astra (Codex)"),
         m("gpt-5.6-sol", "openai-codex", "GPT-5.6 Sol (Codex)"),
         m("gpt-5.6-terra", "openai-codex", "GPT-5.6 Terra (Codex)"),
         m("gpt-5.6-luna", "openai-codex", "GPT-5.6 Luna (Codex)"),
@@ -704,13 +705,14 @@ pub fn known_models() -> Vec<KnownModel> {
         // arms so pinned sessions keep resolving). The plain ids route through
         // `ProviderId::ClaudeCode` — they assume the Claude Code OAuth login,
         // not a direct Anthropic API key. `claude-code-*` aliases are dropped
-        // from the menu (they resolved to the same models); `fable` keeps its
-        // `claude-code-fable-5` MENU id, though its wire id `claude-fable-5`
-        // stays routable in the resolver (persisted session models replay it).
+        // from the menu because they resolve to the same models. Fable 5.1
+        // uses its Anthropic wire id in the menu, matching the other
+        // current Claude models. Legacy Fable 5 ids stay resolver-only so
+        // persisted sessions continue to replay.
+        m("claude-fable-5-1", "claude-code", "Claude Fable 5.1"),
         m("claude-opus-5", "claude-code", "Claude Opus 5"),
         m("claude-sonnet-5", "claude-code", "Claude Sonnet 5"),
         m("claude-haiku-4-5", "claude-code", "Claude Haiku 4.5"),
-        m("claude-code-fable-5", "claude-code", "Claude Code Fable 5"),
         // MiniMax ids use the API casing the resolver returns as current.model
         // (`MiniMax-M2`, not the lowercase alias), so `id == current.model`
         // holds for every entry — ACP/Zed match the selected mode id against the
@@ -722,6 +724,7 @@ pub fn known_models() -> Vec<KnownModel> {
         m("kimi-k3", "kimi", "Kimi K3"),
         m("kimi-k2.6", "kimi", "Kimi K2.6"),
         m("kimi-k2", "kimi", "Kimi K2"),
+        m("glm-5.3-flash", "glm", "GLM 5.3 Flash"),
         m("glm-5.3", "glm", "GLM 5.3"),
         m("glm-5.2", "glm", "GLM 5.2"),
         m("glm-4.7", "glm", "GLM 4.7"),
@@ -848,6 +851,13 @@ pub fn resolve_model_selection(env: &ProviderEnv) -> Result<ModelSelection, Prov
             128_000,
             16_384,
         )),
+        "gpt-6-astra" => Ok(model_selection(
+            ProviderId::OpenAiCodex,
+            "gpt-6-astra",
+            CODEX_BASE_URL,
+            272_000,
+            128_000,
+        )),
         "gpt-5.6-sol" | "gpt-5-6-sol" => Ok(model_selection(
             ProviderId::OpenAiCodex,
             "gpt-5.6-sol",
@@ -950,21 +960,28 @@ pub fn resolve_model_selection(env: &ProviderEnv) -> Result<ModelSelection, Prov
             16_384,
         )),
         // Claude Code (Anthropic Messages wire protocol, OAuth bearer auth).
-        // selection.model preserves the public alias id; ocean-agent maps it to
-        // the real Anthropic API model id. `claude-fable-5` (the wire id) must
-        // stay routable: session records persist `Model.id`, and clients that
-        // pin a session's model replay that id verbatim on later turns — every
-        // other Claude arm already accepts its wire id, and fable missing it
-        // instant-failed all fable-pinned sessions (2026-07-29 outage).
-        "claude-code-fable-5" | "claude-code-fable" | "cc-fable" | "fable" | "claude-fable-5" => {
-            Ok(model_selection(
-                ProviderId::ClaudeCode,
-                "claude-code-fable-5",
-                ANTHROPIC_BASE_URL,
-                200_000,
-                16_384,
-            ))
-        }
+        // Current convenience aliases track Fable 5.1 and resolve directly to
+        // its Anthropic API id. The old menu/wire ids remain routable below:
+        // session records persist `Model.id`, so removing either would brick
+        // Fable 5 sessions on their next turn (the 2026-07-29 outage pattern).
+        "claude-fable-5-1"
+        | "claude-code-fable-5-1"
+        | "claude-code-fable"
+        | "cc-fable"
+        | "fable" => Ok(model_selection(
+            ProviderId::ClaudeCode,
+            "claude-fable-5-1",
+            ANTHROPIC_BASE_URL,
+            1_000_000,
+            128_000,
+        )),
+        "claude-code-fable-5" | "claude-fable-5" => Ok(model_selection(
+            ProviderId::ClaudeCode,
+            "claude-code-fable-5",
+            ANTHROPIC_BASE_URL,
+            200_000,
+            16_384,
+        )),
         "claude-code-opus-5" | "claude-code-opus" | "cc-opus" => Ok(model_selection(
             ProviderId::ClaudeCode,
             "claude-code-opus-5",
@@ -1064,7 +1081,14 @@ pub fn resolve_model_selection(env: &ProviderEnv) -> Result<ModelSelection, Prov
         // `OCEAN_GLM_BASE_URL` override (non-empty wins, else the default), so
         // every GLM route — bare alias, explicit provider, and any fallback
         // alias — honors the same override.
-        "glm" | "glm-4.6" | "glm-4-6" => Ok(model_selection(
+        "glm" => Ok(model_selection(
+            ProviderId::Glm,
+            "glm-5.3",
+            glm_base_url(env),
+            1_000_000,
+            128_000,
+        )),
+        "glm-4.6" | "glm-4-6" => Ok(model_selection(
             ProviderId::Glm,
             "glm-4.6",
             glm_base_url(env),
@@ -1089,8 +1113,15 @@ pub fn resolve_model_selection(env: &ProviderEnv) -> Result<ModelSelection, Prov
             ProviderId::Glm,
             "glm-5.3",
             glm_base_url(env),
-            200_000,
-            8_192,
+            1_000_000,
+            128_000,
+        )),
+        "glm-5.3-flash" | "glm-5-3-flash" => Ok(model_selection(
+            ProviderId::Glm,
+            "glm-5.3-flash",
+            glm_base_url(env),
+            1_000_000,
+            128_000,
         )),
         "glm-4.5" | "glm-4-5" => Ok(model_selection(
             ProviderId::Glm,
@@ -1276,13 +1307,19 @@ fn model_for_explicit_provider(
                 KIMI_MAX_OUTPUT_TOKENS,
             ))
         }
-        "glm" | "zhipu" | "zhipuai" => Ok(model_selection(
-            ProviderId::Glm,
-            model,
-            glm_base_url(env),
-            200_000,
-            8_192,
-        )),
+        "glm" | "zhipu" | "zhipuai" => {
+            let (context_window, max_output_tokens) = match model {
+                "glm-5.3" | "glm-5.3-flash" => (1_000_000, 128_000),
+                _ => (200_000, 8_192),
+            };
+            Ok(model_selection(
+                ProviderId::Glm,
+                model,
+                glm_base_url(env),
+                context_window,
+                max_output_tokens,
+            ))
+        }
         "google" | "gemini" => Ok(model_selection(
             ProviderId::Google,
             model,
@@ -1813,22 +1850,24 @@ mod tests {
     }
 
     #[test]
-    fn fable_wire_id_round_trips_through_the_resolver() {
-        // Session records persist `Model.id` ("claude-fable-5"), and clients
-        // that pin a session's model replay that id as the next turn's model
-        // spec. Every fable spelling — menu id, shorthands, AND the wire id —
-        // must therefore resolve; the wire id missing here bricked every
-        // fable-pinned session on 2026-07-29.
+    fn fable_aliases_track_5_1_and_legacy_ids_stay_routable() {
         for alias in [
-            "claude-code-fable-5",
+            "claude-fable-5-1",
+            "claude-code-fable-5-1",
             "claude-code-fable",
             "cc-fable",
             "fable",
-            "claude-fable-5",
         ] {
             let s = resolve_model_selection(&env(&[("OCEAN_MODEL", alias)])).unwrap();
             assert_eq!(s.provider, ProviderId::ClaudeCode, "{alias}");
-            assert_eq!(s.model, "claude-code-fable-5", "{alias}");
+            assert_eq!(s.model, "claude-fable-5-1", "{alias}");
+            assert_eq!(s.context_window, 1_000_000, "{alias}");
+            assert_eq!(s.max_output_tokens, 128_000, "{alias}");
+        }
+        for legacy in ["claude-code-fable-5", "claude-fable-5"] {
+            let s = resolve_model_selection(&env(&[("OCEAN_MODEL", legacy)])).unwrap();
+            assert_eq!(s.provider, ProviderId::ClaudeCode, "{legacy}");
+            assert_eq!(s.model, "claude-code-fable-5", "{legacy}");
         }
     }
 
@@ -1886,6 +1925,17 @@ mod tests {
         assert_eq!(config.selection.base_url, CODEX_BASE_URL);
         assert_eq!(config.account_id.as_deref(), Some("acct-123"));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn gpt_6_astra_routes_to_codex_with_current_limits() {
+        let selection = resolve_model_selection(&env(&[("OCEAN_MODEL", "gpt-6-astra")]))
+            .expect("GPT-6 Astra should route");
+        assert_eq!(selection.provider, ProviderId::OpenAiCodex);
+        assert_eq!(selection.model, "gpt-6-astra");
+        assert_eq!(selection.base_url, CODEX_BASE_URL);
+        assert_eq!(selection.context_window, 272_000);
+        assert_eq!(selection.max_output_tokens, 128_000);
     }
 
     #[test]
@@ -2011,6 +2061,7 @@ mod tests {
             "deepseek-v4-pro",
             "gpt-4o",
             "gpt-4o-mini",
+            "gpt-6-astra",
             "gpt-5.6-sol",
             "gpt-5.6-terra",
             "gpt-5.6-luna",
@@ -2022,10 +2073,10 @@ mod tests {
             // The retired 4-6/4-7/4-8 ids stay ROUTABLE (legacy arms, pinned
             // sessions) but are deliberately NOT in the menu, so they're
             // absent here too.
+            "claude-fable-5-1",
             "claude-opus-5",
             "claude-sonnet-5",
             "claude-haiku-4-5",
-            "claude-code-fable-5",
             // API-cased ids: `resolve_model_selection` returns these as
             // current.model, and known_models() advertises the same string.
             "MiniMax-M2",
@@ -2034,6 +2085,7 @@ mod tests {
             "kimi-k3",
             "kimi-k2.6",
             "kimi-k2",
+            "glm-5.3-flash",
             "glm-5.3",
             "glm-5.2",
             "glm-4.7",
@@ -2299,29 +2351,33 @@ mod tests {
 
     #[test]
     fn current_glm_models_route_and_round_trip_through_known_models() {
-        // New GLM ids route to ProviderId::Glm with the coding-plan base and
-        // the shared 200k/8k limits, their hyphen aliases normalize to the same
-        // canonical id, and they survive the known_models round-trip.
-        for (id, hyphen) in [
-            ("glm-4.7", "glm-4-7"),
-            ("glm-5.2", "glm-5-2"),
-            ("glm-5.3", "glm-5-3"),
+        for (id, hyphen, context, output) in [
+            ("glm-4.7", "glm-4-7", 200_000, 8_192),
+            ("glm-5.2", "glm-5-2", 200_000, 8_192),
+            ("glm-5.3", "glm-5-3", 1_000_000, 128_000),
+            ("glm-5.3-flash", "glm-5-3-flash", 1_000_000, 128_000),
         ] {
             let sel = resolve_model_selection(&env(&[("OCEAN_MODEL", id)])).unwrap();
             assert_eq!(sel.provider, ProviderId::Glm);
             assert_eq!(sel.model, id);
             assert_eq!(sel.base_url, GLM_BASE_URL);
-            assert_eq!(sel.context_window, 200_000);
-            assert_eq!(sel.max_output_tokens, 8_192);
+            assert_eq!(sel.context_window, context);
+            assert_eq!(sel.max_output_tokens, output);
             let hyphenated = resolve_model_selection(&env(&[("OCEAN_MODEL", hyphen)])).unwrap();
             assert_eq!(hyphenated.model, id);
             assert_eq!(hyphenated.provider, ProviderId::Glm);
         }
+        let latest = resolve_model_selection(&env(&[("OCEAN_MODEL", "glm")])).unwrap();
+        assert_eq!(latest.model, "glm-5.3");
         let listed: std::collections::BTreeSet<String> =
             known_models().into_iter().map(|m| m.id).collect();
         assert!(listed.contains("glm-4.7"), "glm-4.7 must be in the picker");
         assert!(listed.contains("glm-5.2"), "glm-5.2 must be in the picker");
         assert!(listed.contains("glm-5.3"), "glm-5.3 must be in the picker");
+        assert!(
+            listed.contains("glm-5.3-flash"),
+            "glm-5.3-flash must be in the picker"
+        );
     }
 
     #[test]
@@ -2384,14 +2440,14 @@ mod tests {
         assert!(config.readiness().ok);
 
         // The public Claude aliases are advertised in the model picker. The plain
-        // ids (claude-sonnet-5 etc.) are the menu entries now; claude-code-* are
-        // legacy aliases kept routable but off the menu (except fable).
+        // ids (claude-fable-5-1, claude-sonnet-5, etc.) are the menu entries;
+        // claude-code-* aliases remain routable but stay off the menu.
         let listed: std::collections::BTreeSet<String> =
             known_models().into_iter().map(|m| m.id).collect();
+        assert!(listed.contains("claude-fable-5-1"));
         assert!(listed.contains("claude-sonnet-5"));
         assert!(listed.contains("claude-opus-5"));
         assert!(listed.contains("claude-haiku-4-5"));
-        assert!(listed.contains("claude-code-fable-5"));
 
         let _ = fs::remove_dir_all(&dir);
     }

@@ -881,6 +881,37 @@ pub(super) struct AmendArtifactRequest {
     pub(super) author_id: String,
 }
 
+fn room_artifact_author_is_daemon_owned(state: &AppState, key: &RoomKey, author_id: &str) -> bool {
+    with_rooms(state, |store| store.get(key))
+        .ok()
+        .flatten()
+        .and_then(|record| {
+            record
+                .room
+                .participants
+                .iter()
+                .find(|participant| participant.id == author_id)
+                .map(|participant| participant.kind)
+        })
+        .is_some_and(|kind| {
+            matches!(
+                kind,
+                RoomParticipantKind::Agent | RoomParticipantKind::System
+            )
+        })
+}
+
+fn forged_artifact_author_response() -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({
+            "ok": false,
+            "code": "forged_artifact_author",
+            "error": "an agent's artifact is authored by the daemon, not by a client claiming its identity",
+        })),
+    )
+}
+
 /// `POST /v1/rooms/persistent/{key}/artifacts` — record something the room
 /// produced: a task, a decision, or captured knowledge.
 pub(super) async fn room_create_artifact(
@@ -902,29 +933,8 @@ pub(super) async fn room_create_artifact(
     // `classify_local_author` already applies to messages (Agent|System are
     // daemon-only author kinds). Enforce it here too instead of trusting the
     // client one layer down.
-    let claimed_kind = with_rooms(&state, |store| store.get(&key))
-        .ok()
-        .and_then(|rec| {
-            rec.and_then(|rec| {
-                rec.room
-                    .participants
-                    .iter()
-                    .find(|p| p.id == req.author_id)
-                    .map(|p| p.kind)
-            })
-        });
-    if matches!(
-        claimed_kind,
-        Some(RoomParticipantKind::Agent) | Some(RoomParticipantKind::System)
-    ) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({
-                "ok": false,
-                "code": "forged_artifact_author",
-                "error": "an agent's artifact is authored by the daemon, not by a client claiming its identity",
-            })),
-        );
+    if room_artifact_author_is_daemon_owned(&state, &key, &req.author_id) {
+        return forged_artifact_author_response();
     }
     let result = with_rooms(&state, |store| {
         store.create_artifact(
@@ -959,6 +969,16 @@ pub(super) async fn room_amend_artifact(
     Json(req): Json<AmendArtifactRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let key = RoomKey::new(key.trim());
+    if req
+        .title
+        .as_deref()
+        .is_some_and(|title| title.trim().is_empty())
+    {
+        return invalid_request_response();
+    }
+    if room_artifact_author_is_daemon_owned(&state, &key, &req.author_id) {
+        return forged_artifact_author_response();
+    }
     let result = with_rooms(&state, |store| {
         store.amend_artifact(
             &key,
@@ -5663,6 +5683,35 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::CREATED);
+
+        let (status, Json(body)) = room_amend_artifact(
+            State(state.clone()),
+            Path((key.as_str().to_string(), "real".into())),
+            Json(AmendArtifactRequest {
+                expected_version: 1,
+                title: Some("Agent-forged amendment".into()),
+                body: None,
+                state: None,
+                author_id: "researcher".into(),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], json!("forged_artifact_author"));
+
+        let (status, _) = room_amend_artifact(
+            State(state.clone()),
+            Path((key.as_str().to_string(), "real".into())),
+            Json(AmendArtifactRequest {
+                expected_version: 1,
+                title: Some("   ".into()),
+                body: None,
+                state: None,
+                author_id: "alice".into(),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     /// The daemon authors every audit row as ("system", System). If a client can

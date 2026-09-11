@@ -361,8 +361,23 @@ impl Model {
         }
     }
 
-    /// Anthropic Claude Fable 5 — Mythos-class tier above Opus (verified
-    /// recognized on subscription OAuth 2026-07-08).
+    /// Anthropic Claude Fable 5.1 — demanding reasoning and long-horizon
+    /// agentic work, with the current 1M input / 128K output limits.
+    pub fn anthropic_claude_fable_5_1() -> Self {
+        Self {
+            id: "claude-fable-5-1".into(),
+            name: "Claude Fable 5.1".into(),
+            api: "anthropic-messages".into(),
+            provider: "anthropic".into(),
+            base_url: "https://api.anthropic.com".into(),
+            reasoning: true,
+            supports_images: true,
+            context_window: 1_000_000,
+            max_tokens: 128_000,
+        }
+    }
+
+    /// Anthropic Claude Fable 5 (legacy; retained for pinned sessions).
     pub fn anthropic_claude_fable_5() -> Self {
         Self {
             id: "claude-fable-5".into(),

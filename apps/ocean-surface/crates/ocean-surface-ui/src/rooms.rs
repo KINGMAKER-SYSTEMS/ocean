@@ -562,8 +562,14 @@ pub struct Rooms {
     /// initial catch-up, switches to Live once connected, and to Reconnecting on
     /// drop/retry. The view reads this to render the status bar indicator.
     tail_state: RwSignal<TailState>,
-    /// Available agent names fetched from GET /v1/agents (TASK-9/TASK-11).
-    pub available_agents: RwSignal<Vec<String>>,
+    /// Available agent summaries fetched from GET /v1/agents (TASK-9/TASK-11).
+    pub available_agents: RwSignal<Vec<AgentSummary>>,
+    /// The daemon's agents root as reported by `/v1/agents`, so the picker's
+    /// empty state can tell the operator exactly where to drop an agent folder.
+    pub agents_root: RwSignal<Option<String>>,
+    /// Agent name currently being added to the open room (`None` = idle).
+    /// Gates the picker so a double-click can't double-register.
+    pub add_agent_in_flight: RwSignal<Option<String>>,
     /// Whether the first `fetch_agents` has resolved. Starts false so the
     /// add-agent picker shows nothing rather than a premature "No agents" while
     /// the initial `/v1/agents` fetch is still in flight (same flash class as
@@ -632,6 +638,8 @@ impl Rooms {
             identity_name: RwSignal::new(name_static),
             tail_state: RwSignal::new(TailState::Replaying),
             available_agents: RwSignal::new(Vec::new()),
+            agents_root: RwSignal::new(None),
+            add_agent_in_flight: RwSignal::new(None),
             agents_loaded: RwSignal::new(false),
             access: RwSignal::new(None),
             read_summaries: RwSignal::new(HashMap::new()),
@@ -780,31 +788,28 @@ impl Rooms {
         });
     }
 
-    /// Fetch available agent names from GET /v1/agents (TASK-9/TASK-11).
-    /// The daemon returns `{ "ok": true, "agents": [{"name":"flux", ...}, ...] }`.
-    /// We extract just the names for the room agent picker.
+    /// Fetch available agents from GET /v1/agents (TASK-9/TASK-11).
+    /// The daemon returns `{ "ok": true, "root": "...", "agents": [{"name":"flux",
+    /// "description":..., "model":..., "skills":n, "subagents":[..]}, ...] }`.
+    /// A folder that failed to resolve arrives as `{"name", "error"}` and is
+    /// kept (flagged) so the operator sees the broken one instead of it
+    /// silently vanishing from the picker.
     pub fn fetch_agents(&self) {
         let base = self.base();
         let agents_sig = self.available_agents;
+        let root_sig = self.agents_root;
         let loaded = self.agents_loaded;
         spawn_local(async move {
             let url = format!("{base}/v1/agents");
             match Request::get(&url).send().await {
                 Ok(resp) => {
                     if let Ok(json) = resp.json::<serde_json::Value>().await {
-                        if let Some(agents) = json.get("agents").and_then(|a| a.as_array()) {
-                            let ids: Vec<String> = agents
-                                .iter()
-                                .filter_map(|a| {
-                                    a.get("name")
-                                        .and_then(|v| v.as_str())
-                                        .map(|s| s.to_string())
-                                })
-                                .collect();
-                            agents_sig.set(ids);
-                        } else {
-                            agents_sig.set(Vec::new());
-                        }
+                        root_sig.set(
+                            json.get("root")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string()),
+                        );
+                        agents_sig.set(parse_agent_summaries(&json));
                     }
                 }
                 Err(_) => {
@@ -1186,19 +1191,41 @@ impl Rooms {
         });
     }
 
-    /// Add a daemon-owned agent identity to the open room.
+    /// Add a daemon-owned agent to the open room.
+    ///
+    /// Routes on the room's access state: a `Local` room takes the
+    /// participant path (`POST .../participants`, kind = agent); a
+    /// credentialed room registers the agent through the daemon's federation
+    /// bridge (`POST .../members/agents`) so the coworkers' rosters see it
+    /// with its public descriptor. A revoked room is refused up front.
     pub fn add_agent(&self, agent_id: String) {
         let agent_id = agent_id.trim().to_string();
         if agent_id.is_empty() {
             self.status.set("agent id required".into());
             return;
         }
+        if self.add_agent_in_flight.get_untracked().is_some() {
+            return;
+        }
         let Some(key) = self.open_key.get_untracked() else {
             return;
         };
+        let access_state = self.access.get_untracked().map(|access| access.state);
+        match agent_add_route(access_state) {
+            AgentAddRoute::Participant => self.add_agent_local(key, agent_id),
+            AgentAddRoute::Register => self.add_agent_federated(key, agent_id),
+            AgentAddRoute::Refused => {
+                self.status
+                    .set("Agents can't be added to a revoked room.".into());
+            }
+        }
+    }
+
+    fn add_agent_local(&self, key: String, agent_id: String) {
         let base = self.base();
         let me = *self;
         let generation_id = self.generation.get_untracked();
+        self.add_agent_in_flight.set(Some(agent_id.clone()));
         spawn_local(async move {
             let body = JoinBody {
                 id: &agent_id,
@@ -1223,6 +1250,7 @@ impl Rooms {
                 },
                 Err(err) => Err(format!("add agent encode error: {err}")),
             };
+            me.add_agent_in_flight.set(None);
             if result.is_ok() {
                 me.fetch_rooms();
             }
@@ -1235,6 +1263,50 @@ impl Rooms {
                     me.status
                         .set(format!("agent '{agent_id}' added — mention @{agent_id}"));
                     me.refresh_open_transcript(&key, generation_id);
+                }
+                Err(error) => me.status.set(error),
+            }
+        });
+    }
+
+    /// Register a local folder-as-agent into a credentialed (shared) room.
+    /// The daemon resolves the agent, builds its public descriptor, and
+    /// registers it with Bedrock; the response is the refreshed access
+    /// projection (roster included), which replaces `access` directly.
+    fn add_agent_federated(&self, key: String, agent_id: String) {
+        let base = self.base();
+        let me = *self;
+        let generation_id = self.generation.get_untracked();
+        self.add_agent_in_flight.set(Some(agent_id.clone()));
+        spawn_local(async move {
+            let body = serde_json::json!({ "agent_names": [agent_id] });
+            let url = format!(
+                "{base}/v1/rooms/persistent/{}/members/agents",
+                encode(&key)
+            );
+            let result = match Request::post(&url)
+                .header("content-type", "application/json")
+                .json(&body)
+            {
+                Ok(req) => match req.send().await {
+                    Ok(resp) if resp.ok() => resp
+                        .json::<RoomAccessProjection>()
+                        .await
+                        .map_err(|_| "The room roster response was invalid.".to_string()),
+                    Ok(resp) => Err(register_agent_error_text(resp.status())),
+                    Err(_) => Err("Ocean could not reach the room service.".to_string()),
+                },
+                Err(err) => Err(format!("add agent encode error: {err}")),
+            };
+            me.add_agent_in_flight.set(None);
+            if !me.room_is_current(generation_id, &key) {
+                return;
+            }
+            match result {
+                Ok(access) => {
+                    me.access.set(Some(access));
+                    me.status
+                        .set(format!("agent '{agent_id}' registered — mention @{agent_id}"));
                 }
                 Err(error) => me.status.set(error),
             }
@@ -2128,6 +2200,133 @@ fn show_transcript_empty(tail: TailState, transcript_empty: bool) -> bool {
     transcript_empty && matches!(tail, TailState::Live)
 }
 
+/// One discoverable folder-as-agent, as summarized by `GET /v1/agents`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentSummary {
+    pub name: String,
+    pub description: Option<String>,
+    pub model: Option<String>,
+    pub skills: u32,
+    pub subagents: Vec<String>,
+    /// Set when the daemon could discover the folder but not resolve it
+    /// (malformed `agent.toml`, …). Such an agent is shown but not addable.
+    pub error: Option<String>,
+}
+
+impl AgentSummary {
+    /// Case-insensitive match against name, description, and model alias.
+    pub fn matches(&self, query: &str) -> bool {
+        let q = query.trim().to_lowercase();
+        if q.is_empty() {
+            return true;
+        }
+        self.name.to_lowercase().contains(&q)
+            || self
+                .description
+                .as_deref()
+                .is_some_and(|d| d.to_lowercase().contains(&q))
+            || self
+                .model
+                .as_deref()
+                .is_some_and(|m| m.to_lowercase().contains(&q))
+    }
+}
+
+/// Parse the `/v1/agents` payload into summaries. Unknown/missing fields
+/// degrade to `None`/empty; an entry without a `name` is dropped.
+fn parse_agent_summaries(json: &serde_json::Value) -> Vec<AgentSummary> {
+    let Some(agents) = json.get("agents").and_then(|a| a.as_array()) else {
+        return Vec::new();
+    };
+    agents
+        .iter()
+        .filter_map(|a| {
+            let name = a.get("name")?.as_str()?.trim();
+            if name.is_empty() {
+                return None;
+            }
+            let str_field = |k: &str| {
+                a.get(k)
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            };
+            Some(AgentSummary {
+                name: name.to_string(),
+                description: str_field("description"),
+                model: str_field("model"),
+                skills: a
+                    .get("skills")
+                    .and_then(|v| v.as_u64())
+                    .and_then(|n| u32::try_from(n).ok())
+                    .unwrap_or(0),
+                subagents: a
+                    .get("subagents")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str())
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                error: str_field("error"),
+            })
+        })
+        .collect()
+}
+
+/// Which daemon route adds an agent to a room in a given access state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentAddRoute {
+    /// Local room: `POST .../participants` with `kind: agent`.
+    Participant,
+    /// Credentialed room: `POST .../members/agents` (Bedrock registration).
+    Register,
+    /// Revoked room: refuse without a request.
+    Refused,
+}
+
+pub(crate) fn agent_add_route(state: Option<RoomAccessState>) -> AgentAddRoute {
+    match state {
+        None | Some(RoomAccessState::Local) => AgentAddRoute::Participant,
+        Some(RoomAccessState::Revoked) => AgentAddRoute::Refused,
+        Some(
+            RoomAccessState::Connecting | RoomAccessState::Live | RoomAccessState::Recovering,
+        ) => AgentAddRoute::Register,
+    }
+}
+
+/// Operator-facing text for a failed `/members/agents` registration. Mirrors
+/// the daemon's `intent_error_response` status mapping.
+fn register_agent_error_text(status: u16) -> String {
+    match status {
+        400 => "Ocean could not resolve that agent folder.".into(),
+        403 => "This room's access has been revoked.".into(),
+        404 => "That room no longer exists.".into(),
+        409 => "This room is not linked to Bedrock yet.".into(),
+        502 => "Bedrock returned an unexpected response.".into(),
+        503 => "Room sharing is not configured on this Ocean.".into(),
+        _ => "Ocean could not register the agent.".into(),
+    }
+}
+
+/// Agents eligible for the picker: not already in the room, matching the
+/// query. Broken (`error`) agents stay visible so the operator can fix them.
+pub(crate) fn pickable_agents(
+    agents: &[AgentSummary],
+    present_ids: &[String],
+    query: &str,
+) -> Vec<AgentSummary> {
+    agents
+        .iter()
+        .filter(|a| !present_ids.iter().any(|id| id == &a.name))
+        .filter(|a| a.matches(query))
+        .cloned()
+        .collect()
+}
+
 /// Whether the add-agent picker should show its "No agents" hint: only once
 /// `/v1/agents` has resolved AND the list is empty. During the initial fetch an
 /// empty list means "still loading", not "no agents" (same flash class as the
@@ -2168,6 +2367,40 @@ fn access_banner(access: Option<&RoomAccessProjection>) -> Option<&'static str> 
 }
 
 #[allow(dead_code)]
+/// Agent *names* already present in the open room, for de-duplicating the
+/// add-agent picker. Local rooms key agents by participant id (== folder
+/// name); federated rosters key them by Bedrock member id, so there the
+/// public descriptor's `display_name` (the canonical folder name the daemon
+/// registered) is the comparable value.
+pub(crate) fn present_agent_names(
+    access: Option<&RoomAccessProjection>,
+    room: Option<&Room>,
+) -> Vec<String> {
+    match access {
+        Some(access) if access.state != RoomAccessState::Local => access
+            .members
+            .iter()
+            .filter(|member| member.actor_type == FederatedActorType::Agent)
+            .map(|member| {
+                member
+                    .public_agent_descriptor
+                    .as_ref()
+                    .map(|d| d.display_name.clone())
+                    .unwrap_or_else(|| member.display_name.clone())
+            })
+            .collect(),
+        _ => room
+            .map(|room| {
+                room.participants
+                    .iter()
+                    .filter(|p| p.kind == RoomParticipantKind::Agent)
+                    .map(|p| p.id.clone())
+                    .collect()
+            })
+            .unwrap_or_default(),
+    }
+}
+
 fn agent_ids_for(access: Option<&RoomAccessProjection>, room: Option<&Room>) -> Vec<String> {
     let Some(access) = access else {
         return Vec::new();

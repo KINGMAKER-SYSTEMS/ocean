@@ -3179,11 +3179,21 @@ fn state_from_provider_config(provider_config: ProviderConfig) -> anyhow::Result
 fn model_from_provider_config(config: &ProviderConfig) -> anyhow::Result<Model> {
     let selection = &config.selection;
     match selection.provider {
+        ProviderId::Glm => {
+            let mut model = Model::openai_compat(
+                selection.provider.as_str(),
+                selection.model.clone(),
+                selection.base_url.clone(),
+                selection.context_window,
+                selection.max_output_tokens,
+            );
+            model.supports_images = selection.model == "glm-5.3-flash";
+            Ok(model)
+        }
         ProviderId::DeepSeek
         | ProviderId::OpenAiCompatible
         | ProviderId::MiniMax
         | ProviderId::Kimi
-        | ProviderId::Glm
         | ProviderId::Fake => Ok(Model::openai_compat(
             selection.provider.as_str(),
             selection.model.clone(),
@@ -3225,6 +3235,7 @@ fn model_from_provider_config(config: &ProviderConfig) -> anyhow::Result<Model> 
             "claude-opus-5" => Model::anthropic_claude_opus_5(),
             "claude-sonnet-5" => Model::anthropic_claude_sonnet_5(),
             "claude-haiku-4-5" => Model::anthropic_claude_haiku_4_5(),
+            "claude-fable-5-1" => Model::anthropic_claude_fable_5_1(),
             "claude-fable-5" => Model::anthropic_claude_fable_5(),
             // Legacy ids — pinned sessions from before the 2026-07 refresh.
             "claude-opus-4-8" => Model::anthropic_claude_opus_4_8(),
@@ -3243,6 +3254,7 @@ fn model_from_provider_config(config: &ProviderConfig) -> anyhow::Result<Model> 
         ProviderId::ClaudeCode => Ok(match selection.model.as_str() {
             // The claude-code alias maps to the REAL Anthropic API model id on
             // the wire — "claude-code-sonnet-5" is never sent to the API.
+            "claude-code-fable-5-1" | "claude-fable-5-1" => Model::anthropic_claude_fable_5_1(),
             "claude-code-fable-5" | "claude-fable-5" => Model::anthropic_claude_fable_5(),
             "claude-code-opus-5" | "claude-opus-5" => Model::anthropic_claude_opus_5(),
             "claude-code-sonnet-5" | "claude-sonnet-5" => Model::anthropic_claude_sonnet_5(),
@@ -5019,6 +5031,28 @@ done
         assert_eq!(model.base_url, "fake://local");
         assert_eq!(model.context_window, 1_000);
         assert_eq!(model.max_tokens, 1_000);
+    }
+
+    #[test]
+    fn glm_5_3_flash_enables_multimodal_input_only_for_the_flash_route() {
+        let flash = provider_config(ProviderId::Glm, "glm-5.3-flash", true);
+        let flash_model = model_from_provider_config(&flash).expect("glm flash resolves");
+        assert!(flash_model.supports_images);
+
+        let text_only = provider_config(ProviderId::Glm, "glm-5.3", true);
+        let text_model = model_from_provider_config(&text_only).expect("glm 5.3 resolves");
+        assert!(!text_model.supports_images);
+    }
+
+    #[test]
+    fn claude_fable_5_1_maps_to_current_anthropic_model() {
+        let config = provider_config(ProviderId::ClaudeCode, "claude-fable-5-1", true);
+        let model = model_from_provider_config(&config).expect("fable 5.1 resolves");
+        assert_eq!(model.provider, "anthropic");
+        assert_eq!(model.api, "anthropic-messages");
+        assert_eq!(model.id, "claude-fable-5-1");
+        assert_eq!(model.context_window, 1_000_000);
+        assert_eq!(model.max_tokens, 128_000);
     }
 
     #[test]

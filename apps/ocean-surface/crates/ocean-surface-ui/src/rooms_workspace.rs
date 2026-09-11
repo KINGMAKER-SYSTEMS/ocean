@@ -92,6 +92,27 @@ fn access_allows_writes(access: Option<&RoomAccessProjection>) -> bool {
     )
 }
 
+fn access_allows_sharing(
+    access: Option<&RoomAccessProjection>,
+    local_identity_id: &str,
+) -> bool {
+    match access {
+        Some(RoomAccessProjection {
+            state: RoomAccessState::Local,
+            ..
+        }) => true,
+        Some(RoomAccessProjection {
+            state: RoomAccessState::Live,
+            members,
+            ..
+        }) => members.iter().any(|member| {
+            member.member_id == local_identity_id
+                && member.role_in_room == FederatedRoomRole::Owner
+        }),
+        _ => false,
+    }
+}
+
 fn access_allows_thread_writes(access: Option<&RoomAccessProjection>) -> bool {
     matches!(access.map(|a| a.state), Some(RoomAccessState::Local))
 }
@@ -759,8 +780,8 @@ pub fn RoomsWorkspace(
     let thread_composer = RwSignal::new(String::new());
     let selected_thread_root_seq = RwSignal::new(None::<u64>);
     let thread_send_in_flight = RwSignal::new(false);
-    let invite_copied = RwSignal::new(false);
-    let invite_copy_error = RwSignal::new(None::<String>);
+    let copied_invite_link = RwSignal::new(None::<String>);
+    let invite_copy_error = RwSignal::new(None::<(String, String)>);
     let thread_last_sent_draft = RwSignal::new(String::new());
     let thread_last_sent_wire = RwSignal::new(String::new());
     let thread_last_sent_seq = RwSignal::new(0u64);
@@ -1686,18 +1707,23 @@ pub fn RoomsWorkspace(
                                                 </button>
                                             }.into_any()
                                         }}
-                                        <button
-                                            class="rooms-workspace__share-btn"
-                                            type="button"
-                                            disabled=move || rooms.invite_loading.get()
-                                            on:click=move |_| rooms.create_invite()
-                                        >
-                                            {move || if rooms.invite_loading.get() {
-                                                "Creating link…"
-                                            } else {
-                                                "Share"
-                                            }}
-                                        </button>
+                                        {move || access_allows_sharing(
+                                            rooms.access.get().as_ref(),
+                                            &rooms.identity_id.get(),
+                                        ).then(|| view! {
+                                            <button
+                                                class="rooms-workspace__share-btn"
+                                                type="button"
+                                                disabled=move || rooms.invite_loading.get()
+                                                on:click=move |_| rooms.create_invite()
+                                            >
+                                                {move || if rooms.invite_loading.get() {
+                                                    "Creating link…"
+                                                } else {
+                                                    "Share"
+                                                }}
+                                            </button>
+                                        })}
                                         <button
                                             class="rooms-workspace__center-back"
                                             type="button"
@@ -1764,6 +1790,8 @@ pub fn RoomsWorkspace(
                                             invite.room_key, invite.code
                                         );
                                         let copy_link = link.clone();
+                                        let copied_state_link = link.clone();
+                                        let error_state_link = link.clone();
                                         view! {
                                             <div class="rooms-workspace__invite" role="status">
                                                 <div class="rooms-workspace__invite-copy">
@@ -1776,30 +1804,44 @@ pub fn RoomsWorkspace(
                                                     class="rooms-workspace__invite-button"
                                                     type="button"
                                                     on:click=move |_| {
-                                                        invite_copied.set(false);
+                                                        copied_invite_link.set(None);
                                                         invite_copy_error.set(None);
-                                                        let text = copy_link.clone();
+                                                        let copied_link = copy_link.clone();
+                                                        let failed_link = copy_link.clone();
                                                         if let Some(window) = web_sys::window() {
-                                                            let promise = window.navigator().clipboard().write_text(&text);
+                                                            let promise = window
+                                                                .navigator()
+                                                                .clipboard()
+                                                                .write_text(&copied_link);
                                                             wasm_bindgen_futures::spawn_local(async move {
                                                                 match wasm_bindgen_futures::JsFuture::from(promise).await {
-                                                                    Ok(_) => invite_copied.set(true),
-                                                                    Err(_) => invite_copy_error.set(Some(
+                                                                    Ok(_) => copied_invite_link.set(Some(copied_link)),
+                                                                    Err(_) => invite_copy_error.set(Some((
+                                                                        failed_link,
                                                                         "Copy failed—select the link manually.".into(),
-                                                                    )),
+                                                                    ))),
                                                                 }
                                                             });
                                                         } else {
-                                                            invite_copy_error.set(Some(
+                                                            invite_copy_error.set(Some((
+                                                                failed_link,
                                                                 "Copy failed—select the link manually.".into(),
-                                                            ));
+                                                            )));
                                                         }
                                                     }
                                                 >
-                                                    {move || if invite_copied.get() { "Copied" } else { "Copy link" }}
+                                                    {move || if copied_invite_link.get().as_deref()
+                                                        == Some(copied_state_link.as_str())
+                                                    {
+                                                        "Copied"
+                                                    } else {
+                                                        "Copy link"
+                                                    }}
                                                 </button>
-                                                {move || invite_copy_error.get().map(|error| view! {
-                                                    <span class="rooms-workspace__invite-label" role="alert">{error}</span>
+                                                {move || invite_copy_error.get().and_then(|(link, error)| {
+                                                    (link == error_state_link).then(|| view! {
+                                                        <span class="rooms-workspace__invite-label" role="alert">{error}</span>
+                                                    })
                                                 })}
                                             </div>
                                         }.into_any()
@@ -3452,6 +3494,29 @@ mod tests {
         assert!(access_allows_writes(Some(&test_access(
             RoomAccessState::Live
         ))));
+    }
+
+    #[test]
+    fn sharing_is_local_or_federated_owner_only() {
+        let local = test_access(RoomAccessState::Local);
+        assert!(access_allows_sharing(Some(&local), "human-local"));
+
+        let mut live = test_access(RoomAccessState::Live);
+        live.members.push(FederatedRoomMemberProjection {
+            member_id: "human-local".into(),
+            owner_member_id: None,
+            actor_type: FederatedActorType::User,
+            role_in_room: FederatedRoomRole::Member,
+            display_name: "Local human".into(),
+            public_agent_descriptor: None,
+            joined_at: "2026-08-16T00:00:00Z".into(),
+            derived_presence: Some(MemberPresence::Live),
+            local_binding_available: None,
+        });
+        assert!(!access_allows_sharing(Some(&live), "human-local"));
+        live.members[0].role_in_room = FederatedRoomRole::Owner;
+        assert!(access_allows_sharing(Some(&live), "human-local"));
+        assert!(!access_allows_sharing(Some(&live), "other-human"));
     }
 
     #[test]

@@ -6098,3 +6098,35 @@ August 4 subtree snapshot omitted the daemon/store read-cursor contracts require
 by the recovered Surface Rooms UI. Aligned mention parsing with canonical dotted
 agent participant ids. Persistent Rooms 69/69, strict daemon Clippy, formatting,
 and docs checks pass.
+
+_________________________________________________________________________________
+time:      [18:27] [01-09-26]
+agent:     [ocean] [codex]
+worktree:  feat/restore-latest-rooms-ui
+type:      [feat]
+area:      [providers]: Refresh Claude Fable and Z.AI coding-plan models
+
+Added Anthropic's current `claude-fable-5-1` route and picker entry through
+Claude Code OAuth with the documented 1M context and 128K output limits, while
+keeping both Fable 5 persisted ids resolver-only for session compatibility.
+Added Z.AI Coding Plan's `glm-5.3-flash` route with multimodal input, corrected
+GLM 5.3/Flash to their documented 1M/128K limits, and moved the bare `glm` alias
+to flagship GLM 5.3. Z.AI documentation confirms both 5.3 variants are available
+to all coding-plan tiers over Ocean's existing OpenAI-compatible endpoint.
+Focused provider, protocol, and agent mapping tests pass; workspace verification
+is recorded in the task result.
+
+_________________________________________________________________________________
+time:      [20:29] [07-09-26]
+agent:     [ocean surface], [unknown-model]
+worktree:  feat/restore-latest-rooms-ui
+type:      [feature-request]: Add GPT-6 Astra to the Ocean model harness
+area:      [backend]: OpenAI Codex model routing
+
+Added `gpt-6-astra` to the public model registry and exact OpenAI Codex OAuth
+resolver path with Codex's advertised 272K default context and 128K output
+limits. Updated the version-gated Codex wire header from 0.144.1 to the current
+0.153.4 release and added focused route plus picker/resolver invariant coverage.
+Formatting, all 47 ocean-providers tests, 30 focused Codex protocol tests, and
+the release ocean-daemon build pass. An isolated neutral-cwd smoke daemon on
+`:4781` advertised GPT-6 Astra as ready through the existing local Codex OAuth.
