@@ -216,3 +216,15 @@ VS Code/Cursor now uses one model/effort disclosure in the composer instead of s
 
 Extension TypeScript lint and production package passed after installing locked dependencies into the task checkout. JS syntax check passed. ACP: 23 unit plus three permission-ordering integration tests passed; strict all-target Clippy and docs-check passed. Read-only renderer fixture using actual HTML/CSS/JS proves API/max display, disabled disconnected option, incompatible max clearing after model change, Escape/focus, missing pin preservation and 390px viewport bounds x=12..378 with scroll width 390. Fixture evidence does not prove a native editor host or account inference. Owning Surface/crates devlogs updated; root and Child devlog indexes unchanged because no ownership boundaries changed. Prior head 3c4a1320 has hosted CI green. Fresh review, new-head CI, native/live acceptance, account repair and runtime migration compatibility remain pending; no live installation or provider call occurred.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [13:48] [05-10-26]
+agent: [codex] [gpt-6]
+worktree: [feat/model-effort-control] [/Users/risingtidesdev/dev/ocean-ui-current]
+type: [bug report]
+area: [backend] [testing]
+
+Fixed missing native Claude Code login discovery. Explicit env and valid Ocean OAuth credentials retain precedence; read-only native macOS keychain discovery is bounded to two seconds/32 KiB, with native credential-file fallback. Custom CLAUDE_CONFIG_DIR bypasses default account discovery. Future expiry and inference scope are required; native secrets are never imported, refreshed, written or logged, and cannot supply Anthropic API auth.
+
+Validation: 65 provider tests, strict all-target provider Clippy, six OAuth storage tests, seven Agent refresh tests, workspace test compilation and docs-check pass. Readiness-only candidate snapshot now reports 39/44 routes (Claude Code 4/4; Anthropic API 0/4 and Google 0/1). All four Claude Code choices completed bounded live no-tools prompts through production resolver/factory: Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 4.5. Existing other-account acceptance failures remain unresolved. No live installation or durable service/database changes. Provider devlog updated; parent contracts and child indexes unchanged because ownership boundaries are unchanged. Fresh review and operated-runtime compatibility remain required before release.
+_________________________________________________________________________________

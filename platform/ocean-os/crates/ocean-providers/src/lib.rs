@@ -5,6 +5,7 @@
 //! resolved config into legacy runtime structs at the edge.
 
 mod auth_file;
+mod native_claude;
 
 pub use auth_file::{lock_auth_file, AuthFileGuard, AuthFileWriteError, AUTH_FILE_LOCK_WAIT};
 
@@ -159,6 +160,10 @@ pub enum CredentialSource {
     /// used as a fallback when the Ocean `openai-codex` OAuth block is absent or
     /// expired.
     CodexCliAuthFile {
+        path: String,
+    },
+    ClaudeCodeKeychain,
+    ClaudeCodeCliAuthFile {
         path: String,
     },
     NotRequired,
@@ -1613,38 +1618,35 @@ fn resolve_credential(
         }
     }
 
-    let Some(path) = &env.auth_file else {
-        return Ok(None);
-    };
-    if !path.exists() {
-        return Ok(None);
+    if let Some(path) = env.auth_file.as_ref().filter(|path| path.exists()) {
+        let json = read_auth_json(path)?;
+        let (token, kind) = if matches!(provider, ProviderId::ClaudeCode) {
+            (
+                oauth_access_token(&json, "claude-code")
+                    .or_else(|| oauth_access_token(&json, "anthropic-oauth")),
+                CredentialKind::OAuthBearer,
+            )
+        } else {
+            (
+                auth_file_key(&json, provider.as_str()),
+                CredentialKind::ApiKey,
+            )
+        };
+        if let Some(secret) = token.and_then(SecretString::new) {
+            return Ok(Some(ResolvedCredential {
+                secret,
+                source: CredentialSource::OceanAuthFile {
+                    path: path.display().to_string(),
+                },
+                kind,
+            }));
+        }
     }
-
-    let json = read_auth_json(path)?;
-    let source = CredentialSource::OceanAuthFile {
-        path: path.display().to_string(),
-    };
-
-    // Claude Code authenticates with the OAuth access token from a `claude-code`
-    // block (the `anthropic-oauth` block name is accepted as a synonym);
-    // everyone else uses a plain api_key.
-    let (secret, kind) = if matches!(provider, ProviderId::ClaudeCode) {
-        let token = oauth_access_token(&json, "claude-code")
-            .or_else(|| oauth_access_token(&json, "anthropic-oauth"));
-        (token, CredentialKind::OAuthBearer)
+    Ok(if matches!(provider, ProviderId::ClaudeCode) {
+        native_claude::resolve(env)
     } else {
-        (
-            auth_file_key(&json, provider.as_str()),
-            CredentialKind::ApiKey,
-        )
-    };
-    Ok(secret
-        .and_then(SecretString::new)
-        .map(|secret| ResolvedCredential {
-            secret,
-            source,
-            kind,
-        }))
+        None
+    })
 }
 
 fn auth_file_key<'a>(json: &'a serde_json::Value, provider: &str) -> Option<&'a str> {
