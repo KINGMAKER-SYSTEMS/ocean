@@ -65,7 +65,7 @@ fn model_choices(mut models: Vec<ModelInfo>) -> Vec<ModelInfo> {
 #[component]
 pub fn ModelControl(daemon: Daemon) -> impl IntoView {
     let models = daemon.models;
-    let current = daemon.model;
+    let current = daemon.default_model;
     let selected = daemon.model_override;
     let effort = daemon.thinking_level;
     let daemon = StoredValue::new(daemon);
@@ -79,13 +79,14 @@ pub fn ModelControl(daemon: Daemon) -> impl IntoView {
             if event.key() == "Escape" {
                 if let Some(target) = event.target().and_then(|target| target.dyn_into::<web_sys::Element>().ok()) {
                     if let Ok(Some(details)) = target.closest("details") {
+                        if !details.has_attribute("open") { return; }
+                        event.stop_propagation();
                         let _ = details.remove_attribute("open");
                         if let Ok(Some(summary)) = details.query_selector("summary") {
                             if let Ok(summary) = summary.dyn_into::<web_sys::HtmlElement>() { let _ = summary.focus(); }
                         }
                     }
                 }
-                event.stop_propagation();
             }
         }>
             <summary class="ocean-model-control__trigger" aria-label="Model and effort">

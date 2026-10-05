@@ -116,3 +116,15 @@ No live deployment or inference claimed: live daemon 6912315aff3d remains select
 Claude/Google readiness is false, and public runtime reconciliation plus fresh
 review are required before installation. API-auth modern-model coverage and the
 remaining broad UI integration/acceptance goal remain active.
+
+_________________________________________________________________________________
+time: [11:51] [05-10-26]
+agent: [codex] [gpt-6]
+worktree: [feat/model-effort-control] [/Users/risingtidesdev/dev/ocean-ui-current]
+type: [bug report]
+area: [frontend] [testing]
+
+PR #2 review repairs separate the authoritative model default from executed turn models and let Escape bubble from a closed picker. A reducer regression proves override turns preserve the default; rebuilt-browser checks prove open-picker close/focus and closed-picker Sessions dismissal. Surface: 896 tests passed; Trunk built. Agent/protocol: 431 tests passed, one opt-in live diagnostic ignored; strict all-target Clippy passed.
+
+Added an explicit bounded no-tools catalog inference probe with fixed prompts, no session/store/auth writes, and fixed error classifications. Actual account audit: 12 passed, 16 failed, five disconnected. Astra, GPT-5.6 Sol/Terra/Luna, GPT-5.5 and all seven GLM models completed inference; other configured routes returned 401/400/429. Codex version header now matches installed CLI 0.154.0; focused retry confirms GPT-6.1 Sol remains model_unavailable while Astra succeeds. Credential presence does not establish entitlement. Fresh review, current-head CI, modern direct API coverage and operated-runtime compatibility remain required; no live installation occurred.
+_________________________________________________________________________________

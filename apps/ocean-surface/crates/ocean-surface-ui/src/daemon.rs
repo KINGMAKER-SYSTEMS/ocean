@@ -2065,6 +2065,9 @@ pub struct Daemon {
     /// Current model id, learned from TurnStarted (and GET /v1/models). Shown
     /// live in the header so a mid-session swap is visible.
     pub model: RwSignal<Option<String>>,
+    /// Authoritative default from GET /v1/models.current, independent of
+    /// executed turn models and session transcript hydration.
+    pub default_model: RwSignal<Option<String>>,
     /// The catalogue of selectable models from GET /v1/models.
     pub models: RwSignal<Vec<ModelInfo>>,
     /// The selected project id, sent as `project_id` on every turn so the daemon
@@ -2508,6 +2511,7 @@ impl Daemon {
             last_turn_tokens: RwSignal::new(None),
             session_tokens: RwSignal::new(TokenStats::default()),
             model: RwSignal::new(None),
+            default_model: RwSignal::new(None),
             models: RwSignal::new(Vec::new()),
             // Restore the last-selected project from localStorage so the choice
             // survives a reload.
@@ -2591,6 +2595,7 @@ impl Daemon {
             last_turn_tokens: RwSignal::new(None),
             session_tokens: RwSignal::new(TokenStats::default()),
             model: RwSignal::new(None),
+            default_model: RwSignal::new(None),
             models: RwSignal::new(Vec::new()),
             project: RwSignal::new(None),
             projects: RwSignal::new(Vec::new()),
@@ -4077,6 +4082,7 @@ impl Daemon {
         let url = self.url.get_untracked();
         let models = self.models;
         let model = self.model;
+        let default_model = self.default_model;
         spawn_local(async move {
             #[derive(Deserialize)]
             struct Current {
@@ -4096,6 +4102,7 @@ impl Daemon {
                     Ok(r) => {
                         if let Some(cur) = r.current {
                             if !cur.model.is_empty() {
+                                default_model.set(Some(cur.model.clone()));
                                 model.set(Some(cur.model));
                             }
                         }
@@ -8202,6 +8209,27 @@ mod tests {
             daemon.activity_revision,
             daemon.session_title,
             daemon.cwd,
+        );
+    }
+
+    #[test]
+    fn turn_override_does_not_replace_the_daemon_default() {
+        let daemon = daemon_with_session("model-default");
+        daemon.default_model.set(Some("gpt-6-astra".into()));
+        daemon.model_override.set(Some("gpt-6-luna".into()));
+        apply_test_event(
+            &daemon,
+            AgentEvent::TurnStarted {
+                turn_id: "override-turn".into(),
+                session_id: "model-default".into(),
+                model: Some("gpt-6-luna".into()),
+            },
+        );
+        daemon.model_override.set(None);
+        assert_eq!(daemon.model.get_untracked().as_deref(), Some("gpt-6-luna"));
+        assert_eq!(
+            daemon.default_model.get_untracked().as_deref(),
+            Some("gpt-6-astra")
         );
     }
 

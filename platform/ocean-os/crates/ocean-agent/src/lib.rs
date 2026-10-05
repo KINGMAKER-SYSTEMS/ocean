@@ -5691,6 +5691,151 @@ done
         assert_eq!(model.max_tokens, 128_000);
     }
 
+    /// Explicit operator diagnostic: fixed prompt, no tools/session/store/refresh.
+    /// Ordinary tests never read credentials or contact a provider.
+    #[tokio::test]
+    #[ignore = "requires OCEAN_LIVE_MODEL_PROBE=1 and configured provider accounts"]
+    async fn live_catalog_models_complete_tool_free_prompt() {
+        use futures::StreamExt;
+        assert_eq!(std::env::var("OCEAN_LIVE_MODEL_PROBE").as_deref(), Ok("1"));
+        fn error_status(error: &ocean_protocol::Error) -> String {
+            use ocean_protocol::Error;
+            match error {
+                Error::ProviderError { status, body } => {
+                    // Only fixed classes leave this scope; upstream bodies may
+                    // echo private data or contain attacker-controlled text.
+                    let text: String = body
+                        .chars()
+                        .take(4096)
+                        .collect::<String>()
+                        .to_ascii_lowercase();
+                    let class = if text.contains("version") {
+                        "version_gate"
+                    } else if text.contains("model_not_found")
+                        || text.contains("unsupported_model")
+                        || (text.contains("model")
+                            && (text.contains("not supported")
+                                || text.contains("not available")
+                                || text.contains("does not exist")))
+                    {
+                        "model_unavailable"
+                    } else if text.contains("unsupported_parameter") {
+                        "unsupported_parameter"
+                    } else if text.contains("insufficient_quota") {
+                        "quota"
+                    } else if text.contains("max_output_tokens") {
+                        "output_cap"
+                    } else if text.contains("instructions") {
+                        "instructions"
+                    } else {
+                        "rejected"
+                    };
+                    format!("http_{status}_{class}")
+                }
+                Error::RetryExhausted { source, .. } => error_status(source),
+                Error::Http(_) => "transport".into(),
+                Error::MissingApiKey(_) => "missing_credential".into(),
+                Error::Cancelled => "cancelled".into(),
+                _ => "protocol".into(),
+            }
+        }
+        let mut env = ProviderEnv::from_process();
+        env.vars.remove("OCEAN_PROVIDER");
+        let filter = std::env::var("OCEAN_MODEL_PROBE_IDS").ok();
+        let mut failures = Vec::new();
+        let mut passed = 0;
+        let mut disconnected = 0;
+        for known in ocean_providers::known_models() {
+            if filter
+                .as_ref()
+                .is_some_and(|ids| !ids.split(',').any(|id| id.trim() == known.id))
+            {
+                continue;
+            }
+            env.vars.insert("OCEAN_MODEL".into(), known.id.clone());
+            let config =
+                ocean_providers::resolve_provider_config(&env).expect("catalog route resolves");
+            if !config.readiness().ok {
+                println!("MODEL_PROBE {} {} disconnected", known.provider, known.id);
+                disconnected += 1;
+                continue;
+            }
+            let model = model_from_provider_config(&config).expect("catalog model constructs");
+            let mut options = ocean_protocol::StreamOptions {
+                api_key: config
+                    .credential
+                    .as_ref()
+                    .map(|credential| credential.secret.expose().to_owned()),
+                base_url: Some(config.selection.base_url.clone()),
+                auth: auth_method_for(&config),
+                reasoning: Some(ocean_protocol::ThinkingLevel::Low),
+                max_tokens: Some(1024),
+                ..Default::default()
+            };
+            if let Some(account_id) = &config.account_id {
+                options
+                    .headers
+                    .insert("chatgpt-account-id".into(), account_id.clone());
+            }
+            let context = ocean_protocol::Context {
+                messages: vec![Message::user_text("Reply exactly OCEAN_MODEL_OK.")],
+                ..Default::default()
+            };
+            let probe = async {
+                let mut stream = ocean_protocol::stream_simple(&model, &context, &options)
+                    .await
+                    .map_err(|error| error_status(&error))?;
+                while let Some(event) = stream.next().await {
+                    match event.map_err(|error| error_status(&error))? {
+                        ocean_protocol::AssistantMessageEvent::Done { message, .. } => {
+                            let text: String = message
+                                .content
+                                .iter()
+                                .filter_map(|content| content.as_text())
+                                .collect();
+                            if text.trim() == "OCEAN_MODEL_OK" {
+                                return Ok(message.usage.total_tokens);
+                            }
+                            return Err("unexpected_output".to_owned());
+                        }
+                        ocean_protocol::AssistantMessageEvent::Error { .. } => {
+                            return Err("stream_error".to_owned())
+                        }
+                        _ => {}
+                    }
+                }
+                Err("missing_completion".to_owned())
+            };
+            let result = tokio::time::timeout(std::time::Duration::from_secs(45), probe).await;
+            match result {
+                Ok(Ok(tokens)) => {
+                    passed += 1;
+                    println!(
+                        "MODEL_PROBE {} {} passed tokens={tokens}",
+                        known.provider, known.id
+                    );
+                }
+                failed => {
+                    let status = match failed {
+                        Ok(Err(status)) => status,
+                        _ => "timeout".into(),
+                    };
+                    println!("MODEL_PROBE {} {} {status}", known.provider, known.id);
+                    failures.push((known.id, status));
+                }
+            }
+        }
+        println!(
+            "MODEL_PROBE_SUMMARY passed={passed} disconnected={disconnected} failed={}",
+            failures.len()
+        );
+        assert!(passed > 0, "no configured route completed inference");
+        assert!(
+            failures.is_empty(),
+            "configured routes failed: {failures:?}"
+        );
+    }
+
     #[test]
     fn every_catalog_model_constructs_a_runtime_wire_model() {
         for known in ocean_providers::known_models() {

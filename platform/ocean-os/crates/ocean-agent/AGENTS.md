@@ -29,6 +29,11 @@ transcripts by session id.
   unconfirmed. Never roll back a stale credential snapshot, hold custody across
   network/await, or log provider bodies/tokens; refresh diagnostics use fixed
   class/status only. External CLI writers are not enrolled by this interface.
+- The ignored live catalog probe requires `OCEAN_LIVE_MODEL_PROBE=1`; optional
+  `OCEAN_MODEL_PROBE_IDS` limits exact ids. It sends only a fixed no-tools prompt,
+  bounds each call to 45 seconds, and prints fixed error classes and token counts.
+  It never refreshes credentials or constructs sessions/stores. Configured
+  credentials alone do not prove entitlement or completed inference.
 - Preserve session compatibility unless a migration is documented.
 - Every advertised catalog model must construct a runtime wire model with the
   same id and limits. Current Opus/Sonnet 5.5 constructors use 1M/128K;
@@ -190,6 +195,8 @@ transcripts by session id.
 - Memory guidance must not encourage unconditional recall. Call `recall` only when prior conversations, preferences, or decisions are needed and not already injected.
 
 ## Verification
+
+- Explicit live diagnostic: `OCEAN_LIVE_MODEL_PROBE=1 cargo test -p ocean-agent live_catalog_models_complete_tool_free_prompt --locked -- --ignored --nocapture` (contacts configured providers).
 
 - `cargo test -p ocean-agent every_catalog_model_constructs --locked`
 - `cargo test -p ocean-agent production_model_validation --locked`
