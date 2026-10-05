@@ -276,3 +276,15 @@ Fixed the TUI slash commands that misbehaved. /clear during a running turn dropp
 
 Validation: all 506 TUI tests pass (4 ignored), including new cases for each fix; cargo check, rustfmt check, the required release build of ocean-tui and docs-check pass. The installed operator binary is unchanged until the TUI installer is run from main after merge. TUI devlog updated; indexes unchanged.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [17:47] [05-10-26]
+agent: [claude] [claude code]
+worktree: [claude/tui-slash-fixes] [/Users/risingtidesdev/dev/ocean-claude-audit]
+type: [review]
+area: [frontend] [testing]
+
+Applied the independent review of the TUI slash fixes. The first version of /clear during a running turn kept the queue but deleted its rows, so a queued follow-up ran later with nothing on screen, and it deleted an undecided approval card, leaving the approve keys with no target. A busy /clear now keeps queued follow-up rows and undecided approval cards, and a promoted follow-up always gets a user row. /copy returns a whole reply even when a notice split it into two blocks. The turn-lifecycle line in the TUI contract now lists what actually clears busy.
+
+Validation: all 509 TUI tests pass (4 ignored), with new cases for a follow-up queued before a busy /clear running visibly, a promoted prompt with no row, a surviving approval card, Esc after /clear, the idle pause reset and the split reply; rustfmt check, the release build of ocean-tui and docs-check pass.
+_________________________________________________________________________________

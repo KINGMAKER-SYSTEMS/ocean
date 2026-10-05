@@ -2096,12 +2096,14 @@ impl ChatComponent {
             return None;
         }
         let prompt = self.queued_prompts.pop_front()?;
-        if let Some(queued) = self
+        match self
             .turns
             .iter_mut()
             .find(|turn| matches!(turn, Turn::Queued(text) if text == &prompt))
         {
-            *queued = Turn::User(prompt.clone());
+            Some(queued) => *queued = Turn::User(prompt.clone()),
+            // A prompt that runs must always show: never submit one silently.
+            None => self.turns.push(Turn::User(prompt.clone())),
         }
         self.next_submission_id = self.next_submission_id.wrapping_add(1);
         let submission_id = self.next_submission_id;
@@ -2633,19 +2635,29 @@ impl ChatComponent {
                 }
             }
             "/clear" => {
-                self.turns.clear();
+                if self.busy {
+                    // Clearing the view does not end a running turn. Dropping
+                    // `busy` here disarmed `/stop` and Esc while the daemon
+                    // kept executing tools. The turn also keeps the rows it
+                    // still acts through: queued follow-ups, whose rows are the
+                    // only on-screen form of the FIFO, and an approval card
+                    // that is still waiting for ⌃Y/⌃N.
+                    self.turns.retain(|turn| {
+                        matches!(
+                            turn,
+                            Turn::Queued(_) | Turn::Permission { resolved: None, .. }
+                        )
+                    });
+                } else {
+                    self.turns.clear();
+                    self.queued_prompts.clear();
+                    self.clear_queue_pause();
+                }
                 self.md.clear();
                 self.clear_tool_ui_state();
                 self.last_wrapped_rows = None;
                 self.last_viewport_rows = None;
                 self.scroll_back = 0;
-                // Clearing the view does not end a running turn. Dropping
-                // `busy` here disarmed `/stop` and Esc while the daemon kept
-                // executing tools, and released the queue behind the turn.
-                if !self.busy {
-                    self.queued_prompts.clear();
-                    self.clear_queue_pause();
-                }
                 None
             }
             "/pinned" => match args {
@@ -2782,10 +2794,23 @@ impl ChatComponent {
     }
 
     fn last_reply(&self) -> Option<String> {
-        self.turns.iter().rev().find_map(|t| match t {
-            Turn::Assistant(s) if !s.trim().is_empty() => Some(s.clone()),
-            _ => None,
-        })
+        // The newest assistant block, plus the blocks before it that only
+        // Ocean's own notices separate from it: a notice pushed while a reply
+        // streams splits that reply in two, and `/copy` wants all of it.
+        let mut parts: Vec<&str> = Vec::new();
+        for turn in self.turns.iter().rev() {
+            match turn {
+                Turn::Assistant(text) if !parts.is_empty() || !text.trim().is_empty() => {
+                    parts.push(text)
+                }
+                Turn::Assistant(_) | Turn::Notice(_) => {}
+                _ if parts.is_empty() => {}
+                _ => break,
+            }
+        }
+        parts.reverse();
+        let reply = parts.concat();
+        (!reply.trim().is_empty()).then_some(reply)
     }
 
     /// Push `/help` output into the transcript as an assistant block — the
@@ -5720,6 +5745,16 @@ mod tests {
             matches!(&chat.turns[1], Turn::Notice(s) if !s.contains("continues")),
             "streamed text must not append to Ocean's own block"
         );
+        // The notice split the reply on screen; `/copy` still returns all of it.
+        match chat.run_slash("/copy", "") {
+            Some(Action::CopyToClipboard(t)) => assert_eq!(t, "the answer continues"),
+            other => panic!("expected CopyToClipboard, got {other:?}"),
+        }
+
+        // An earlier reply, on the far side of the next prompt, is not part of it.
+        chat.turns.push(Turn::User("next question".into()));
+        chat.push_assistant("second answer");
+        assert_eq!(chat.last_reply().as_deref(), Some("second answer"));
     }
 
     /// Clearing the view is not ending the turn. `/clear` used to drop `busy`,
@@ -5747,20 +5782,101 @@ mod tests {
         );
         assert!(chat.busy, "the turn is still running");
         assert_eq!(chat.queued_prompts.len(), 1, "its queue is untouched");
+        // The queue's row is the only sign a prompt is waiting, so it stays.
+        assert!(
+            matches!(chat.turns.as_slice(), [Turn::Queued(text)] if text == "queued follow-up"),
+            "a queued follow-up must stay visible"
+        );
+        // Esc and /stop both still reach the running turn.
+        assert!(matches!(
+            chat.handle_key(key(KeyCode::Esc)),
+            Some(Action::InterruptTurn)
+        ));
         assert!(matches!(
             chat.run_slash("/stop", ""),
             Some(Action::InterruptTurn)
         ));
     }
 
+    /// The follow-up queued before a busy `/clear` still runs when the turn
+    /// ends, and it runs in plain sight.
+    #[test]
+    fn follow_up_queued_before_a_busy_clear_still_runs_visibly() {
+        let mut chat = ChatComponent {
+            busy: true,
+            input: "then run the migration".into(),
+            ..Default::default()
+        };
+        let _ = chat.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(chat.run_slash("/clear", "").is_none());
+
+        let next = chat.update(&turn_finished(AgentTurnStatus::Completed, None));
+        assert!(matches!(
+            next,
+            Some(Action::SubmitPrompt { prompt, .. }) if prompt == "then run the migration"
+        ));
+        assert!(
+            chat.turns
+                .iter()
+                .any(|turn| matches!(turn, Turn::User(text) if text == "then run the migration")),
+            "the promoted prompt must show as a user row"
+        );
+    }
+
+    /// Even with no row to convert, a promoted prompt is shown, never run
+    /// silently.
+    #[test]
+    fn promoted_prompt_without_a_queued_row_still_gets_a_user_row() {
+        let mut chat = ChatComponent::default();
+        chat.queued_prompts.push_back("orphaned".to_string());
+        let next = chat.submit_next_queued_prompt();
+        assert!(matches!(
+            next,
+            Some(Action::SubmitPrompt { prompt, .. }) if prompt == "orphaned"
+        ));
+        assert!(matches!(chat.turns.as_slice(), [Turn::User(text)] if text == "orphaned"));
+    }
+
+    /// A turn blocked on approval keeps its card through `/clear`: the card is
+    /// what ⌃Y/⌃N act on, and without it the turn waits with no way to answer.
+    #[test]
+    fn clear_during_a_running_turn_keeps_a_pending_approval_card() {
+        let mut chat = ChatComponent {
+            busy: true,
+            ..Default::default()
+        };
+        let pending = PermissionId::new_v4();
+        chat.turns
+            .push(Turn::Assistant("about to run a command".into()));
+        chat.turns.push(Turn::Permission {
+            permission_id: PermissionId::new_v4(),
+            tool: "bash".into(),
+            reason: "already answered".into(),
+            resolved: Some(true),
+        });
+        chat.turns.push(Turn::Permission {
+            permission_id: pending,
+            tool: "bash".into(),
+            reason: "rm -rf build".into(),
+            resolved: None,
+        });
+
+        assert!(chat.run_slash("/clear", "").is_none());
+        assert_eq!(chat.pending_permission(), Some(pending));
+        assert_eq!(chat.turns.len(), 1, "only the undecided card remains");
+    }
+
     #[test]
     fn clear_when_idle_still_drops_the_queue() {
         let mut chat = ChatComponent::default();
         chat.queued_prompts.push_back("left over".to_string());
+        chat.turns.push(Turn::Queued("left over".into()));
         chat.turns.push(Turn::Assistant("done".into()));
+        chat.queued_prompts_paused = true;
         assert!(chat.run_slash("/clear", "").is_none());
         assert!(chat.turns.is_empty());
         assert!(chat.queued_prompts.is_empty());
+        assert!(!chat.queued_prompts_paused, "the pause goes with the queue");
         assert!(!chat.busy);
     }
 
