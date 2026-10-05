@@ -168,3 +168,15 @@ A preview exposed Rooms mounting before proxy bootstrap resolved the daemon URL.
 
 Final Surface: 895 tests passed (two retired hero tests removed), strict WASM Clippy and Trunk build passed; docs-check passed. Initial build failed for disk space; clearing this task's disposable Ocean incremental compiler cache recovered space, and final checks reran successfully. No user data or live service changed. Surface devlog/design guidance updated; root and Child devlog indexes stay unchanged because ownership boundaries did not move. Prior auth-route head a5ac9279 has both hosted builds green. Fresh review, new-head CI, account repair, runtime compatibility and broader UI/live acceptance remain required.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [12:59] [05-10-26]
+agent: [codex] [gpt-6]
+worktree: [feat/model-effort-control] [/Users/risingtidesdev/dev/ocean-ui-current]
+type: [feature-request]
+area: [frontend] [design] [testing]
+
+Floating chat now uses the same model/effort control as the main composer. Drafts remain editable during streaming; submission requires nonblank input, an idle turn and resolved endpoint in both handler and button. Rejected submissions preserve drafts. Compact layout anchors the picker to the composer, uses touch-sized controls and Ocean browser background while preserving native overlay transparency through the existing host seam.
+
+Surface: 896 tests passed, strict WASM Clippy and Trunk build passed. Docs-check passed (30 packages, 151 active Markdown files, 170 links). Read-only browser fixtures prove Escape/focus, 390px layout with panel x=24..366 and no horizontal overflow, and Enter preserving a draft while delayed bootstrap keeps Send disabled. Fixture evidence does not establish real inference or native overlay acceptance. Owning Surface devlog updated; root and Child devlog indexes unchanged because ownership boundaries did not move. Fresh review, current-head CI, account repair and operated-runtime compatibility remain pending; no live installation occurred.
+_________________________________________________________________________________

@@ -127,6 +127,8 @@ token to browser code, bundle it, or cache it in client storage.
 ## Model and Effort Control
 
 - `crates/ocean-surface-ui/src/model_control.rs` owns the composer's single model/effort disclosure.
+  Main and floating chat use this same component and daemon selection state;
+  do not add a second model/effort picker for an alternate chat host.
   It consumes the daemon's shared model catalog and current selection; choices
   remain per-turn overrides rather than global model mutations. Prefer additive
   `/v1/models.routes` and `current.route` when present, with legacy `models`
@@ -144,6 +146,13 @@ token to browser code, bundle it, or cache it in client storage.
   focus; a closed disclosure lets Escape reach the global reveal handler.
 - Product intent lives in `PRODUCT.md`; existing web design and token files
   remain the visual authority.
+
+- Floating chat keeps drafts editable during streaming. Send admission requires
+  a resolved endpoint, an idle turn and nonblank input, in both the button and
+  submit handler. Rejected submissions preserve the draft; Halt remains the
+  active-turn action. Its model panel is anchored to the compact composer.
+  Browser float mode uses Ocean's background; native overlay transparency is
+  gated through the existing `host::running_in_tauri` seam.
 
 ## Session Contract
 

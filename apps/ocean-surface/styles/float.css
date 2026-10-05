@@ -1,13 +1,15 @@
 /* ─── Floating chat corridor (ocean-surface-ui/src/widget.rs) ──────────────
    Activated via ?float=1 or #float on the surface URL.
-   Keep the root/corridor transparent for overlay placement. widget.rs owns the
+   Native overlays retain transparency; browser float mode uses Ocean's surface.
+   widget.rs owns the
    per-message depth effect, so .ocean-float__msg remains a layout-only wrapper.
    ───────────────────────────────────────────────────────────────────────── */
 
 body.ocean-float-mode {
-  background: transparent;
+  background: var(--bg);
   overflow: hidden;
 }
+body.ocean-float-overlay { background: transparent; }
 
 .ocean-float {
   position: relative;
@@ -225,7 +227,10 @@ body.ocean-float-mode {
 /* ── compact composer ────────────────────────────────────────────────── */
 
 .ocean-float__composer {
-  display: flex;
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas: "input input" "controls action";
   align-items: center;
   gap: 6px;
   padding: 10px 12px;
@@ -234,7 +239,7 @@ body.ocean-float-mode {
 }
 
 .ocean-float__input {
-  flex: 1;
+  grid-area: input;
   min-width: 0;
   height: var(--ctl-h);
   padding: 0 12px;
@@ -252,6 +257,14 @@ body.ocean-float-mode {
     box-shadow var(--dur-fast) var(--ease),
     opacity var(--dur-fast) var(--ease);
 }
+
+.ocean-float__turn-controls {
+  grid-area: controls;
+  min-width: 0;
+}
+
+.ocean-float .ocean-model-control { position: static; }
+.ocean-float .ocean-model-control__panel { left: 12px; right: 12px; width: auto; }
 
 .ocean-float__input::placeholder {
   color: var(--fg-3);
@@ -274,6 +287,7 @@ body.ocean-float-mode {
 
 .ocean-float__send,
 .ocean-float__halt {
+  grid-area: action;
   appearance: none;
   display: inline-flex;
   flex: 0 0 auto;
@@ -294,6 +308,14 @@ body.ocean-float-mode {
     color var(--dur-fast) var(--ease),
     filter var(--dur-fast) var(--ease),
     opacity var(--dur-fast) var(--ease);
+}
+
+@media (pointer: coarse) {
+  .ocean-float__input,
+  .ocean-float .ocean-model-control select { min-height: 44px; font-size: 16px; }
+  .ocean-float .ocean-model-control__trigger,
+  .ocean-float__send,
+  .ocean-float__halt { min-height: 44px; min-width: 44px; }
 }
 
 .ocean-float__send {
