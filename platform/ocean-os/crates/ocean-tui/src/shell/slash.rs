@@ -95,7 +95,7 @@ pub const COMMANDS: &[SlashCommand] = &[
     },
     SlashCommand {
         name: "/thinking",
-        desc: "set thinking directly (/thinking default|off|minimal|low|medium|high|xhigh)",
+        desc: "set thinking directly (/thinking default|off|minimal|low|medium|high|xhigh|max)",
         group: "session",
         soon: false,
     },

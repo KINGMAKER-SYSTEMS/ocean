@@ -86,8 +86,7 @@
 
 .ocean-brand__word {
   display: inline-flex;
-  /* Brand font — the same --wm-font (Poppins) the landing reveal letters
-     use; the old --mono terminal face predates the wordmark switch. */
+  /* The header wordmark uses the shared Poppins brand font. */
   font-family: var(--wm-font);
   font-size: 14px;
   font-weight: 700;
@@ -274,73 +273,36 @@
   min-width: 0;
 }
 
-.ocean-thinking,
-.ocean-model-override {
-  appearance: none;
-  box-sizing: border-box;
-  min-width: 0;
-  color: var(--fg);
-  font-family: var(--font);
-  font-weight: 500;
-  line-height: 1;
-  background-color: var(--bg-raised);
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'%3E%3Cpath d='M2 4l3 3 3-3' fill='none' stroke='%23909098' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 10px center;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  cursor: pointer;
-  transition: background-color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease), opacity var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease);
+/* A single quiet trigger; settings appear only when the operator opens it. */
+.ocean-model-control { position: relative; min-width: 0; }
+.ocean-model-control__trigger {
+  display: flex; align-items: center; gap: 8px; list-style: none;
+  min-height: var(--ctl-h-sm); max-width: 320px; padding: 0 8px;
+  color: var(--fg-2); font-size: 12px; cursor: pointer; border-radius: var(--radius);
 }
-
-.ocean-thinking,
-.ocean-model-override {
-  height: var(--ctl-h-sm);
-  max-width: 150px;
-  padding: 0 24px 0 8px;
-  font-size: 11px;
-  color: var(--fg-3);
-  background-color: transparent;
-  background-position: right 6px center;
-  border-color: transparent;
+.ocean-model-control__trigger::-webkit-details-marker { display: none; }
+.ocean-model-control__name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ocean-model-control__effort { color: var(--fg-3); font-size: 11px; white-space: nowrap; }
+.ocean-model-control__chevron { color: var(--fg-3); margin-left: auto; }
+.ocean-model-control__trigger:hover,
+.ocean-model-control[open] > summary { background: var(--bg-elevated); color: var(--fg); }
+.ocean-model-control__trigger:focus-visible,
+.ocean-model-control select:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.ocean-model-control__panel {
+  position: absolute; bottom: calc(100% + 8px); left: 0; z-index: var(--z-dropdown, 30);
+  width: min(320px, calc(100vw - 40px)); box-sizing: border-box;
+  background: var(--bg-raised); border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg); padding: 14px; display: grid; gap: 12px;
 }
-
-.ocean-thinking:hover,
-.ocean-model-override:hover {
-  color: var(--fg);
+.ocean-model-control__field { display: grid; gap: 6px; color: var(--fg-2); font-size: 12px; }
+.ocean-model-control select {
+  width: 100%; min-width: 0; min-height: 36px; font: inherit; color: var(--fg);
+  background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 0 8px; cursor: pointer;
 }
-
-.ocean-thinking:hover,
-.ocean-model-override:hover {
-  background-color: var(--bg-elevated);
-  border-color: var(--border-strong);
-}
-
-.ocean-thinking:focus-visible,
-.ocean-model-override:focus-visible {
-  outline: none;
-  border-color: var(--accent);
-  box-shadow: var(--focus-ring);
-}
-
-.ocean-thinking:active,
-.ocean-model-override:active {
-  transform: scale(0.985);
-}
-
-.ocean-thinking:disabled,
-.ocean-model-override:disabled {
-  color: var(--fg-4);
-  opacity: 0.45;
-  pointer-events: none;
-}
-
-.ocean-thinking option,
-.ocean-model-override option {
-  background: var(--bg-raised);
-  color: var(--fg);
-  font-family: var(--font);
-}
+.ocean-model-control select:hover { border-color: var(--border-strong); }
+.ocean-model-control option { color: var(--fg); background: var(--bg-raised); }
+.ocean-model-control option:disabled { color: var(--fg-3); }
 
 /* Button controls -------------------------------------------------------- */
 .ocean-sessions-trigger,

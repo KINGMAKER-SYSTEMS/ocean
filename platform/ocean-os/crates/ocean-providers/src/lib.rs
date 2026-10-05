@@ -5,6 +5,7 @@
 //! resolved config into legacy runtime structs at the edge.
 
 mod auth_file;
+mod native_claude;
 
 pub use auth_file::{lock_auth_file, AuthFileGuard, AuthFileWriteError, AUTH_FILE_LOCK_WAIT};
 
@@ -159,6 +160,10 @@ pub enum CredentialSource {
     /// used as a fallback when the Ocean `openai-codex` OAuth block is absent or
     /// expired.
     CodexCliAuthFile {
+        path: String,
+    },
+    ClaudeCodeKeychain,
+    ClaudeCodeCliAuthFile {
         path: String,
     },
     NotRequired,
@@ -693,6 +698,9 @@ pub fn known_models() -> Vec<KnownModel> {
         // are about to stop existing.
         m("deepseek-v4-pro", "deepseek", "DeepSeek V4 Pro"),
         m("deepseek-v4-flash", "deepseek", "DeepSeek V4 Flash"),
+        m("gpt-6.1-sol", "openai-codex", "GPT-6.1 Sol (Codex)"),
+        m("gpt-6-sol", "openai-codex", "GPT-6 Sol (Codex)"),
+        m("gpt-6-luna", "openai-codex", "GPT-6 Luna (Codex)"),
         m("gpt-6-astra", "openai-codex", "GPT-6 Astra (Codex)"),
         m("gpt-5.6-sol", "openai-codex", "GPT-5.6 Sol (Codex)"),
         m("gpt-5.6-terra", "openai-codex", "GPT-5.6 Terra (Codex)"),
@@ -714,8 +722,8 @@ pub fn known_models() -> Vec<KnownModel> {
         // current Claude models. Legacy Fable 5 ids stay resolver-only so
         // persisted sessions continue to replay.
         m("claude-fable-5-1", "claude-code", "Claude Fable 5.1"),
-        m("claude-opus-5", "claude-code", "Claude Opus 5"),
-        m("claude-sonnet-5", "claude-code", "Claude Sonnet 5"),
+        m("claude-opus-5-5", "claude-code", "Claude Opus 5.5"),
+        m("claude-sonnet-5-5", "claude-code", "Claude Sonnet 5.5"),
         m("claude-haiku-4-5", "claude-code", "Claude Haiku 4.5"),
         // MiniMax ids use the API casing the resolver returns as current.model
         // (`MiniMax-M2`, not the lowercase alias), so `id == current.model`
@@ -750,8 +758,27 @@ pub struct ReadyModel {
     #[serde(flatten)]
     pub model: KnownModel,
     pub ready: bool,
+    #[serde(default)]
+    pub effort_levels: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_source: Option<CredentialSource>,
+}
+
+/// Effort choices supported by Ocean's current wire encoder for this model.
+/// This is additive catalog metadata; older clients can ignore it.
+pub fn model_effort_levels(id: &str) -> &'static [&'static str] {
+    if matches!(
+        id,
+        "gpt-6-astra" | "gpt-6.1-sol" | "claude-fable-5-1" | "claude-opus-5-5"
+    ) {
+        &["low", "medium", "high", "xhigh", "max"]
+    } else if matches!(id, "gpt-6-sol" | "gpt-6-luna" | "claude-sonnet-5-5")
+        || id.starts_with("gpt-5.6")
+    {
+        &["off", "low", "medium", "high", "xhigh", "max"]
+    } else {
+        &["off", "minimal", "low", "medium", "high", "xhigh"]
+    }
 }
 
 /// Per-model readiness for `GET /v1/models`: resolve each distinct provider's
@@ -773,6 +800,7 @@ pub fn known_models_with_readiness(env: &ProviderEnv) -> Vec<ReadyModel> {
                 .or_insert_with(|| {
                     let mut probe = env.clone();
                     probe.vars.insert("OCEAN_MODEL".into(), m.id.clone());
+                    probe.vars.remove("OCEAN_PROVIDER");
                     match resolve_provider_config(&probe) {
                         Ok(cfg) => {
                             let r = cfg.readiness();
@@ -783,10 +811,107 @@ pub fn known_models_with_readiness(env: &ProviderEnv) -> Vec<ReadyModel> {
                 })
                 .clone();
             ReadyModel {
+                effort_levels: model_effort_levels(&m.id)
+                    .iter()
+                    .map(|level| (*level).into())
+                    .collect(),
                 model: m,
                 ready,
                 credential_source,
             }
+        })
+        .collect()
+}
+
+/// Additive picker entries with an unambiguous provider-qualified selection id.
+/// Legacy `KnownModel.id` stays equal to the provider wire model id.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelRoute {
+    pub id: String,
+    pub model_id: String,
+    pub provider: String,
+    pub label: String,
+    pub ready: bool,
+    pub effort_levels: Vec<String>,
+    pub aliases: Vec<String>,
+}
+
+/// Pure catalog; readiness is resolved separately from the caller's environment.
+pub fn model_routes() -> Vec<ModelRoute> {
+    let legacy = known_models();
+    let mut routes = Vec::new();
+    for model in &legacy {
+        let label = if model.provider == "claude-code" {
+            format!("{} (Claude Code)", model.label)
+        } else {
+            model.label.clone()
+        };
+        routes.push(ModelRoute {
+            id: format!("{}/{}", model.provider, model.id),
+            model_id: model.id.clone(),
+            provider: model.provider.clone(),
+            label,
+            ready: false,
+            effort_levels: model_effort_levels(&model.id)
+                .iter()
+                .map(|s| (*s).into())
+                .collect(),
+            aliases: vec![model.id.clone()],
+        });
+    }
+    for model in legacy {
+        let api_provider = if model.provider == "openai-codex" && openai_uses_responses(&model.id) {
+            "openai"
+        } else if model.provider == "claude-code" {
+            "anthropic"
+        } else {
+            continue;
+        };
+        let label = if api_provider == "openai" {
+            model.label.replace("(Codex)", "(API)")
+        } else {
+            format!("{} (API)", model.label)
+        };
+        routes.push(ModelRoute {
+            id: format!("{api_provider}/{}", model.id),
+            effort_levels: model_effort_levels(&model.id)
+                .iter()
+                .map(|s| (*s).into())
+                .collect(),
+            model_id: model.id,
+            provider: api_provider.into(),
+            label,
+            ready: false,
+            aliases: Vec::new(),
+        });
+    }
+    routes
+}
+
+/// Catalog-only membership check for both legacy and qualified selection ids.
+/// Returns the durable wire-model/provider pair without accessing credentials.
+pub fn catalog_model(spec: &str) -> Option<KnownModel> {
+    model_routes()
+        .into_iter()
+        .find(|route| route.id == spec || route.aliases.iter().any(|alias| alias == spec))
+        .map(|route| KnownModel {
+            id: route.model_id,
+            provider: route.provider,
+            label: route.label,
+        })
+}
+
+pub fn model_routes_with_readiness(env: &ProviderEnv) -> Vec<ModelRoute> {
+    let mut readiness = BTreeMap::new();
+    model_routes()
+        .into_iter()
+        .map(|mut route| {
+            route.ready = *readiness.entry(route.provider.clone()).or_insert_with(|| {
+                let mut probe = env.clone();
+                probe.vars.insert("OCEAN_MODEL".into(), route.id.clone());
+                resolve_provider_config(&probe).is_ok_and(|config| config.readiness().ok)
+            });
+            route
         })
         .collect()
 }
@@ -807,6 +932,22 @@ pub fn resolve_model_selection(env: &ProviderEnv) -> Result<ModelSelection, Prov
         return Err(ProviderConfigError::NoModelSelected);
     };
     let model = normalize_model_id(chosen);
+    if let Some((provider, id)) = model.split_once('/') {
+        if provider.is_empty() || id.is_empty() || id.contains('/') {
+            return Err(ProviderConfigError::UnknownModel { model });
+        }
+        // An explicit picker route outranks an ambient provider pin. First
+        // preserve canonical bare-route aliases/limits, then use explicit auth.
+        let mut bare = env.clone();
+        bare.vars.remove("OCEAN_PROVIDER");
+        bare.vars.insert("OCEAN_MODEL".into(), id.into());
+        if let Ok(selection) = resolve_model_selection(&bare) {
+            if selection.provider.as_str() == provider {
+                return Ok(selection);
+            }
+        }
+        return model_for_explicit_provider(provider, id, env);
+    }
     let provider_override = env.get("OCEAN_PROVIDER").map(str::trim);
 
     if let Some(provider) = provider_override {
@@ -854,6 +995,13 @@ pub fn resolve_model_selection(env: &ProviderEnv) -> Result<ModelSelection, Prov
             OPENAI_BASE_URL,
             128_000,
             16_384,
+        )),
+        "gpt-6.1-sol" | "gpt-6-sol" | "gpt-6-luna" => Ok(model_selection(
+            ProviderId::OpenAiCodex,
+            &model,
+            CODEX_BASE_URL,
+            272_000,
+            128_000,
         )),
         "gpt-6-astra" => Ok(model_selection(
             ProviderId::OpenAiCodex,
@@ -917,16 +1065,40 @@ pub fn resolve_model_selection(env: &ProviderEnv) -> Result<ModelSelection, Prov
         // `claude-code` block), NOT a direct Anthropic API key. Same Anthropic
         // Messages wire + base URL; only the auth header differs (Bearer vs
         // x-api-key). The convenience aliases ("sonnet", "opus", "haiku") track
-        // the newest ids. Direct-API-key auth for these ids is intentionally
-        // not wired (provision later if a custom-model API path is needed).
-        "claude-sonnet-5" | "claude-sonnet" | "sonnet" => Ok(model_selection(
+        // the newest ids. Explicit OCEAN_PROVIDER=anthropic selects API-key
+        // auth; bare ids retain the Claude Code subscription route.
+        "claude-sonnet-5-5"
+        | "claude-code-sonnet-5-5"
+        | "claude-sonnet"
+        | "sonnet"
+        | "claude-code-sonnet"
+        | "cc-sonnet" => Ok(model_selection(
+            ProviderId::ClaudeCode,
+            "claude-sonnet-5-5",
+            ANTHROPIC_BASE_URL,
+            1_000_000,
+            128_000,
+        )),
+        "claude-sonnet-5" => Ok(model_selection(
             ProviderId::ClaudeCode,
             "claude-sonnet-5",
             ANTHROPIC_BASE_URL,
             200_000,
             16_384,
         )),
-        "claude-opus-5" | "claude-opus" | "opus" => Ok(model_selection(
+        "claude-opus-5-5"
+        | "claude-code-opus-5-5"
+        | "claude-opus"
+        | "opus"
+        | "claude-code-opus"
+        | "cc-opus" => Ok(model_selection(
+            ProviderId::ClaudeCode,
+            "claude-opus-5-5",
+            ANTHROPIC_BASE_URL,
+            1_000_000,
+            128_000,
+        )),
+        "claude-opus-5" => Ok(model_selection(
             ProviderId::ClaudeCode,
             "claude-opus-5",
             ANTHROPIC_BASE_URL,
@@ -986,7 +1158,7 @@ pub fn resolve_model_selection(env: &ProviderEnv) -> Result<ModelSelection, Prov
             200_000,
             16_384,
         )),
-        "claude-code-opus-5" | "claude-code-opus" | "cc-opus" => Ok(model_selection(
+        "claude-code-opus-5" => Ok(model_selection(
             ProviderId::ClaudeCode,
             "claude-code-opus-5",
             ANTHROPIC_BASE_URL,
@@ -1000,7 +1172,7 @@ pub fn resolve_model_selection(env: &ProviderEnv) -> Result<ModelSelection, Prov
             200_000,
             16_384,
         )),
-        "claude-code-sonnet-5" | "claude-code-sonnet" | "cc-sonnet" => Ok(model_selection(
+        "claude-code-sonnet-5" => Ok(model_selection(
             ProviderId::ClaudeCode,
             "claude-code-sonnet-5",
             ANTHROPIC_BASE_URL,
@@ -1244,6 +1416,32 @@ fn minimax_base_url(env: &ProviderEnv) -> &str {
     }
 }
 
+/// Direct API-key routes for current GPT families use Responses for tool calls.
+/// Keep this selection predicate shared with the runtime/history factory.
+pub fn openai_uses_responses(model: &str) -> bool {
+    matches!(
+        model,
+        "gpt-6.1-sol"
+            | "gpt-6-sol"
+            | "gpt-6-luna"
+            | "gpt-6-astra"
+            | "gpt-5.6"
+            | "gpt-5.6-sol"
+            | "gpt-5.6-terra"
+            | "gpt-5.6-luna"
+    )
+}
+
+fn explicit_claude_limits(model: &str) -> (u32, u32) {
+    match model
+        .strip_prefix("claude-code-")
+        .unwrap_or(model.strip_prefix("claude-").unwrap_or(model))
+    {
+        "fable-5-1" | "opus-5-5" | "sonnet-5-5" => (1_000_000, 128_000),
+        _ => (200_000, 16_384),
+    }
+}
+
 fn model_for_explicit_provider(
     provider: &str,
     model: &str,
@@ -1261,8 +1459,16 @@ fn model_for_explicit_provider(
             ProviderId::OpenAi,
             model,
             OPENAI_BASE_URL,
-            128_000,
-            16_384,
+            if openai_uses_responses(model) {
+                1_050_000
+            } else {
+                128_000
+            },
+            if openai_uses_responses(model) {
+                128_000
+            } else {
+                16_384
+            },
         )),
         "openai-codex" | "codex" => Ok(model_selection(
             ProviderId::OpenAiCodex,
@@ -1275,15 +1481,15 @@ fn model_for_explicit_provider(
             ProviderId::Anthropic,
             model,
             ANTHROPIC_BASE_URL,
-            200_000,
-            16_384,
+            explicit_claude_limits(model).0,
+            explicit_claude_limits(model).1,
         )),
         "claude-code" => Ok(model_selection(
             ProviderId::ClaudeCode,
             model,
             ANTHROPIC_BASE_URL,
-            200_000,
-            16_384,
+            explicit_claude_limits(model).0,
+            explicit_claude_limits(model).1,
         )),
         // MiniMax's API is case-sensitive on model ids (`MiniMax-M2`), but `model`
         // arrives lowercased (normalize_model_id). Restore the API casing for
@@ -1412,38 +1618,35 @@ fn resolve_credential(
         }
     }
 
-    let Some(path) = &env.auth_file else {
-        return Ok(None);
-    };
-    if !path.exists() {
-        return Ok(None);
+    if let Some(path) = env.auth_file.as_ref().filter(|path| path.exists()) {
+        let json = read_auth_json(path)?;
+        let (token, kind) = if matches!(provider, ProviderId::ClaudeCode) {
+            (
+                oauth_access_token(&json, "claude-code")
+                    .or_else(|| oauth_access_token(&json, "anthropic-oauth")),
+                CredentialKind::OAuthBearer,
+            )
+        } else {
+            (
+                auth_file_key(&json, provider.as_str()),
+                CredentialKind::ApiKey,
+            )
+        };
+        if let Some(secret) = token.and_then(SecretString::new) {
+            return Ok(Some(ResolvedCredential {
+                secret,
+                source: CredentialSource::OceanAuthFile {
+                    path: path.display().to_string(),
+                },
+                kind,
+            }));
+        }
     }
-
-    let json = read_auth_json(path)?;
-    let source = CredentialSource::OceanAuthFile {
-        path: path.display().to_string(),
-    };
-
-    // Claude Code authenticates with the OAuth access token from a `claude-code`
-    // block (the `anthropic-oauth` block name is accepted as a synonym);
-    // everyone else uses a plain api_key.
-    let (secret, kind) = if matches!(provider, ProviderId::ClaudeCode) {
-        let token = oauth_access_token(&json, "claude-code")
-            .or_else(|| oauth_access_token(&json, "anthropic-oauth"));
-        (token, CredentialKind::OAuthBearer)
+    Ok(if matches!(provider, ProviderId::ClaudeCode) {
+        native_claude::resolve(env)
     } else {
-        (
-            auth_file_key(&json, provider.as_str()),
-            CredentialKind::ApiKey,
-        )
-    };
-    Ok(secret
-        .and_then(SecretString::new)
-        .map(|secret| ResolvedCredential {
-            secret,
-            source,
-            kind,
-        }))
+        None
+    })
 }
 
 fn auth_file_key<'a>(json: &'a serde_json::Value, provider: &str) -> Option<&'a str> {
@@ -1664,6 +1867,126 @@ mod tests {
     }
 
     #[test]
+    fn qualified_routes_round_trip_wire_id_provider_and_efforts() {
+        let routes = model_routes_with_readiness(&env(&[("OCEAN_PROVIDER", "openai")]));
+        let mut ids = std::collections::HashSet::new();
+        for route in routes {
+            assert!(ids.insert(route.id.clone()), "duplicate route");
+            let selection = resolve_model_selection(&env(&[
+                ("OCEAN_MODEL", &route.id),
+                ("OCEAN_PROVIDER", "google"),
+            ]))
+            .unwrap();
+            assert_eq!(selection.model, route.model_id);
+            assert_eq!(selection.provider.as_str(), route.provider);
+            assert!(!route.effort_levels.is_empty());
+        }
+        for invalid in [
+            "/gpt-6-astra",
+            "openai/",
+            "openai/x/y",
+            "foreign/gpt-6-astra",
+        ] {
+            assert!(resolve_model_selection(&env(&[("OCEAN_MODEL", invalid)])).is_err());
+        }
+    }
+
+    #[test]
+    fn picker_readiness_is_per_auth_route_despite_global_provider_pin() {
+        let env = env(&[
+            ("OCEAN_PROVIDER", "openai"),
+            ("OPENAI_API_KEY", "synthetic-api-key"),
+        ]);
+        let routes = model_routes_with_readiness(&env);
+        assert!(
+            routes
+                .iter()
+                .find(|r| r.id == "openai/gpt-6.1-sol")
+                .unwrap()
+                .ready
+        );
+        assert!(
+            !routes
+                .iter()
+                .find(|r| r.id == "openai-codex/gpt-6.1-sol")
+                .unwrap()
+                .ready
+        );
+        assert!(
+            !routes
+                .iter()
+                .find(|r| r.id == "claude-code/claude-opus-5-5")
+                .unwrap()
+                .ready
+        );
+        assert!(
+            !routes
+                .iter()
+                .find(|r| r.id == "anthropic/claude-opus-5-5")
+                .unwrap()
+                .ready
+        );
+        let legacy = known_models_with_readiness(&env);
+        assert!(
+            !legacy
+                .iter()
+                .find(|m| m.model.provider == "deepseek")
+                .unwrap()
+                .ready
+        );
+    }
+
+    #[test]
+    fn current_explicit_claude_auth_routes_use_current_limits() {
+        for provider in ["anthropic", "claude-code"] {
+            for id in ["claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5"] {
+                let selection = resolve_model_selection(&env(&[
+                    ("OCEAN_PROVIDER", provider),
+                    ("OCEAN_MODEL", id),
+                ]))
+                .unwrap();
+                assert_eq!(selection.model, id);
+                assert_eq!(
+                    (selection.context_window, selection.max_output_tokens),
+                    (1_000_000, 128_000)
+                );
+            }
+        }
+        assert_eq!(
+            explicit_claude_limits("claude-code-opus-5-5"),
+            (1_000_000, 128_000)
+        );
+        assert_eq!(explicit_claude_limits("claude-opus-5"), (200_000, 16_384));
+    }
+
+    #[test]
+    fn current_openai_api_routes_keep_api_auth_and_published_limits() {
+        for id in [
+            "gpt-6.1-sol",
+            "gpt-6-sol",
+            "gpt-6-luna",
+            "gpt-6-astra",
+            "gpt-5.6",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+        ] {
+            let selection =
+                resolve_model_selection(&env(&[("OCEAN_PROVIDER", "openai"), ("OCEAN_MODEL", id)]))
+                    .unwrap();
+            assert_eq!(selection.provider, ProviderId::OpenAi);
+            assert_eq!(selection.model, id);
+            assert_eq!(selection.base_url, OPENAI_BASE_URL);
+            assert_eq!(
+                (selection.context_window, selection.max_output_tokens),
+                (1_050_000, 128_000)
+            );
+        }
+        assert!(!openai_uses_responses("gpt-4o"));
+        assert!(!openai_uses_responses("custom-gpt-model"));
+    }
+
+    #[test]
     fn explicit_google_provider_routes_to_google() {
         let selection = resolve_model_selection(&env(&[
             ("OCEAN_PROVIDER", "google"),
@@ -1833,16 +2156,16 @@ mod tests {
     }
 
     #[test]
-    fn opus_aliases_track_opus_5_and_legacy_4_8_stays_routable() {
+    fn opus_aliases_track_5_5_and_pinned_ids_stay_routable() {
         // The convenience aliases follow the newest Opus generation.
-        for alias in ["opus", "claude-opus", "claude-opus-5"] {
+        for alias in ["opus", "claude-opus", "claude-opus-5-5"] {
             let s = resolve_model_selection(&env(&[("OCEAN_MODEL", alias)])).unwrap();
             assert_eq!(s.provider, ProviderId::ClaudeCode, "{alias}");
-            assert_eq!(s.model, "claude-opus-5", "{alias}");
+            assert_eq!(s.model, "claude-opus-5-5", "{alias}");
         }
         for alias in ["claude-code-opus", "cc-opus"] {
             let s = resolve_model_selection(&env(&[("OCEAN_MODEL", alias)])).unwrap();
-            assert_eq!(s.model, "claude-code-opus-5", "{alias}");
+            assert_eq!(s.model, "claude-opus-5-5", "{alias}");
         }
         // Pinned sessions on the retired ids keep resolving (off the menu).
         let legacy = resolve_model_selection(&env(&[("OCEAN_MODEL", "claude-opus-4-8")])).unwrap();
@@ -1851,6 +2174,28 @@ mod tests {
         let legacy_cc =
             resolve_model_selection(&env(&[("OCEAN_MODEL", "claude-code-opus-4-8")])).unwrap();
         assert_eq!(legacy_cc.model, "claude-code-opus-4-8");
+    }
+
+    #[test]
+    fn sonnet_aliases_track_5_5_and_pinned_ids_stay_routable() {
+        for alias in [
+            "sonnet",
+            "claude-sonnet",
+            "claude-sonnet-5-5",
+            "cc-sonnet",
+            "claude-code-sonnet",
+            "claude-code-sonnet-5-5",
+        ] {
+            let selection = resolve_model_selection(&env(&[("OCEAN_MODEL", alias)])).unwrap();
+            assert_eq!(selection.provider, ProviderId::ClaudeCode, "{alias}");
+            assert_eq!(selection.model, "claude-sonnet-5-5", "{alias}");
+            assert_eq!(selection.context_window, 1_000_000);
+            assert_eq!(selection.max_output_tokens, 128_000);
+        }
+        for id in ["claude-sonnet-5", "claude-code-sonnet-5"] {
+            let selection = resolve_model_selection(&env(&[("OCEAN_MODEL", id)])).unwrap();
+            assert_eq!(selection.model, id);
+        }
     }
 
     #[test]
@@ -2006,6 +2351,33 @@ mod tests {
     }
 
     #[test]
+    fn current_catalog_efforts_match_model_constraints() {
+        for id in [
+            "gpt-6.1-sol",
+            "gpt-6-astra",
+            "claude-fable-5-1",
+            "claude-opus-5-5",
+        ] {
+            let levels = model_effort_levels(id);
+            assert!(levels.contains(&"max"));
+            assert!(!levels.contains(&"off"));
+            assert!(!levels.contains(&"minimal"));
+        }
+        for id in ["gpt-6-sol", "gpt-6-luna", "claude-sonnet-5-5"] {
+            assert!(model_effort_levels(id).contains(&"off"));
+            assert!(model_effort_levels(id).contains(&"max"));
+        }
+        assert!(!model_effort_levels("claude-haiku-4-5").contains(&"max"));
+        let catalog = known_models_with_readiness(&ProviderEnv::default());
+        let sol = catalog
+            .iter()
+            .find(|model| model.model.id == "gpt-6.1-sol")
+            .unwrap();
+        assert!(sol.effort_levels.iter().any(|level| level == "max"));
+        assert!(!sol.ready);
+    }
+
+    #[test]
     fn known_models_are_all_routable() {
         // Every model the public picker advertises must actually route through
         // resolve_model_selection (passed as OCEAN_MODEL, the way a client
@@ -2066,6 +2438,9 @@ mod tests {
             "gpt-4o",
             "gpt-4o-mini",
             "gpt-6-astra",
+            "gpt-6.1-sol",
+            "gpt-6-sol",
+            "gpt-6-luna",
             "gpt-5.6-sol",
             "gpt-5.6-terra",
             "gpt-5.6-luna",
@@ -2078,8 +2453,8 @@ mod tests {
             // sessions) but are deliberately NOT in the menu, so they're
             // absent here too.
             "claude-fable-5-1",
-            "claude-opus-5",
-            "claude-sonnet-5",
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
             "claude-haiku-4-5",
             // API-cased ids: `resolve_model_selection` returns these as
             // current.model, and known_models() advertises the same string.
@@ -2449,8 +2824,8 @@ mod tests {
         let listed: std::collections::BTreeSet<String> =
             known_models().into_iter().map(|m| m.id).collect();
         assert!(listed.contains("claude-fable-5-1"));
-        assert!(listed.contains("claude-sonnet-5"));
-        assert!(listed.contains("claude-opus-5"));
+        assert!(listed.contains("claude-sonnet-5-5"));
+        assert!(listed.contains("claude-opus-5-5"));
         assert!(listed.contains("claude-haiku-4-5"));
 
         let _ = fs::remove_dir_all(&dir);

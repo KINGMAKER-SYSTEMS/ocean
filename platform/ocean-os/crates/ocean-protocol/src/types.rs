@@ -11,6 +11,7 @@ pub enum ThinkingLevel {
     Medium,
     High,
     Xhigh,
+    Max,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -314,6 +315,26 @@ impl Model {
         }
     }
 
+    pub fn anthropic_claude_opus_5_5() -> Self {
+        Self {
+            id: "claude-opus-5-5".into(),
+            name: "Claude Opus 5.5".into(),
+            context_window: 1_000_000,
+            max_tokens: 128_000,
+            ..Self::anthropic_claude_opus_5()
+        }
+    }
+
+    pub fn anthropic_claude_sonnet_5_5() -> Self {
+        Self {
+            id: "claude-sonnet-5-5".into(),
+            name: "Claude Sonnet 5.5".into(),
+            context_window: 1_000_000,
+            max_tokens: 128_000,
+            ..Self::anthropic_claude_sonnet_5()
+        }
+    }
+
     /// Anthropic Claude Opus 5 — current Opus generation (2026-07 release).
     pub fn anthropic_claude_opus_5() -> Self {
         Self {
@@ -461,6 +482,27 @@ impl Model {
             supports_images: true,
             context_window: 1_000_000,
             max_tokens: 8_192,
+        }
+    }
+
+    /// Official OpenAI Responses API authenticated by an API key.
+    pub fn openai_responses(
+        id: impl Into<String>,
+        base_url: impl Into<String>,
+        context_window: u32,
+        max_tokens: u32,
+    ) -> Self {
+        let id = id.into();
+        Self {
+            name: id.clone(),
+            id,
+            api: "openai-responses".into(),
+            provider: "openai".into(),
+            base_url: base_url.into(),
+            reasoning: true,
+            supports_images: true,
+            context_window,
+            max_tokens,
         }
     }
 

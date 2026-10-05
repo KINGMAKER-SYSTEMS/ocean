@@ -34,6 +34,8 @@ export interface OceanModelOption {
   id: string;
   name: string;
   description?: string | null;
+  ready?: boolean;
+  effortLevels?: string[];
 }
 
 export interface OceanSettingsSnapshot {
@@ -323,11 +325,22 @@ export class OceanConnection {
       return;
     }
     this.currentModeId = modes.currentModeId;
-    this.availableModes = modes.availableModes.map((mode) => ({
-      id: mode.id,
-      name: mode.name,
-      description: mode.description,
-    }));
+    this.availableModes = modes.availableModes.map((mode) => {
+      const ocean = mode._meta?.ocean;
+      const metadata: Record<string, unknown> =
+        ocean && typeof ocean === "object" && !Array.isArray(ocean)
+          ? ocean as Record<string, unknown>
+          : {};
+      return {
+        id: mode.id,
+        name: mode.name,
+        description: mode.description,
+        ready: typeof metadata.ready === "boolean" ? metadata.ready : undefined,
+        effortLevels: Array.isArray(metadata.effort_levels)
+          ? metadata.effort_levels.filter((level: unknown): level is string => typeof level === "string")
+          : undefined,
+      };
+    });
   }
 
   private async ensureDaemonHealthy(): Promise<void> {

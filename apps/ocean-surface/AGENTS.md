@@ -115,6 +115,47 @@ The web proxy reads the daemon-minted mode-0600 observer token immediately
 before each upstream request and injects it server-side. Never expose that
 token to browser code, bundle it, or cache it in client storage.
 
+## Empty Session Surface
+
+- Empty transcripts show the existing static circular Ocean mark and an
+  accessible title. Keep the composer primary: no full-pane animated hero,
+  repeated Sessions action, marketing copy or idle rendering loop.
+- Sessions navigation stays in the existing header/native navigation. Hide
+  unavailable voice controls instead of showing disabled setup placeholders
+  or local credential paths. Existing voice transport readiness owns visibility.
+
+## Model and Effort Control
+
+- `crates/ocean-surface-ui/src/model_control.rs` owns the composer's single model/effort disclosure.
+  Main and floating Leptos chat use this same component and daemon selection state;
+  do not add a second Leptos model/effort picker for an alternate chat host.
+  It consumes the daemon's shared model catalog and current selection; choices
+  remain per-turn overrides rather than global model mutations. Prefer additive
+  `/v1/models.routes` and `current.route` when present, with legacy `models`
+  fallback. Provider-qualified ids distinguish API and subscription auth;
+  aliases render older saved selections without rewriting their stored value.
+- Honor additive `ready` metadata: disable explicitly disconnected provider
+  entries, retain compatibility when an older daemon omits readiness, and
+  preserve pinned ids while the catalog loads. Readiness proves credentials,
+  not provider entitlement or successful inference.
+- Use additive daemon `effort_levels` metadata for model-specific choices,
+  including max on current models. Older daemons retain the existing fallback
+  vocabulary based on the wire model even for qualified saved ids. Explicit
+  empty effort metadata remains authoritative; do not synthesize extra choices.
+  Model changes clear incompatible overrides; stored max survives
+  reload. The default selection comes only from `/v1/models.current`, never
+  the most recent executed turn. Escape closes an open disclosure and restores
+  focus; a closed disclosure lets Escape reach the global reveal handler.
+- Product intent lives in `PRODUCT.md`; existing web design and token files
+  remain the visual authority.
+
+- Floating chat keeps drafts editable during streaming. Send admission requires
+  a resolved endpoint, an idle turn and nonblank input, in both the button and
+  submit handler. Rejected submissions preserve the draft; Halt remains the
+  active-turn action. Its model panel is anchored to the compact composer.
+  Browser float mode uses Ocean's background; native overlay transparency is
+  gated through the existing `host::running_in_tauri` seam.
+
 ## Session Contract
 
 The ecosystem invariant is:
@@ -174,6 +215,9 @@ Web surface session UI:
   accumulated text with the authoritative done transcript. Keep this projection
   conversation-only (Planner has no chat transcript), and do not represent it as
   daemon-persisted history: a later session refresh remains authoritative.
+- Mount the Rooms workspace only after `daemon.endpoint_ready` confirms proxy
+  config or the host fallback has resolved. Its mount fetch must never race
+  bootstrap against an initial fallback daemon URL.
 - Idle web/extension headers stay single-bar: project/session context may stay
   visible, but call/join affordances live behind overflow until intentionally
   opened or actively connected.
@@ -283,7 +327,9 @@ Web surface session UI:
 - Federated Share requires `Live` access and the daemon's `caller_member_id`
   matching a projected `User` with `Owner` role. Browser-local identity is not
   authority. Missing caller data disables federated Share; Local is unchanged.
-  Deploy the additive daemon caller projection before this Surface change.
+  Accept the operated daemon's equivalent `self_member_id` as a read alias;
+  serialize only `caller_member_id`. Duplicate caller fields fail decoding.
+  Both names come from daemon credential projection, never browser identity.
 - Rooms G1 is daemon-native text collaboration. LiveKit controls stay outside
   the room join, leave, roster, and transcript lifecycle until explicitly
   reintroduced behind a reviewed platform contract.
@@ -408,6 +454,7 @@ The daemon must be running from `../ocean-os` for live agent behavior.
 
 ## Cursor / VS Code Extension UI Contract
 
+- The editor composer uses one native model/effort disclosure. ACP mode metadata owns readiness and model-specific effort options; older bridges use the legacy vocabulary. Keep selected ids intact, retain missing/pinned choices, clear incompatible effort on explicit model changes, and preserve Escape focus restoration. Max must remain supported by settings, the command picker and prompt metadata.
 - Keep `vscode-extension/` transcript-first: do not add command decks, fake
   logos, sparkle/AI ornament, or rows of location/action buttons unless the
   operator explicitly asks for that UI.

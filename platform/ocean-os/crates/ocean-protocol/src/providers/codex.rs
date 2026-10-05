@@ -39,18 +39,23 @@ const ORIGINATOR: &str = "codex_cli_rs";
 const OPENAI_BETA: &str = "responses=experimental";
 // ChatGPT's Codex backend version-gates newly released models. Keep this aligned
 // with the current open-source Codex CLI wire version.
-const CODEX_VERSION: &str = "0.153.4";
+const CODEX_VERSION: &str = "0.154.0";
 
 fn apply_request_headers(
     request: reqwest::RequestBuilder,
     access: &str,
     session_id: &str,
     account_id: Option<&str>,
+    codex_oauth: bool,
 ) -> reqwest::RequestBuilder {
     let request = request
         .bearer_auth(access)
         .header("accept", "text/event-stream")
-        .header("content-type", "application/json")
+        .header("content-type", "application/json");
+    if !codex_oauth {
+        return request;
+    }
+    let request = request
         .header("originator", ORIGINATOR)
         .header("openai-beta", OPENAI_BETA)
         .header("version", CODEX_VERSION)
@@ -87,7 +92,7 @@ impl Default for CodexProvider {
 /// - user/assistant text → `message` items with typed content parts
 /// - assistant tool calls → `function_call` items (arguments as a JSON string)
 /// - tool results → `function_call_output` items
-fn convert_input(messages: &[Message]) -> Vec<Value> {
+fn convert_input(messages: &[Message], replay_route: Option<(&str, &str)>) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::new();
     for m in messages {
         match m {
@@ -148,7 +153,11 @@ fn convert_input(messages: &[Message]) -> Vec<Value> {
                         Content::Thinking {
                             thinking_signature: Some(sig),
                             ..
-                        } if sig.starts_with(REASONING_ITEM_MARKER) => {
+                        } if sig.starts_with(REASONING_ITEM_MARKER)
+                            && replay_route.is_none_or(|(api, provider)| {
+                                a.api == api && a.provider == provider
+                            }) =>
+                        {
                             let has_follower = a.content[i + 1..].iter().any(|c| {
                                 matches!(c, Content::ToolCall { .. })
                                     || matches!(c, Content::Text { text } if !text.is_empty())
@@ -236,13 +245,24 @@ fn convert_input(messages: &[Message]) -> Vec<Value> {
     out
 }
 
-fn reasoning_effort(level: ThinkingLevel) -> Option<&'static str> {
+fn reasoning_effort(model: &str, level: ThinkingLevel) -> Option<&'static str> {
+    if model.starts_with("gpt-6") || model.starts_with("gpt-5.6") {
+        return Some(match level {
+            ThinkingLevel::Off if matches!(model, "gpt-6-astra" | "gpt-6.1-sol") => "low",
+            ThinkingLevel::Off => "none",
+            ThinkingLevel::Minimal | ThinkingLevel::Low => "low",
+            ThinkingLevel::Medium => "medium",
+            ThinkingLevel::High => "high",
+            ThinkingLevel::Xhigh => "xhigh",
+            ThinkingLevel::Max => "max",
+        });
+    }
     match level {
         ThinkingLevel::Off => None,
         ThinkingLevel::Minimal => Some("minimal"),
         ThinkingLevel::Low => Some("low"),
         ThinkingLevel::Medium => Some("medium"),
-        ThinkingLevel::High | ThinkingLevel::Xhigh => Some("high"),
+        ThinkingLevel::High | ThinkingLevel::Xhigh | ThinkingLevel::Max => Some("high"),
     }
 }
 
@@ -290,7 +310,7 @@ fn build_body(model: &Model, context: &Context, options: &StreamOptions) -> Valu
     // parallel tool calls like the rest.
     let mut body = json!({
         "model": model.id,
-        "input": convert_input(&context.messages),
+        "input": convert_input(&context.messages, (model.api == "openai-responses").then_some((model.api.as_str(), model.provider.as_str()))),
         "tool_choice": "auto",
         "store": false,
         "stream": true,
@@ -323,7 +343,7 @@ fn build_body(model: &Model, context: &Context, options: &StreamOptions) -> Valu
     // coherent (see REASONING_ITEM_MARKER).
     body["include"] = json!(["reasoning.encrypted_content"]);
     if let Some(level) = options.reasoning {
-        if let Some(effort) = reasoning_effort(level) {
+        if let Some(effort) = reasoning_effort(&model.id, level) {
             body["reasoning"] = json!({"effort": effort, "summary": "auto"});
         }
     }
@@ -795,7 +815,8 @@ impl Provider for CodexProvider {
         let access = options
             .api_key
             .clone()
-            .ok_or_else(|| Error::MissingApiKey("openai-codex".into()))?;
+            .ok_or_else(|| Error::MissingApiKey(model.provider.clone()))?;
+        let codex_oauth = model.api == "codex-responses";
         let account_id = options.headers.get("chatgpt-account-id").cloned();
         let base_url = options
             .base_url
@@ -826,6 +847,7 @@ impl Provider for CodexProvider {
                         &access,
                         &session_id,
                         account_id.as_deref(),
+                        codex_oauth,
                     );
                     let r = match req.json(&body).send().await {
                         Ok(r) => r,
@@ -1280,7 +1302,7 @@ impl Provider for CodexProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{now_ms, ToolResultMessage};
+    use crate::types::{now_ms, Tool, ToolResultMessage};
     #[test]
     fn codex_request_includes_client_version_header() {
         let built = apply_request_headers(
@@ -1288,6 +1310,7 @@ mod tests {
             "oauth-token",
             "session-123",
             Some("account-456"),
+            true,
         )
         .build()
         .expect("request builds");
@@ -1297,6 +1320,129 @@ mod tests {
             Some(CODEX_VERSION),
             "new Codex models are version-gated by this header"
         );
+    }
+
+    #[test]
+    fn api_responses_headers_exclude_codex_account_identity() {
+        let request = apply_request_headers(
+            reqwest::Client::new().post("https://example.test/v1/responses"),
+            "synthetic-api-key",
+            "session-123",
+            Some("account-456"),
+            false,
+        )
+        .build()
+        .unwrap();
+        assert_eq!(
+            request.headers()["authorization"],
+            "Bearer synthetic-api-key"
+        );
+        for header in [
+            "originator",
+            "openai-beta",
+            "version",
+            "session_id",
+            "chatgpt-account-id",
+        ] {
+            assert!(
+                !request.headers().contains_key(header),
+                "API route leaked {header}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn api_responses_stream_uses_responses_tools_and_completes() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = Vec::new();
+            let mut chunk = [0u8; 4096];
+            let (header_end, length) = loop {
+                let n = socket.read(&mut chunk).await.unwrap();
+                assert!(n > 0, "request ended before headers");
+                bytes.extend_from_slice(&chunk[..n]);
+                assert!(bytes.len() < 64 * 1024, "fixture request exceeds bound");
+                if let Some(end) = bytes.windows(4).position(|v| v == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&bytes[..end]);
+                    let length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap();
+                    break (end + 4, length);
+                }
+            };
+            assert!(length < 64 * 1024);
+            while bytes.len() < header_end + length {
+                let n = socket.read(&mut chunk).await.unwrap();
+                assert!(n > 0);
+                bytes.extend_from_slice(&chunk[..n]);
+            }
+            let headers = String::from_utf8_lossy(&bytes[..header_end]).to_ascii_lowercase();
+            assert!(headers.starts_with("post /v1/responses http/1.1"));
+            assert!(headers.contains("authorization: bearer synthetic-api-key"));
+            assert!(!headers.contains("chatgpt-account-id:"));
+            assert!(!headers.contains("originator:"));
+            let body: Value =
+                serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap();
+            assert_eq!(body["model"], "gpt-6.1-sol");
+            assert_eq!(body["store"], false);
+            assert_eq!(body["tools"][0]["type"], "function");
+            assert_eq!(body["tools"][0]["name"], "lookup");
+            assert!(body["tools"][0].get("function").is_none());
+            assert_eq!(body["reasoning"]["effort"], "max");
+            assert_eq!(body["include"][0], "reasoning.encrypted_content");
+            let events = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ready\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":2,\"output_tokens\":1,\"total_tokens\":3}}}\n\n";
+            let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{events}", events.len());
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        let model = Model::openai_responses(
+            "gpt-6.1-sol",
+            format!("http://{address}/v1"),
+            1_050_000,
+            128_000,
+        );
+        let context = Context {
+            messages: vec![Message::user_text("fixture")],
+            tools: vec![Tool {
+                name: "lookup".into(),
+                description: "lookup".into(),
+                parameters: json!({"type":"object"}),
+            }],
+            ..Default::default()
+        };
+        let options = StreamOptions {
+            api_key: Some("synthetic-api-key".into()),
+            reasoning: Some(ThinkingLevel::Max),
+            headers: [("chatgpt-account-id".into(), "must-not-forward".into())].into(),
+            ..Default::default()
+        };
+        let probe = async {
+            let mut stream = crate::stream_simple(&model, &context, &options)
+                .await
+                .unwrap();
+            let mut done = None;
+            while let Some(event) = stream.next().await {
+                if let AssistantMessageEvent::Done { message, .. } = event.unwrap() {
+                    done = Some(message);
+                }
+            }
+            server.await.unwrap();
+            let message = done.expect("stream completes");
+            assert_eq!(message.api, "openai-responses");
+            assert_eq!(message.provider, "openai");
+            assert_eq!(message.content[0].as_text(), Some("ready"));
+            assert_eq!(message.usage.total_tokens, 3);
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), probe)
+            .await
+            .unwrap();
     }
 
     // OCEAN-99: vision parity for the OpenAI Responses API. A user image must
@@ -1314,7 +1460,7 @@ mod tests {
             timestamp: now_ms(),
         }];
 
-        let out = convert_input(&messages);
+        let out = convert_input(&messages, None);
         assert_eq!(out.len(), 1);
         let parts = out[0]["content"].as_array().expect("content array missing");
 
@@ -1350,7 +1496,7 @@ mod tests {
             timestamp: now_ms(),
         })];
 
-        let out = convert_input(&messages);
+        let out = convert_input(&messages, None);
 
         // The text output still rides on the function_call_output, unchanged.
         let fco = out
@@ -1385,7 +1531,7 @@ mod tests {
             timestamp: now_ms(),
         })];
 
-        let out = convert_input(&messages);
+        let out = convert_input(&messages, None);
 
         assert_eq!(
             out.len(),
@@ -1435,7 +1581,7 @@ mod tests {
             timestamp: now_ms(),
         })];
 
-        let out = convert_input(&messages);
+        let out = convert_input(&messages, None);
 
         // No reasoning text or signature anywhere in the encoded input.
         let serialized = serde_json::to_string(&out).unwrap();
@@ -1747,18 +1893,40 @@ mod tests {
         );
     }
 
-    // OCEAN-198: the reasoning-effort mapper covers every ThinkingLevel — Off →
-    // None (omit the param), and Xhigh folds into "high" since the Responses API
-    // has no distinct level above it.
+    // Older model mappings retain their existing wire vocabulary; modern
+    // GPT-6/5.6 mappings are covered separately above.
+    #[test]
+    fn modern_codex_effort_preserves_xhigh_and_normalizes_retired_levels() {
+        for id in ["gpt-6-astra", "gpt-6.1-sol"] {
+            assert_eq!(reasoning_effort(id, ThinkingLevel::Off), Some("low"));
+            assert_eq!(reasoning_effort(id, ThinkingLevel::Minimal), Some("low"));
+            assert_eq!(reasoning_effort(id, ThinkingLevel::Xhigh), Some("xhigh"));
+            assert_eq!(reasoning_effort(id, ThinkingLevel::Max), Some("max"));
+        }
+        assert_eq!(
+            reasoning_effort("gpt-6-luna", ThinkingLevel::Off),
+            Some("none")
+        );
+    }
+
     #[test]
     fn reasoning_effort_maps_every_level() {
-        assert_eq!(reasoning_effort(ThinkingLevel::Off), None);
-        assert_eq!(reasoning_effort(ThinkingLevel::Minimal), Some("minimal"));
-        assert_eq!(reasoning_effort(ThinkingLevel::Low), Some("low"));
-        assert_eq!(reasoning_effort(ThinkingLevel::Medium), Some("medium"));
-        assert_eq!(reasoning_effort(ThinkingLevel::High), Some("high"));
+        assert_eq!(reasoning_effort("gpt-4o", ThinkingLevel::Off), None);
         assert_eq!(
-            reasoning_effort(ThinkingLevel::Xhigh),
+            reasoning_effort("gpt-4o", ThinkingLevel::Minimal),
+            Some("minimal")
+        );
+        assert_eq!(reasoning_effort("gpt-4o", ThinkingLevel::Low), Some("low"));
+        assert_eq!(
+            reasoning_effort("gpt-4o", ThinkingLevel::Medium),
+            Some("medium")
+        );
+        assert_eq!(
+            reasoning_effort("gpt-4o", ThinkingLevel::High),
+            Some("high")
+        );
+        assert_eq!(
+            reasoning_effort("gpt-4o", ThinkingLevel::Xhigh),
             Some("high"),
             "Xhigh has no distinct Responses level; it folds into high"
         );
@@ -1975,11 +2143,29 @@ mod tests {
             timestamp: now_ms(),
         })];
 
-        let out = convert_input(&messages);
+        let out = convert_input(&messages, None);
         assert_eq!(out.len(), 2, "reasoning item + function_call: {out:?}");
         assert_eq!(out[0], raw_item, "reasoning item must replay verbatim");
         assert_eq!(out[1]["type"], "function_call");
         assert_eq!(out[1]["call_id"], "call_1");
+
+        // API-key Responses preserves only its own recorded reasoning, never
+        // opaque items from a separate OAuth provider/account route.
+        let mut api_messages = messages;
+        let Message::Assistant(message) = &mut api_messages[0] else {
+            unreachable!()
+        };
+        message.api = "openai-responses".into();
+        message.provider = "openai".into();
+        let out = convert_input(&api_messages, Some(("openai-responses", "openai")));
+        assert_eq!(out[0], raw_item);
+        let Message::Assistant(message) = &mut api_messages[0] else {
+            unreachable!()
+        };
+        message.provider = "openai-codex".into();
+        let out = convert_input(&api_messages, Some(("openai-responses", "openai")));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["type"], "function_call");
     }
 
     // The API pairs a reasoning item with a FOLLOWING item from the same
@@ -2006,7 +2192,7 @@ mod tests {
             timestamp: now_ms(),
         })];
 
-        let out = convert_input(&messages);
+        let out = convert_input(&messages, None);
         assert!(
             out.is_empty(),
             "a reasoning item with no follower must be dropped: {out:?}"

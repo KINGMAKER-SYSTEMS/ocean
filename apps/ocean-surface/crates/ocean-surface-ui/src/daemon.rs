@@ -1966,6 +1966,8 @@ struct PlannerStreamSources {
 #[derive(Clone)]
 pub struct Daemon {
     pub url: RwSignal<String>,
+    /// True only after proxy configuration or the host fallback is resolved.
+    pub endpoint_ready: RwSignal<bool>,
     pub turns: RwSignal<Vec<Turn>>,
     pub streaming: RwSignal<bool>,
     pub session_id: RwSignal<Option<String>>,
@@ -2065,6 +2067,9 @@ pub struct Daemon {
     /// Current model id, learned from TurnStarted (and GET /v1/models). Shown
     /// live in the header so a mid-session swap is visible.
     pub model: RwSignal<Option<String>>,
+    /// Authoritative default from GET /v1/models.current, independent of
+    /// executed turn models and session transcript hydration.
+    pub default_model: RwSignal<Option<String>>,
     /// The catalogue of selectable models from GET /v1/models.
     pub models: RwSignal<Vec<ModelInfo>>,
     /// The selected project id, sent as `project_id` on every turn so the daemon
@@ -2229,9 +2234,16 @@ pub struct Daemon {
 pub struct ModelInfo {
     pub id: String,
     #[serde(default)]
+    pub aliases: Vec<String>,
+    #[serde(default)]
     pub provider: String,
     #[serde(default)]
     pub label: String,
+    /// Credential readiness from the daemon; absent on older daemons.
+    #[serde(default)]
+    pub ready: Option<bool>,
+    #[serde(default)]
+    pub effort_levels: Option<Vec<String>>,
 }
 
 /// Token usage for a turn (or summed for a session), mirrored from the daemon's
@@ -2463,6 +2475,7 @@ impl Daemon {
     pub fn new(url: impl Into<String>) -> Self {
         Self {
             url: RwSignal::new(url.into()),
+            endpoint_ready: RwSignal::new(false),
             turns: RwSignal::new(Vec::new()),
             streaming: RwSignal::new(false),
             session_id: RwSignal::new(None),
@@ -2503,6 +2516,7 @@ impl Daemon {
             last_turn_tokens: RwSignal::new(None),
             session_tokens: RwSignal::new(TokenStats::default()),
             model: RwSignal::new(None),
+            default_model: RwSignal::new(None),
             models: RwSignal::new(Vec::new()),
             // Restore the last-selected project from localStorage so the choice
             // survives a reload.
@@ -2546,6 +2560,7 @@ impl Daemon {
     pub fn dummy() -> Self {
         Self {
             url: RwSignal::new("http://127.0.0.1:4780".into()),
+            endpoint_ready: RwSignal::new(false),
             turns: RwSignal::new(Vec::new()),
             streaming: RwSignal::new(false),
             session_id: RwSignal::new(None),
@@ -2586,6 +2601,7 @@ impl Daemon {
             last_turn_tokens: RwSignal::new(None),
             session_tokens: RwSignal::new(TokenStats::default()),
             model: RwSignal::new(None),
+            default_model: RwSignal::new(None),
             models: RwSignal::new(Vec::new()),
             project: RwSignal::new(None),
             projects: RwSignal::new(Vec::new()),
@@ -2633,6 +2649,7 @@ impl Daemon {
             let is_extension = running_as_extension();
             if is_extension {
                 daemon.url.set(DEFAULT_DAEMON_URL.to_string());
+                daemon.endpoint_ready.set(true);
                 // No proxy fronts the side panel: voice goes daemon-direct to
                 // `/v1/voice/*`, so readiness is host-neutral (offered) and any
                 // missing-credential state surfaces per request. There is no
@@ -2695,6 +2712,7 @@ impl Daemon {
                     // No proxy in front (e.g. trunk serve direct). Keep fallback.
                 }
             }
+            daemon.endpoint_ready.set(true);
             // Seed voice readiness from the host-neutral decision. Web with a
             // proxy honors its `has_auth`; Tauri and proxy-less web fall through
             // to `None` → offered (daemon-direct), credential state per request.
@@ -4072,16 +4090,21 @@ impl Daemon {
         let url = self.url.get_untracked();
         let models = self.models;
         let model = self.model;
+        let default_model = self.default_model;
         spawn_local(async move {
             #[derive(Deserialize)]
             struct Current {
                 #[serde(default)]
                 model: String,
+                #[serde(default)]
+                route: Option<String>,
             }
             #[derive(Deserialize)]
             struct ModelsResponse {
                 #[serde(default)]
                 models: Vec<ModelInfo>,
+                #[serde(default)]
+                routes: Option<Vec<ModelInfo>>,
                 #[serde(default)]
                 current: Option<Current>,
             }
@@ -4091,10 +4114,16 @@ impl Daemon {
                     Ok(r) => {
                         if let Some(cur) = r.current {
                             if !cur.model.is_empty() {
+                                let default_id = if r.routes.is_some() {
+                                    cur.route.unwrap_or_else(|| cur.model.clone())
+                                } else {
+                                    cur.model.clone()
+                                };
+                                default_model.set(Some(default_id));
                                 model.set(Some(cur.model));
                             }
                         }
-                        models.set(r.models);
+                        models.set(r.routes.unwrap_or(r.models));
                     }
                     Err(err) => log::warn!("models decode error: {err}"),
                 },
@@ -7824,7 +7853,7 @@ const MODEL_OVERRIDE_STORAGE_KEY: &str = "ocean.model_override";
 /// `ocean_protocol::ThinkingLevel` (serde lowercase) and with the composer's
 /// dropdown in `app.rs` — otherwise a level the dropdown offers gets silently
 /// dropped on reload by this restore filter. (OCEAN-202 added minimal + xhigh.)
-const THINKING_LEVELS: &[&str] = &["off", "minimal", "low", "medium", "high", "xhigh"];
+const THINKING_LEVELS: &[&str] = &["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 /// The persisted per-turn thinking level, restored on construction. Filtered to
 /// known values so only a valid `ThinkingLevel` string is ever loaded.
@@ -8197,6 +8226,27 @@ mod tests {
             daemon.activity_revision,
             daemon.session_title,
             daemon.cwd,
+        );
+    }
+
+    #[test]
+    fn turn_override_does_not_replace_the_daemon_default() {
+        let daemon = daemon_with_session("model-default");
+        daemon.default_model.set(Some("gpt-6-astra".into()));
+        daemon.model_override.set(Some("gpt-6-luna".into()));
+        apply_test_event(
+            &daemon,
+            AgentEvent::TurnStarted {
+                turn_id: "override-turn".into(),
+                session_id: "model-default".into(),
+                model: Some("gpt-6-luna".into()),
+            },
+        );
+        daemon.model_override.set(None);
+        assert_eq!(daemon.model.get_untracked().as_deref(), Some("gpt-6-luna"));
+        assert_eq!(
+            daemon.default_model.get_untracked().as_deref(),
+            Some("gpt-6-astra")
         );
     }
 
@@ -9760,13 +9810,13 @@ mod tests {
     #[test]
     fn thinking_level_values_match_daemon_serialization() {
         // These are the exact lowercase strings the daemon's `ThinkingLevel`
-        // serde enum deserializes (off/minimal/low/medium/high/xhigh). The
+        // serde enum deserializes (off/minimal/low/medium/high/xhigh/max). The
         // composer's selector emits these and they flow straight onto
         // `AgentTurnRequest::thinking_level`; this same list also gates which
         // persisted value survives a reload (see load_persisted_thinking_level).
         assert_eq!(
             THINKING_LEVELS,
-            &["off", "minimal", "low", "medium", "high", "xhigh"],
+            &["off", "minimal", "low", "medium", "high", "xhigh", "max"],
         );
     }
 
@@ -9778,7 +9828,7 @@ mod tests {
         // the filter is `THINKING_LEVELS.contains(&v)`, so assert each offered
         // value is contained. (The dropdown's empty "" = no override is not a
         // stored level and is intentionally absent.)
-        for level in ["off", "minimal", "low", "medium", "high", "xhigh"] {
+        for level in ["off", "minimal", "low", "medium", "high", "xhigh", "max"] {
             assert!(
                 THINKING_LEVELS.contains(&level),
                 "thinking level `{level}` is offered by the composer but would be \

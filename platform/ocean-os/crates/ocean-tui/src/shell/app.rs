@@ -920,10 +920,8 @@ impl App {
             let tx = self.actions_tx.clone();
             tokio::spawn(async move {
                 if let Ok(r) = client.models().await {
-                    let _ = tx.send(Action::ModelsLoaded {
-                        current: r.current.model,
-                        entries: r.models,
-                    });
+                    let (current, entries) = r.into_choices();
+                    let _ = tx.send(Action::ModelsLoaded { current, entries });
                 }
             });
         }
@@ -1767,14 +1765,19 @@ impl App {
     /// a pick shows instantly; the chat's turn-derived model is the fallback
     /// until the next `TurnStarted` confirms it.
     fn status_data(&self) -> StatusData<'_> {
+        let model = self
+            .model_override
+            .as_deref()
+            .or(self.chat.model())
+            .or_else(|| (!self.models_current.is_empty()).then_some(self.models_current.as_str()));
+        let model = model.map(|id| {
+            self.models_entries
+                .iter()
+                .find(|entry| crate::shell::client::model_routes_match(&entry.id, id))
+                .map_or(id, |entry| entry.label.as_str())
+        });
         StatusData {
-            model: self
-                .model_override
-                .as_deref()
-                .or(self.chat.model())
-                .or_else(|| {
-                    (!self.models_current.is_empty()).then_some(self.models_current.as_str())
-                }),
+            model,
             health: self.health.effective(),
             error: Some(self.status.as_str()),
             activity: self.chat.activity(),
@@ -2468,6 +2471,7 @@ impl App {
                     AgentTurnEvent::SessionConfigChanged {
                         session_id,
                         model,
+                        provider,
                         config_revision,
                         ..
                     } => {
@@ -2475,7 +2479,8 @@ impl App {
                         // not invalidate transcript history. Reflect remote (or
                         // our own in-flight) model pins without forcing a full
                         // session sync that could reject a queued follow-up.
-                        self.observe_session_model_authority(*session_id, model, *config_revision);
+                        let route = crate::shell::client::model_route_id(model, Some(provider));
+                        self.observe_session_model_authority(*session_id, &route, *config_revision);
                     }
                     _ => {}
                 }
@@ -2843,6 +2848,17 @@ impl App {
             // lease, so the latest generation waits through that expected 409
             // instead of snapping the picker back to the old model.
             Action::SetModel(id) => {
+                let normalized = if self.models_current.contains('/')
+                    || self
+                        .models_entries
+                        .iter()
+                        .any(|entry| entry.id.contains('/'))
+                {
+                    crate::shell::client::model_route_id(id, None)
+                } else {
+                    id.clone()
+                };
+                let id = &normalized;
                 self.model_override = Some(id.clone());
                 self.model_config_generation = self.model_config_generation.wrapping_add(1);
                 if let Some(session_id) = self.session_id {
@@ -2975,9 +2991,12 @@ impl App {
                                 &config.model,
                                 config.config_revision,
                             );
-                            let response_is_latest = config.model == *requested
-                                && self
-                                    .model_authority_matches(&config.model, config.config_revision);
+                            let response_is_latest =
+                                crate::shell::client::model_routes_match(&config.model, requested)
+                                    && self.model_authority_matches(
+                                        &config.model,
+                                        config.config_revision,
+                                    );
                             if self.pending_model_for_session(*session_id) == Some(requested) {
                                 self.pending_model_pin = None;
                             }
@@ -3110,10 +3129,8 @@ impl App {
                 tokio::spawn(async move {
                     match client.models().await {
                         Ok(r) => {
-                            let _ = tx.send(Action::ModelsLoaded {
-                                current: r.current.model,
-                                entries: r.models,
-                            });
+                            let (current, entries) = r.into_choices();
+                            let _ = tx.send(Action::ModelsLoaded { current, entries });
                         }
                         Err(e) => {
                             let _ = tx.send(Action::Error(format!("models: {e}")));
@@ -3134,7 +3151,7 @@ impl App {
                 self.models_sel = self
                     .models_entries
                     .iter()
-                    .position(|m| m.id == active)
+                    .position(|m| crate::shell::client::model_routes_match(&m.id, &active))
                     .unwrap_or(0);
                 // If the advisor picker is what triggered this fetch, seat its
                 // cursor on the model it's currently set to.
@@ -3155,10 +3172,8 @@ impl App {
                     tokio::spawn(async move {
                         match client.models().await {
                             Ok(r) => {
-                                let _ = tx.send(Action::ModelsLoaded {
-                                    current: r.current.model,
-                                    entries: r.models,
-                                });
+                                let (current, entries) = r.into_choices();
+                                let _ = tx.send(Action::ModelsLoaded { current, entries });
                             }
                             Err(e) => {
                                 let _ = tx.send(Action::Error(format!("models: {e}")));
@@ -3645,7 +3660,7 @@ impl App {
             && self
                 .authoritative_model
                 .as_deref()
-                .is_some_and(|current| current != model)
+                .is_some_and(|current| !crate::shell::client::model_routes_match(current, model))
         {
             // Equal nonzero revisions with different payloads violate daemon
             // authority; retain the first observed value rather than making
@@ -3656,9 +3671,11 @@ impl App {
 
         self.model_config_revision = Some(config_revision);
         self.authoritative_model = Some(model.to_string());
-        let preserve_pending_intent = self
-            .pending_model_pin_for_session(session_id)
-            .is_some_and(|pending| pending.model != model);
+        let preserve_pending_intent =
+            self.pending_model_pin_for_session(session_id)
+                .is_some_and(|pending| {
+                    !crate::shell::client::model_routes_match(&pending.model, model)
+                });
         if !preserve_pending_intent {
             self.model_override = Some(model.to_string());
         }
@@ -3680,7 +3697,10 @@ impl App {
 
     fn model_authority_matches(&self, model: &str, config_revision: u64) -> bool {
         self.model_config_revision == Some(config_revision)
-            && self.authoritative_model.as_deref() == Some(model)
+            && self
+                .authoritative_model
+                .as_deref()
+                .is_some_and(|current| crate::shell::client::model_routes_match(current, model))
     }
 
     fn observe_session_model_authority(
@@ -3722,7 +3742,7 @@ impl App {
             return None;
         }
         let pending = self.pending_model_pin_for_session(session_id)?;
-        if pending.model != model {
+        if !crate::shell::client::model_routes_match(&pending.model, model) {
             return None;
         }
         let task_correlated = self.model_config_task.as_ref().is_some_and(|task| {
@@ -3810,7 +3830,7 @@ impl App {
                 let matched = matches!(
                     &attempt,
                     Ok(config)
-                        if config.session_id == session_id && config.model == requested
+                        if config.session_id == session_id && crate::shell::client::model_routes_match(&config.model, &requested)
                 );
                 last_result = attempt;
                 if matched {
@@ -4897,8 +4917,15 @@ impl App {
                 Some(i) => {
                     let e = &self.models_entries[*i];
                     let selected = *i == self.models_sel;
-                    let active = self.model_override.as_deref() == Some(e.id.as_str())
-                        || (self.model_override.is_none() && e.id == self.models_current);
+                    let active = self
+                        .model_override
+                        .as_deref()
+                        .is_some_and(|id| crate::shell::client::model_routes_match(id, &e.id))
+                        || (self.model_override.is_none()
+                            && crate::shell::client::model_routes_match(
+                                &e.id,
+                                &self.models_current,
+                            ));
                     let bed = if selected { theme::BG_HL } else { theme::SLATE };
                     let marker = if selected { g("▎", "|") } else { " " };
                     let dot = if active { g("● ", "* ") } else { "  " };
@@ -5825,19 +5852,12 @@ impl App {
         let Ok(history) = crate::shell::sessions::history_from_sync_snapshot(snapshot) else {
             return (false, None);
         };
-        let authority_applied = self.apply_authoritative_session_model(
-            session_id,
-            &snapshot.model,
-            snapshot.config_revision,
-        );
+        let route = crate::shell::client::model_route_id(&snapshot.model, Some(&snapshot.provider));
+        let authority_applied =
+            self.apply_authoritative_session_model(session_id, &route, snapshot.config_revision);
         let model_release_generation = (retire_model_pin && authority_applied)
             .then(|| {
-                self.retire_matching_model_pin(
-                    session_id,
-                    &snapshot.model,
-                    snapshot.config_revision,
-                    false,
-                )
+                self.retire_matching_model_pin(session_id, &route, snapshot.config_revision, false)
             })
             .flatten();
         // A successful fenced snapshot proves the session is idle. Retire any
@@ -6538,14 +6558,15 @@ fn thinking_label(t: Option<ThinkingLevel>) -> &'static str {
         Some(ThinkingLevel::Medium) => "medium",
         Some(ThinkingLevel::High) => "high",
         Some(ThinkingLevel::Xhigh) => "xhigh",
+        Some(ThinkingLevel::Max) => "max",
     }
 }
 
 /// Cycle the thinking level through `default → off → minimal → low → medium →
-/// high → xhigh` (wrapping both directions). `default` (None) sends nothing so
+/// high → xhigh → max` (wrapping both directions). `default` (None) sends nothing so
 /// the daemon's global setting stays in force.
 fn cycle_thinking(cur: Option<ThinkingLevel>, dir: i8) -> Option<ThinkingLevel> {
-    const ORDER: [Option<ThinkingLevel>; 7] = [
+    const ORDER: [Option<ThinkingLevel>; 8] = [
         None,
         Some(ThinkingLevel::Off),
         Some(ThinkingLevel::Minimal),
@@ -6553,6 +6574,7 @@ fn cycle_thinking(cur: Option<ThinkingLevel>, dir: i8) -> Option<ThinkingLevel> 
         Some(ThinkingLevel::Medium),
         Some(ThinkingLevel::High),
         Some(ThinkingLevel::Xhigh),
+        Some(ThinkingLevel::Max),
     ];
     let i = ORDER.iter().position(|o| *o == cur).unwrap_or(0) as i8;
     let n = ORDER.len() as i8;
@@ -7711,20 +7733,20 @@ mod tests {
         // Forward from default hits every level then wraps home.
         let mut cur = None;
         let mut seen = vec![thinking_label(cur)];
-        for _ in 0..6 {
+        for _ in 0..7 {
             cur = cycle_thinking(cur, 1);
             seen.push(thinking_label(cur));
         }
         assert_eq!(
             seen,
-            vec!["default", "off", "minimal", "low", "medium", "high", "xhigh"]
+            vec!["default", "off", "minimal", "low", "medium", "high", "xhigh", "max"]
         );
-        assert_eq!(cycle_thinking(cur, 1), None, "xhigh wraps to default");
-        // Backward from default wraps to xhigh.
+        assert_eq!(cycle_thinking(cur, 1), None, "max wraps to default");
+        // Backward from default wraps to max.
         assert_eq!(
             thinking_label(cycle_thinking(None, -1)),
-            "xhigh",
-            "default wraps backward to xhigh"
+            "max",
+            "default wraps backward to max"
         );
     }
 
@@ -8787,6 +8809,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn api_pin_requires_matching_provider_authority_for_same_wire_model() {
+        let mut app = offline_app();
+        let session = AgentSessionId(uuid::Uuid::from_u128(519));
+        app.session_id = Some(session);
+        app.dispatch(Action::SetModel("openai/gpt-6-astra".into()));
+        assert!(app.pending_model_pin.is_some());
+        app.dispatch(Action::AgentEvent(Box::new(
+            AgentTurnEvent::SessionConfigChanged {
+                session_id: session,
+                model: "gpt-6-astra".into(),
+                provider: "openai-codex".into(),
+                config_revision: 11,
+            },
+        )));
+        assert!(
+            app.pending_model_pin.is_some(),
+            "same wire model on another auth is not the requested pin"
+        );
+        assert_eq!(
+            app.authoritative_model.as_deref(),
+            Some("openai-codex/gpt-6-astra")
+        );
+        assert_eq!(app.model_override.as_deref(), Some("openai/gpt-6-astra"));
+        app.dispatch(Action::AgentEvent(Box::new(
+            AgentTurnEvent::SessionConfigChanged {
+                session_id: session,
+                model: "gpt-6-astra".into(),
+                provider: "openai".into(),
+                config_revision: 12,
+            },
+        )));
+        assert!(app.pending_model_pin.is_none());
+        assert_eq!(
+            app.authoritative_model.as_deref(),
+            Some("openai/gpt-6-astra")
+        );
+    }
+
+    #[tokio::test]
     async fn session_model_resolution_installs_only_current_authority() {
         use crate::shell::client::SessionConfigResponse;
 
@@ -8794,7 +8855,7 @@ mod tests {
         let current = AgentSessionId(uuid::Uuid::from_u128(501));
         app.session_id = Some(current);
         app.model_config_generation = 7;
-        app.model_override = Some("deepseek-v4-pro".into());
+        app.model_override = Some("deepseek/deepseek-v4-pro".into());
         app.model_config_task = Some(ModelConfigTask {
             session_id: current,
             generation: 7,
@@ -8821,7 +8882,7 @@ mod tests {
             requested: None,
             result: Ok(SessionConfigResponse {
                 session_id: current,
-                model: "deepseek-v4-pro".into(),
+                model: "deepseek/deepseek-v4-pro".into(),
                 config_revision: 9,
             }),
         });
@@ -8839,7 +8900,7 @@ mod tests {
         let mut app = offline_app();
         let current = AgentSessionId(uuid::Uuid::from_u128(502));
         app.session_id = Some(current);
-        app.model_override = Some("gemini-2.0-flash".into());
+        app.model_override = Some("google/gemini-2.0-flash".into());
         app.model_config_generation = 7;
         app.model_config_task = Some(ModelConfigTask {
             session_id: current,
@@ -8852,13 +8913,16 @@ mod tests {
         app.dispatch(Action::AgentEvent(Box::new(
             AgentTurnEvent::SessionConfigChanged {
                 session_id: current,
-                model: "gpt-5.6-sol".into(),
+                model: "openai-codex/gpt-5.6-sol".into(),
                 provider: "openai-codex".into(),
                 config_revision: 11,
             },
         )));
 
-        assert_eq!(app.model_override.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(
+            app.model_override.as_deref(),
+            Some("openai-codex/gpt-5.6-sol")
+        );
         assert!(!app.sessions_requiring_sync.contains(&current));
         assert_eq!(app.compacting_session, None);
         assert!(app.model_config_task.is_none());
@@ -8869,13 +8933,13 @@ mod tests {
             requested: None,
             result: Ok(SessionConfigResponse {
                 session_id: current,
-                model: "gemini-2.0-flash".into(),
+                model: "google/gemini-2.0-flash".into(),
                 config_revision: 10,
             }),
         });
         assert_eq!(
             app.model_override.as_deref(),
-            Some("gpt-5.6-sol"),
+            Some("openai-codex/gpt-5.6-sol"),
             "stale binding GET cannot overwrite a newer config event"
         );
     }
@@ -8888,12 +8952,12 @@ mod tests {
         let current = AgentSessionId(uuid::Uuid::from_u128(506));
         app.session_id = Some(current);
         app.model_config_generation = 1;
-        app.model_override = Some("deepseek-v4-flash".into());
+        app.model_override = Some("deepseek/deepseek-v4-flash".into());
         let queue_pause_generation = app.chat.pause_queued_prompts_for_model();
         app.chat.seed_queued_prompt_for_test("run after pin");
         app.pending_model_pin = Some(PendingModelPin {
             session_id: Some(current),
-            model: "deepseek-v4-flash".into(),
+            model: "deepseek/deepseek-v4-flash".into(),
             generation: 1,
             queue_pause_generation,
         });
@@ -8908,10 +8972,10 @@ mod tests {
         app.dispatch(Action::SessionModelResolved {
             session_id: current,
             generation: 1,
-            requested: Some("deepseek-v4-flash".into()),
+            requested: Some("deepseek/deepseek-v4-flash".into()),
             result: Ok(SessionConfigResponse {
                 session_id: current,
-                model: "deepseek-v4-flash".into(),
+                model: "deepseek/deepseek-v4-flash".into(),
                 config_revision: 4,
             }),
         });
@@ -8920,7 +8984,7 @@ mod tests {
         assert_eq!(app.model_config_revision, Some(4));
         assert_eq!(
             app.authoritative_model.as_deref(),
-            Some("deepseek-v4-flash")
+            Some("deepseek/deepseek-v4-flash")
         );
         assert_eq!(app.chat.paused_queued_prompt_count(), 0);
         assert!(
@@ -8935,13 +8999,13 @@ mod tests {
         let current = AgentSessionId(uuid::Uuid::from_u128(508));
         app.session_id = Some(current);
         app.model_config_generation = 1;
-        app.model_override = Some("gpt-5.6-terra".into());
+        app.model_override = Some("openai-codex/gpt-5.6-terra".into());
         let queue_pause_generation = app.chat.pause_queued_prompts_for_model();
         app.chat
             .seed_queued_prompt_for_test("run after event authority");
         app.pending_model_pin = Some(PendingModelPin {
             session_id: Some(current),
-            model: "gpt-5.6-terra".into(),
+            model: "openai-codex/gpt-5.6-terra".into(),
             generation: 1,
             queue_pause_generation,
         });
@@ -8955,7 +9019,7 @@ mod tests {
         app.dispatch(Action::AgentEvent(Box::new(
             AgentTurnEvent::SessionConfigChanged {
                 session_id: current,
-                model: "gpt-5.6-terra".into(),
+                model: "openai-codex/gpt-5.6-terra".into(),
                 provider: "openai-codex".into(),
                 config_revision: 4,
             },
@@ -8970,7 +9034,7 @@ mod tests {
         app.dispatch(Action::SessionModelResolved {
             session_id: current,
             generation: 1,
-            requested: Some("gpt-5.6-terra".into()),
+            requested: Some("openai-codex/gpt-5.6-terra".into()),
             result: Err("response connection closed".into()),
         });
 
@@ -8987,12 +9051,12 @@ mod tests {
         let current = AgentSessionId(uuid::Uuid::from_u128(510));
         app.session_id = Some(current);
         app.model_config_generation = 1;
-        app.model_override = Some("gpt-5.6-terra".into());
+        app.model_override = Some("openai-codex/gpt-5.6-terra".into());
         let queue_pause_generation = app.chat.pause_queued_prompts_for_model();
         app.chat.seed_queued_prompt_for_test("run after late event");
         app.pending_model_pin = Some(PendingModelPin {
             session_id: Some(current),
-            model: "gpt-5.6-terra".into(),
+            model: "openai-codex/gpt-5.6-terra".into(),
             generation: 1,
             queue_pause_generation,
         });
@@ -9007,7 +9071,7 @@ mod tests {
         app.dispatch(Action::SessionModelResolved {
             session_id: current,
             generation: 1,
-            requested: Some("gpt-5.6-terra".into()),
+            requested: Some("openai-codex/gpt-5.6-terra".into()),
             result: Err("response connection closed".into()),
         });
         assert!(app.pending_model_pin.is_some());
@@ -9019,7 +9083,7 @@ mod tests {
         app.dispatch(Action::AgentEvent(Box::new(
             AgentTurnEvent::SessionConfigChanged {
                 session_id: current,
-                model: "gpt-5.6-terra".into(),
+                model: "openai-codex/gpt-5.6-terra".into(),
                 provider: "openai-codex".into(),
                 config_revision: 4,
             },
@@ -9045,13 +9109,13 @@ mod tests {
         let current = AgentSessionId(uuid::Uuid::from_u128(512));
         app.session_id = Some(current);
         app.model_config_generation = 1;
-        app.model_override = Some("gpt-5.6-terra".into());
+        app.model_override = Some("openai-codex/gpt-5.6-terra".into());
         let queue_pause_generation = app.chat.pause_queued_prompts_for_model();
         app.chat
             .seed_queued_prompt_for_test("wait for reconciliation");
         app.pending_model_pin = Some(PendingModelPin {
             session_id: Some(current),
-            model: "gpt-5.6-terra".into(),
+            model: "openai-codex/gpt-5.6-terra".into(),
             generation: 1,
             queue_pause_generation,
         });
@@ -9065,14 +9129,14 @@ mod tests {
         app.dispatch(Action::SessionModelResolved {
             session_id: current,
             generation: 1,
-            requested: Some("gpt-5.6-terra".into()),
+            requested: Some("openai-codex/gpt-5.6-terra".into()),
             result: Err("response connection closed".into()),
         });
 
         app.dispatch(Action::AgentEvent(Box::new(
             AgentTurnEvent::SessionConfigChanged {
                 session_id: current,
-                model: "gpt-5.6-sol".into(),
+                model: "openai-codex/gpt-5.6-sol".into(),
                 provider: "openai-codex".into(),
                 config_revision: 5,
             },
@@ -9082,8 +9146,14 @@ mod tests {
             .model_config_task
             .as_ref()
             .is_some_and(|task| { task.kind == ModelConfigTaskKind::Load }));
-        assert_eq!(app.model_override.as_deref(), Some("gpt-5.6-terra"));
-        assert_eq!(app.authoritative_model.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(
+            app.model_override.as_deref(),
+            Some("openai-codex/gpt-5.6-terra")
+        );
+        assert_eq!(
+            app.authoritative_model.as_deref(),
+            Some("openai-codex/gpt-5.6-sol")
+        );
 
         app.dispatch(Action::SessionModelResolved {
             session_id: current,
@@ -9091,12 +9161,15 @@ mod tests {
             requested: None,
             result: Ok(SessionConfigResponse {
                 session_id: current,
-                model: "gpt-5.6-sol".into(),
+                model: "openai-codex/gpt-5.6-sol".into(),
                 config_revision: 5,
             }),
         });
         assert!(app.pending_model_pin.is_none());
-        assert_eq!(app.model_override.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(
+            app.model_override.as_deref(),
+            Some("openai-codex/gpt-5.6-sol")
+        );
         assert_eq!(app.chat.paused_queued_prompt_count(), 1);
         assert!(matches!(
             app.chat.handle_key(crossterm::event::KeyEvent::new(
@@ -9115,13 +9188,13 @@ mod tests {
         let current = AgentSessionId(uuid::Uuid::from_u128(511));
         app.session_id = Some(current);
         app.model_config_generation = 1;
-        app.model_override = Some("gpt-5.6-terra".into());
+        app.model_override = Some("openai-codex/gpt-5.6-terra".into());
         let queue_pause_generation = app.chat.pause_queued_prompts_for_model();
         app.chat
             .seed_queued_prompt_for_test("requires explicit recovery");
         app.pending_model_pin = Some(PendingModelPin {
             session_id: Some(current),
-            model: "gpt-5.6-terra".into(),
+            model: "openai-codex/gpt-5.6-terra".into(),
             generation: 1,
             queue_pause_generation,
         });
@@ -9139,13 +9212,16 @@ mod tests {
             requested: None,
             result: Ok(SessionConfigResponse {
                 session_id: current,
-                model: "gpt-5.6-sol".into(),
+                model: "openai-codex/gpt-5.6-sol".into(),
                 config_revision: 0,
             }),
         });
 
         assert!(app.pending_model_pin.is_none());
-        assert_eq!(app.model_override.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(
+            app.model_override.as_deref(),
+            Some("openai-codex/gpt-5.6-sol")
+        );
         assert!(app.chat.release_recovered_queued_prompt().is_none());
         assert_eq!(app.chat.paused_queued_prompt_count(), 1);
         assert!(matches!(
@@ -9164,13 +9240,13 @@ mod tests {
         app.session_id = Some(current);
         app.session_binding_generation = 3;
         app.model_config_generation = 1;
-        app.model_override = Some("gpt-5.6-terra".into());
+        app.model_override = Some("openai-codex/gpt-5.6-terra".into());
         let queue_pause_generation = app.chat.pause_queued_prompts_for_model();
         app.chat
             .seed_queued_prompt_for_test("run after snapshot authority");
         app.pending_model_pin = Some(PendingModelPin {
             session_id: Some(current),
-            model: "gpt-5.6-terra".into(),
+            model: "openai-codex/gpt-5.6-terra".into(),
             generation: 1,
             queue_pause_generation,
         });
@@ -9183,7 +9259,7 @@ mod tests {
         });
         let snapshot = ocean_core::SessionSyncSnapshot {
             session_id: current.0,
-            model: "gpt-5.6-terra".into(),
+            model: "openai-codex/gpt-5.6-terra".into(),
             provider: "openai-codex".into(),
             config_revision: 4,
             transcript: Vec::new(),
@@ -9217,12 +9293,12 @@ mod tests {
         let current = AgentSessionId(uuid::Uuid::from_u128(507));
         app.session_id = Some(current);
         app.model_config_generation = 1;
-        app.model_override = Some("deepseek-v4-flash".into());
+        app.model_override = Some("deepseek/deepseek-v4-flash".into());
         let queue_pause_generation = app.chat.pause_queued_prompts_for_model();
         app.chat.seed_queued_prompt_for_test("do not run stale");
         app.pending_model_pin = Some(PendingModelPin {
             session_id: Some(current),
-            model: "deepseek-v4-flash".into(),
+            model: "deepseek/deepseek-v4-flash".into(),
             generation: 1,
             queue_pause_generation,
         });
@@ -9235,8 +9311,8 @@ mod tests {
         });
 
         for (model, provider, config_revision) in [
-            ("deepseek-v4-flash", "deepseek", 4),
-            ("gpt-5.6-sol", "openai-codex", 5),
+            ("deepseek/deepseek-v4-flash", "deepseek", 4),
+            ("openai-codex/gpt-5.6-sol", "openai-codex", 5),
         ] {
             app.dispatch(Action::AgentEvent(Box::new(
                 AgentTurnEvent::SessionConfigChanged {
@@ -9256,18 +9332,24 @@ mod tests {
         app.dispatch(Action::SessionModelResolved {
             session_id: current,
             generation: 1,
-            requested: Some("deepseek-v4-flash".into()),
+            requested: Some("deepseek/deepseek-v4-flash".into()),
             result: Ok(SessionConfigResponse {
                 session_id: current,
-                model: "deepseek-v4-flash".into(),
+                model: "deepseek/deepseek-v4-flash".into(),
                 config_revision: 4,
             }),
         });
 
         assert!(app.pending_model_pin.is_none());
         assert_eq!(app.model_config_revision, Some(5));
-        assert_eq!(app.authoritative_model.as_deref(), Some("gpt-5.6-sol"));
-        assert_eq!(app.model_override.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(
+            app.authoritative_model.as_deref(),
+            Some("openai-codex/gpt-5.6-sol")
+        );
+        assert_eq!(
+            app.model_override.as_deref(),
+            Some("openai-codex/gpt-5.6-sol")
+        );
         assert_eq!(app.chat.paused_queued_prompt_count(), 1);
         assert!(!app.chat.is_busy());
         assert!(app.status.contains("superseded"));
@@ -9288,13 +9370,13 @@ mod tests {
         let current = AgentSessionId(uuid::Uuid::from_u128(513));
         app.session_id = Some(current);
         app.model_config_generation = 3;
-        app.model_override = Some("deepseek-v4-flash".into());
+        app.model_override = Some("deepseek/deepseek-v4-flash".into());
         let queue_pause_generation = app.chat.pause_queued_prompts_for_model();
         app.chat
             .seed_queued_prompt_for_test("wait for generation three");
         app.pending_model_pin = Some(PendingModelPin {
             session_id: Some(current),
-            model: "deepseek-v4-flash".into(),
+            model: "deepseek/deepseek-v4-flash".into(),
             generation: 3,
             queue_pause_generation,
         });
@@ -9309,7 +9391,7 @@ mod tests {
         app.dispatch(Action::AgentEvent(Box::new(
             AgentTurnEvent::SessionConfigChanged {
                 session_id: current,
-                model: "deepseek-v4-flash".into(),
+                model: "deepseek/deepseek-v4-flash".into(),
                 provider: "deepseek".into(),
                 config_revision: 1,
             },
@@ -9327,10 +9409,10 @@ mod tests {
         app.dispatch(Action::SessionModelResolved {
             session_id: current,
             generation: 2,
-            requested: Some("gpt-5.6-sol".into()),
+            requested: Some("openai-codex/gpt-5.6-sol".into()),
             result: Ok(SessionConfigResponse {
                 session_id: current,
-                model: "gpt-5.6-sol".into(),
+                model: "openai-codex/gpt-5.6-sol".into(),
                 config_revision: 2,
             }),
         });
@@ -9348,13 +9430,13 @@ mod tests {
         let current = AgentSessionId(uuid::Uuid::from_u128(503));
         app.session_id = Some(current);
 
-        app.dispatch(Action::SetModel("deepseek-v4-flash".into()));
+        app.dispatch(Action::SetModel("deepseek/deepseek-v4-flash".into()));
         let first_generation = app
             .model_config_task
             .as_ref()
             .expect("first save task")
             .generation;
-        app.dispatch(Action::SetModel("gpt-5.6-sol".into()));
+        app.dispatch(Action::SetModel("openai-codex/gpt-5.6-sol".into()));
 
         let task = app
             .model_config_task
@@ -9362,18 +9444,21 @@ mod tests {
             .expect("serialized save task");
         assert_eq!(task.generation, first_generation);
         assert_eq!(task.kind, ModelConfigTaskKind::Save);
-        assert_eq!(app.pending_model_for_session(current), Some("gpt-5.6-sol"));
+        assert_eq!(
+            app.pending_model_for_session(current),
+            Some("openai-codex/gpt-5.6-sol")
+        );
         app.dispatch(Action::AgentEvent(Box::new(
             AgentTurnEvent::SessionConfigChanged {
                 session_id: current,
-                model: "deepseek-v4-flash".into(),
+                model: "deepseek/deepseek-v4-flash".into(),
                 provider: "deepseek".into(),
                 config_revision: 1,
             },
         )));
         assert_eq!(
             app.model_override.as_deref(),
-            Some("gpt-5.6-sol"),
+            Some("openai-codex/gpt-5.6-sol"),
             "older save event cannot overwrite the newer local intent"
         );
         app.abort_model_config_task();
@@ -9387,10 +9472,10 @@ mod tests {
         let current = AgentSessionId(uuid::Uuid::from_u128(505));
         app.session_id = Some(current);
         app.model_config_generation = 2;
-        app.model_override = Some("gpt-5.6-sol".into());
+        app.model_override = Some("openai-codex/gpt-5.6-sol".into());
         app.pending_model_pin = Some(PendingModelPin {
             session_id: Some(current),
-            model: "gpt-5.6-sol".into(),
+            model: "openai-codex/gpt-5.6-sol".into(),
             generation: 2,
             queue_pause_generation: 11,
         });
@@ -9405,10 +9490,10 @@ mod tests {
         app.dispatch(Action::SessionModelResolved {
             session_id: current,
             generation: 1,
-            requested: Some("deepseek-v4-flash".into()),
+            requested: Some("deepseek/deepseek-v4-flash".into()),
             result: Ok(SessionConfigResponse {
                 session_id: current,
-                model: "deepseek-v4-flash".into(),
+                model: "deepseek/deepseek-v4-flash".into(),
                 config_revision: 1,
             }),
         });
@@ -9417,7 +9502,10 @@ mod tests {
         assert_eq!(task.generation, 2);
         assert_eq!(task.kind, ModelConfigTaskKind::Save);
         assert_eq!(task.queue_pause_generation, Some(11));
-        assert_eq!(app.model_override.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(
+            app.model_override.as_deref(),
+            Some("openai-codex/gpt-5.6-sol")
+        );
         app.abort_model_config_task();
     }
 
@@ -9435,7 +9523,7 @@ mod tests {
         ) else {
             panic!("expected first root submission");
         };
-        app.dispatch(Action::SetModel("gpt-5.6-terra".into()));
+        app.dispatch(Action::SetModel("openai-codex/gpt-5.6-terra".into()));
         app.chat.seed_queued_prompt_for_test("follow-up");
         assert!(app.pending_model_pin.is_some());
 
@@ -9461,7 +9549,7 @@ mod tests {
         let session_id = AgentSessionId(uuid::Uuid::from_u128(504));
         app.chat.adopt_active_turn();
 
-        app.dispatch(Action::SetModel("gpt-5.6-sol".into()));
+        app.dispatch(Action::SetModel("openai-codex/gpt-5.6-sol".into()));
         let queue_pause_generation = app
             .pending_model_pin
             .as_ref()
@@ -9471,7 +9559,7 @@ mod tests {
             app.pending_model_pin,
             Some(PendingModelPin {
                 session_id: None,
-                model: "gpt-5.6-sol".into(),
+                model: "openai-codex/gpt-5.6-sol".into(),
                 generation: 1,
                 queue_pause_generation,
             })
@@ -9481,7 +9569,7 @@ mod tests {
 
         assert_eq!(
             app.pending_model_for_session(session_id),
-            Some("gpt-5.6-sol")
+            Some("openai-codex/gpt-5.6-sol")
         );
         let task = app.model_config_task.as_ref().expect("post-bind model pin");
         assert_eq!(task.session_id, session_id);

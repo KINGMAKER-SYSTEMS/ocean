@@ -16,6 +16,10 @@ use crate::components::PermissionPrompts;
 use crate::daemon::{daemon_url_from_env, Daemon};
 use crate::model::{Block, Role, ToolStatus, Turn};
 
+fn can_submit(text: &str, streaming: bool, endpoint_ready: bool) -> bool {
+    endpoint_ready && !streaming && !text.trim().is_empty()
+}
+
 #[component]
 pub fn FloatingApp() -> impl IntoView {
     let daemon = Daemon::new(daemon_url_from_env());
@@ -25,13 +29,18 @@ pub fn FloatingApp() -> impl IntoView {
     let status = daemon.status;
     let streaming = daemon.streaming;
     let turns = daemon.turns;
+    let endpoint_ready = daemon.endpoint_ready;
+    let daemon_model_control = daemon.clone();
 
-    // Tag body for transparent / overlay styling.
+    // Browser float mode keeps Ocean's surface; native overlays retain alpha.
     Effect::new(move |_| {
         if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
             let _ = doc.body().map(|b| {
                 let el: &web_sys::Element = b.as_ref();
                 let _ = el.class_list().add_1("ocean-float-mode");
+                if crate::host::running_in_tauri() {
+                    let _ = el.class_list().add_1("ocean-float-overlay");
+                }
             });
         }
     });
@@ -41,7 +50,11 @@ pub fn FloatingApp() -> impl IntoView {
         move |ev: SubmitEvent| {
             ev.prevent_default();
             let text = input.get_untracked();
-            if text.trim().is_empty() {
+            if !can_submit(
+                &text,
+                streaming.get_untracked(),
+                endpoint_ready.get_untracked(),
+            ) {
                 return;
             }
             input.set(String::new());
@@ -69,15 +82,19 @@ pub fn FloatingApp() -> impl IntoView {
                     <input
                         type="text"
                         class="ocean-float__input"
-                        placeholder="Message your agent…"
+                        aria-label="Message Ocean"
+                        placeholder="Message Ocean…"
                         prop:value=move || input.get()
                         on:input=move |ev| input.set(event_target_value(&ev))
-                        disabled=move || streaming.get()
                     />
+                    <div class="ocean-float__turn-controls">
+                        <crate::model_control::ModelControl daemon=daemon_model_control.clone() />
+                    </div>
                     <Show
                         when=move || streaming.get()
                         fallback=move || view! {
-                            <button type="submit" class="ocean-float__send" aria-label="Send">
+                            <button type="submit" class="ocean-float__send" aria-label="Send"
+                                disabled=move || !can_submit(&input.get(), streaming.get(), endpoint_ready.get())>
                                 <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
                             </button>
                         }
@@ -333,4 +350,18 @@ pub fn float_mode_active() -> bool {
     }
     let hash = window.location().hash().unwrap_or_default();
     hash.contains("float")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::can_submit;
+
+    #[test]
+    fn draft_submission_requires_resolved_endpoint_and_idle_turn() {
+        assert!(can_submit("next task", false, true));
+        assert!(!can_submit(" \n\t", false, true));
+        assert!(!can_submit("next task", true, true));
+        assert!(!can_submit("next task", false, false));
+        assert!(!can_submit("next task", true, false));
+    }
 }

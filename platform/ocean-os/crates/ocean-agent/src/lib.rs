@@ -182,6 +182,17 @@ impl SessionModelConfig {
     pub fn is_session_pinned(&self, global_model: &str) -> bool {
         self.config_revision > 0 || (!self.model.trim().is_empty() && self.model != global_model)
     }
+
+    /// Preserve a catalog pin's auth route when reconstructing turn selection.
+    /// Non-catalog legacy/custom models retain their existing bare-id behavior.
+    pub fn model_spec(&self) -> String {
+        let route = format!("{}/{}", self.provider, self.model);
+        if ocean_providers::catalog_model(&route).is_some() {
+            route
+        } else {
+            self.model.clone()
+        }
+    }
 }
 
 /// Classification of a deterministic transcript-text match.
@@ -3610,6 +3621,14 @@ fn model_from_provider_config(config: &ProviderConfig) -> anyhow::Result<Model> 
             selection.context_window,
             selection.max_output_tokens,
         )),
+        ProviderId::OpenAi if ocean_providers::openai_uses_responses(&selection.model) => {
+            Ok(Model::openai_responses(
+                selection.model.clone(),
+                selection.base_url.clone(),
+                selection.context_window,
+                selection.max_output_tokens,
+            ))
+        }
         ProviderId::OpenAi => Ok(match selection.model.as_str() {
             "gpt-4o" => Model::openai_gpt_4o(),
             "gpt-4o-mini" => Model::openai_gpt_4o_mini(),
@@ -3641,6 +3660,8 @@ fn model_from_provider_config(config: &ProviderConfig) -> anyhow::Result<Model> 
             selection.max_output_tokens,
         )),
         ProviderId::Anthropic => Ok(match selection.model.as_str() {
+            "claude-opus-5-5" => Model::anthropic_claude_opus_5_5(),
+            "claude-sonnet-5-5" => Model::anthropic_claude_sonnet_5_5(),
             "claude-opus-5" => Model::anthropic_claude_opus_5(),
             "claude-sonnet-5" => Model::anthropic_claude_sonnet_5(),
             "claude-haiku-4-5" => Model::anthropic_claude_haiku_4_5(),
@@ -3661,6 +3682,8 @@ fn model_from_provider_config(config: &ProviderConfig) -> anyhow::Result<Model> 
             }
         }),
         ProviderId::ClaudeCode => Ok(match selection.model.as_str() {
+            "claude-code-opus-5-5" | "claude-opus-5-5" => Model::anthropic_claude_opus_5_5(),
+            "claude-code-sonnet-5-5" | "claude-sonnet-5-5" => Model::anthropic_claude_sonnet_5_5(),
             // The claude-code alias maps to the REAL Anthropic API model id on
             // the wire — "claude-code-sonnet-5" is never sent to the API.
             "claude-code-fable-5-1" | "claude-fable-5-1" => Model::anthropic_claude_fable_5_1(),
@@ -3879,19 +3902,17 @@ pub fn lsp_servers(cwd: &std::path::Path) -> Vec<LspServerView> {
 }
 
 fn should_strip_assistant_thinking(provider: &ProviderId, model: &str) -> bool {
-    // OpenAiCodex is deliberately NOT in this list: the codex provider stores
-    // encrypted Responses `reasoning` items in thinking_signature and MUST get
+    // Codex and current OpenAI API routes preserve encrypted Responses items.
+    // The shared collector stores them in thinking_signature and MUST get
     // them back to replay them — stripping here is what degenerated gpt-5.x
     // into malformed tool calls across tool rounds. The codex encoder itself
     // drops any thinking block that isn't its own marked reasoning item, so the
     // cross-provider privacy drop still holds on that route.
     matches!(
         provider,
-        ProviderId::DeepSeek
-            | ProviderId::OpenAi
-            | ProviderId::OpenAiCompatible
-            | ProviderId::MiniMax
-    ) || (*provider == ProviderId::Kimi && model != "kimi-k3")
+        ProviderId::DeepSeek | ProviderId::OpenAiCompatible | ProviderId::MiniMax
+    ) || (*provider == ProviderId::OpenAi && !ocean_providers::openai_uses_responses(model))
+        || (*provider == ProviderId::Kimi && model != "kimi-k3")
 }
 
 fn strip_assistant_thinking_content(messages: &mut [Message]) {
@@ -5649,6 +5670,42 @@ done
     }
 
     #[test]
+    fn current_openai_api_models_use_responses_and_preserve_reasoning() {
+        for id in [
+            "gpt-6.1-sol",
+            "gpt-6-astra",
+            "gpt-6-sol",
+            "gpt-6-luna",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+        ] {
+            let config = provider_config(ProviderId::OpenAi, id, true);
+            let model = model_from_provider_config(&config).unwrap();
+            assert_eq!(model.api, "openai-responses");
+            assert_eq!(model.provider, "openai");
+            assert_eq!(model.id, id);
+            assert_eq!(model.base_url, config.selection.base_url);
+            assert!(model.supports_images);
+            assert!(!should_strip_assistant_thinking(&ProviderId::OpenAi, id));
+            assert!(should_strip_assistant_thinking(
+                &ProviderId::OpenAiCompatible,
+                id
+            ));
+        }
+        assert!(should_strip_assistant_thinking(
+            &ProviderId::OpenAi,
+            "gpt-4o"
+        ));
+        assert_eq!(
+            model_from_provider_config(&provider_config(ProviderId::OpenAi, "gpt-4o", true))
+                .unwrap()
+                .api,
+            "openai-completions"
+        );
+    }
+
+    #[test]
     fn glm_provider_config_maps_to_openai_compat_model() {
         // GLM (Zhipu) is an OpenAI-compatible chat-completions endpoint: the
         // resolved Model must carry provider "glm", the openai-completions api,
@@ -5685,6 +5742,258 @@ done
         assert_eq!(model.id, "claude-fable-5-1");
         assert_eq!(model.context_window, 1_000_000);
         assert_eq!(model.max_tokens, 128_000);
+    }
+
+    /// Explicit operator diagnostic: fixed prompt, no tools/session/store/refresh.
+    /// Ordinary tests never read credentials or contact a provider.
+    #[tokio::test]
+    #[ignore = "requires OCEAN_LIVE_MODEL_PROBE=1 and configured provider accounts"]
+    async fn live_catalog_models_complete_tool_free_prompt() {
+        use futures::StreamExt;
+        assert_eq!(std::env::var("OCEAN_LIVE_MODEL_PROBE").as_deref(), Ok("1"));
+        fn error_status(error: &ocean_protocol::Error) -> String {
+            use ocean_protocol::Error;
+            match error {
+                Error::ProviderError { status, body } => {
+                    // Only fixed classes leave this scope; upstream bodies may
+                    // echo private data or contain attacker-controlled text.
+                    let text: String = body
+                        .chars()
+                        .take(4096)
+                        .collect::<String>()
+                        .to_ascii_lowercase();
+                    let class = if text.contains("version") {
+                        "version_gate"
+                    } else if text.contains("model_not_found")
+                        || text.contains("unsupported_model")
+                        || (text.contains("model")
+                            && (text.contains("not supported")
+                                || text.contains("not available")
+                                || text.contains("does not exist")))
+                    {
+                        "model_unavailable"
+                    } else if text.contains("unsupported_parameter") {
+                        "unsupported_parameter"
+                    } else if text.contains("insufficient_quota") {
+                        "quota"
+                    } else if text.contains("max_output_tokens") {
+                        "output_cap"
+                    } else if text.contains("instructions") {
+                        "instructions"
+                    } else {
+                        "rejected"
+                    };
+                    format!("http_{status}_{class}")
+                }
+                Error::RetryExhausted { source, .. } => error_status(source),
+                Error::Http(_) => "transport".into(),
+                Error::MissingApiKey(_) => "missing_credential".into(),
+                Error::Cancelled => "cancelled".into(),
+                Error::UnsupportedProvider(_) => "unsupported_route".into(),
+                Error::InvalidResponse(body) => {
+                    let text: String = body
+                        .chars()
+                        .take(4096)
+                        .collect::<String>()
+                        .to_ascii_lowercase();
+                    if text.contains("quota") || text.contains("billing") {
+                        "stream_quota".into()
+                    } else if text.contains("model_not_found") || text.contains("unsupported_model")
+                    {
+                        "stream_model_unavailable".into()
+                    } else if text.contains("rate_limit") || text.contains("rate limit") {
+                        "stream_rate_limit".into()
+                    } else if text.contains("api key")
+                        || text.contains("authentication")
+                        || text.contains("unauthor")
+                    {
+                        "stream_auth_refused".into()
+                    } else if [
+                        "max_output_tokens",
+                        "reasoning",
+                        "summary",
+                        "unsupported",
+                        "instructions",
+                    ]
+                    .iter()
+                    .any(|word| text.contains(word))
+                    {
+                        "stream_unsupported_parameter".into()
+                    } else if text.contains("sse:") {
+                        "invalid_sse".into()
+                    } else {
+                        "invalid_response".into()
+                    }
+                }
+                _ => "protocol".into(),
+            }
+        }
+        let mut env = ProviderEnv::from_process();
+        env.vars.remove("OCEAN_PROVIDER");
+        let filter = std::env::var("OCEAN_MODEL_PROBE_IDS").ok();
+        if let Ok(provider) = std::env::var("OCEAN_MODEL_PROBE_PROVIDER") {
+            assert!(
+                filter.is_some(),
+                "explicit provider probe requires exact model ids"
+            );
+            env.vars.insert("OCEAN_PROVIDER".into(), provider);
+        }
+        let mut failures = Vec::new();
+        let mut passed = 0;
+        let mut disconnected = 0;
+        for known in ocean_providers::known_models() {
+            if filter
+                .as_ref()
+                .is_some_and(|ids| !ids.split(',').any(|id| id.trim() == known.id))
+            {
+                continue;
+            }
+            env.vars.insert("OCEAN_MODEL".into(), known.id.clone());
+            let config =
+                ocean_providers::resolve_provider_config(&env).expect("catalog route resolves");
+            if !config.readiness().ok {
+                println!(
+                    "MODEL_PROBE {} {} disconnected",
+                    config.selection.provider.as_str(),
+                    known.id
+                );
+                disconnected += 1;
+                continue;
+            }
+            let model = model_from_provider_config(&config).expect("catalog model constructs");
+            let mut options = ocean_protocol::StreamOptions {
+                api_key: config
+                    .credential
+                    .as_ref()
+                    .map(|credential| credential.secret.expose().to_owned()),
+                base_url: Some(config.selection.base_url.clone()),
+                auth: auth_method_for(&config),
+                reasoning: Some(ocean_protocol::ThinkingLevel::Low),
+                max_tokens: Some(1024),
+                ..Default::default()
+            };
+            if let Some(account_id) = &config.account_id {
+                options
+                    .headers
+                    .insert("chatgpt-account-id".into(), account_id.clone());
+            }
+            let context = ocean_protocol::Context {
+                messages: vec![Message::user_text("Reply exactly OCEAN_MODEL_OK.")],
+                ..Default::default()
+            };
+            let probe = async {
+                let mut stream = ocean_protocol::stream_simple(&model, &context, &options)
+                    .await
+                    .map_err(|error| error_status(&error))?;
+                while let Some(event) = stream.next().await {
+                    match event.map_err(|error| error_status(&error))? {
+                        ocean_protocol::AssistantMessageEvent::Done { message, .. } => {
+                            let text: String = message
+                                .content
+                                .iter()
+                                .filter_map(|content| content.as_text())
+                                .collect();
+                            if text.trim() == "OCEAN_MODEL_OK" {
+                                return Ok(message.usage.total_tokens);
+                            }
+                            return Err("unexpected_output".to_owned());
+                        }
+                        ocean_protocol::AssistantMessageEvent::Error { .. } => {
+                            return Err("stream_error".to_owned())
+                        }
+                        _ => {}
+                    }
+                }
+                Err("missing_completion".to_owned())
+            };
+            let result = tokio::time::timeout(std::time::Duration::from_secs(45), probe).await;
+            match result {
+                Ok(Ok(tokens)) => {
+                    passed += 1;
+                    println!(
+                        "MODEL_PROBE {} {} passed tokens={tokens}",
+                        config.selection.provider.as_str(),
+                        known.id
+                    );
+                }
+                failed => {
+                    let status = match failed {
+                        Ok(Err(status)) => status,
+                        _ => "timeout".into(),
+                    };
+                    println!(
+                        "MODEL_PROBE {} {} {status}",
+                        config.selection.provider.as_str(),
+                        known.id
+                    );
+                    failures.push((known.id, status));
+                }
+            }
+        }
+        println!(
+            "MODEL_PROBE_SUMMARY passed={passed} disconnected={disconnected} failed={}",
+            failures.len()
+        );
+        assert!(passed > 0, "no configured route completed inference");
+        assert!(
+            failures.is_empty(),
+            "configured routes failed: {failures:?}"
+        );
+    }
+
+    #[test]
+    fn every_auth_route_constructs_the_selected_runtime_model() {
+        for route in ocean_providers::model_routes() {
+            let env = ProviderEnv {
+                vars: [
+                    ("OCEAN_MODEL".into(), route.id.clone()),
+                    ("OCEAN_PROVIDER".into(), "google".into()),
+                ]
+                .into(),
+                auth_file: None,
+                codex_auth_file: None,
+            };
+            let config = ocean_providers::resolve_provider_config(&env).unwrap();
+            let model = model_from_provider_config(&config).unwrap();
+            assert_eq!(model.id, route.model_id);
+            assert_eq!(config.selection.provider.as_str(), route.provider);
+            assert_eq!(model.context_window, config.selection.context_window);
+            assert_eq!(model.max_tokens, config.selection.max_output_tokens);
+            if route.provider == "openai" && ocean_providers::openai_uses_responses(&route.model_id)
+            {
+                assert_eq!(model.api, "openai-responses");
+            }
+        }
+    }
+
+    #[test]
+    fn every_catalog_model_constructs_a_runtime_wire_model() {
+        for known in ocean_providers::known_models() {
+            // Selection-only resolution never reads auth or calls a provider.
+            let env = ProviderEnv {
+                vars: std::collections::BTreeMap::from([("OCEAN_MODEL".into(), known.id.clone())]),
+                ..Default::default()
+            };
+            let selection = ocean_providers::resolve_model_selection(&env).unwrap();
+            let config = ProviderConfig {
+                selection,
+                credential: None,
+                account_id: None,
+            };
+            let model = model_from_provider_config(&config)
+                .unwrap_or_else(|error| panic!("{}: {error}", known.id));
+            assert_eq!(model.id, known.id);
+            assert_eq!(
+                model.context_window, config.selection.context_window,
+                "{}",
+                known.id
+            );
+            assert_eq!(
+                model.max_tokens, config.selection.max_output_tokens,
+                "{}",
+                known.id
+            );
+        }
     }
 
     #[test]
@@ -5804,6 +6113,30 @@ done
         assert!(config(1).is_session_pinned("fake-ok"));
         assert!(!config(0).is_session_pinned("fake-ok"));
         assert!(config(0).is_session_pinned("fake-surface"));
+        assert_eq!(config(1).model_spec(), "fake-ok");
+    }
+
+    #[test]
+    fn session_model_spec_preserves_catalog_auth_route_for_turn_resolution() {
+        for route in ocean_providers::model_routes() {
+            let config = SessionModelConfig {
+                model: route.model_id.clone(),
+                provider: route.provider.clone(),
+                config_revision: 1,
+                client_type: None,
+            };
+            assert_eq!(config.model_spec(), route.id);
+            let selection = ocean_providers::resolve_model_selection(&ProviderEnv {
+                vars: std::collections::BTreeMap::from([
+                    ("OCEAN_MODEL".into(), config.model_spec()),
+                    ("OCEAN_PROVIDER".into(), "google".into()),
+                ]),
+                ..Default::default()
+            })
+            .unwrap();
+            assert_eq!(selection.model, route.model_id);
+            assert_eq!(selection.provider.as_str(), route.provider);
+        }
     }
 
     #[tokio::test]

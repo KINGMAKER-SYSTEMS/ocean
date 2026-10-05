@@ -1,32 +1,10 @@
-//! TASK-14 — mobile splash rendering + Sessions button chrome.
-//!
-//! Source-assertion tests (same style as open_transcript_layout.rs /
-//! dead_selector_removal.rs) pinning two operator-reported polish fixes so they
-//! can't silently regress:
-//!   1. MOBILE SPLASH: the Soundings landing (crate::loader) sizes its WebGL
-//!      backing store ONCE in `init_gl`. On a phone the pane is not stable at
-//!      first paint (URL bar collapses, `100dvh` settles late) and changes on
-//!      rotation, so a frozen buffer is stretched by the canvas
-//!      `width/height:100%` — the aspect-fitted wordmark crops off the sides,
-//!      or a zero-height first frame clamps to a 2×2 buffer and reads blank.
-//!      The fix re-syncs the buffer to the live client size every rendered
-//!      frame (`sync_size`), so the scene is always drawn at the true pane
-//!      aspect.
-//!   2. SESSIONS BUTTON: `.ocean-sessions-trigger` gains the app-chrome idiom
-//!      its neighbours already carry — a hairline border, a centered label, a
-//!      hover edge, and a coarse-pointer 44px hit floor — instead of the flat
-//!      borderless fill that read as a cheap web button.
+//! Sessions header control chrome and coarse-pointer hit targets.
 
 use std::path::Path;
 
 fn read(rel: &str) -> String {
     let path = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).join(rel);
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
-}
-
-fn loader_rs() -> String {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/loader.rs");
-    std::fs::read_to_string(path).expect("read src/loader.rs")
 }
 
 /// Strip `/* … */` comments so property assertions never match commentary.
@@ -43,20 +21,6 @@ fn strip_css_comments(input: &str) -> String {
     }
     out.push_str(rest);
     out
-}
-
-/// Strip `//`-line and `/* */`-block comments from Rust so assertions match
-/// real code, never the doc/comment prose that explains the fix.
-fn strip_rust_comments(input: &str) -> String {
-    let no_block = strip_css_comments(input); // `/* */` share syntax
-    no_block
-        .lines()
-        .map(|l| match l.find("//") {
-            Some(i) => &l[..i],
-            None => l,
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 /// Inner text of the brace-matched block starting at `open` (index of `{`).
@@ -96,62 +60,6 @@ fn rule_body_exact(css: &str, selector: &str) -> String {
         from = at + selector.len();
     }
     panic!("no rule with exact selector `{selector}` in chrome.css");
-}
-
-// ---- 1. Mobile splash: backing store re-syncs to the live pane every frame ---
-
-#[test]
-fn soundings_render_resyncs_backing_store_each_frame() {
-    let src = strip_rust_comments(&loader_rs());
-
-    // A dedicated size-sync helper exists and re-measures the LIVE display size
-    // (client_width/client_height) rather than trusting init_gl's one-shot.
-    assert!(
-        src.contains("fn sync_size"),
-        "loader.rs must define a sync_size() that re-measures the canvas — the \
-         backing store cannot stay frozen at its init size on mobile (TASK-14)",
-    );
-    let bytes = src.as_bytes();
-    let at = src
-        .find("fn sync_size")
-        .expect("sync_size defined (checked above)");
-    let open = at + src[at..].find('{').expect("sync_size has a body");
-    let body = brace_body(bytes, open);
-    for needle in [
-        "client_width",
-        "client_height",
-        "set_width",
-        "set_height",
-        "viewport",
-    ] {
-        assert!(
-            body.contains(needle),
-            "sync_size must re-measure the live pane and resize the buffer + \
-             viewport (`{needle}` missing) — the mobile-crop fix (TASK-14); \
-             body was:\n{body}",
-        );
-    }
-    // DPR stays clamped to match init_gl so the two paths can't disagree.
-    assert!(
-        body.contains("device_pixel_ratio") && body.contains("min(2.0)"),
-        "sync_size must use the same DPR≤2 cap as init_gl (TASK-14)",
-    );
-}
-
-#[test]
-fn soundings_render_calls_sync_size_before_drawing() {
-    let src = strip_rust_comments(&loader_rs());
-    let at = src
-        .find("fn render")
-        .expect("SoundingsLandingEngine::render exists");
-    let open = at + src[at..].find('{').expect("render has a body");
-    let body = brace_body(src.as_bytes(), open);
-    assert!(
-        body.contains("self.sync_size()"),
-        "render() must call self.sync_size() so every frame is drawn at the true \
-         live pane aspect — without it the splash crops on mobile (TASK-14); \
-         render body:\n{body}",
-    );
 }
 
 // ---- 2. Sessions button carries the app-chrome idiom ------------------------

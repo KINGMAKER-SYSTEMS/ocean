@@ -261,7 +261,7 @@ fn thinking_budget(level: ThinkingLevel) -> Option<u32> {
         ThinkingLevel::Low => Some(2048),
         ThinkingLevel::Medium => Some(8192),
         ThinkingLevel::High => Some(16384),
-        ThinkingLevel::Xhigh => Some(24576),
+        ThinkingLevel::Xhigh | ThinkingLevel::Max => Some(24576),
     }
 }
 
@@ -376,7 +376,49 @@ fn build_body(model: &Model, context: &Context, options: &StreamOptions) -> Valu
     if let Some(t) = options.temperature {
         body["temperature"] = json!(t);
     }
-    if let Some(level) = options.reasoning {
+    let adaptive = matches!(
+        model.id.trim_start_matches("claude-code-"),
+        "claude-fable-5-1"
+            | "fable-5-1"
+            | "claude-fable-5"
+            | "fable-5"
+            | "claude-opus-5-5"
+            | "opus-5-5"
+            | "claude-opus-5"
+            | "opus-5"
+            | "claude-sonnet-5"
+            | "sonnet-5"
+            | "claude-sonnet-5-5"
+            | "sonnet-5-5"
+    );
+    if adaptive
+        && options.reasoning == Some(ThinkingLevel::Off)
+        && matches!(
+            model.id.trim_start_matches("claude-code-"),
+            "claude-opus-5" | "opus-5" | "claude-sonnet-5" | "sonnet-5"
+        )
+    {
+        body["thinking"] = json!({"type": "disabled"});
+    } else if adaptive {
+        body.as_object_mut().unwrap().remove("temperature");
+        let between_tools = options.reasoning == Some(ThinkingLevel::Off)
+            && matches!(
+                model.id.trim_start_matches("claude-code-"),
+                "claude-sonnet-5-5" | "sonnet-5-5"
+            );
+        body["thinking"] =
+            json!({"type": if between_tools { "between_tools" } else { "adaptive" }});
+        if let Some(level) = options.reasoning {
+            let effort = match level {
+                ThinkingLevel::Off | ThinkingLevel::Minimal | ThinkingLevel::Low => "low",
+                ThinkingLevel::Medium => "medium",
+                ThinkingLevel::High => "high",
+                ThinkingLevel::Xhigh => "xhigh",
+                ThinkingLevel::Max => "max",
+            };
+            body["output_config"] = json!({"effort": effort});
+        }
+    } else if let Some(level) = options.reasoning {
         if let Some(budget) = thinking_budget(level) {
             // Anthropic requires budget_tokens >= 1024 and strictly below
             // max_tokens. Preserve the caller's output cap by shrinking the
@@ -799,6 +841,76 @@ mod tests {
     fn anthropic_model() -> Model {
         Model::anthropic_claude_sonnet_4_6()
     }
+    #[test]
+    fn current_claude_models_use_adaptive_effort_without_budget() {
+        for id in [
+            "claude-fable-5-1",
+            "claude-opus-5-5",
+            "claude-code-opus-5",
+            "claude-sonnet-5",
+        ] {
+            let mut model = anthropic_model();
+            model.id = id.into();
+            for (level, expected) in [
+                (ThinkingLevel::Off, "low"),
+                (ThinkingLevel::Medium, "medium"),
+                (ThinkingLevel::Xhigh, "xhigh"),
+                (ThinkingLevel::Max, "max"),
+            ] {
+                let options = StreamOptions {
+                    reasoning: Some(level),
+                    temperature: Some(1.0),
+                    ..Default::default()
+                };
+                let body = build_body(&model, &Context::default(), &options);
+                if level == ThinkingLevel::Off
+                    && matches!(id, "claude-code-opus-5" | "claude-sonnet-5")
+                {
+                    assert_eq!(body["thinking"], json!({"type":"disabled"}), "{id}");
+                    assert!(body.get("output_config").is_none());
+                } else {
+                    assert_eq!(body["thinking"], json!({"type":"adaptive"}), "{id}");
+                    assert_eq!(body["output_config"]["effort"], expected, "{id}");
+                    assert!(body.get("temperature").is_none());
+                }
+            }
+            let body = build_body(&model, &Context::default(), &StreamOptions::default());
+            assert_eq!(body["thinking"]["type"], "adaptive");
+            assert!(body.get("output_config").is_none());
+        }
+    }
+
+    #[test]
+    fn sonnet_5_5_off_uses_between_tools_and_other_efforts_use_adaptive() {
+        for id in ["claude-sonnet-5-5", "claude-code-sonnet-5-5"] {
+            let mut model = anthropic_model();
+            model.id = id.into();
+            for (level, thinking, effort) in [
+                (ThinkingLevel::Off, "between_tools", "low"),
+                (ThinkingLevel::Minimal, "adaptive", "low"),
+                (ThinkingLevel::Low, "adaptive", "low"),
+                (ThinkingLevel::High, "adaptive", "high"),
+                (ThinkingLevel::Xhigh, "adaptive", "xhigh"),
+                (ThinkingLevel::Max, "adaptive", "max"),
+            ] {
+                let body = build_body(
+                    &model,
+                    &Context::default(),
+                    &StreamOptions {
+                        reasoning: Some(level),
+                        temperature: Some(0.5),
+                        ..Default::default()
+                    },
+                );
+                assert_eq!(body["thinking"], json!({"type":thinking}));
+                assert_eq!(body["output_config"]["effort"], effort);
+                assert!(body.get("temperature").is_none());
+            }
+            let body = build_body(&model, &Context::default(), &StreamOptions::default());
+            assert_eq!(body["thinking"], json!({"type":"adaptive"}));
+        }
+    }
+
     #[test]
     fn haiku_high_thinking_budget_stays_below_max_tokens() {
         let options = StreamOptions {

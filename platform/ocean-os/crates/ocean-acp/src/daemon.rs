@@ -510,6 +510,10 @@ pub struct ModelInfo {
     pub label: Option<String>,
     #[serde(default)]
     pub provider: Option<String>,
+    #[serde(default)]
+    pub ready: Option<bool>,
+    #[serde(default)]
+    pub effort_levels: Option<Vec<String>>,
 }
 
 impl ModelInfo {
@@ -532,6 +536,8 @@ pub struct CurrentModel {
     #[allow(dead_code)]
     pub provider: Option<String>,
     pub model: String,
+    #[serde(default)]
+    pub route: Option<String>,
 }
 
 /// Response body of `GET /v1/models`.
@@ -540,6 +546,9 @@ pub struct ModelsResponse {
     pub current: CurrentModel,
     #[serde(default)]
     pub models: Vec<ModelInfo>,
+    /// Qualified auth routes are authoritative when supplied by a newer daemon.
+    #[serde(default)]
+    pub routes: Option<Vec<ModelInfo>>,
 }
 
 /// Decoded body of `POST /v1/model`. Only used by [`DaemonClient::set_model`],

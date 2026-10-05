@@ -97,22 +97,13 @@ web-sys = { version = "0.3", features = [
   "RtcTrackEvent",
   "RtcRtpSender",
   "RtcIceGatheringState",
-  # ── WebGL loader plate (loader.rs) ────────────────────────────────
+  # Canvas badges and Observatory scene
   "HtmlCanvasElement",
   "CanvasRenderingContext2d",
   "ResizeObserver",
   "CanvasGradient",
   "TextMetrics",
   "CssStyleDeclaration",
-  "WebGlRenderingContext",
-  "WebGlProgram",
-  "WebGlShader",
-  "WebGlBuffer",
-  "WebGlTexture",
-  "WebGlUniformLocation",
-  "WebGlActiveInfo",
-  "WebglLoseContext",
-  "WebGlContextEvent",
 ] }
 js-sys = "0.3"
 # Satisfies on_cleanup's Send+Sync bound for the wave-badge rAF Rc state

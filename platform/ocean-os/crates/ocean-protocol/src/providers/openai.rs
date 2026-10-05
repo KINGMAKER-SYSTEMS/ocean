@@ -629,7 +629,7 @@ fn openai_reasoning_effort(level: ThinkingLevel) -> Option<&'static str> {
         ThinkingLevel::Minimal => Some("minimal"),
         ThinkingLevel::Low => Some("low"),
         ThinkingLevel::Medium => Some("medium"),
-        ThinkingLevel::High | ThinkingLevel::Xhigh => Some("high"),
+        ThinkingLevel::High | ThinkingLevel::Xhigh | ThinkingLevel::Max => Some("high"),
     }
 }
 
@@ -644,7 +644,7 @@ fn deepseek_reasoning_effort(level: ThinkingLevel) -> Option<&'static str> {
         | ThinkingLevel::Low
         | ThinkingLevel::Medium
         | ThinkingLevel::High => Some("high"),
-        ThinkingLevel::Xhigh => Some("max"),
+        ThinkingLevel::Xhigh | ThinkingLevel::Max => Some("max"),
     }
 }
 

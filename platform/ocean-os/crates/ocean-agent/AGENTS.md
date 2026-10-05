@@ -29,12 +29,30 @@ transcripts by session id.
   unconfirmed. Never roll back a stale credential snapshot, hold custody across
   network/await, or log provider bodies/tokens; refresh diagnostics use fixed
   class/status only. External CLI writers are not enrolled by this interface.
+- The ignored live catalog probe requires `OCEAN_LIVE_MODEL_PROBE=1`; optional
+  `OCEAN_MODEL_PROBE_IDS` limits exact ids. `OCEAN_MODEL_PROBE_PROVIDER` tests
+  an explicit auth route and requires that exact-id filter. It sends only a
+  fixed no-tools prompt,
+  bounds each call to 45 seconds, and prints fixed error classes and token counts.
+  It never refreshes credentials or constructs sessions/stores. Configured
+  credentials alone do not prove entitlement or completed inference.
 - Preserve session compatibility unless a migration is documented.
+- Every advertised catalog model must construct a runtime wire model with the
+  same id and limits. Current Opus/Sonnet 5.5 constructors use 1M/128K;
+  both Claude Code OAuth and explicit Anthropic routes share those constructors.
+  Direct OpenAI API-key GPT-6/5.6 routes construct `openai-responses` models;
+  same-route encrypted reasoning survives history shaping. Older OpenAI and
+  compatibility routes retain Chat Completions and the existing thinking strip.
+  Authored agent model validation checks production routing, not picker
+  membership, so older pinned ids remain valid and keyless test routes fail.
 - Session-config model pins update model/provider together under the same
   per-session lock as turn persistence and increment the persisted monotonic
   `config_revision`; explicit creation may atomically seed one already-resolved
   model/provider pair at revision one, while legacy session files deserialize
   that revision as zero.
+  `SessionModelConfig::model_spec` reconstructs catalog provider/model routes
+  for turn resolution so resumed API pins retain their selected auth; custom
+  and non-catalog legacy ids keep bare-id behavior.
   Detail and bounded sync projections carry the same revision. Optional config reads must distinguish
   an absent session from unreadable/corrupt storage so daemon adapters map only
   genuine absence to 404.
@@ -122,7 +140,8 @@ transcripts by session id.
 - `PromptControl` receives exactly two effective harness-profile booleans from the daemon: `hashline_edits` and `artifact_spill`. Direct/legacy callers default both off; do not add declarative profile fields here until production runtime composition actually consumes them.
 - History shaping preserves stored thinking only when the selected route is exact
   `kimi`/`kimi-k3` (Moonshot requires same-model `reasoning_content` replay) or
-  `openai-codex` (the codex encoder replays its own marker-signed encrypted
+  `openai-codex` or current OpenAI GPT-6/5.6 Responses routes (the shared
+  Responses encoder replays its own marker-signed encrypted
   reasoning items and MUST receive them back — stripping them degenerates
   gpt-5.x into malformed tool calls across tool rounds). Kimi K2.x and other
   OpenAI-compatible routes retain the existing thinking-strip boundary;
@@ -185,6 +204,13 @@ transcripts by session id.
 - Memory guidance must not encourage unconditional recall. Call `recall` only when prior conversations, preferences, or decisions are needed and not already injected.
 
 ## Verification
+
+- Explicit live diagnostic: `OCEAN_LIVE_MODEL_PROBE=1 cargo test -p ocean-agent live_catalog_models_complete_tool_free_prompt --locked -- --ignored --nocapture` (contacts configured providers).
+
+- `cargo test -p ocean-agent every_catalog_model_constructs --locked`
+- `cargo test -p ocean-agent every_auth_route_constructs --locked`
+- `cargo test -p ocean-agent session_model_spec --locked`
+- `cargo test -p ocean-agent production_model_validation --locked`
 
 - `cargo test -p ocean-agent provider_refusal --locked` — synthetic primary and
   alternate 401/403 sequences, later availability failures, exact expiry,

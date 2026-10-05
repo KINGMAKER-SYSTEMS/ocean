@@ -242,7 +242,11 @@ pub enum OutboxItemState {
 pub struct RoomAccessProjection {
     pub state: RoomAccessState,
     /// Daemon credential's caller identity; never inferred from browser storage.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        alias = "self_member_id",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub caller_member_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_confirmed_global_sequence: Option<u64>,
@@ -2316,25 +2320,6 @@ pub struct AgentSummary {
     pub error: Option<String>,
 }
 
-impl AgentSummary {
-    /// Case-insensitive match against name, description, and model alias.
-    pub fn matches(&self, query: &str) -> bool {
-        let q = query.trim().to_lowercase();
-        if q.is_empty() {
-            return true;
-        }
-        self.name.to_lowercase().contains(&q)
-            || self
-                .description
-                .as_deref()
-                .is_some_and(|d| d.to_lowercase().contains(&q))
-            || self
-                .model
-                .as_deref()
-                .is_some_and(|m| m.to_lowercase().contains(&q))
-    }
-}
-
 /// Parse the `/v1/agents` payload into summaries. Unknown/missing fields
 /// degrade to `None`/empty; an entry without a `name` is dropped.
 fn parse_agent_summaries(json: &serde_json::Value) -> Vec<AgentSummary> {
@@ -2413,21 +2398,6 @@ fn register_agent_error_text(status: u16) -> String {
         503 => "Room sharing is not configured on this Ocean.".into(),
         _ => "Ocean could not register the agent.".into(),
     }
-}
-
-/// Agents eligible for the picker: not already in the room, matching the
-/// query. Broken (`error`) agents stay visible so the operator can fix them.
-pub(crate) fn pickable_agents(
-    agents: &[AgentSummary],
-    present_ids: &[String],
-    query: &str,
-) -> Vec<AgentSummary> {
-    agents
-        .iter()
-        .filter(|a| !present_ids.iter().any(|id| id == &a.name))
-        .filter(|a| a.matches(query))
-        .cloned()
-        .collect()
 }
 
 /// Whether the add-agent picker should show its "No agents" hint: only once
