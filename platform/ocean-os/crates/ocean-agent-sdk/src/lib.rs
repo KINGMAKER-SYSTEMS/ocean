@@ -31,8 +31,8 @@ pub use ocean_protocol::ThinkingLevel;
 /// [`ContextUsage::source`] for a reading taken at a completed turn's final
 /// round.
 pub const CONTEXT_SOURCE_FINAL_ROUND: &str = "provider_reported_final_round";
-/// [`ContextUsage::source`] for a reading taken before a failure. Tool results
-/// saved after that request are not in it.
+/// [`ContextUsage::source`] for a reading taken before a failure or a
+/// turn-limit stop. Tool results saved after that request are not in it.
 pub const CONTEXT_SOURCE_LAST_COMPLETED_ROUND: &str = "provider_reported_last_completed_round";
 
 /// Truthful context-window occupancy measured at one provider request boundary.
@@ -48,7 +48,7 @@ pub struct ContextUsage {
     /// Stable provenance label: [`CONTEXT_SOURCE_FINAL_ROUND`], or
     /// [`CONTEXT_SOURCE_LAST_COMPLETED_ROUND`] when the reading was taken
     /// before a failure (a failed turn, or a stop-hook continuation that failed
-    /// after an otherwise successful turn).
+    /// after an otherwise successful turn) or before a turn-limit stop.
     pub source: String,
     /// Daemon wall-clock timestamp (Unix milliseconds) when the turn's provider
     /// measurement was published.
@@ -56,8 +56,8 @@ pub struct ContextUsage {
 }
 
 impl ContextUsage {
-    /// True when the reading was taken before a failure, so the saved
-    /// transcript can be larger than `used_tokens`.
+    /// True when the reading was taken before a failure or a turn-limit stop,
+    /// so the saved transcript can be larger than `used_tokens`.
     pub fn is_floor(&self) -> bool {
         self.source == CONTEXT_SOURCE_LAST_COMPLETED_ROUND
     }

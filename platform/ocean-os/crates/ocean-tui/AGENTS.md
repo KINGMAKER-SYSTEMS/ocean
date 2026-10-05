@@ -107,10 +107,10 @@ This crate owns the full-screen terminal steering cockpit (`ocean` binary) for i
 - Metrics are truthful or absent: tok/s and context occupancy render only from
   daemon-reported values for the LAST finished turn (both clear on
   `TurnStarted`; context also clears on stream gaps or adoption after a missing
-  start). Context occupancy uses the provider-reported final request (or, for
-  a turn that failed, its last completed request, which the daemon labels
-  `provider_reported_last_completed_round`), never cumulative multi-round
-  usage; unknown values remain absent. The model
+  start). Context occupancy uses the provider-reported final request (or the
+  last completed request of a turn or continuation that failed or ran out of
+  rounds, which the daemon labels `provider_reported_last_completed_round`),
+  never cumulative multi-round usage; unknown values remain absent. The model
   row falls back to the startup `/v1/models` fetch only before a session is bound.
   A bound session's model is daemon-owned config: `/model` and the picker must
   both dispatch `Action::SetModel` and persist through
@@ -165,7 +165,8 @@ This crate owns the full-screen terminal steering cockpit (`ocean` binary) for i
   restores `FileTreeComponent`.
 - The `USAGE` representation records a bounded history of only daemon-reported
   context measurements from correlated finished turns: the final request, or
-  the last completed request of a turn that failed, captioned
+  the last completed request when the daemon labels the reading
+  `provider_reported_last_completed_round`, captioned
   `last completed request` instead of `final request`. It never
   substitutes cumulative input tokens or local estimates, follows model reroutes,
   clears on session switch, and labels retained history partial after an SSE gap.

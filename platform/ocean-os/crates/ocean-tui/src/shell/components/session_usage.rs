@@ -2,7 +2,8 @@
 //!
 //! This projection records only daemon-reported context usage from finished
 //! turns: the final request, or the last completed request of a turn that
-//! failed, captioned as such. It never substitutes cumulative input tokens or
+//! failed or ran out of rounds, captioned as such. It never substitutes
+//! cumulative input tokens or
 //! estimates, and a stream gap is shown as partial rather than silently
 //! claiming complete session history.
 
@@ -30,7 +31,8 @@ struct UsageSample {
     model: Option<String>,
     used_tokens: u64,
     context_window: u64,
-    /// The reading predates a failure; the saved transcript can be larger.
+    /// The reading predates a failure or a turn-limit stop; the saved
+    /// transcript can be larger.
     floor: bool,
 }
 
@@ -272,6 +274,23 @@ mod tests {
         AgentTurnId(uuid::Uuid::from_u128(value))
     }
 
+    fn render(usage: &mut SessionUsageComponent) -> String {
+        let backend = ratatui::backend::TestBackend::new(40, 8);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| usage.draw(frame, frame.area()))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let mut out = String::new();
+        for y in buf.area.top()..buf.area.bottom() {
+            for x in buf.area.left()..buf.area.right() {
+                out.push_str(buf.cell((x, y)).unwrap().symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
     fn finished(session_id: AgentSessionId, turn_id: AgentTurnId) -> AgentTurnEvent {
         AgentTurnEvent::TurnFinished {
             session_id,
@@ -346,6 +365,14 @@ mod tests {
 
         let captions: Vec<_> = usage.samples.iter().map(UsageSample::caption).collect();
         assert_eq!(captions, ["final request", "last completed request"]);
+
+        // The panel draws the newest sample, which is the marked one.
+        let screen = render(&mut usage);
+        assert!(screen.contains("50% · last completed request"), "{screen}");
+        assert!(!screen.contains("final request"), "{screen}");
+        usage.samples.pop_back();
+        let screen = render(&mut usage);
+        assert!(screen.contains("50% · final request"), "{screen}");
     }
 
     #[test]

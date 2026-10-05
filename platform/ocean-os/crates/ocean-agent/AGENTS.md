@@ -46,8 +46,9 @@ transcripts by session id.
   continuations add their counters and replace the context measurement, which
   describes the latest provider request; a continuation that fails still adds
   the rounds it completed, and its reading stays marked as a floor even though
-  the turn itself succeeded. The daemon must take the label from that mark,
-  never from the turn's `ok`.
+  the turn itself succeeded. A turn stopped at its turn limit is marked too:
+  it ends on a tool round whose results were saved after the measured request.
+  The daemon must take the label from that mark, never from the turn's `ok`.
 - Preserve session compatibility unless a migration is documented.
 - Every advertised catalog model must construct a runtime wire model with the
   same id and limits. Current Opus/Sonnet 5.5 constructors use 1M/128K;

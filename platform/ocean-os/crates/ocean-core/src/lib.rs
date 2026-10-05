@@ -332,16 +332,17 @@ pub struct TokenUsage {
     pub total_tokens: u64,
     /// Provider-reported total token consumption for one provider request: the
     /// final round of a completed turn, or the last completed round of one that
-    /// then failed (see `context_is_floor`). This is not cumulative turn usage;
-    /// zero means no authoritative measurement.
+    /// then failed or stopped at its turn limit (see `context_is_floor`). This
+    /// is not cumulative turn usage; zero means no authoritative measurement.
     #[serde(default)]
     pub context_tokens: u64,
     /// Context-window capacity of the effective model for this turn.
     #[serde(default)]
     pub context_window: u64,
     /// True when `context_tokens` comes from a turn or continuation that failed
-    /// after that request. Tool results saved afterwards are not in it, so it
-    /// is a floor for the saved transcript rather than its measured size.
+    /// after that request, or that stopped at its turn limit on a tool round.
+    /// Tool results saved afterwards are not in it, so it is a floor for the
+    /// saved transcript rather than its measured size.
     #[serde(default)]
     pub context_is_floor: bool,
 }

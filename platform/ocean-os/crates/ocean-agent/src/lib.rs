@@ -2663,7 +2663,9 @@ impl AgentRuntime {
             total_tokens: run.usage.total_tokens,
             context_tokens: run.context_tokens,
             context_window: u64::from(snapshot.model.context_window),
-            context_is_floor: false,
+            // A turn stopped at its limit ends on a tool round: the results
+            // and the stand-in reply were saved after the measured request.
+            context_is_floor: run.stopped_at_turn_limit,
         };
 
         Ok((session.id, stdout, stderr, usage))
@@ -4935,6 +4937,69 @@ mod tests {
         }
     }
 
+    /// A turn that runs out of rounds on a tool call succeeds, but its tool
+    /// results were saved after the last measured request, so that reading is
+    /// a floor exactly as it is for a turn that failed there.
+    #[tokio::test]
+    async fn a_turn_stopped_at_its_limit_marks_its_context_reading_a_floor() {
+        let config_dir = temp_config_dir("turn-limit-context-floor");
+        let mut runtime = runtime(
+            config_dir.clone(),
+            provider_config(ProviderId::Fake, ocean_runtime::FAKE_TOOL_MODEL, false),
+        );
+        let mut tool_round = scripted_assistant("");
+        tool_round.content = vec![Content::ToolCall {
+            id: "call-1".into(),
+            name: "ls".into(),
+            arguments: serde_json::json!({ "path": "." }),
+        }];
+        tool_round.stop_reason = ocean_protocol::StopReason::ToolUse;
+        tool_round.usage = ocean_protocol::Usage {
+            input: 39_000,
+            output: 1_000,
+            total_tokens: 40_000,
+            ..Default::default()
+        };
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        runtime.test_turn_provider = Some(TestCompactProvider(Arc::new(ScriptedTurnProvider {
+            calls: calls.clone(),
+            rounds: vec![vec![ocean_protocol::AssistantMessageEvent::Done {
+                reason: ocean_protocol::StopReason::ToolUse,
+                message: tool_round,
+            }]],
+        })));
+
+        let res = runtime
+            .prompt(
+                PromptRequest {
+                    prompt: "list the directory".into(),
+                    images: None,
+                    request_id: None,
+                    session_id: Some(SessionId::new_v4()),
+                    create_if_missing: true,
+                    max_turns: Some(1),
+                    yolo: true,
+                    cwd: config_dir.display().to_string(),
+                    project_id: None,
+                    client_type: None,
+                    decision_token: None,
+                },
+                PromptControl::yolo(true),
+            )
+            .await;
+
+        assert!(res.ok, "{}", res.stderr);
+        assert!(
+            res.stderr.contains("stopped at max turns"),
+            "{}",
+            res.stderr
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(res.usage.context_tokens, 40_000);
+        assert!(res.usage.context_is_floor);
+        let _ = std::fs::remove_dir_all(config_dir);
+    }
+
     /// A turn that completes a tool round and then fails was billed for that
     /// round and its checkpoint is saved. It used to report zero tokens and no
     /// context reading at every layer.
@@ -5028,6 +5093,10 @@ mod tests {
         assert_eq!(
             res.usage.context_window,
             u64::from(runtime.snapshot().model.context_window)
+        );
+        assert!(
+            res.usage.context_is_floor,
+            "the tool result saved after that request is not in the reading"
         );
 
         // The reported round is the one that was checkpointed.
