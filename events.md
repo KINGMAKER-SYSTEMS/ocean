@@ -420,3 +420,15 @@ Applied the delta review of the context-reading provenance change. It found one 
 
 Validation: ocean-agent (266, live probe ignored), ocean-core (62), ocean-agent-sdk and ocean-tui (501, 4 ignored) pass; workspace test compilation, rustfmt check and docs-check pass. The new one-round test is ok and marked, and fails when the mark is hard-coded false. The reviewer re-ran the agent suite and the usage-panel tests independently. No provider was called.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [18:38] [05-10-26]
+agent: [claude] [claude code]
+worktree: [claude/tui-slash-fixes] [/Users/risingtidesdev/dev/ocean-claude-audit]
+type: [bug report]
+area: [testing]
+
+Fixed the ocean-tui test that failed intermittently during this work, shell::herdr::tests::resume_session_reports_agent_session_id_with_resume_source. It was recorded earlier as load-sensitive; the cause is a race in the test, not load. Binding a session launches two herdr reports, the session report and a state report, as separate processes, and the fake herdr appends each one's arguments to the same marker file in whichever order they run. The helper returned on the first non-empty read, so when the state report landed first the test asserted on a file that did not hold the session report yet. The helper now waits until the session report's final argument is present. Test-only; the reporter itself is unchanged, and its two reports are independent by design.
+
+Validation: ocean-tui passes 511 tests (4 ignored) eight times in a row on the branch merged with current main, where the same suite had failed five of nine runs before the fix; workspace test compilation and rustfmt check pass. The failing runs' own output showed both reports present with the session report complete, which is what identified the race.
+_________________________________________________________________________________
