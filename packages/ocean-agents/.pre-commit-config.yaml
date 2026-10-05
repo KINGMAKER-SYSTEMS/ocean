@@ -1,0 +1,18 @@
+# Pre-commit drift gate for the base-profile composition (OCEAN-89).
+#
+# The Ocean daemon loads ONE published file per surface (assistants/<SURFACE>/system.md),
+# a COMPOSED artifact from _shared/ + _base/<SURFACE>/. This hook fails the commit if
+# any published profile drifts from its _base sources — i.e. a hand-edited published
+# file, or sources edited without re-running the composer.
+#
+# Install once:  pre-commit install
+# Run manually:  pre-commit run assistants-compose-check --all-files
+repos:
+  - repo: local
+    hooks:
+      - id: assistants-compose-check
+        name: assistants base-profile composition is current (--check)
+        entry: python3 assistants/tools/compose_profile.py --check
+        language: system
+        pass_filenames: false
+        files: ^assistants/(_shared|_base|[A-Z]+)/.*\.md$

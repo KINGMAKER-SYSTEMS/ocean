@@ -1,0 +1,95 @@
+name: Build
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scope:
+    name: Build scope
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      ocean: ${{ steps.scope.outputs.ocean }}
+      surface: ${{ steps.scope.outputs.surface }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - id: scope
+        name: Select changed components
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: python3 .github/build-scope.py
+
+  ocean-os:
+    name: Build Ocean
+    needs: scope
+    if: ${{ always() && (needs.scope.result != 'success' || needs.scope.outputs.ocean == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: platform/ocean-os
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: platform/ocean-os -> target
+      - run: cargo build --locked -p ocean-daemon -p ocean-tui -p ocean-cli -p ocean-acp -p ocean-mcp
+
+  ocean-surface:
+    name: Build Surface
+    needs: scope
+    if: ${{ always() && (needs.scope.result != 'success' || needs.scope.outputs.surface == 'true') }}
+    runs-on: macos-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: apps/ocean-surface
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.97.0
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            apps/ocean-surface -> target
+            apps/ocean-surface/crates/ocean-tauri -> target
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: trunk@0.21.14
+      - name: Build web bundle
+        run: env -u NO_COLOR trunk build --locked
+      - name: Build proxy
+        run: cargo build -p ocean-surface-proxy --locked
+      - name: Build native shell with the web bundle
+        working-directory: apps/ocean-surface/crates/ocean-tauri
+        run: cargo build --locked
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/ocean-surface/vscode-extension/package-lock.json
+      - name: Build VSCode extension
+        working-directory: apps/ocean-surface/vscode-extension
+        run: |
+          npm ci
+          npm run package

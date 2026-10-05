@@ -1,0 +1,44 @@
+# Per-package ignores live in each package's own .gitignore.
+# Repo-level ignores:
+
+.DS_Store
+*.log
+
+# editor / local tooling
+.vscode/
+.idea/
+*.swp
+
+# Local Claude Code session state (per-developer)
+.claude/
+
+# Never commit a key file if one is dropped in-repo
+*.key
+xai.key
+
+# Node (legacy-voice runs from here only)
+node_modules/
+
+# Rust + Trunk artifacts
+/target/
+**/target/
+/dist/
+crates/ocean-gui/canvas-web/dist/
+
+# Tauri build output (standalone ocean-tauri shell). target/ is covered by
+# **/target/ above; gen/ holds tauri-build's regenerated capability schemas.
+/crates/ocean-tauri/gen/
+
+# local UI test artifacts
+.playwright-mcp/
+tool-group-collapsed.png
+extension/dist/
+
+# VS Code/Cursor extension local/build artifacts
+.cursor/
+vscode-extension/.vscode/
+vscode-extension/node_modules/
+vscode-extension/dist/
+vscode-extension/*.vsix
+.stitchpad/
+.pi-subagents/

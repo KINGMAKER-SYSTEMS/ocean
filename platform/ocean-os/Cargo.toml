@@ -1,0 +1,146 @@
+[workspace]
+members = [
+  "crates/ocean-core",
+  "crates/ocean-protocol",
+  "crates/ocean-runtime",
+  "crates/ocean-mcp",
+  "crates/ocean-lsp",
+  "crates/ocean-acp",
+  "crates/ocean-agent",
+  "crates/ocean-agent-sdk",
+  "crates/ocean-ast",
+  "crates/ocean-minimizer",
+  "crates/ocean-walker",
+  "crates/ocean-search",
+  "crates/ocean-providers",
+  "crates/ocean-longhouse",
+  "crates/ocean-heartbeat",
+  "crates/ocean-daemon",
+  "crates/ocean-cli",
+  "crates/ocean-tui",
+  "crates/ocean-browser",
+  "crates/ocean-call",
+  "crates/ocean-store",
+  "crates/ocean-extension",
+  "crates/ocean-plugin",
+  "crates/ocean-hooks",
+  "crates/ocean-context",
+  "crates/ocean-memory",
+  "crates/ocean-hashline",
+  "crates/ocean-oauth",
+  "crates/ocean-observatory",
+  "xtask",
+]
+# ocean-ast, ocean-minimizer, ocean-walker, and ocean-search are standalone,
+# unwired libraries; xtask is a dev-only task runner (the cargo-xtask pattern). They compile under
+# workspace commands, but bare `cargo build` / `cargo test` skips them via
+# default-members.
+# Invoke xtask explicitly:
+#   cargo xtask <cmd>        (alias in /.cargo/config.toml)
+#   cargo run -p xtask -- <cmd>
+default-members = [
+  "crates/ocean-core",
+  "crates/ocean-protocol",
+  "crates/ocean-runtime",
+  "crates/ocean-mcp",
+  "crates/ocean-lsp",
+  "crates/ocean-acp",
+  "crates/ocean-agent",
+  "crates/ocean-agent-sdk",
+  "crates/ocean-providers",
+  "crates/ocean-longhouse",
+  "crates/ocean-heartbeat",
+  "crates/ocean-daemon",
+  "crates/ocean-cli",
+  "crates/ocean-tui",
+  "crates/ocean-browser",
+  "crates/ocean-call",
+  "crates/ocean-store",
+  "crates/ocean-extension",
+  "crates/ocean-plugin",
+  "crates/ocean-hooks",
+  "crates/ocean-context",
+  "crates/ocean-memory",
+  "crates/ocean-hashline",
+  "crates/ocean-oauth",
+  "crates/ocean-observatory",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+authors = ["Ocean OS"]
+publish = false
+# Enforced by `cargo xtask ci --msrv`; the resolved dependency graph requires 1.88.
+rust-version = "1.88"
+
+[workspace.dependencies]
+anyhow = "1"
+async-trait = "0.1"
+axum = { version = "0.8", features = ["ws"] }
+clap = { version = "4", features = ["derive", "env"] }
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
+crossterm = "0.29"
+ratatui = "0.30"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml_ng = "0.10"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+ocean-core = { path = "crates/ocean-core" }
+ocean-protocol = { path = "crates/ocean-protocol" }
+ocean-runtime = { path = "crates/ocean-runtime" }
+ocean-mcp = { path = "crates/ocean-mcp" }
+toml = "0.8"
+semver = "1"
+moka = { version = "0.12", features = ["future"] }
+ocean-agent-sdk = { path = "crates/ocean-agent-sdk" }
+ocean-agent = { path = "crates/ocean-agent" }
+ocean-providers = { path = "crates/ocean-providers" }
+ocean-browser = { path = "crates/ocean-browser" }
+ocean-call = { path = "crates/ocean-call" }
+# LEGACY: chromiumoxide is quarantined behind the default-off `legacy-chromium`
+# feature (ocean-browser → ocean-runtime → ocean-agent → ocean-daemon) while the
+# Chromium backend is being replaced by OceanWebKit. Default workspace builds
+# compile no chromiumoxide. Kept at default features only ("bytes"): the
+# `fetcher`/`rustls`/`native-tls` features pull in chromiumoxide_fetcher
+# (auto-downloads Chromium) which has a broken zip gate in 0.9.1 — and the
+# legacy backend drives the system Chrome, so we never want the fetcher.
+chromiumoxide = { version = "0.9" }
+base64 = "0.22"
+ocean-longhouse = { path = "crates/ocean-longhouse" }
+ocean-store = { path = "crates/ocean-store" }
+# Bundled SQLite (no system libsqlite3 dependency). Sync, no async-runtime
+# coupling — matches the daemon's std::sync::Mutex room registry style.
+rusqlite = { version = "0.32", features = ["bundled", "chrono", "uuid"] }
+ocean-extension = { path = "crates/ocean-extension" }
+ocean-plugin = { path = "crates/ocean-plugin" }
+ocean-hooks = { path = "crates/ocean-hooks" }
+regex = "1"
+ocean-context = { path = "crates/ocean-context" }
+ocean-memory = { path = "crates/ocean-memory" }
+ocean-observatory = { path = "crates/ocean-observatory" }
+# B1 tree-sitter resolver (OCEAN-307). Pinned: grammar ABI and node-kind names
+# must not drift under us — sig-hashes are persisted in handoffs.
+tree-sitter = "=0.26.9"
+tree-sitter-rust = "=0.24.2"
+tree-sitter-typescript = "=0.23.2"
+sha2 = "0.10"
+getrandom = "0.3"
+ocean-oauth = { path = "crates/ocean-oauth" }
+fs2 = "0.4"
+parking_lot = "0.12"
+globset = "0.4"
+grep-regex = "0.1"
+grep-searcher = "0.1"
+ignore = "0.4"
+rayon = "1.12"
+libc = "0.2"
+windows-sys = "0.61"

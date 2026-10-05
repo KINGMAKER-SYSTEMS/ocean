@@ -1,0 +1,28 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/ocean-surface-ui",
+  "crates/ocean-surface-proxy",
+  "crates/ocean-gui",
+]
+# `cargo build` (no -p) builds only the native proxy. The UI crate is a
+# wasm-only target built via Trunk (or `-p ocean-surface-ui --target
+# wasm32-unknown-unknown`), so excluding it from the default set avoids a
+# pointless native compile of a browser binary. The native surface is now
+# the Tauri shell at crates/ocean-tauri/ — a standalone project (not a
+# workspace member) launched via ./run-tauri.sh.
+default-members = ["crates/ocean-surface-proxy"]
+
+# crates/ocean-gui is ABANDONED (2026-07-21). The GPUI desktop face is dead —
+# the active native surface is the Tauri shell at crates/ocean-tauri/. DO NOT
+# work on ocean-gui: do not scout it for fixes, do not add features, do not
+# "clean it up", do not file or take tickets against it. It is NOT a live
+# surface and touching it is wasted effort. The source is frozen for reference
+# only; it remains a workspace member solely so a stale `cargo check` doesn't
+# error. Any agent finding a "bug" in here should ignore it and move on.
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+authors = ["Risingtides-dev"]
+rust-version = "1.82"

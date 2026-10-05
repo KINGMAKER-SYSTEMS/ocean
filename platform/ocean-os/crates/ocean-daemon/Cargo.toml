@@ -1,0 +1,125 @@
+[package]
+name = "ocean-daemon"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "ocean-daemon"
+path = "src/main.rs"
+
+[features]
+default = []
+# Internal source-inclusion mode for the isolated Windows registry portability
+# harness. It removes only daemon AppState/Axum route coupling so the harness
+# compiles the actual common reader and unsupported supervisor modules.
+registry-portability-check = []
+# Activates the live call-session audio loop (OCEAN-CALL): joins the LiveKit
+# room, taps remote PCM, and publishes Ocean's voice back. Pulls native
+# libwebrtc via ocean-call's own `livekit-tap` feature, so it is OPT-IN — the
+# default daemon build stays fast and credential-free. The wiring
+# (`spawn_call_session`) compiles either way; only the live tap is gated.
+# `xai-stt` enables the live xAI batch transcription HTTP call; `xai-tts` enables
+# the live xAI TTS synth so the active lane speaks Ocean's reply aloud (both use
+# the same XAI_API_KEY the live tap already requires).
+livekit-tap = ["ocean-call/livekit-tap", "ocean-call/xai-stt", "ocean-call/xai-tts"]
+# Adds the Deepgram *streaming* STT provider to the live call loop (OCEAN-242):
+# when `DEEPGRAM_API_KEY` is set the daemon runs `run_call_session_streaming`
+# (live socket, real-time interims + barge-in onset) instead of the batch xAI
+# loop; without the key it still falls back to batch. Implies `livekit-tap`
+# because the streaming path reuses the same LiveKit frame source + voice. Pulls
+# the websocket stack via ocean-call's `deepgram-stt`; OPT-IN so the default and
+# `livekit-tap`-only builds pull no websocket deps.
+deepgram-stt = ["livekit-tap", "ocean-call/deepgram-stt"]
+# Legacy chromiumoxide/CDP browser backend: the agent's 19 `browser_*` tools
+# drive a real Chrome for Testing and `/v1/browser/screencast` +
+# `/v1/browser/input` relay its live CDP session to Ocean Desktop. Default-off
+# while the backend is replaced by the OceanWebKit browser host; without it,
+# browser tools return `browser_host_unavailable` and the relay routes serve
+# the frozen `no-browser` status from `browser_stream_stub`.
+legacy-chromium = [
+    "dep:chromiumoxide",
+    "dep:ocean-browser",
+    "ocean-browser/legacy-chromium",
+    "ocean-agent/legacy-chromium",
+]
+
+[dependencies]
+libc = "0.2"
+anyhow.workspace = true
+async-trait.workspace = true
+axum.workspace = true
+chrono.workspace = true
+# Legacy Chromium CDP relay (`browser_stream`): quarantined behind the
+# default-off `legacy-chromium` feature; replaced by a no-browser stub in
+# default builds.
+chromiumoxide = { workspace = true, optional = true }
+# P2-C: caller-owned idempotent redemption bearers and deterministic,
+# domain-separated agent registration keys. All are workspace-pinned.
+base64.workspace = true
+getrandom.workspace = true
+ocean-agent.workspace = true
+ocean-agent-sdk.workspace = true
+ocean-browser = { workspace = true, optional = true }
+ocean-call.workspace = true
+ocean-core.workspace = true
+ocean-extension.workspace = true
+ocean-longhouse.workspace = true
+ocean-observatory.workspace = true
+ocean-protocol.workspace = true
+# Voice phases 2/3: resolve the OpenAI credential for the Realtime mint.
+ocean-providers.workspace = true
+ocean-runtime.workspace = true
+ocean-store.workspace = true
+moka.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+semver.workspace = true
+sha2.workspace = true
+fs2.workspace = true
+# Voice phases 2-4: the Realtime client-secret mint POSTs to api.openai.com,
+# and the STT endpoint uses multipart for xAI speech-to-text. Workspace-pinned;
+# already a transitive dep via ocean-protocol.
+reqwest = { workspace = true, features = ["multipart"] }
+# S2 P2-B: parse Bedrock's durable room SSE stream. Already locked through
+# ocean-protocol/ocean-mcp; direct here because the daemon owns the supervisor.
+eventsource-stream = "0.2"
+tokio.workspace = true
+tokio-stream.workspace = true
+tokio-util.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tempfile = "3"
+# OCEAN-130: the fake-tool block→decide→proceed test scripts a provider stream
+# via `futures::stream::iter`. Test-only; the production daemon never builds one.
+futures = "0.3"
+# OCEAN-227: drive the real router via `ServiceExt::oneshot` to prove the
+# `/v1/council/convene` alias is wired (and reads the response body). Both crates
+# are already in the workspace lock as transitive deps of axum, so this adds no
+# new downloads. Versions match axum 0.8's `http`/`http-body` stack.
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+# OCEAN-255: the persistence-retry tests construct a `RoomStoreError::Db` (the
+# transient class) via its public `From<rusqlite::Error>`, so they need to name a
+# `rusqlite::Error`. Test-only; the production daemon talks to the store only
+# through `ocean-store`'s API. Already in the workspace lock (transitive via
+# ocean-store), so this pulls no new download.
+rusqlite = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Wdk_Foundation",
+    "Wdk_Storage_FileSystem",
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+] }

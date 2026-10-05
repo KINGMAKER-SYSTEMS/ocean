@@ -1,0 +1,75 @@
+[package]
+name = "ocean-runtime"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Ocean OS agent runtime with tool calling. Streaming agent loop, permission policy, built-in tools (read/write/edit/bash/grep/glob/web_fetch/todo)."
+
+[lib]
+name = "ocean_runtime"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow.workspace = true
+async-stream = "0.3"
+async-trait.workspace = true
+chrono.workspace = true
+futures = "0.3"
+glob = "0.3"
+ignore = "0.4"
+libc = "0.2"
+ocean-protocol = { path = "../ocean-protocol" }
+ocean-agent-sdk = { workspace = true }
+ocean-browser = { workspace = true, optional = true }
+ocean-hashline = { path = "../ocean-hashline" }
+regex.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+shell-words = "1"
+thiserror = "1"
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+unicode-width = "0.2"
+uuid.workspace = true
+
+[features]
+default = []
+# Legacy chromiumoxide/CDP browser backend (being replaced by the OceanWebKit
+# browser host). Default-off: without it the 19 `browser_*` tools keep their
+# exact schemas registered but return a structured `browser_host_unavailable`
+# error instead of launching Chrome, and no chromiumoxide enters the graph.
+legacy-chromium = ["dep:ocean-browser", "ocean-browser/legacy-chromium"]
+
+[dev-dependencies]
+proptest = "1"
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[[test]]
+name = "tools_smoke"
+path = "tests/tools_smoke.rs"
+
+[[test]]
+name = "trim_invariants"
+path = "tests/trim_invariants.rs"
+
+[[test]]
+name = "agent_loop_e2e"
+path = "tests/agent_loop_e2e.rs"
+
+[[test]]
+name = "turn_tracing_spans"
+path = "tests/turn_tracing_spans.rs"
+
+[[test]]
+name = "hashline_wiring"
+path = "tests/hashline_wiring.rs"
+
+[[test]]
+name = "artifact_spill_wiring"
+path = "tests/artifact_spill_wiring.rs"

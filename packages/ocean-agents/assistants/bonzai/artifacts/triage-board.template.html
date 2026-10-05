@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Branch Triage — 63 abandoned branches</title>
+<style>
+  :root{
+    --bg:#0b0e14; --panel:#141925; --panel2:#1b2231; --line:#252e40;
+    --ink:#e6edf6; --dim:#8a98ad; --faint:#5d6b81;
+    --restore:#2ea043; --delete:#e5534b; --cherry:#d29922;
+    --accent:#3b82f6;
+    --noise:#3a2330; --fix:#1e2a3a; --gold:#2a2418;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--ink);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;padding:0 0 120px}
+  header{position:sticky;top:0;z-index:30;background:rgba(11,14,20,.92);backdrop-filter:blur(12px);border-bottom:1px solid var(--line);padding:18px 28px}
+  h1{font-size:20px;font-weight:700;letter-spacing:-.02em}
+  .sub{color:var(--dim);font-size:13px;margin-top:3px}
+  .filters{display:flex;gap:8px;margin-top:14px;flex-wrap:wrap;align-items:center}
+  .chip{background:var(--panel2);border:1px solid var(--line);color:var(--dim);padding:5px 11px;border-radius:20px;cursor:pointer;font-size:12px;font-weight:500;user-select:none}
+  .chip:hover{color:var(--ink)}
+  .chip.on{background:var(--accent);border-color:var(--accent);color:#fff}
+  .tally{margin-left:auto;display:flex;gap:14px;font-size:12px;font-weight:600}
+  .tally span{color:var(--dim)}
+  .tally b.r{color:var(--restore)} .tally b.d{color:var(--delete)} .tally b.c{color:var(--cherry)} .tally b.u{color:var(--faint)}
+  main{max-width:1180px;margin:0 auto;padding:24px 28px}
+  .reposec{margin-bottom:34px}
+  .repohead{display:flex;align-items:baseline;gap:10px;margin:0 0 14px;padding-bottom:8px;border-bottom:1px solid var(--line)}
+  .repohead h2{font-size:16px;font-weight:700}
+  .repohead .meta{color:var(--faint);font-size:12px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin-bottom:12px;display:grid;grid-template-columns:1fr auto;gap:14px;transition:opacity .15s,border-color .15s}
+  .card.tier-gold{border-left:3px solid var(--cherry)}
+  .card.tier-fix{border-left:3px solid var(--accent)}
+  .card.tier-noise{opacity:.6}
+  .card.tier-noise:hover{opacity:1}
+  .card.decided-delete{opacity:.4}
+  .card.decided-restore{border-color:var(--restore)}
+  .card.decided-cherry{border-color:var(--cherry)}
+  .bmeta{min-width:0}
+  .bname{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;font-weight:600;color:var(--ink);word-break:break-all}
+  .badges{display:flex;gap:6px;margin:6px 0 8px;flex-wrap:wrap}
+  .badge{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;padding:2px 7px;border-radius:5px}
+  .b-gold{background:var(--gold);color:var(--cherry)}
+  .b-fix{background:var(--fix);color:#7fb0 f0;color:#8fb8f5}
+  .b-noise{background:var(--noise);color:#d98aa5}
+  .b-dup{background:#2a2233;color:#b794d6}
+  .stat{color:var(--faint);font-size:12px;font-weight:600}
+  .stat .add{color:#3fb950} .stat .del{color:#e5534b}
+  .subs{margin-top:8px;list-style:none;display:flex;flex-direction:column;gap:2px}
+  .subs li{color:var(--dim);font-size:12px;padding-left:14px;position:relative;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:640px}
+  .subs li:before{content:"•";position:absolute;left:2px;color:var(--faint)}
+  .subs li.more{color:var(--faint);font-style:italic}
+  .actions{display:flex;flex-direction:column;gap:6px;align-self:center}
+  .btn{border:1px solid var(--line);background:var(--panel2);color:var(--dim);padding:7px 14px;border-radius:7px;cursor:pointer;font-size:12px;font-weight:600;min-width:108px;text-align:center;user-select:none}
+  .btn:hover{color:var(--ink);border-color:var(--faint)}
+  .btn.sel-restore{background:var(--restore);border-color:var(--restore);color:#fff}
+  .btn.sel-delete{background:var(--delete);border-color:var(--delete);color:#fff}
+  .btn.sel-cherry{background:var(--cherry);border-color:var(--cherry);color:#1b1300}
+  footer{position:fixed;bottom:0;left:0;right:0;z-index:40;background:rgba(11,14,20,.95);backdrop-filter:blur(12px);border-top:1px solid var(--line);padding:14px 28px;display:flex;gap:12px;align-items:center}
+  footer .hint{color:var(--dim);font-size:12px;flex:1}
+  footer button{background:var(--accent);color:#fff;border:0;padding:10px 20px;border-radius:8px;font-weight:700;font-size:13px;cursor:pointer}
+  footer button.ghost{background:var(--panel2);border:1px solid var(--line);color:var(--ink)}
+  footer button:hover{filter:brightness(1.1)}
+  .quick{display:flex;gap:6px}
+  .quick button{background:var(--panel2);border:1px solid var(--line);color:var(--dim);padding:7px 12px;border-radius:7px;font-size:11px;font-weight:600;cursor:pointer}
+  .quick button:hover{color:var(--ink)}
+  textarea#out{position:fixed;left:-9999px}
+  .note{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:10px 14px;margin-bottom:18px;color:var(--dim);font-size:12.5px}
+  .note b{color:var(--ink)}
+</style>
+</head>
+<body>
+<header>
+  <h1>Branch Triage</h1>
+  <div class="sub">63 branches with unmerged commits across 5 repos · the 142 already-shipped ones were deleted · decide each: <b style="color:var(--restore)">restore</b> · <b style="color:var(--delete)">delete</b> · <b style="color:var(--cherry)">cherry-pick</b></div>
+  <div class="filters">
+    <span class="chip on" data-f="all">All</span>
+    <span class="chip" data-f="gold">★ Real work</span>
+    <span class="chip" data-f="fix">Small fixes</span>
+    <span class="chip" data-f="noise">Noise / dup</span>
+    <span class="chip" data-f="undecided">Undecided</span>
+    <div class="tally">
+      <span>restore <b class="r" id="t-r">0</b></span>
+      <span>cherry <b class="c" id="t-c">0</b></span>
+      <span>delete <b class="d" id="t-d">0</b></span>
+      <span>left <b class="u" id="t-u">63</b></span>
+    </div>
+  </div>
+</header>
+<main id="app"></main>
+<footer>
+  <div class="quick">
+    <button id="q-noise">⌫ Delete all noise</button>
+    <button id="q-gold">★ Restore all real work</button>
+  </div>
+  <div class="hint" id="hint">Pick an action on each card. When done, export and paste back to Claude.</div>
+  <button class="ghost" id="export">Copy decisions</button>
+  <button id="exportdl">Download JSON</button>
+</footer>
+<textarea id="out"></textarea>
+<script>
+const DATA = __DATA__;
+
+// classify each branch
+function classify(b){
+  const s = b.subjects.join(' ');
+  if(b.files===0 || /GitButler Workspace Commit/.test(b.subjects[0]) && b.commits===1 && b.files===0) return {tier:'noise',tag:'EMPTY'};
+  if(/GitButler Workspace Commit/.test(s) && b.files===0) return {tier:'noise',tag:'EMPTY'};
+  if(/verify auto-deploy trigger/.test(s) && b.adds===827) return {tier:'noise',tag:'DUP PRD'};
+  if(/^docs: add Telegram sound distribution PRD$/.test(b.subjects[0]) && b.commits===1) return {tier:'noise',tag:'DUP PRD'};
+  if(/^standup:/.test(b.subjects[0])) return {tier:'noise',tag:'STANDUP'};
+  if(/gitignore \.claude/.test(s)) return {tier:'noise',tag:'GITIGNORE'};
+  if(/Resolve [0-9a-f]{8}-/.test(b.subjects[0])) return {tier:'noise',tag:'TEST'};
+  if(b.commits>=4 || b.adds>=800) return {tier:'gold',tag:'REAL WORK'};
+  return {tier:'fix',tag:'FIX'};
+}
+// suggested default decision
+function suggest(t){ return t==='noise'?'delete': t==='gold'?'restore':'cherry'; }
+
+const decisions = {};
+const repos = {};
+DATA.forEach((b,i)=>{ b._id=i; b._c=classify(b); b._sug=suggest(b._c.tier);
+  (repos[b.repo]=repos[b.repo]||[]).push(b); });
+
+const repoOrder = []; // populated at runtime
+const tierRank = {gold:0,fix:1,noise:2};
+
+function render(filter='all'){
+  const app=document.getElementById('app'); app.innerHTML='';
+  repoOrder.forEach(rname=>{
+    const list=(repos[rname]||[]).slice().sort((a,b)=>tierRank[a._c.tier]-tierRank[b._c.tier] || b.commits-a.commits);
+    const vis=list.filter(b=>passes(b,filter));
+    if(!vis.length) return;
+    const sec=document.createElement('section'); sec.className='reposec';
+    const gold=list.filter(b=>b._c.tier==='gold').length, noise=list.filter(b=>b._c.tier==='noise').length;
+    sec.innerHTML=`<div class="repohead"><h2>${rname}</h2><span class="meta">${list.length} branches · ${gold} real · ${noise} noise</span></div>`;
+    vis.forEach(b=>sec.appendChild(card(b)));
+    app.appendChild(sec);
+  });
+  updateTally();
+}
+function passes(b,f){
+  if(f==='all')return true;
+  if(f==='undecided')return !decisions[b._id];
+  return b._c.tier===f;
+}
+function card(b){
+  const d=document.createElement('div');
+  const dec=decisions[b._id];
+  d.className=`card tier-${b._c.tier}`+(dec?` decided-${dec}`:'');
+  d.dataset.id=b._id;
+  const subs=b.subjects.slice(0,4).map(s=>`<li>${esc(s)}</li>`).join('')
+    + (b.commits>4?`<li class="more">+${b.commits-4} more commit${b.commits-4>1?'s':''}</li>`:'');
+  const badge = b._c.tier==='gold'?'b-gold':b._c.tier==='fix'?'b-fix':(b._c.tag.includes('DUP')?'b-dup':'b-noise');
+  d.innerHTML=`
+    <div class="bmeta">
+      <div class="bname">${esc(b.branch)}</div>
+      <div class="badges">
+        <span class="badge ${badge}">${b._c.tag}</span>
+        <span class="stat">${b.commits} commit${b.commits>1?'s':''} · ${b.files} file${b.files!=1?'s':''} · <span class="add">+${b.adds}</span> <span class="del">−${b.dels}</span> · ${b.age}</span>
+      </div>
+      <ul class="subs">${subs}</ul>
+    </div>
+    <div class="actions">
+      <div class="btn ${dec==='restore'?'sel-restore':''}" data-act="restore">↺ Restore</div>
+      <div class="btn ${dec==='cherry'?'sel-cherry':''}" data-act="cherry">⑂ Cherry-pick</div>
+      <div class="btn ${dec==='delete'?'sel-delete':''}" data-act="delete">⌫ Delete</div>
+    </div>`;
+  d.querySelectorAll('.btn').forEach(btn=>btn.onclick=()=>{
+    const id=b._id, act=btn.dataset.act;
+    decisions[id]=decisions[id]===act?undefined:act;
+    if(decisions[id]===undefined)delete decisions[id];
+    render(curFilter);
+  });
+  return d;
+}
+function esc(s){return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
+function updateTally(){
+  let r=0,c=0,dl=0; Object.values(decisions).forEach(v=>{if(v==='restore')r++;else if(v==='cherry')c++;else if(v==='delete')dl++;});
+  t_r.textContent=r;t_c.textContent=c;t_d.textContent=dl;t_u.textContent=63-r-c-dl;
+}
+let curFilter='all';
+document.querySelectorAll('.chip').forEach(ch=>ch.onclick=()=>{
+  document.querySelectorAll('.chip').forEach(x=>x.classList.remove('on'));ch.classList.add('on');
+  curFilter=ch.dataset.f; render(curFilter);
+});
+document.getElementById('q-noise').onclick=()=>{DATA.forEach(b=>{if(b._c.tier==='noise')decisions[b._id]='delete'});render(curFilter)};
+document.getElementById('q-gold').onclick=()=>{DATA.forEach(b=>{if(b._c.tier==='gold')decisions[b._id]='restore'});render(curFilter)};
+
+function buildExport(){
+  const out={restore:[],cherry:[],delete:[],undecided:[]};
+  DATA.forEach(b=>{const d=decisions[b._id]||'undecided';out[d].push(`${b.repo}  ${b.branch}`)});
+  return out;
+}
+document.getElementById('export').onclick=()=>{
+  const o=buildExport();
+  let txt='BRANCH TRIAGE DECISIONS\n\n';
+  ['restore','cherry','delete','undecided'].forEach(k=>{
+    txt+=`## ${k.toUpperCase()} (${o[k].length})\n`+(o[k].map(x=>'  '+x).join('\n')||'  (none)')+'\n\n';
+  });
+  const ta=document.getElementById('out');ta.value=txt;ta.select();document.execCommand('copy');
+  document.getElementById('hint').textContent='✓ Copied to clipboard — paste back to Claude.';
+};
+document.getElementById('exportdl').onclick=()=>{
+  const blob=new Blob([JSON.stringify(buildExport(),null,2)],{type:'application/json'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='branch-decisions.json';a.click();
+};
+render('all');
+</script>
+</body>
+</html>

@@ -1,0 +1,1028 @@
+/* Transcript surface — conversation, tool activity, and permission gates. */
+
+/* ── Permission approval prompts ─────────────────────────────────── */
+.ocean-perms {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 18px 0;
+}
+
+/* TASK-69: "permissions couldn't refresh" affordance. A degraded snapshot no
+   longer degrades to a silent blank — this warns that N gates MAY be pending so
+   a pre-load, blocked tool call is never invisible. */
+.ocean-perms__warning {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 12px 18px 0;
+  padding: 10px 14px;
+  background: var(--warn-soft);
+  border: 1px solid var(--warn);
+  border-radius: var(--radius-lg);
+  color: var(--fg-2);
+  animation: ocean-perm-in var(--dur-fast) var(--ease);
+}
+
+.ocean-perms__warning-head {
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.ocean-perms__warning-detail {
+  color: var(--fg-3, var(--fg-2));
+  font-size: 12px;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.ocean-perm {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  color: var(--fg-2);
+  animation: ocean-perm-in var(--dur-fast) var(--ease);
+}
+
+@keyframes ocean-perm-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.ocean-perm.is-deciding {
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+.ocean-perm__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.ocean-perm__badge {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.ocean-perm__tool {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ocean-perm__reason {
+  color: var(--fg-2);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.ocean-perm__args {
+  max-height: 168px;
+  margin: 0;
+  overflow: auto;
+  padding: 10px 12px;
+  background: var(--bg-well);
+  border-radius: var(--radius);
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ocean-perm__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.ocean-perm__approve,
+.ocean-perm__deny {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: var(--ctl-h);
+  min-width: 82px;
+  padding: 0 16px;
+  border-radius: var(--radius);
+  font: 600 13px/1 var(--font);
+  cursor: pointer;
+  transition:
+    background var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    filter var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease),
+    opacity var(--dur-fast) var(--ease);
+}
+
+.ocean-perm__approve {
+  border: none;
+  background: var(--accent);
+  color: var(--fg-on-accent);
+}
+
+.ocean-perm__approve:hover {
+  filter: brightness(1.12);
+}
+
+.ocean-perm__deny {
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--err);
+}
+
+.ocean-perm__deny:hover {
+  background: var(--err-soft);
+  border-color: var(--err);
+}
+
+.ocean-perm__approve:focus-visible,
+.ocean-perm__deny:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.ocean-perm__approve:active,
+.ocean-perm__deny:active {
+  transform: scale(0.985);
+}
+
+.ocean-perm__approve:disabled,
+.ocean-perm__deny:disabled {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+/* ── Transcript scroll region and empty state ────────────────────── */
+.transcript {
+  /* This is the only flexible-height child in the chat column. Be explicit:
+     WebKit otherwise occasionally resolves the shorthand against streaming
+     content's intrinsic height, leaving free space below the composer while a
+     pending turn is still materializing. */
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 18px 22px;
+  /* Opaque on purpose: the animated pending badge keeps this scroll
+     content on its own compositor layer, and a transparent layer's blacks
+     can quantize differently from the page underneath — the boundary
+     rendered as a faint full-width "lighter/darker" line at the bottom of
+     the content (reported twice, Chrome and Tauri/WebKit). An opaque
+     background makes the whole box one consistent surface, so any layer
+     edge falls on designed boundaries (header/composer), never mid-page. */
+  background: var(--bg);
+  color: var(--fg-2);
+}
+
+.transcript__landing {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px 16px;
+  text-align: center;
+}
+
+
+/* ── The Ocean badge (wave-badge) ─────────────────────────────────────
+   The circular brand mark, pixel-true to the reference
+   (docs/assets/ocean-logo-circular-neumorphic-reference.png): a matte
+   coin face darker than the page, thin rim relief, and the muted
+   turquoise→blue --badge-* ramp (NOT the neon working ramp). Reusable
+   anywhere a brand/loading mark is needed; `.is-spinning` churns the
+   water. Wave paths repeat every 22 user units and every loop translates
+   exactly one period, so the seam is invisible. */
+.wave-badge {
+  display: block;
+  /* Shallow relief + a faint luminous aura: the coin sits ON the surface,
+     barely, and breathes a little of its own light into the dark. */
+  filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.55))
+          drop-shadow(0 0 9px color-mix(in srgb, var(--badge-b2) 9%, transparent));
+}
+
+/* Rim relief: a thin machined coin edge with a faint neutral halo. Stroke
+   hue + geometry are per-instance inline (the gradient id carries the
+   instance uid); only the halo filter lives here. */
+.wave-badge__ring {
+  filter: drop-shadow(0 0 1px rgba(255, 255, 255, 0.14));
+}
+
+/* ── The measured light — gradient stops (COLORS ONLY; tokens.css owns the
+   hues). Coin material (face / rim / vignette / occlusion / gloss) plus the
+   six-strata depth ramp, each band a lit top lip falling to a deeper floor.
+   Fills/strokes reference these through per-instance gradient ids set inline
+   on the paths (icons.rs), so multiple badges never collide. */
+.wave-badge__stop-face-hi { stop-color: color-mix(in srgb, var(--badge-face) 95%, white); }
+.wave-badge__stop-face { stop-color: var(--badge-face); }
+.wave-badge__stop-rim-hi { stop-color: color-mix(in srgb, var(--badge-rim) 72%, white); }
+.wave-badge__stop-rim-lo { stop-color: color-mix(in srgb, var(--badge-rim) 72%, black); }
+.wave-badge__stop-vig-in { stop-color: transparent; }
+.wave-badge__stop-vig-out { stop-color: rgba(0, 0, 0, 0.55); }
+.wave-badge__stop-occl-in { stop-color: transparent; }
+.wave-badge__stop-occl-mid { stop-color: rgba(0, 0, 0, 0.26); }
+.wave-badge__stop-occl-out { stop-color: rgba(0, 0, 0, 0.72); }
+.wave-badge__stop-gloss { stop-color: var(--badge-gloss); stop-opacity: 0.15; }
+.wave-badge__stop-gloss-out { stop-color: var(--badge-gloss); stop-opacity: 0; }
+
+.wave-badge__stop-b1-hi { stop-color: color-mix(in srgb, var(--badge-b1) 82%, white); }
+.wave-badge__stop-b1-lo { stop-color: color-mix(in srgb, var(--badge-b1) 88%, black); }
+.wave-badge__stop-b2-hi { stop-color: color-mix(in srgb, var(--badge-b2) 84%, white); }
+.wave-badge__stop-b2-lo { stop-color: color-mix(in srgb, var(--badge-b2) 88%, black); }
+.wave-badge__stop-b3-hi { stop-color: color-mix(in srgb, var(--badge-b3) 86%, white); }
+.wave-badge__stop-b3-lo { stop-color: color-mix(in srgb, var(--badge-b3) 88%, black); }
+.wave-badge__stop-b4-hi { stop-color: color-mix(in srgb, var(--badge-b4) 88%, white); }
+.wave-badge__stop-b4-lo { stop-color: color-mix(in srgb, var(--badge-b4) 88%, black); }
+.wave-badge__stop-b5-hi { stop-color: color-mix(in srgb, var(--badge-b5) 88%, white); }
+.wave-badge__stop-b5-lo { stop-color: color-mix(in srgb, var(--badge-b5) 86%, black); }
+.wave-badge__stop-b6-hi { stop-color: color-mix(in srgb, var(--badge-b6) 86%, white); }
+.wave-badge__stop-b6-lo { stop-color: color-mix(in srgb, var(--badge-b6) 72%, black); }
+
+/* Whitecap glint (soft halo + crisp core) and the dark longitudinal splits
+   between strata. Stroke widths / blur / opacity are per-instance inline
+   (they scale with the compact variant); only the hue lives here. */
+.wave-badge__foam-core,
+.wave-badge__foam-halo { stroke: var(--badge-foam); }
+.wave-badge__split { stroke: var(--badge-split); }
+
+/* Soundings accent: expanding foam ping ring + source glint. Ring stroke
+   and glint fill live in Rust rAF; only the hue is here. Static badges
+   keep both at opacity 0 (default in the SVG markup). */
+.wave-badge__ping-ring { stroke: var(--badge-foam); }
+.wave-badge__ping-glint { fill: var(--badge-foam); }
+
+/* ── Landing hero field — the Soundings scene owns the whole pane. The
+   canvas host is absolute inset:0, so the reveal wrapper must stretch to
+   the full landing box (the old 340px cap sized the retired wordmark SVG). */
+.transcript__landing-reveal {
+  flex: 1 1 auto;
+  align-self: stretch;
+  width: 100%;
+  min-height: 0;
+}
+
+
+/* Screen-reader title; visually quiet under the banner. */
+.transcript__landing-title {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.transcript__sessions-launcher {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  align-self: center;
+  height: var(--ctl-h);
+  margin-top: 4px;
+  padding: 0 18px;
+  background: var(--bg-elevated);
+  box-shadow: var(--elev-1);
+  border-radius: var(--radius);
+  color: var(--fg-2);
+  font-family: var(--font);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  cursor: pointer;
+  user-select: none;
+  transition:
+    background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
+}
+
+.transcript__sessions-launcher:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.transcript__sessions-launcher:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.transcript__sessions-launcher:active {
+  transform: scale(0.985);
+}
+
+/* ── Turns and prose blocks ──────────────────────────────────────── */
+.turn {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.turn--user,
+.turn--assistant {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.turn--user {
+  align-items: flex-end;
+}
+
+.turn--assistant {
+  align-items: flex-start;
+}
+
+
+.turn__body {
+  min-width: 0;
+  max-width: 100%;
+  color: var(--fg-2);
+  overflow-wrap: anywhere;
+}
+
+.turn--user .turn__body {
+  max-width: min(72ch, 86%);
+  padding: 10px 12px;
+  background: var(--sheen-soft), var(--bg-elevated);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--elev-1);
+  color: var(--fg);
+  white-space: pre-wrap;
+}
+
+.turn--assistant .turn__body {
+  /* TASK-52 open document flow: the assistant turn is DE-BUBBLED. No card
+     background, border, radius, or shadow — content sits directly on the
+     transcript surface, and turn separation comes from the transcript's
+     vertical rhythm (its 18px flex gap), not chrome. The body spans the full
+     transcript rail so rendered components below can break out to full
+     measure; prose re-imposes its own readable measure (see .block--text). */
+  width: 100%;
+  max-width: 100%;
+  padding: 0;
+  background: none;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+/* Live activity row — one pure reducer-driven row at transcript tail,
+   outside the turn For loop. Shares the transcript rail, flush left,
+   no card chrome. Non-wrapping, ellipsized at narrow widths. */
+.live-activity-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 2px;
+  min-height: 24px;
+  align-self: flex-start;
+  width: min(74ch, 100%);
+  font-family: var(--font);
+  font-size: 12px;
+  color: var(--fg-3);
+}
+
+.live-activity-row .wave-badge {
+  font-size: 20px;
+  flex-shrink: 0;
+}
+
+.live-activity-row__label {
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .live-activity-row .wave-badge canvas {
+    animation: none;
+  }
+}
+
+/* TASK-52 two-measure layout — the PROSE column. The assistant body is now
+   de-bubbled and full-width, so the readable measure lives HERE on the text
+   block itself: streaming markdown prose is capped at 74ch (the same
+   comfortable measure the old reply card carried) while rendered components
+   below break out to the full rail. No bubble chrome — the de-bubbled turn
+   owns the surface, prose just sits on it flush. */
+.turn--assistant .turn__body .block--text {
+  max-width: 74ch;
+  padding: 0;
+  background: none;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.block {
+  margin: 6px 0;
+}
+
+.block--text {
+  max-width: 72ch;
+  padding: 12px 16px;
+  background: var(--sheen-soft), var(--bg-raised);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--elev-1);
+  color: var(--fg-2);
+  font-size: 14px;
+  line-height: 1.6;
+  text-wrap: pretty;
+}
+
+/* Streaming markdown (markdown_stream.rs) wraps each top-level block in a
+   display:contents `.md-block` host so the block-split structure has zero
+   layout/margin-collapse effect — sibling block margins collapse exactly as if
+   the wrappers were absent. Only the very first and very last rendered node
+   flush against the bubble padding. */
+.md-block {
+  display: contents;
+}
+
+.block--text > .md-block:first-child > :first-child {
+  margin-top: 0;
+}
+
+.block--text > .md-block:last-child > :last-child {
+  margin-bottom: 0;
+}
+
+.block--text p,
+.block--text ul,
+.block--text ol {
+  margin: 0.45em 0;
+}
+
+.block--text ul,
+.block--text ol {
+  padding-left: 1.4em;
+}
+
+.block--text a {
+  color: var(--accent);
+  text-decoration-color: var(--accent-soft);
+  text-underline-offset: 3px;
+}
+
+.block--text a:hover {
+  text-decoration-color: var(--accent);
+}
+
+.block--text h1,
+.block--text h2,
+.block--text h3 {
+  margin: 0.75em 0 0.35em;
+  color: var(--fg);
+  font-weight: 600;
+  line-height: 1.25;
+  text-wrap: balance;
+}
+
+.block--text h1 {
+  font-size: 22px;
+}
+
+.block--text h2 {
+  font-size: 18px;
+}
+
+.block--text h3 {
+  font-size: 15px;
+}
+
+.block--text strong {
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.block--text code {
+  padding: 0.1em 0.38em;
+  background: var(--bg-well);
+  border-radius: var(--radius-sm);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.block--text pre {
+  max-width: 100%;
+  overflow-x: auto;
+  padding: 10px 12px;
+  background: var(--bg-well);
+  border-radius: var(--radius);
+  box-shadow: var(--well);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.block--text pre code {
+  padding: 0;
+  background: transparent;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.block--text blockquote {
+  margin: 0.6em 0;
+  padding: 0.1em 0 0.1em 12px;
+  box-shadow: inset 1px 0 0 var(--border-subtle);
+  color: var(--fg-2);
+}
+
+/* ── Generic disclosure system ─────────────────────────────────────
+   Rust emits .transcript-disclosure--group|--thinking|--row on the root
+   wrapper. Children: __head (button), __tick, __dot, __label, __status,
+   __body. State lives on the root: .is-open .is-running .is-ok .is-err */
+
+/* ---- Wrappers ---------------------------------------------------- */
+.block--thinking {
+  max-width: 72ch;
+}
+
+.block--tool.drawer {
+  margin: 3px 0;
+}
+
+.tool-group {
+  margin: 3px 0;
+}
+
+.transcript-disclosure--group > .transcript-disclosure__body > .block--tool.drawer {
+  margin: 1px 0;
+}
+
+/* ---- Head button — base ------------------------------------------ */
+.transcript-disclosure__head {
+  appearance: none;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  border: 0;
+  border-radius: var(--radius);
+  color: var(--fg-3);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1.45;
+  text-align: left;
+  transition:
+    background var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
+}
+
+.transcript-disclosure__head:hover {
+  background: var(--sheen-soft), var(--bg-elevated);
+  color: var(--fg);
+}
+
+.transcript-disclosure__head:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.transcript-disclosure__head:active {
+  transform: scale(0.985);
+  box-shadow: var(--pressed);
+}
+
+/* Group variant (tool-group): taller, mono font, always raised */
+.transcript-disclosure--group > .transcript-disclosure__head {
+  min-height: 28px;
+  padding: 4px 10px;
+  background: var(--sheen-soft), var(--bg-raised);
+  box-shadow: var(--elev-1);
+  font-family: var(--mono);
+}
+.transcript-disclosure--group > .transcript-disclosure__head:hover,
+.transcript-disclosure--group.is-open > .transcript-disclosure__head {
+  background: var(--sheen-soft), var(--bg-elevated);
+  box-shadow: var(--elev-2);
+}
+
+/* Row variant (drawer): shorter, transparent until hover/open */
+.transcript-disclosure--row > .transcript-disclosure__head {
+  min-height: 24px;
+  padding: 3px 8px;
+  background: transparent;
+  font-family: var(--mono);
+}
+
+.transcript-disclosure--row > .transcript-disclosure__head:hover,
+.transcript-disclosure--row.is-open > .transcript-disclosure__head {
+  background: var(--sheen-soft), var(--bg-elevated);
+  box-shadow: var(--elev-1);
+}
+
+/* Thinking variant: pill-shaped, sans font, content-width */
+.transcript-disclosure--thinking > .transcript-disclosure__head {
+  display: inline-flex;
+  width: auto;
+  max-width: 100%;
+  align-self: flex-start;
+  min-height: var(--ctl-h-sm);
+  padding: 0 11px;
+  background: var(--sheen-soft), var(--bg-elevated);
+  box-shadow: var(--elev-1);
+  font: 500 12px/1 var(--font);
+}
+
+.transcript-disclosure--thinking > .transcript-disclosure__head:hover {
+  background: var(--sheen-soft), var(--bg-hover);
+  box-shadow: var(--elev-2);
+}
+
+.block--thinking > .transcript-disclosure__head {
+  font-style: italic;
+}
+
+/* ---- Tick (chevron) ---------------------------------------------- */
+.transcript-disclosure__tick {
+  flex: 0 0 auto;
+  width: 10px;
+}
+
+.transcript-disclosure--group.is-open > .transcript-disclosure__head .transcript-disclosure__tick,
+.transcript-disclosure--row.is-open > .transcript-disclosure__head .transcript-disclosure__tick,
+.transcript-disclosure--thinking.is-open > .transcript-disclosure__head .transcript-disclosure__tick {
+  color: var(--accent);
+}
+
+/* ---- Dot (status indicator) -------------------------------------- */
+.transcript-disclosure__dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-pill);
+  background: var(--fg-4);
+}
+
+.transcript-disclosure--group.is-running > .transcript-disclosure__head .transcript-disclosure__dot,
+.transcript-disclosure--row.is-running > .transcript-disclosure__head .transcript-disclosure__dot,
+.transcript-disclosure--thinking.is-running > .transcript-disclosure__head .transcript-disclosure__dot {
+  background: var(--running);
+}
+
+.transcript-disclosure--group.is-ok > .transcript-disclosure__head .transcript-disclosure__dot,
+.transcript-disclosure--row.is-ok > .transcript-disclosure__head .transcript-disclosure__dot,
+.transcript-disclosure--thinking.is-ok > .transcript-disclosure__head .transcript-disclosure__dot {
+  background: var(--ok);
+}
+
+.transcript-disclosure--group.is-err > .transcript-disclosure__head .transcript-disclosure__dot,
+.transcript-disclosure--row.is-err > .transcript-disclosure__head .transcript-disclosure__dot,
+.transcript-disclosure--thinking.is-err > .transcript-disclosure__head .transcript-disclosure__dot {
+  background: var(--err);
+}
+
+/* ---- Label ------------------------------------------------------- */
+.transcript-disclosure__label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.transcript-disclosure--group > .transcript-disclosure__head > .transcript-disclosure__label,
+.transcript-disclosure--row > .transcript-disclosure__head > .transcript-disclosure__label {
+  font-family: var(--mono);
+}
+
+/* ---- Status ------------------------------------------------------ */
+.transcript-disclosure__status {
+  flex: 0 0 auto;
+  color: var(--fg-3);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.transcript-disclosure--group.is-running > .transcript-disclosure__head .transcript-disclosure__status,
+.transcript-disclosure--row.is-running > .transcript-disclosure__head .transcript-disclosure__status,
+.transcript-disclosure--thinking.is-running > .transcript-disclosure__head .transcript-disclosure__status {
+  color: var(--running);
+}
+
+.transcript-disclosure--group.is-err > .transcript-disclosure__head .transcript-disclosure__status,
+.transcript-disclosure--row.is-err > .transcript-disclosure__head .transcript-disclosure__status,
+.transcript-disclosure--thinking.is-err > .transcript-disclosure__head .transcript-disclosure__status {
+  color: var(--err);
+}
+
+/* ---- Body (expandable content) ----------------------------------- */
+.transcript-disclosure__body {
+  overflow: auto;
+  animation: drawer-open var(--dur-fast) var(--ease);
+}
+
+/* Group body: flex container for nested drawers */
+.transcript-disclosure--group > .transcript-disclosure__body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 2px 0;
+}
+
+/* Row body: mono code well */
+.transcript-disclosure--row > .transcript-disclosure__body {
+  max-height: 320px;
+  margin: 4px 0 8px 20px;
+  padding: 10px 12px;
+  background: var(--bg-well);
+  border-radius: var(--radius);
+  box-shadow: var(--well-deep);
+  color: var(--fg-2);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+/* Thinking body: italic prose */
+.transcript-disclosure--thinking > .transcript-disclosure__body {
+  max-height: 320px;
+  margin: 8px 0 0;
+  padding: 10px 14px;
+  background: var(--bg-raised);
+  border-radius: var(--radius);
+  box-shadow: var(--well);
+  color: var(--fg-3);
+  font: italic 13px/1.55 var(--font);
+  white-space: pre-wrap;
+}
+
+@keyframes drawer-open {
+  from {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* TASK-52: the specular-edge streaming breath was removed with the assistant
+   card — a breathing box-shadow/border is exactly the card chrome the
+   de-bubbled open flow drops. The live-activity row (TASK-22) owns the live
+   streaming/reasoning signal now, so the turn body needs no live-edge glow. */
+
+/* Newly-mounted turns materialize from just below the surface — a short
+   opacity + 2px rise (the rise-from-depth tide). Gated on .turn.is-new,
+   which Rust emits ONLY on turns appended mid-stream; hydrated history never
+   carries it, so this never fires on page-load/restore. */
+@keyframes ocean-turn-materialize {
+  from { opacity: 0; transform: translateY(2px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.turn.is-new {
+  animation: ocean-turn-materialize var(--dur-fast) var(--ease-tide) both;
+}
+
+/* ── TASK-52 full-measure components — the two-measure BREAKOUT ─────────
+   The heart of the ask. The assistant turn is de-bubbled (no parent card), so
+   rendered components are no longer flattened into it: they regain their own
+   native card chrome (components.css elevation/padding) AND break out to the
+   FULL transcript rail width. Prose above holds a 74ch measure; components span
+   the whole rail so dashboards, tables, kanban, stat rows, forms, callouts,
+   confirms, galleries, media and preview cards can breathe.
+   width:100% forces full-rail fill even when intrinsic content is narrow;
+   components.css already caps them at max-width:100% so they never overflow. */
+.turn--assistant .turn__body .component-kanban,
+.turn--assistant .turn__body .component-table,
+.turn--assistant .turn__body .component-progress,
+.turn--assistant .turn__body .component-markdown,
+.turn--assistant .turn__body .component-dashboard,
+.turn--assistant .turn__body .component-chart,
+.turn--assistant .turn__body .component-interactive-plot,
+.turn--assistant .turn__body .component-timeline,
+.turn--assistant .turn__body .component-stats,
+.turn--assistant .turn__body .component-filetree,
+.turn--assistant .turn__body .component-diff,
+.turn--assistant .turn__body .component-code,
+.turn--assistant .turn__body .component-gallery,
+.turn--assistant .turn__body .component-form,
+.turn--assistant .turn__body .component-callout,
+.turn--assistant .turn__body .component-confirm,
+.turn--assistant .turn__body .block--map,
+.turn--assistant .turn__body .block--video,
+.turn--assistant .turn__body .block--component-unknown {
+  width: 100%;
+  max-width: 100%;
+}
+
+/* ── Compact containment — large components scroll locally at 380px ──
+   Dashboards, kanbans, maps, videos and disclosure bodies stay within the
+   turn without pushing page overflow. */
+.turn--assistant .turn__body .component-dashboard,
+.turn--assistant .turn__body .kanban-columns,
+.turn--assistant .turn__body .block--map,
+.turn--assistant .turn__body .block--video,
+.turn--assistant .turn__body .transcript-disclosure__body {
+  max-height: 380px;
+  overflow: auto;
+}
+
+
+/* ── Markdown tables inside text blocks ──────────────────────────── */
+.block--text table {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  margin: 10px 0;
+  overflow-x: auto;
+  border-collapse: collapse;
+  color: var(--fg-2);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.block--text th,
+.block--text td {
+  padding: 8px 12px;
+  border: 1px solid var(--border-subtle);
+  text-align: left;
+  vertical-align: top;
+}
+
+.block--text th {
+  background: var(--bg-elevated);
+  color: var(--fg-3);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.block--text td {
+  color: var(--fg-2);
+}
+
+
+
+@media (prefers-reduced-motion: reduce) {
+  .ocean-perm,
+  .transcript-disclosure__body,
+  .turn.is-new {
+    animation: none;
+  }
+
+  .ocean-perm__approve,
+  .ocean-perm__deny,
+  .transcript-disclosure__head {
+    transition: none;
+  }
+
+  /* Landing hero + thinking plate render a single settled GL frame in Rust;
+     no CSS motion to kill beyond the shared rules above. */
+}
+
+/* ── Soundings hero + thinking plate ─────────────────────────────────
+   Geometry/motion live in Rust WebGL (loader.rs); colors arrive as shader
+/* ── Full-glass landing — the reveal's water floods the whole pane ────
+   The scene svg overflows its centered box (water paths span far beyond
+   the 600×600 viewBox); the landing clips it at the pane edges, reading
+   as a glass filled up to the orb. */
+.transcript__landing {
+  position: relative;
+  justify-content: center;
+  min-height: 100%;
+  overflow: hidden;
+}
+
+.transcript__landing-reveal {
+  position: relative;
+}
+
+.transcript__landing-reveal .soundings-landing canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.ocean-reveal {
+  overflow: visible;
+  /* No drop-shadow here: a filter would rasterize the full-bleed water's
+     ink overflow every frame (huge layer, mobile jank). */
+  filter: none;
+}
+
+/* Sessions launcher — submerged in the scene's water zone. Surfaces when
+   the rAF wavefront crosses its spot (SoundingsLanding stamps
+   `data-flooded` on its host div — no hardcoded delay). */
+.transcript__landing-reveal .transcript__sessions-launcher {
+  position: absolute;
+  left: 50%;
+  top: 75%;
+  transform: translateX(-50%);
+  margin-top: 0;
+  z-index: 1;
+  color: var(--water-crest);
+  background: color-mix(in srgb, var(--water-mid) 32%, transparent);
+  border: 1px solid color-mix(in srgb, var(--water-crest-soft) 30%, transparent);
+  box-shadow: none;
+  backdrop-filter: blur(2px);
+}
+
+.transcript__landing-reveal .transcript__sessions-launcher:hover {
+  background: color-mix(in srgb, var(--water-mid) 50%, transparent);
+  color: var(--badge-foam);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .transcript__landing-reveal .transcript__sessions-launcher {
+    opacity: 0;
+    transform: translateX(-50%) translateY(10px);
+    transition: opacity 0.7s ease-out, transform 0.7s ease-out;
+    pointer-events: none;
+  }
+
+  .transcript__landing-reveal [data-flooded] ~ .transcript__sessions-launcher {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+    pointer-events: auto;
+  }
+}
+
+/* ── Return-to-latest affordance ─────────────────────────────────────────
+   Zero-height sticky dock at the end of the scroll content: sticks above the
+   container's bottom edge only while the user is scrolled up, occupies no
+   layout space, and never moves the viewport on its own. */
+.transcript__latest-dock {
+  position: sticky;
+  bottom: 14px;
+  z-index: 3;
+  display: flex;
+  justify-content: center;
+  height: 0;
+  overflow: visible;
+}
+
+.transcript__latest {
+  padding: 5px 11px 6px;
+  color: var(--fg-3);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  transform: translateY(-100%);
+  box-shadow: 0 3px 10px color-mix(in srgb, var(--bg) 55%, transparent);
+  transition: color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
+}
+
+.transcript__latest:hover {
+  color: var(--fg);
+  border-color: var(--border);
+}

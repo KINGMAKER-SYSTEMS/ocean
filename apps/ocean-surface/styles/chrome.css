@@ -1,0 +1,573 @@
+/* Header shell ----------------------------------------------------------- */
+.ocean-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  box-sizing: border-box;
+  min-height: 56px;
+  padding: 0 16px;
+  background: var(--bg-raised);
+  box-shadow:
+    inset 0 1px 0 var(--specular-soft),   /* top-edge light */
+    0 1px 0 var(--border),                /* crisp bottom seam */
+    var(--shadow-sm);                     /* soft drop over the transcript */
+}
+
+/* Desktop (Tauri overlay titlebar): the header IS the titlebar — native
+   traffic lights float over its left edge, so pad the brand clear of them.
+   `.is-titlebar` is set on the app root only inside the Tauri shell. */
+.is-titlebar .ocean-header {
+  padding-left: var(--titlebar-inset);
+}
+
+/* Native chrome spans the actual window even when the readable product shell
+   is capped at --shell-max. Without this, wide collapsed-workspace windows
+   strand the overflow and workspace controls at the shell edge and leave a
+   dead titlebar strip before the rounded window edge. The open workspace path
+   already widens the root and intentionally ends the header at the pane. */
+.ocean-surface.is-titlebar:not(.has-workspace-open) .ocean-header {
+  width: 100vw;
+  margin-left: calc((100% - 100vw) / 2);
+  flex: 0 0 auto;
+}
+
+.ocean-header__right {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* Brand ------------------------------------------------------------------ */
+.ocean-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.ocean-brand__word span:nth-child(1) { color: var(--ocean-4); }
+.ocean-brand__word span:nth-child(2) { color: var(--ocean-5); }
+.ocean-brand__word span:nth-child(3) { color: var(--ocean-6); }
+.ocean-brand__word span:nth-child(4) { color: var(--ocean-7); }
+.ocean-brand__word span:nth-child(5) { color: var(--ocean-8); }
+
+/* Slow solid-color shimmer across the header wordmark letters. Each span
+   keeps its ramp color (--letter-fill) and eases toward --letter-shimmer;
+   never gradient-clip text. */
+.ocean-brand__word span:nth-child(1) { --letter-fill: var(--ocean-4); }
+.ocean-brand__word span:nth-child(2) { --letter-fill: var(--ocean-5); }
+.ocean-brand__word span:nth-child(3) { --letter-fill: var(--ocean-6); }
+.ocean-brand__word span:nth-child(4) { --letter-fill: var(--ocean-7); }
+.ocean-brand__word span:nth-child(5) { --letter-fill: var(--ocean-8); }
+@media (prefers-reduced-motion: no-preference) {
+  .ocean-brand__word span {
+    animation: ocean-brand-shimmer 5.5s ease-in-out infinite;
+  }
+  .ocean-brand__word span:nth-child(1) { animation-delay: 0s; }
+  .ocean-brand__word span:nth-child(2) { animation-delay: -0.55s; }
+  .ocean-brand__word span:nth-child(3) { animation-delay: -1.1s; }
+  .ocean-brand__word span:nth-child(4) { animation-delay: -1.65s; }
+  .ocean-brand__word span:nth-child(5) { animation-delay: -2.2s; }
+  @keyframes ocean-brand-shimmer {
+    0%, 100% { color: var(--letter-fill); }
+    40% { color: color-mix(in srgb, var(--letter-fill) 35%, var(--letter-shimmer)); }
+  }
+}
+
+/* Header lockup — the mark and the wordmark side by side, vertically
+   centered with a quiet gap. */
+.ocean-brand .wave-badge {
+  flex: none;
+  font-size: 24px;
+}
+
+.ocean-brand__word {
+  display: inline-flex;
+  /* Brand font — the same --wm-font (Poppins) the landing reveal letters
+     use; the old --mono terminal face predates the wordmark switch. */
+  font-family: var(--wm-font);
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.22em;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: default;
+}
+
+/* Inline SVG icons inherit text color + size (1em). The default treatment is
+   FILLED (the game-icons set: SoundOn/SoundOff/Amplitude) — they need
+   `fill: currentColor` to be visible at all. */
+.icon {
+  display: inline-block;
+  width: 1em;
+  height: 1em;
+  vertical-align: middle;
+  fill: currentColor;
+}
+
+/* Stroke (line) icons — Menu, Council, Groups, Capture, Mic. Their SVGs
+   carry `fill="none" stroke="currentColor"` as presentation attributes, but a
+   class selector (`.icon`, specificity 0-1-0) outranks a presentation attribute
+   (0-0-0), so the global `.icon { fill: currentColor }` above would otherwise
+   FILL them — collapsing each line drawing into a solid blob. This rule uses a
+   two-class selector (`.icon.icon--stroke`, specificity 0-2-0) so it
+   deterministically beats `.icon` regardless of source order, restoring the
+   intended outline rendering. `fill: none` cascades to the child paths/lines
+   (which set no fill of their own); `stroke` + `stroke-width` are restated so
+   the look never depends on the SVG attributes surviving. (OCEAN-202) */
+.icon.icon--stroke {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* Header metadata chips -------------------------------------------------- */
+.ocean-runtime {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding-left: 12px;
+  box-shadow: inset 1px 0 0 var(--border-subtle);
+}
+
+/* Tokens are post-hoc session metadata — the least important cue, so they
+   shrink and truncate first when the row tightens; the live browser + status
+   cues never give up space. */
+.ocean-runtime .ocean-tokens {
+  min-width: 0;
+  flex: 0 1 auto;
+}
+.ocean-runtime .ocean-tokens__io {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ocean-runtime .ocean-browser-control,
+.ocean-runtime .ocean-status {
+  flex: 0 0 auto;
+}
+
+.ocean-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--fg-3);
+  font-family: var(--font);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.35;
+}
+
+.ocean-status__dot {
+  display: none;
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  border-radius: var(--radius-pill);
+  background: var(--ok);
+}
+
+.ocean-status.is-quiet .ocean-status__dot {
+  display: block;
+}
+
+.ocean-status__text {
+  min-width: 0;
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Steady/benign states are fine — show just the dot, drop the words. The text
+   returns for connecting / permission / cancelled / error messages; aria-label
+   keeps the full status for assistive tech. */
+.ocean-status.is-quiet .ocean-status__text {
+  display: none;
+}
+
+/* Browser-control indicator (OCEAN-92): a live "Ocean is driving the browser"
+   cue with a pulsing dot, shown only while the daemon's browser_activity stream
+   reports the agent is acting in the browser. */
+.ocean-browser-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  box-sizing: border-box;
+  height: var(--ctl-h-sm);
+  padding: 0 10px;
+  color: var(--accent);
+  font-family: var(--font);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  background: var(--accent-soft);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  white-space: nowrap;
+  cursor: default;
+}
+
+.ocean-browser-control__dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  /* Live-state glow: this chip renders only while the agent drives the
+     browser — its presence is the live hook, so the dot blooms aqua. */
+  box-shadow: 0 0 0 4px var(--accent-soft), var(--glow-live);
+  animation: ocean-browser-pulse 1.2s var(--ease) infinite;
+}
+
+.ocean-browser-control__label {
+  color: var(--accent);
+  letter-spacing: 0.02em;
+}
+
+@keyframes ocean-browser-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.45; transform: scale(0.82); }
+}
+
+/* Token usage: pure text — a metadata readout, not a control. */
+.ocean-tokens {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--fg-3);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.ocean-tokens__io {
+  color: var(--fg-2);
+  letter-spacing: 0;
+}
+
+.ocean-tokens__rate {
+  padding-left: 8px;
+  color: var(--fg-3);
+  box-shadow: inset 1px 0 0 var(--border-subtle);
+}
+
+/* Select controls -------------------------------------------------------- */
+/* Turn-control minis: quiet borderless selects on the composer dock's
+   bottom row. Chrome appears on hover/focus only — they're power knobs,
+   not primary affordances. */
+.ocean-turn-controls {
+  grid-area: controls;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+
+.ocean-thinking,
+.ocean-model-override {
+  appearance: none;
+  box-sizing: border-box;
+  min-width: 0;
+  color: var(--fg);
+  font-family: var(--font);
+  font-weight: 500;
+  line-height: 1;
+  background-color: var(--bg-raised);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'%3E%3Cpath d='M2 4l3 3 3-3' fill='none' stroke='%23909098' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease), opacity var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease);
+}
+
+.ocean-thinking,
+.ocean-model-override {
+  height: var(--ctl-h-sm);
+  max-width: 150px;
+  padding: 0 24px 0 8px;
+  font-size: 11px;
+  color: var(--fg-3);
+  background-color: transparent;
+  background-position: right 6px center;
+  border-color: transparent;
+}
+
+.ocean-thinking:hover,
+.ocean-model-override:hover {
+  color: var(--fg);
+}
+
+.ocean-thinking:hover,
+.ocean-model-override:hover {
+  background-color: var(--bg-elevated);
+  border-color: var(--border-strong);
+}
+
+.ocean-thinking:focus-visible,
+.ocean-model-override:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+
+.ocean-thinking:active,
+.ocean-model-override:active {
+  transform: scale(0.985);
+}
+
+.ocean-thinking:disabled,
+.ocean-model-override:disabled {
+  color: var(--fg-4);
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.ocean-thinking option,
+.ocean-model-override option {
+  background: var(--bg-raised);
+  color: var(--fg);
+  font-family: var(--font);
+}
+
+/* Button controls -------------------------------------------------------- */
+.ocean-sessions-trigger,
+.ocean-more__btn,
+.ocean-more__item,
+.ocean-council-modal__close {
+  appearance: none;
+  box-sizing: border-box;
+  font-family: var(--font);
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease), opacity var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
+}
+
+.ocean-more__btn {
+  display: inline-grid;
+  place-items: center;
+  width: var(--ctl-h-sm);
+  height: var(--ctl-h-sm);
+  padding: 0;
+  color: var(--fg-3);
+  font-size: 14px;
+  line-height: 1;
+  background: var(--bg-elevated);
+  border: none;
+  border-radius: var(--radius);
+  box-shadow: var(--elev-1);
+}
+
+.ocean-more__btn:hover {
+  color: var(--fg);
+  background: var(--bg-hover);
+}
+
+.ocean-sessions-trigger:focus-visible,
+.ocean-more__btn:focus-visible,
+.ocean-council-modal__close:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+
+.ocean-sessions-trigger:active,
+.ocean-more__btn:active {
+  transform: translateY(1px);
+  box-shadow: var(--pressed);
+}
+
+/* council-close isn't a raised key, so it keeps the scale dip — pressed
+   inset shadow only reads as "depressed" on an elevated surface. */
+.ocean-council-modal__close:active {
+  transform: scale(0.985);
+}
+
+.ocean-council-modal__close:disabled {
+  color: var(--fg-4);
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+/* Header overflow (<details>): the ONE place secondary actions live.
+   Council, rooms, voice mute, and extension capture are menu rows here —
+   not a strip of header buttons. */
+.ocean-more {
+  position: relative;
+  flex: 0 0 auto;
+}
+.ocean-more__btn {
+  list-style: none;
+  user-select: none;
+  font-size: 16px;
+  letter-spacing: 0.05em;
+}
+.ocean-more__btn::-webkit-details-marker { display: none; }
+.ocean-more[open] .ocean-more__btn {
+  color: var(--fg);
+  background: var(--bg-hover);
+}
+.ocean-more__menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  min-width: 176px;
+  padding: 4px;
+  background: var(--bg-elevated);
+  border: none;
+  border-radius: var(--radius);
+  box-shadow: var(--elev-3);
+  animation: ocean-tide-rise var(--dur) var(--ease-tide) backwards;
+}
+
+/* Tidal entrance — the menu rises from 8px below the surface, the overhead
+   light catching its top edge as it settles into place. The reference
+   elevated panel: a lit slab, no outline, only the specular seam + drop. */
+@keyframes ocean-tide-rise {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.ocean-more__item {
+  display: block;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--fg-2);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.ocean-more__item:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+.ocean-more__item:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* Sessions trigger ------------------------------------------------------- */
+/* The single persistent header affordance — opens the centered sessions
+   modal (chat / create project / resume). A labeled button, not an icon, so
+   it reads as the primary entry point the rest of the chrome orbits. */
+.ocean-sessions-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;   /* label sits dead-center in the pill */
+  height: var(--ctl-h-sm);
+  padding: 0 14px;
+  color: var(--fg);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  line-height: 1;
+  white-space: nowrap;
+  background: var(--bg-elevated);
+  /* Hairline edge + lit top seam is the app-chrome idiom every neighbouring
+     control (--thinking / --model-override / browser chip) shares; the old
+     borderless fill read as a flat web button. */
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--elev-1);
+}
+
+.ocean-sessions-trigger:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+/* Coarse pointers get a 44px tap target without disturbing the desktop
+   density — an invisible ::after grows the hit area along the short axis into
+   the header's own padding (TASK-42 idiom, matching the composer triggers). */
+@media (pointer: coarse) {
+  .ocean-sessions-trigger {
+    position: relative;
+  }
+  .ocean-sessions-trigger::after {
+    content: "";
+    position: absolute;
+    inset-inline: 0;
+    inset-block: -8px; /* 28 + 16 = 44 */
+  }
+}
+
+/* Council modal ---------------------------------------------------------- */
+.ocean-council-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
+.ocean-council-modal__bar {
+  display: flex;
+  flex: 0 0 56px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  box-sizing: border-box;
+  padding: 0 16px;
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.ocean-council-modal__title {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ocean-council-modal__close {
+  display: inline-grid;
+  place-items: center;
+  width: var(--ctl-h-sm);
+  height: var(--ctl-h-sm);
+  padding: 0;
+  color: var(--fg-3);
+  font-size: 14px;
+  line-height: 1;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+}
+
+.ocean-council-modal__close:hover {
+  color: var(--fg);
+  background: var(--bg-elevated);
+  box-shadow: var(--elev-1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ocean-browser-control__dot {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
+  .ocean-more__menu {
+    animation: none;
+  }
+}

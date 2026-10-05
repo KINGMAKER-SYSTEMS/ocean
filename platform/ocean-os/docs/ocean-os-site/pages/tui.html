@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ocean TUI Workbench</title>
+  <link rel="stylesheet" href="../styles.css">
+  <style>
+    .codepath { color: #c8fbff; }
+    .kbd { font-family: var(--mono); font-size: 12px; border: 1px solid rgba(255,255,255,.18); border-radius: 7px; padding: 2px 6px; background: rgba(255,255,255,.06); }
+  </style>
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="../index.html"><span class="mark">≈</span><span><strong>Ocean OS</strong><span>Architecture docs</span></span></a>
+    <div class="navgroup"><p class="navtitle">Start</p><a class="navlink" href="../index.html">Architecture overview</a><a class="navlink" href="surfaces.html">Surfaces</a></div>
+    <div class="navgroup"><p class="navtitle">Clients</p><a class="navlink active" href="tui.html">TUI workbench</a><a class="navlink" href="desktop.html">Native desktop</a><a class="navlink" href="surface.html">Ocean Surface</a></div>
+    <div class="status">Current implementation: <code>crates/ocean-tui/src/shell/</code></div>
+  </aside>
+  <div class="content">
+    <div class="topbar"><div class="crumb">Ocean OS / <strong>TUI workbench</strong></div><div class="buildnote">sole terminal surface</div></div>
+    <main>
+      <section class="hero">
+        <div class="eyebrow"><span class="dot"></span>terminal steering workbench</div>
+        <h1>One native workbench, backed by the Ocean daemon.</h1>
+        <p class="lead"><code>ocean-tui</code> renders chat, native session resume, files, editor, 3D project graph, terminal dock, tool activity, permissions, and daemon health. It does not embed a second TUI or own the agent runtime.</p>
+      </section>
+      <section class="section">
+        <div class="section-head"><div><div class="eyebrow">Architecture</div><h2>Single client surface</h2></div></div>
+        <div class="body grid2">
+          <div class="card"><h3>Workbench</h3><p>The async component tree under <span class="codepath">src/shell/</span> is the only TUI implementation. The former Track-0 room cockpit, legacy flag, and mesh parity command were removed.</p></div>
+          <div class="card"><h3>Daemon authority</h3><p>Turns, tools, providers, permissions, and durable sessions remain in <code>ocean-daemon</code> and <code>ocean-agent</code>. The TUI communicates through HTTP and session-scoped SSE.</p></div>
+          <div class="card"><h3>Native sessions</h3><p>The session rail rehydrates UUID-backed transcripts and swaps the scoped event stream in place. <code>--session &lt;id-or-prefix&gt;</code> targets the same native path.</p></div>
+          <div class="card"><h3>Project surfaces</h3><p>Bottom navigation exposes sessions, chat, editor, graph, terminal, and files. The graph uses the 3D spatial camera pipeline in <span class="codepath">shell/spatial.rs</span>.</p></div>
+        </div>
+      </section>
+      <section class="section">
+        <div class="section-head"><div><div class="eyebrow">Run</div><h2>Launch in a project</h2></div></div>
+        <div class="body"><pre>cargo build -p ocean-tui --release
+./target/release/ocean-tui --project /path/to/repo
+./target/release/ocean-tui --project /path/to/repo --session &lt;uuid-or-prefix&gt;</pre>
+          <p><span class="kbd">Enter</span> submit/resume · <span class="kbd">Ctrl-R</span> history · <span class="kbd">Ctrl-O</span> tool drawers · <span class="kbd">Tab</span> completion/focus</p>
+        </div>
+      </section>
+    </main>
+  </div>
+</div>
+</body>
+</html>

@@ -1,0 +1,57 @@
+[package]
+name = "ocean-agent"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+# Legacy chromiumoxide/CDP browser backend. Default-off: without it the 19
+# `browser_*` tools keep their schemas but return `browser_host_unavailable`,
+# and no chromiumoxide enters the build graph.
+legacy-chromium = ["ocean-runtime/legacy-chromium"]
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+sha2.workspace = true
+chrono.workspace = true
+ocean-core.workspace = true
+ocean-providers.workspace = true
+ocean-runtime.workspace = true
+ocean-mcp.workspace = true
+ocean-lsp = { path = "../ocean-lsp" }
+ocean-memory = { path = "../ocean-memory" }
+ocean-context = { path = "../ocean-context" }
+ocean-plugin.workspace = true
+ocean-hooks.workspace = true
+# Longhouse council ops exposed to agents as tools via LonghouseProvider
+# (OCEAN-118). ocean-longhouse depends UP on ocean-runtime, not on ocean-agent,
+# so there is no cycle.
+ocean-longhouse.workspace = true
+ocean-protocol.workspace = true
+# Consuming the provider's `AssistantMessageEventStream` in the one-shot
+# `complete_once` advisor path needs `StreamExt::next` (same 0.3 line the
+# protocol crate already pulls in).
+futures = "0.3"
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+toml.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+# Safe descriptor-relative contributed-folder reads; already in the lockfile.
+rustix = { version = "1.1.4", features = ["fs"] }
+
+[dev-dependencies]
+# Isolated, auto-cleaned temp roots for the system_prompt tests so they never
+# read (or mutate) the operator's real ~/.config/ocean-rs/assistants (OCEAN-285).
+# Unique per test, dropped on scope exit — no shared process env, no save/restore
+# race under `cargo test`'s parallel threads.
+tempfile = "3"

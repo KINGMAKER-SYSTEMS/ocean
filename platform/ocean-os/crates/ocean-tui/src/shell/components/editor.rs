@@ -1,0 +1,1174 @@
+//! EditorComponent — syntax-highlighted source editor plus a read-only, styled
+//! Markdown preview. Opens files from the tree/graph, edits source in place,
+//! Ctrl-S saves, and Ctrl-P flips Markdown tabs between source and preview.
+
+use std::path::PathBuf;
+
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use ratatui::{
+    layout::Rect,
+    style::{Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Padding, Paragraph, Wrap},
+    Frame,
+};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+use crate::shell::{
+    action::Action,
+    component::Component,
+    components::chat::sanitize_line,
+    editor::EditorTab,
+    git::Mark,
+    highlight::Highlighter,
+    kitty::{self, Placement},
+    markdown::Markdown,
+    panel,
+    theme::{self, g},
+};
+
+const GUTTER_W: u16 = 6; // 1 git mark + "{:>4} " line number
+const WHEEL_ROWS: isize = 3;
+const PREVIEW_PAD_X: u16 = 2;
+
+pub struct EditorComponent {
+    hl: Highlighter,
+    root: PathBuf,
+    tabs: Vec<EditorTab>,
+    markdown: Markdown,
+    active: usize,
+    pub focused: bool,
+    last_body_h: usize,
+    last_text_w: usize,
+    follow_cursor: bool,
+    selection_body: Rect,
+    selection_top: usize,
+    /// Out-of-band kitty graphics requested by the latest editor draw.
+    image_placements: Vec<Placement>,
+}
+
+impl EditorComponent {
+    pub fn new(root: PathBuf) -> Self {
+        Self {
+            hl: Highlighter::new(),
+            root,
+            tabs: Vec::new(),
+            markdown: Markdown::default(),
+            active: 0,
+            focused: false,
+            last_body_h: 20,
+            last_text_w: 80,
+            follow_cursor: true,
+            selection_body: Rect::default(),
+            selection_top: 0,
+            image_placements: Vec::new(),
+        }
+    }
+
+    pub fn has_tabs(&self) -> bool {
+        !self.tabs.is_empty()
+    }
+
+    /// Re-root editor authority with the active project. Tabs belong to their
+    /// workspace, so a project switch closes them rather than retaining stale
+    /// edit or image-preview paths across the boundary.
+    pub fn set_root(&mut self, root: PathBuf) -> bool {
+        if self.root == root {
+            return true;
+        }
+        if self.tabs.iter().any(|tab| tab.dirty) {
+            return false;
+        }
+        self.root = root;
+        self.tabs.clear();
+        self.active = 0;
+        self.markdown.clear();
+        self.image_placements.clear();
+        self.selection_body = Rect::default();
+        self.selection_top = 0;
+        true
+    }
+
+    /// Visible inline/direct image previews from the most recent draw.
+    pub fn image_placements(&self) -> &[Placement] {
+        &self.image_placements
+    }
+
+    /// Breadcrumb text: the open file's path relative to the project root.
+    pub fn crumb(&self) -> String {
+        match self.tabs.get(self.active) {
+            Some(t) => t
+                .path
+                .strip_prefix(&self.root)
+                .unwrap_or(&t.path)
+                .display()
+                .to_string(),
+            None => "no file".to_string(),
+        }
+    }
+
+    /// Open `path`, focusing an existing tab if already open.
+    pub fn open(&mut self, path: PathBuf) {
+        let path = if kitty::is_image_path(&path) {
+            let Some(root) = std::fs::canonicalize(&self.root).ok() else {
+                return;
+            };
+            let Some(path) = std::fs::canonicalize(path).ok() else {
+                return;
+            };
+            if !path.starts_with(root) {
+                return;
+            }
+            path
+        } else {
+            path
+        };
+        if let Some(i) = self.tabs.iter().position(|t| t.path == path) {
+            self.active = i;
+            if self.tabs[i].markdown_preview {
+                self.markdown.clear();
+            }
+            return;
+        }
+        let opened = if kitty::is_image_path(&path) {
+            EditorTab::open_image(path)
+        } else {
+            EditorTab::open(path, &self.hl)
+        };
+        if let Ok(mut tab) = opened {
+            tab.markdown_preview = !tab.image_preview && is_markdown(&tab.ext());
+            if tab.markdown_preview {
+                self.markdown.clear();
+            }
+            tab.load_git(&self.root);
+            self.tabs.push(tab);
+            self.active = self.tabs.len() - 1;
+        }
+    }
+
+    fn tab(&mut self) -> Option<&mut EditorTab> {
+        self.tabs.get_mut(self.active)
+    }
+
+    /// Stable visual row under a painted editor body cell. Code rows map to
+    /// document lines; prose rows map to the width-dependent wrapped-row stream.
+    pub fn selection_row_for_screen(&self, screen_row: u16) -> Option<usize> {
+        (self.has_tabs()
+            && screen_row >= self.selection_body.y
+            && screen_row < self.selection_body.bottom())
+        .then(|| self.selection_top + usize::from(screen_row - self.selection_body.y))
+    }
+
+    pub fn selection_columns(&self) -> Option<(u16, u16)> {
+        let gutter = self
+            .tabs
+            .get(self.active)
+            .filter(|t| t.markdown_preview && is_markdown(&t.ext()))
+            .map_or(GUTTER_W, |_| 0);
+        (self.has_tabs() && self.selection_body.width > gutter).then(|| {
+            (
+                self.selection_body.x + gutter,
+                self.selection_body.right().saturating_sub(1),
+            )
+        })
+    }
+
+    /// Saturate editor chrome/composer-edge drags to the nearest painted content
+    /// row while retaining the same stable row coordinate used across scrolling.
+    pub fn nearest_selection_row(&self, screen_row: u16) -> Option<usize> {
+        (self.has_tabs() && self.selection_body.height > 0).then(|| {
+            let row = screen_row.clamp(
+                self.selection_body.y,
+                self.selection_body.bottom().saturating_sub(1),
+            );
+            self.selection_top + usize::from(row - self.selection_body.y)
+        })
+    }
+}
+
+impl Component for EditorComponent {
+    /// Bracketed paste: insert into the buffer at the cursor, newline-aware.
+    /// Tabs are kept verbatim (file content fidelity); CRs fold into the
+    /// following newline; other control bytes drop.
+    fn handle_paste(&mut self, text: &str) -> Option<Action> {
+        if !self.focused {
+            return None;
+        }
+        let hl = &self.hl;
+        let t = self.tabs.get_mut(self.active)?;
+        if t.image_preview || t.peek || (t.markdown_preview && is_markdown(&t.ext())) {
+            return None;
+        }
+        for c in text.chars() {
+            match c {
+                '\n' => t.insert_newline(hl),
+                '\r' => {}
+                '\t' => t.insert_char('\t', hl),
+                c if c.is_control() => {}
+                c => t.insert_char(c, hl),
+            }
+        }
+        None
+    }
+
+    fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
+        if !self.focused {
+            return None;
+        }
+        let vp = self.last_body_h.max(1);
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        // ── peek-mode: Enter commits, Esc closes ──
+        if self.tabs.get(self.active).is_some_and(|t| t.peek) {
+            match key.code {
+                KeyCode::Enter => {
+                    if let Some(t) = self.tabs.get_mut(self.active) {
+                        t.commit_peek();
+                        self.follow_cursor = true;
+                        if is_markdown(&t.ext()) {
+                            t.markdown_preview = true;
+                        }
+                    }
+                    return Some(Action::Render);
+                }
+                KeyCode::Esc => {
+                    self.tabs.remove(self.active);
+                    self.markdown.clear();
+                    self.image_placements.clear();
+                    self.active = self.active.min(self.tabs.len().saturating_sub(1));
+                    self.follow_cursor = true;
+                    return Some(Action::Render);
+                }
+                _ => return None,
+            }
+        }
+        if ctrl && key.code == KeyCode::Char('p') {
+            let t = self.tabs.get_mut(self.active)?;
+            if is_markdown(&t.ext()) {
+                t.markdown_preview = !t.markdown_preview;
+                self.markdown.clear();
+                self.follow_cursor = !t.markdown_preview;
+                return Some(Action::Render);
+            }
+            return None;
+        }
+        if self
+            .tabs
+            .get(self.active)
+            .is_some_and(|tab| tab.image_preview)
+        {
+            // Image tabs are immutable previews. In particular, Ctrl-S must
+            // never write the placeholder text buffer over the binary.
+            return None;
+        }
+        if ctrl && key.code == KeyCode::Char('s') {
+            if let Some(t) = self.tab() {
+                let _ = t.save();
+            }
+            return None;
+        }
+        let preview = self
+            .tabs
+            .get(self.active)
+            .is_some_and(|t| t.markdown_preview && is_markdown(&t.ext()));
+        if preview {
+            let t = self.tabs.get_mut(self.active)?;
+            match key.code {
+                KeyCode::Up => t.preview_scroll = t.preview_scroll.saturating_sub(1),
+                KeyCode::Down => t.preview_scroll = t.preview_scroll.saturating_add(1),
+                KeyCode::PageUp => t.preview_scroll = t.preview_scroll.saturating_sub(vp),
+                KeyCode::PageDown => t.preview_scroll = t.preview_scroll.saturating_add(vp),
+                KeyCode::Home => t.preview_scroll = 0,
+                KeyCode::End => t.preview_scroll = usize::MAX,
+                _ => {}
+            }
+            return Some(Action::Render);
+        }
+        self.follow_cursor = true;
+        let hl = &self.hl;
+        let t = self.tabs.get_mut(self.active)?;
+        match key.code {
+            KeyCode::Up => t.move_cursor(-1, 0, vp),
+            KeyCode::Down => t.move_cursor(1, 0, vp),
+            KeyCode::Left => t.move_cursor(0, -1, vp),
+            KeyCode::Right => t.move_cursor(0, 1, vp),
+            KeyCode::Enter => t.insert_newline(hl),
+            KeyCode::Backspace => t.backspace(hl),
+            KeyCode::Delete => t.delete_forward(hl),
+            KeyCode::Char(c) if !ctrl => t.insert_char(c, hl),
+            _ => {}
+        }
+        None
+    }
+
+    fn handle_mouse(&mut self, mouse: MouseEvent) -> Option<Action> {
+        let (prose, preview) = self
+            .tabs
+            .get(self.active)
+            .map(|t| {
+                (
+                    is_prose(&t.ext()),
+                    t.markdown_preview && is_markdown(&t.ext()),
+                )
+            })
+            .unwrap_or_default();
+        if self
+            .tabs
+            .get(self.active)
+            .is_some_and(|tab| tab.image_preview || tab.peek)
+        {
+            return None;
+        }
+        let height = self.last_body_h;
+        self.follow_cursor = false;
+        let t = self.tabs.get_mut(self.active)?;
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                if preview {
+                    t.preview_scroll = t.preview_scroll.saturating_sub(WHEEL_ROWS as usize);
+                } else if prose {
+                    t.visual_scroll = t.visual_scroll.saturating_sub(WHEEL_ROWS as usize);
+                } else {
+                    t.scroll_lines(-WHEEL_ROWS, height);
+                }
+            }
+            MouseEventKind::ScrollDown => {
+                if preview {
+                    t.preview_scroll = t.preview_scroll.saturating_add(WHEEL_ROWS as usize);
+                } else if prose {
+                    t.visual_scroll = t.visual_scroll.saturating_add(WHEEL_ROWS as usize);
+                } else {
+                    t.scroll_lines(WHEEL_ROWS, height);
+                }
+            }
+            _ => return None,
+        }
+        Some(Action::Render)
+    }
+
+    fn tick(&mut self) -> Option<Action> {
+        let hl = &self.hl;
+        let mut changed = false;
+        if let Some(t) = self.tabs.get_mut(self.active) {
+            changed = t.settle(hl);
+        }
+        changed.then_some(Action::Render)
+    }
+
+    fn draw(&mut self, frame: &mut Frame, area: Rect) {
+        self.image_placements.clear();
+        let (title, dirty, preview, is_image, peek) = match self.tabs.get(self.active) {
+            Some(t) => (
+                t.name().to_uppercase(),
+                t.dirty,
+                t.markdown_preview && is_markdown(&t.ext()),
+                t.image_preview,
+                t.peek,
+            ),
+            None => ("EDITOR".to_string(), false, false, false, false),
+        };
+        let state = match (preview, dirty, is_image, peek) {
+            (_, _, true, _) => Some("image"),
+            (_, _, _, true) => Some("peek"),
+            (true, true, false, _) => Some("preview · unsaved"),
+            (true, false, false, _) => Some("preview"),
+            (false, true, false, _) => Some("unsaved"),
+            _ => None,
+        };
+        let body = panel::draw(frame, area, &title, state, self.focused);
+        self.selection_body = body;
+        if body.width == 0 {
+            self.selection_top = 0;
+            return;
+        }
+        frame.render_widget(Block::default().style(Style::default().bg(theme::BG)), body);
+        self.last_body_h = body.height as usize;
+
+        let Some(t) = self.tabs.get_mut(self.active) else {
+            self.selection_top = 0;
+            panel::footer(frame, area, " no file open");
+            return;
+        };
+
+        // ── image-file tab: reserve the body for a single full-size pixel preview ──
+        if is_image {
+            let note = if !kitty::supported() {
+                "image preview needs a kitty-graphics terminal".to_string()
+            } else {
+                let size = std::fs::metadata(&t.path)
+                    .map(|m| {
+                        let bytes = m.len();
+                        if bytes < 1024 {
+                            format!("{bytes} B")
+                        } else if bytes < 1024 * 1024 {
+                            format!("{} KiB", bytes / 1024)
+                        } else {
+                            format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
+                        }
+                    })
+                    .unwrap_or_else(|_| "?".into());
+                format!("{} · {}", t.path.display(), size)
+            };
+            let note =
+                panel::fit_cells(&sanitize_line(&note), body.width.saturating_sub(2) as usize);
+            let note_width = UnicodeWidthStr::width(note.as_str()).min(u16::MAX as usize) as u16;
+            let pad_x = body.width.saturating_sub(note_width + 2).min(4);
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    format!("  {}{note}", " ".repeat(pad_x as usize)),
+                    Style::default().fg(theme::COMMENT),
+                ))
+                .style(Style::default().bg(theme::BG)),
+                Rect::new(body.x, body.y, body.width, 1),
+            );
+            if kitty::supported() {
+                if let Some(png) = kitty::normalize_to_png(&t.path, &self.root) {
+                    let image_body = Rect::new(
+                        body.x + 1,
+                        body.y + 1,
+                        body.width.saturating_sub(2),
+                        body.height.saturating_sub(2),
+                    );
+                    if image_body.width > 0 && image_body.height > 0 {
+                        self.image_placements.push(kitty::Placement {
+                            path: png,
+                            rect: image_body,
+                        });
+                    }
+                }
+            }
+            self.selection_top = 0;
+            panel::footer(frame, area, " image preview · read-only");
+            return;
+        }
+
+        // ── peek mode: file-summary header + read-only content preview ──
+        if peek {
+            draw_peek_header(frame, body, t);
+            let peek_body = Rect::new(
+                body.x,
+                body.y + 1,
+                body.width,
+                body.height.saturating_sub(1),
+            );
+            if preview {
+                // Markdown: render preview below the peek header.
+                let source = t
+                    .lines
+                    .iter()
+                    .map(|line| sanitize_line(line))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let rendered = self.markdown.render(&source);
+                let mut block_lines = rendered.lines;
+                let mut block_links = rendered.links;
+                let logical_images = kitty::reserve_markdown_images(
+                    &mut block_lines,
+                    &mut block_links,
+                    &rendered.images,
+                    t.path.parent().unwrap_or(&self.root),
+                    &self.root,
+                );
+                let paragraph = Paragraph::new(block_lines.clone())
+                    .style(Style::default().bg(theme::BG))
+                    .block(Block::default().padding(Padding::horizontal(PREVIEW_PAD_X)))
+                    .wrap(Wrap { trim: false });
+                let content_width = peek_body
+                    .width
+                    .saturating_sub(PREVIEW_PAD_X.saturating_mul(2));
+                frame.render_widget(paragraph, peek_body);
+                if !logical_images.is_empty() && content_width > 0 && peek_body.height > 0 {
+                    let scroll_area = Rect::new(
+                        peek_body.x.saturating_add(PREVIEW_PAD_X),
+                        peek_body.y,
+                        content_width,
+                        peek_body.height,
+                    );
+                    self.image_placements = kitty::project_visible(
+                        &block_lines,
+                        &logical_images,
+                        scroll_area,
+                        0,
+                        content_width,
+                        scroll_area.x,
+                        scroll_area.width,
+                    );
+                }
+                self.selection_top = 0;
+            } else {
+                // Code: syntax-highlighted first N lines, read-only.
+                let max_lines = (peek_body.height as usize).min(20);
+                let mut lines = Vec::new();
+                for row in 0..max_lines.min(t.lines.len()) {
+                    let mut spans = gutter(t, row, false);
+                    if let Some(styled) = t.highlighted.get(row).filter(|s| !s.is_empty()) {
+                        for (color, text) in styled {
+                            let clean = sanitize_line(text);
+                            spans.push(Span::styled(clean, Style::default().fg(*color)));
+                        }
+                    } else {
+                        spans.push(Span::styled(
+                            sanitize_line(&t.lines[row]),
+                            Style::default().fg(theme::FG),
+                        ));
+                    }
+                    lines.push(Line::from(spans));
+                }
+                if (t.lines.len() as u16) > max_lines as u16 {
+                    let more = format!("… {} more lines", t.lines.len() - max_lines);
+                    lines.push(Line::from(Span::styled(
+                        more,
+                        Style::default().fg(theme::COMMENT),
+                    )));
+                }
+                frame.render_widget(
+                    Paragraph::new(lines).style(Style::default().bg(theme::BG)),
+                    peek_body,
+                );
+                self.selection_top = 0;
+            }
+            panel::footer(frame, area, " ↵ edit  esc close");
+            return;
+        }
+
+        if preview {
+            self.last_text_w = body.width as usize;
+            let source = t
+                .lines
+                .iter()
+                .map(|line| sanitize_line(line))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let rendered = self.markdown.render(&source);
+            let mut block_lines = rendered.lines;
+            let mut block_links = rendered.links;
+            let logical_images = kitty::reserve_markdown_images(
+                &mut block_lines,
+                &mut block_links,
+                &rendered.images,
+                t.path.parent().unwrap_or(&self.root),
+                &self.root,
+            );
+            let paragraph = Paragraph::new(block_lines.clone())
+                .style(Style::default().bg(theme::BG))
+                .block(Block::default().padding(Padding::horizontal(PREVIEW_PAD_X)))
+                .wrap(Wrap { trim: false });
+            let content_width = body.width.saturating_sub(PREVIEW_PAD_X.saturating_mul(2));
+            let wrapped_rows = paragraph.line_count(content_width);
+            let max_scroll = wrapped_rows
+                .saturating_sub(body.height as usize)
+                .min(u16::MAX as usize);
+            t.preview_scroll = t.preview_scroll.min(max_scroll);
+            self.selection_top = t.preview_scroll;
+            let scroll = t.preview_scroll as u16;
+            frame.render_widget(paragraph.scroll((scroll, 0)), body);
+            // Project visible images after wrap+scroll so they track the viewport.
+            if !logical_images.is_empty() && content_width > 0 && body.height > 0 {
+                let scroll_area = Rect::new(
+                    body.x.saturating_add(PREVIEW_PAD_X),
+                    body.y,
+                    content_width,
+                    body.height,
+                );
+                self.image_placements = kitty::project_visible(
+                    &block_lines,
+                    &logical_images,
+                    scroll_area,
+                    scroll,
+                    content_width,
+                    scroll_area.x,
+                    scroll_area.width,
+                );
+            }
+            panel::footer(frame, area, " preview · ^P source · ↑↓ scroll");
+            return;
+        }
+
+        self.last_text_w = body.width.saturating_sub(GUTTER_W) as usize;
+        let text_w = self.last_text_w.max(1);
+        let prose = is_prose(&t.ext());
+        let (lines, cursor) = if prose {
+            let result = prose_view(t, body.height as usize, text_w, self.follow_cursor);
+            self.selection_top = t.visual_scroll;
+            result
+        } else {
+            let result = code_view(t, body.height as usize, text_w, self.follow_cursor);
+            self.selection_top = t.scroll;
+            result
+        };
+        frame.render_widget(
+            Paragraph::new(lines).style(Style::default().bg(theme::BG)),
+            body,
+        );
+
+        if self.focused {
+            if let Some((x, y)) = cursor {
+                let cx = body.x + GUTTER_W + x as u16;
+                let cy = body.y + y as u16;
+                if cx < body.right() && cy < body.bottom() {
+                    frame.set_cursor_position((cx, cy));
+                }
+            }
+        }
+        let footer = if is_markdown(&t.ext()) {
+            format!(
+                " {}:{} · source · ^P preview",
+                t.cursor_row + 1,
+                t.cursor_col + 1
+            )
+        } else {
+            let mode = if prose { "wrap" } else { "scroll" };
+            format!(" {}:{} · {mode}", t.cursor_row + 1, t.cursor_col + 1)
+        };
+        panel::footer(frame, area, &footer);
+        let _ = Modifier::BOLD;
+    }
+}
+
+fn is_markdown(ext: &str) -> bool {
+    matches!(ext.to_ascii_lowercase().as_str(), "md" | "markdown" | "mdx")
+}
+
+fn is_prose(ext: &str) -> bool {
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "md" | "markdown" | "mdx" | "txt" | "text" | "rst" | "adoc" | "org"
+    )
+}
+
+fn gutter(t: &EditorTab, row: usize, continuation: bool) -> Vec<Span<'static>> {
+    if continuation {
+        return vec![Span::styled(
+            "      ",
+            Style::default().fg(theme::COMMENT).bg(theme::BG_DARK),
+        )];
+    }
+    let (mark_ch, mark_color) = match t.git_lines.get(&row) {
+        Some(Mark::Added) => (g("▎", "+"), theme::GREEN),
+        Some(Mark::Modified) => (g("▎", "~"), theme::YELLOW),
+        Some(Mark::Deleted) => (g("▁", "-"), theme::RED),
+        None => (" ", theme::BG),
+    };
+    vec![
+        Span::styled(mark_ch, Style::default().fg(mark_color).bg(theme::BG_DARK)),
+        Span::styled(
+            format!("{:>4} ", row + 1),
+            Style::default().fg(theme::COMMENT).bg(theme::BG_DARK),
+        ),
+    ]
+}
+
+fn display_col(s: &str, char_col: usize) -> usize {
+    let prefix = s.chars().take(char_col).collect::<String>();
+    UnicodeWidthStr::width(sanitize_line(&prefix).as_str())
+}
+
+fn sanitized_line_with_cursor(s: &str, char_col: usize) -> (String, usize) {
+    let prefix = s.chars().take(char_col).collect::<String>();
+    (sanitize_line(s), sanitize_line(&prefix).chars().count())
+}
+
+/// Character ranges for terminal-cell soft wrapping. Prefer the last whitespace
+/// before the edge, but hard-wrap a single oversized token so it can never clip.
+fn wrap_ranges(s: &str, width: usize) -> Vec<(usize, usize)> {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.is_empty() {
+        return vec![(0, 0)];
+    }
+    let mut out = Vec::new();
+    let mut start = 0;
+    while start < chars.len() {
+        let mut cells = 0;
+        let mut end = start;
+        let mut whitespace_break = None;
+        while end < chars.len() {
+            let cw = chars[end].width().unwrap_or(0);
+            if end > start && cells + cw > width {
+                break;
+            }
+            cells += cw;
+            end += 1;
+            if chars[end - 1].is_whitespace() {
+                whitespace_break = Some(end);
+            }
+            if cells >= width {
+                break;
+            }
+        }
+        if end < chars.len() {
+            if let Some(at) = whitespace_break.filter(|at| *at > start) {
+                end = at;
+            }
+        }
+        if end == start {
+            end += 1;
+        }
+        out.push((start, end));
+        start = end;
+    }
+    out
+}
+
+fn prose_view(
+    t: &mut EditorTab,
+    height: usize,
+    width: usize,
+    follow_cursor: bool,
+) -> (Vec<Line<'static>>, Option<(usize, usize)>) {
+    let mut visual = Vec::new();
+    let mut cursor_visual = 0;
+    let mut cursor_x = 0;
+    for (row, raw) in t.lines.iter().enumerate() {
+        let (clean, clean_cursor_col) = sanitized_line_with_cursor(raw, t.cursor_col);
+        let ranges = wrap_ranges(&clean, width);
+        for (part, (start, end)) in ranges.iter().copied().enumerate() {
+            if row == t.cursor_row && clean_cursor_col >= start && clean_cursor_col <= end {
+                cursor_visual = visual.len();
+                cursor_x = display_col(
+                    &clean
+                        .chars()
+                        .skip(start)
+                        .take(clean_cursor_col - start)
+                        .collect::<String>(),
+                    clean_cursor_col - start,
+                );
+            }
+            let mut spans = gutter(t, row, part > 0);
+            let text: String = clean.chars().skip(start).take(end - start).collect();
+            spans.push(Span::styled(text, Style::default().fg(theme::FG)));
+            visual.push(Line::from(spans));
+        }
+    }
+    if follow_cursor {
+        if cursor_visual < t.visual_scroll {
+            t.visual_scroll = cursor_visual;
+        } else if height > 0 && cursor_visual >= t.visual_scroll + height {
+            t.visual_scroll = cursor_visual + 1 - height;
+        }
+    }
+    let max_scroll = visual.len().saturating_sub(height.max(1));
+    t.visual_scroll = t.visual_scroll.min(max_scroll);
+    let cursor = (cursor_visual >= t.visual_scroll
+        && cursor_visual < t.visual_scroll.saturating_add(height))
+    .then(|| {
+        (
+            cursor_x.min(width.saturating_sub(1)),
+            cursor_visual - t.visual_scroll,
+        )
+    });
+    let shown = visual
+        .into_iter()
+        .skip(t.visual_scroll)
+        .take(height)
+        .collect();
+    (shown, cursor)
+}
+
+fn code_view(
+    t: &mut EditorTab,
+    height: usize,
+    width: usize,
+    follow_cursor: bool,
+) -> (Vec<Line<'static>>, Option<(usize, usize)>) {
+    let cursor_cells = t
+        .lines
+        .get(t.cursor_row)
+        .map(|line| display_col(line, t.cursor_col))
+        .unwrap_or(0);
+    if follow_cursor {
+        if t.cursor_row < t.scroll {
+            t.scroll = t.cursor_row;
+        } else if height > 0 && t.cursor_row >= t.scroll + height {
+            t.scroll = t.cursor_row + 1 - height;
+        }
+        if cursor_cells < t.horizontal_scroll {
+            t.horizontal_scroll = cursor_cells;
+        } else if cursor_cells >= t.horizontal_scroll + width {
+            t.horizontal_scroll = cursor_cells + 1 - width;
+        }
+    }
+
+    let mut lines = Vec::new();
+    for row in t.scroll..(t.scroll + height).min(t.lines.len()) {
+        let mut spans = gutter(t, row, false);
+        let raw = sanitize_line(&t.lines[row]);
+        let visible = cell_slice(&raw, t.horizontal_scroll, width);
+        // Horizontal viewport correctness takes precedence over retaining token
+        // run boundaries; syntax color remains for the common zero-offset view.
+        if t.horizontal_scroll == 0 {
+            if let Some(styled) = t.highlighted.get(row).filter(|s| !s.is_empty()) {
+                let mut remaining = width;
+                for (color, text) in styled {
+                    if remaining == 0 {
+                        break;
+                    }
+                    let clean = sanitize_line(text);
+                    let visible = cell_slice(&clean, 0, remaining);
+                    remaining = remaining.saturating_sub(UnicodeWidthStr::width(visible.as_str()));
+                    spans.push(Span::styled(visible, Style::default().fg(*color)));
+                }
+            } else {
+                spans.push(Span::styled(visible, Style::default().fg(theme::FG)));
+            }
+        } else {
+            spans.push(Span::styled(visible, Style::default().fg(theme::FG)));
+        }
+        lines.push(Line::from(spans));
+    }
+    let cursor = (t.cursor_row >= t.scroll && t.cursor_row < t.scroll + height).then(|| {
+        (
+            cursor_cells.saturating_sub(t.horizontal_scroll),
+            t.cursor_row - t.scroll,
+        )
+    });
+    (lines, cursor)
+}
+
+fn cell_slice(s: &str, offset: usize, width: usize) -> String {
+    let mut out = String::new();
+    let mut cell = 0;
+    let end = offset.saturating_add(width);
+    for ch in s.chars() {
+        let cw = ch.width().unwrap_or(0);
+        if cell + cw <= offset {
+            cell += cw;
+            continue;
+        }
+        if cell < offset {
+            let clipped = (cell + cw - offset).min(width);
+            out.push_str(&" ".repeat(clipped));
+            cell += cw;
+            continue;
+        }
+        if cell + cw > end {
+            out.push_str(&" ".repeat(end.saturating_sub(cell)));
+            break;
+        }
+        out.push(ch);
+        cell += cw;
+    }
+    out
+}
+
+/// File peek header: an extension badge (`.rs`) and file stats row.
+fn draw_peek_header(frame: &mut Frame, body: Rect, t: &EditorTab) {
+    let ext = t.ext();
+    let lang = t.language();
+    let lines_str = format!(
+        "{} line{}",
+        t.lines.len(),
+        if t.lines.len() == 1 { "" } else { "s" }
+    );
+    let size_str = t.file_size().unwrap_or_else(|| "?".into());
+    let ago_str = t.modified_ago().unwrap_or_else(|| "?".into());
+
+    let ext_pill = if ext.is_empty() {
+        "".into()
+    } else {
+        format!(".{ext}")
+    };
+    let sep = g(" · ", " | ");
+    let info = format!("{lang}{sep}{lines_str}{sep}{size_str}{sep}{ago_str}");
+
+    let ext_style = Style::default()
+        .fg(theme::CYAN)
+        .add_modifier(Modifier::BOLD);
+    let dim = Style::default().fg(theme::COMMENT);
+
+    let ext_w = UnicodeWidthStr::width(ext_pill.as_str());
+    let info_w = UnicodeWidthStr::width(info.as_str());
+    let gap = if ext_w > 0 && info_w > 0 { 1 } else { 0 };
+    let total_w = ext_w + gap + info_w;
+
+    let line = if total_w <= body.width as usize {
+        Line::from(vec![
+            Span::styled(ext_pill, ext_style),
+            Span::raw(" "),
+            Span::styled(info, dim),
+        ])
+    } else {
+        // Tight: show just lang + lines.
+        let short = format!("{lang}{sep}{lines_str}");
+        Line::from(vec![
+            Span::styled(ext_pill, ext_style),
+            Span::raw(" "),
+            Span::styled(short, dim),
+        ])
+    };
+
+    frame.render_widget(
+        Paragraph::new(line).style(Style::default().bg(theme::BG_DARK)),
+        Rect::new(body.x, body.y, body.width, 1),
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prose_extensions_wrap_but_source_extensions_scroll() {
+        assert!(is_prose("md"));
+        assert!(is_prose("TXT"));
+        assert!(!is_prose("rs"));
+        assert!(!is_prose("ts"));
+    }
+
+    #[test]
+    fn wrapping_prefers_whitespace_and_never_loses_text() {
+        let text = "alpha beta gamma";
+        let ranges = wrap_ranges(text, 7);
+        let chars: Vec<char> = text.chars().collect();
+        let rebuilt: String = ranges
+            .iter()
+            .flat_map(|(a, b)| chars[*a..*b].iter())
+            .collect();
+        assert_eq!(rebuilt, text);
+        assert!(ranges.len() > 1);
+    }
+
+    #[test]
+    fn cell_slice_obeys_wide_character_boundaries() {
+        assert_eq!(cell_slice("ab界cd", 0, 4), "ab界");
+        assert_eq!(cell_slice("ab界cd", 3, 2), " c");
+        assert_eq!(cell_slice("ab界cd", 4, 2), "cd");
+    }
+
+    #[test]
+    fn rendered_text_and_cursor_share_terminal_sanitization() {
+        assert_eq!(sanitize_line("a\tb\u{1b}c"), "a    bc");
+        assert_eq!(display_col("\tab", 1), 4);
+        let (clean, cursor) = sanitized_line_with_cursor("a\u{1b}\tb", 3);
+        assert_eq!(clean, "a    b");
+        assert_eq!(cursor, 5);
+    }
+
+    #[test]
+    fn code_view_preserves_manual_scroll_until_keyboard_input() {
+        let hl = Highlighter::new();
+        let mut tab = EditorTab::open(PathBuf::from("missing.rs"), &hl).unwrap();
+        tab.lines = (0..12).map(|i| format!("line {i}")).collect();
+        tab.highlighted.resize(tab.lines.len(), Vec::new());
+        tab.scroll = 6;
+
+        let _ = code_view(&mut tab, 3, 20, false);
+        assert_eq!(tab.scroll, 6);
+
+        let _ = code_view(&mut tab, 3, 20, true);
+        assert_eq!(tab.scroll, 0);
+    }
+
+    #[test]
+    fn prose_view_preserves_manual_scroll_until_keyboard_input() {
+        let hl = Highlighter::new();
+        let mut tab = EditorTab::open(PathBuf::from("missing.md"), &hl).unwrap();
+        tab.lines = (0..12).map(|i| format!("line {i}")).collect();
+        tab.highlighted.resize(tab.lines.len(), Vec::new());
+        tab.visual_scroll = 6;
+
+        let _ = prose_view(&mut tab, 3, 20, false);
+        assert_eq!(tab.visual_scroll, 6);
+
+        let _ = prose_view(&mut tab, 3, 20, true);
+        assert_eq!(tab.visual_scroll, 0);
+    }
+
+    fn focused_editor(path: &str) -> EditorComponent {
+        let mut editor = EditorComponent::new(PathBuf::from("."));
+        editor.focused = true;
+        editor.open(PathBuf::from(path));
+        editor
+    }
+
+    fn press(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, modifiers)
+    }
+
+    #[test]
+    fn markdown_preview_is_read_only_and_preserves_source_state() {
+        let mut editor = focused_editor("missing.md");
+        // Press Enter to commit peek mode (markdown stays in preview).
+        editor.handle_key(press(KeyCode::Enter, KeyModifiers::NONE));
+        let tab = &mut editor.tabs[0];
+        tab.lines = vec!["# Draft".into(), "body".into()];
+        tab.cursor_row = 1;
+        tab.cursor_col = 4;
+        tab.dirty = true;
+        tab.visual_scroll = 7;
+
+        let before = editor.tabs[0].lines.clone();
+        editor.handle_key(press(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert_eq!(editor.tabs[0].lines, before);
+        assert_eq!(editor.tabs[0].cursor_row, 1);
+        assert_eq!(editor.tabs[0].cursor_col, 4);
+        assert!(editor.tabs[0].dirty);
+        assert_eq!(editor.tabs[0].visual_scroll, 7);
+
+        editor.handle_key(press(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(editor.tabs[0].preview_scroll, 1);
+        editor.handle_key(press(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        assert!(!editor.tabs[0].markdown_preview);
+        editor.handle_key(press(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert_eq!(editor.tabs[0].lines[1], "bodyx");
+    }
+
+    #[test]
+    fn image_tab_ignores_paste_edits_and_save_without_touching_binary() {
+        let path =
+            std::env::temp_dir().join(format!("ocean-editor-readonly-{}.png", std::process::id()));
+        let original = b"\x89PNG\r\n\x1a\nbinary fixture";
+        std::fs::write(&path, original).unwrap();
+        let mut editor = EditorComponent::new(std::env::temp_dir());
+        editor.focused = true;
+        editor.open(path.clone());
+        assert!(editor.tabs[0].image_preview);
+
+        editor.handle_paste("overwrite");
+        editor.handle_key(press(KeyCode::Char('x'), KeyModifiers::NONE));
+        editor.handle_key(press(KeyCode::Char('s'), KeyModifiers::CONTROL));
+
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert!(!editor.tabs[0].dirty);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn reroot_closes_workspace_owned_tabs_and_updates_image_boundary() {
+        let base = std::env::temp_dir().join(format!("ocean-editor-reroot-{}", std::process::id()));
+        let first = base.join("first");
+        let second = base.join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        let file = first.join("note.md");
+        std::fs::write(&file, "# first").unwrap();
+
+        let mut editor = EditorComponent::new(first);
+        editor.open(file);
+        assert!(editor.has_tabs());
+        assert!(editor.set_root(second.clone()));
+        assert!(!editor.has_tabs());
+        assert_eq!(editor.root, second);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn reroot_refuses_to_discard_a_modified_buffer() {
+        let base =
+            std::env::temp_dir().join(format!("ocean-editor-dirty-reroot-{}", std::process::id()));
+        let first = base.join("first");
+        let second = base.join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        let file = first.join("note.md");
+        std::fs::write(&file, "original").unwrap();
+
+        let mut editor = EditorComponent::new(first.clone());
+        editor.open(file);
+        editor.tabs[0].dirty = true;
+        assert!(editor.tabs[0].dirty);
+        assert!(!editor.set_root(second));
+        assert_eq!(editor.root, first);
+        assert!(editor.has_tabs());
+        assert!(editor.tabs[0].dirty);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn image_tab_rejects_a_workspace_symlink_to_an_outside_file() {
+        use std::os::unix::fs::symlink;
+        let base =
+            std::env::temp_dir().join(format!("ocean-editor-image-root-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let outside = std::env::temp_dir().join(format!(
+            "ocean-editor-image-outside-{}.png",
+            std::process::id()
+        ));
+        std::fs::write(&outside, b"\x89PNG\r\n\x1a\noutside").unwrap();
+        let link = base.join("escape.png");
+        symlink(&outside, &link).unwrap();
+
+        let mut editor = EditorComponent::new(base.clone());
+        editor.open(link);
+        assert!(!editor.has_tabs());
+
+        let _ = std::fs::remove_dir_all(base);
+        let _ = std::fs::remove_file(outside);
+    }
+
+    #[test]
+    fn first_open_peeks_then_enter_commits_or_escape_closes() {
+        let mut committed = focused_editor("missing.rs");
+        assert!(committed.tabs[0].peek, "text files open as previews");
+        assert!(committed
+            .handle_key(press(KeyCode::Enter, KeyModifiers::NONE))
+            .is_some());
+        assert!(!committed.tabs[0].peek, "Enter promotes the tab to editing");
+
+        let mut closed = focused_editor("missing.rs");
+        assert!(closed
+            .handle_key(press(KeyCode::Esc, KeyModifiers::NONE))
+            .is_some());
+        assert!(!closed.has_tabs(), "Esc closes an uncommitted preview");
+    }
+
+    #[test]
+    fn preview_toggle_is_markdown_only() {
+        let mut editor = focused_editor("missing.rs");
+        assert!(editor
+            .handle_key(press(KeyCode::Char('p'), KeyModifiers::CONTROL))
+            .is_none());
+        assert!(!editor.tabs[0].markdown_preview);
+    }
+
+    #[test]
+    fn preview_renders_unsaved_markdown_without_control_sequences() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut editor = focused_editor("missing.md");
+        // Press Enter to commit peek mode (markdown stays in preview).
+        editor.handle_key(press(KeyCode::Enter, KeyModifiers::NONE));
+        editor.tabs[0].lines = vec![
+            "# Ocean Preview".into(),
+            String::new(),
+            "A **bold**\tview\u{1b} from the unsaved buffer.".into(),
+            String::new(),
+            "- [x] styled lists".into(),
+        ];
+        editor.tabs[0].dirty = true;
+
+        let backend = TestBackend::new(72, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| editor.draw(frame, frame.area()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let screen = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(screen.contains("Ocean Preview"), "{screen}");
+        assert!(!screen.contains("# Ocean Preview"), "{screen}");
+        assert!(
+            screen.contains("A bold    view from the unsaved buffer."),
+            "{screen}"
+        );
+        assert!(screen.contains("☑ styled lists") || screen.contains("[x] styled lists"));
+        assert!(screen.contains("preview · unsaved"), "{screen}");
+        assert!(screen.contains("^P source"), "{screen}");
+        assert!(!screen.contains('\u{1b}'), "{screen:?}");
+    }
+
+    #[test]
+    fn markdown_extensions_are_distinct_from_other_prose() {
+        assert!(is_markdown("md"));
+        assert!(is_markdown("MARKDOWN"));
+        assert!(is_markdown("mdx"));
+        assert!(!is_markdown("txt"));
+        assert!(!is_markdown("rs"));
+    }
+}

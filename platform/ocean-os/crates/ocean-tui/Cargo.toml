@@ -1,0 +1,56 @@
+[package]
+name = "ocean-tui"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+crossterm = { version = "0.29", features = ["event-stream"] }
+ocean-agent-sdk.workspace = true
+ocean-core.workspace = true
+ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+unicode-width = "0.2"
+unicode-segmentation = "1.13"
+pulldown-cmark = { version = "0.13", default-features = false }
+# Phase-1 shell (session-first rebuild): async component architecture.
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+futures = "0.3"
+# Phase-2 shell: embedded PTY for resuming ocean sessions (harvested from CTRL).
+portable-pty = "0.8"
+vt100 = "0.16"
+tui-term = "0.3.4"
+# Phase-3 shell: editor / file tree / graph workbench surfaces (harvested from CTRL).
+syntect = { version = "5", default-features = false, features = ["default-fancy"] }
+ignore = "0.4"
+# Slice-4 edit-preview diff cards: line + word-level diffing (matches ocean-hashline).
+similar = "2"
+# Non-fatal warn logging for best-effort prompt-history I/O.
+tracing.workspace = true
+open = "5"
+# QR rendering for `/beam` (device handoff codes are Unicode half-blocks —
+# the default image/svg renderers stay off).
+qrcode = { version = "0.14", default-features = false }
+# Kitty graphics protocol payload encoding (inline image display).
+base64.workspace = true
+crc32fast = "1"
+libc.workspace = true
+png = "0.17.16"
+ocean-oauth.workspace = true
+ocean-observatory.workspace = true
+ocean-providers.workspace = true
+
+# Native push-to-dictate capture is macOS-first. Target-gating avoids pulling
+# ALSA development headers into the Linux workspace/MSRV lanes.
+[target.'cfg(target_os = "macos")'.dependencies]
+cpal = "0.15"

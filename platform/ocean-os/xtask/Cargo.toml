@@ -1,0 +1,18 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+publish = false
+
+# Ocean OS dev-task runner (the cargo-xtask pattern: a plain workspace binary,
+# invoked via `cargo xtask <cmd>` — see /.cargo/config.toml alias). NOT part of
+# the runtime; it ships nothing. It owns docs/index integrity, the executable
+# CI command manifest, and libwebrtc cache recovery (OCEAN-252). Deliberately
+# ZERO third-party deps so it stays cheap and cannot destabilize workspace builds.
+
+[[bin]]
+name = "xtask"
+path = "src/main.rs"

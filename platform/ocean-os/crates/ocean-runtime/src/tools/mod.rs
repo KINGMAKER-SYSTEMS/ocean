@@ -1,0 +1,54 @@
+//! Builtin tools: read, write, edit, bash, ls, grep, glob, component render.
+//!
+//! Mirrors the core toolset shipped in `packages/coding-agent/src/core/...`.
+
+pub mod bash;
+pub mod browser;
+pub mod component;
+pub mod edit;
+pub mod glob_tool;
+pub mod grep;
+pub mod hashline_edit;
+pub mod ls;
+pub mod offshore;
+pub mod path;
+pub mod read;
+pub mod slack_canvas;
+pub mod surface;
+pub mod todo;
+pub mod web_fetch;
+pub mod write;
+
+use std::sync::Arc;
+
+use crate::types::AgentTool;
+
+/// Returns the default suite of builtin tools used by the coding agent.
+///
+/// Includes `component_wait`, which uses a global [`ComponentWaitRegistry`]
+/// shared with the daemon's `/v1/component/event` route.
+pub fn default_tools() -> Vec<Arc<dyn AgentTool>> {
+    vec![
+        Arc::new(read::ReadTool::new()),
+        Arc::new(write::WriteTool::new()),
+        Arc::new(edit::EditTool::new()),
+        Arc::new(bash::BashTool::new()),
+        Arc::new(ls::LsTool::new()),
+        Arc::new(grep::GrepTool::new()),
+        Arc::new(glob_tool::GlobTool::new()),
+        Arc::new(web_fetch::WebFetchTool::new()),
+        Arc::new(todo::TodoTool::new()),
+        Arc::new(component::ComponentRenderTool),
+        Arc::new(component::ComponentUnmountTool),
+        Arc::new(surface::SurfacePatchTool),
+        // Unbound: with no session it can't scope a fulfillment lookup, so reads
+        // stay `pending_bridge`. The session-scoped `BuiltinProvider` rebuilds
+        // this one with the turn's session id (OCEAN-271) so a read surfaces the
+        // bridge-fulfilled content; this default is for ad-hoc/test paths.
+        Arc::new(slack_canvas::SlackCanvasTool::new()),
+        // Unbound: falls back to the model-supplied `session_id` arg. The
+        // session-scoped `BuiltinProvider` rebuilds this one with the turn's
+        // session id (OCEAN-60); this default is for ad-hoc/test paths.
+        Arc::new(component::ComponentWaitTool::new()),
+    ]
+}

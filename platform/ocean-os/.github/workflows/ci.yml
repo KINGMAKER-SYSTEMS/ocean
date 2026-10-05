@@ -1,0 +1,112 @@
+name: CI
+
+# The Rust workspace gate. Runs on every PR and on pushes to main so a breaking
+# change (including Rule-A cross-crate breaks) can't merge unchecked.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── build / test / clippy ────────────────────────────────────────────────
+  check:
+    name: check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        # macOS is the production deploy target; Ubuntu catches Linux-specific
+        # breakage and exercises the full workspace on a second platform.
+        os: [ubuntu-latest, macos-latest]
+      fail-fast: false
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # macOS may need pkg-config for crate feature-detection (e.g. openssl-sys
+      # probes, though the workspace pins rustls where possible). Install it
+      # early so native deps can resolve headers.
+      - name: Install system deps (macOS)
+        if: runner.os == 'macOS'
+        run: brew install pkg-config
+
+      - name: Install system deps (Ubuntu feature lanes)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libglib2.0-dev
+
+      - name: Install Rust toolchain (stable + clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+
+      # The dependency-free xtask manifest is the canonical local/CI gate:
+      # docs/index integrity, whole-workspace build + tests, warning-clean
+      # all-target Clippy, and formatting. cargo-deny stays in its Ubuntu-only
+      # job below, so this matrix invocation explicitly omits that final step.
+      - name: Repository gate
+        run: cargo xtask ci --skip-deny
+
+      # Reuse the stable-toolchain build cache to cover supported daemon feature
+      # combinations and release-only compilation on both supported platforms.
+      - name: Supported features + release profile
+        run: cargo xtask ci --compatibility
+
+  # ── minimum supported Rust version ───────────────────────────────────────
+  msrv:
+    name: MSRV (Rust 1.88)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system deps (Ubuntu feature lanes)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libglib2.0-dev
+
+      - name: Install Rust 1.88
+        uses: dtolnay/rust-toolchain@1.88.0
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Default + supported-feature checks
+        # rust-toolchain.toml pins the workspace to 1.97, and rustup resolves
+        # that pin ahead of the job-installed 1.88 — so every cargo invocation
+        # (including the ones xtask spawns) must be forced back onto the MSRV
+        # toolchain explicitly. RUSTUP_TOOLCHAIN outranks the pin file and is
+        # inherited by xtask's child processes.
+        run: cargo xtask ci --msrv
+        env:
+          RUSTUP_TOOLCHAIN: "1.88.0"
+
+  # ── supply-chain audit ───────────────────────────────────────────────────
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      - name: Check licenses + advisories
+        run: cargo deny check

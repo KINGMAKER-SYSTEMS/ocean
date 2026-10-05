@@ -1,0 +1,1077 @@
+/* ─── Composer dock + voice input ───────────────────────────────────────────
+   Visual contract: product-register controls from docs/OCEAN_WEB_SURFACE_DESIGN.md.
+   Rust owns behavior and class names; this file only skins the emitted surface.
+   ───────────────────────────────────────────────────────────────────────── */
+
+/* One compact dock card. The writing row owns the full width; the lower
+   toolbar keeps voice, turn controls, and the single action slot aligned.
+   The FORM is the only framed surface and owns the focus ring. */
+.ocean-composer {
+  /* Keep the dock out of the chat column's flex negotiation. During the
+     send-to-first-token gap the transcript owns every remaining pixel; the
+     composer must stay pinned to the bottom rather than follow the pending
+     content's intrinsic height. */
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
+  grid-template-areas:
+    "attachments attachments attachments attachments"
+    "input input input input"
+    "attach orb controls action";
+  align-items: center;
+  column-gap: 8px;
+  row-gap: 4px;
+  margin: 8px 18px 12px;
+  padding: 8px 12px;
+  border-radius: var(--radius-lg);
+  background: var(--bg-elevated);
+  box-shadow: var(--elev-2);
+  transition: box-shadow var(--dur) var(--ease-tide);
+}
+.ocean-composer:focus-within {
+  box-shadow: var(--elev-2), var(--focus-ring);
+}
+
+/* ── voice orb ─────────────────────────────────────────────────────────── */
+
+.voice-wrap {
+  position: relative;
+  grid-area: orb;
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: row;
+  gap: 2px;
+  align-items: center;
+  align-self: center;
+}
+
+.voice-orb {
+  appearance: none;
+  display: grid;
+  width: var(--ctl-h);
+  height: var(--ctl-h);
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--bg-elevated);
+  color: var(--fg-3);
+  font: inherit;
+  cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
+  touch-action: none;
+  transition:
+    transform var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease),
+    opacity var(--dur-fast) var(--ease);
+}
+
+.voice-orb:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.voice-orb:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.voice-orb:active {
+  transform: scale(0.985);
+}
+
+.voice-orb.is-disabled,
+.voice-orb:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.voice-orb__glyph {
+  display: inline-flex;
+  pointer-events: none;
+  color: currentColor;
+}
+
+.voice-orb__glyph .icon,
+.voice-orb__glyph svg {
+  width: 18px;
+  height: 18px;
+}
+
+.voice-orb.is-recording {
+  border-color: transparent;
+  background: var(--accent);
+  color: var(--fg-on-accent);
+  box-shadow: var(--glow-brand);
+  animation: voice-pulse 1.35s var(--ease) infinite;
+}
+
+.voice-orb.is-transcribing {
+  border-color: var(--warn);
+  background: var(--warn-soft);
+  color: var(--warn);
+  animation: voice-transcribe 1.4s var(--ease) infinite;
+}
+
+.voice-orb.is-live {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  --voice-listen-pulse: var(--accent-soft);
+  animation: voice-listen 2.4s var(--ease) infinite;
+}
+
+.voice-orb.is-live.is-capturing {
+  border-color: transparent;
+  background: var(--accent);
+  color: var(--fg-on-accent);
+  box-shadow: var(--glow-brand);
+  animation: voice-pulse 1s var(--ease) infinite;
+}
+
+.voice-orb.is-live.is-transcribing {
+  border-color: var(--warn);
+  background: var(--warn-soft);
+  color: var(--warn);
+  box-shadow: none;
+  animation: voice-transcribe 1.2s var(--ease) infinite;
+}
+
+/* Off is a true device-level kill switch: the orb goes quiet (no glow, no
+   breathing) but stays clickable — a click reopens this menu, not the mic. */
+.voice-orb.is-off {
+  color: var(--fg-3);
+  border-color: var(--border-subtle);
+  background: var(--bg-elevated);
+  box-shadow: none;
+  animation: none;
+}
+
+@keyframes voice-pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(0, 215, 215, 0.20), var(--glow-brand);
+  }
+  50% {
+    box-shadow: 0 0 0 8px rgba(0, 215, 215, 0.08), var(--glow-brand);
+  }
+}
+
+@keyframes voice-listen {
+  0%, 100% {
+    box-shadow: 0 0 0 0 var(--voice-listen-pulse);
+  }
+  50% {
+    box-shadow: 0 0 0 5px var(--voice-listen-pulse);
+  }
+}
+
+@keyframes voice-transcribe {
+  0%, 100% {
+    box-shadow: 0 0 0 0 var(--warn-soft);
+  }
+  50% {
+    box-shadow: 0 0 0 5px var(--warn-soft);
+  }
+}
+
+/* ── voice mode menu ──────────────────────────────────────────────────── */
+/* A popover of the three honest mic modes (off / push-to-talk / hands-free)
+   anchored above the orb inside .voice-wrap (position: relative). The orb is
+   the mic; a small trigger opens this menu. Rust owns the active mode and
+   whether the menu is mounted — this only skins the emitted panel. */
+
+.voice-menu {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  /* The orb sits at the composer's LEFT edge — anchor the popover's left
+     to the wrap so it grows rightward over the composer, not off-viewport. */
+  left: 0;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  min-width: 224px;
+  padding: 6px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  box-shadow: var(--elev-3);
+  animation: voice-menu-enter var(--dur-fast) var(--ease) both;
+}
+
+@keyframes voice-menu-enter {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Mode row — icon left, label + description stacked right. The three are
+   direct children placed by grid, so source order never breaks the layout. */
+.voice-menu__item {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: 8px;
+  row-gap: 2px;
+  align-items: center;
+  width: 100%;
+  padding: 8px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease);
+}
+
+.voice-menu__item:hover {
+  background: var(--bg-hover);
+}
+
+.voice-menu__item:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.voice-menu__item.is-active {
+  background: var(--accent-soft);
+}
+
+.voice-menu__item-icon {
+  grid-row: 1 / span 2;
+  grid-column: 1;
+  align-self: center;
+  display: inline-flex;
+  font-size: 14px;
+  color: var(--fg-3);
+}
+
+.voice-menu__item-icon .icon,
+.voice-menu__item-icon svg {
+  width: 1em;
+  height: 1em;
+}
+
+.voice-menu__item.is-active .voice-menu__item-icon {
+  color: var(--accent);
+}
+
+.voice-menu__item-label {
+  grid-column: 2;
+  grid-row: 1;
+  font-size: 12px;
+  line-height: 1.3;
+  color: var(--fg);
+}
+
+.voice-menu__item-desc {
+  grid-column: 2;
+  grid-row: 2;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--fg-3);
+}
+
+.voice-menu__error {
+  color: var(--err);
+  font-size: 11px;
+  line-height: 1.35;
+  padding-inline: 8px;
+  margin: 0;
+}
+
+/* Hr-like separator between mode rows and the spoken-replies toggle. */
+.voice-menu__divider {
+  height: 0;
+  margin: 6px 2px;
+  border: 0;
+  border-top: 1px solid var(--border-subtle);
+}
+
+/* "Microphone" group label — non-interactive section header for the
+   radio-group portion of the voice menu. */
+.voice-menu__group-label {
+  display: block;
+  padding: 6px 8px 2px;
+  font-size: 10px;
+  line-height: 1.4;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-3);
+  user-select: none;
+}
+
+/* Spoken-replies toggle — a quiet row with a trailing state dot (::after);
+   is-on blooms the dot aqua to read as "replies on". */
+.voice-menu__toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 8px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg);
+  font-size: 12px;
+  line-height: 1.3;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease);
+}
+
+.voice-menu__toggle:hover {
+  background: var(--bg-hover);
+}
+
+.voice-menu__toggle:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.voice-menu__toggle::after {
+  content: "";
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-pill);
+  background: var(--border-strong);
+  transition:
+    background var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease);
+}
+
+.voice-menu__toggle.is-on::after {
+  background: var(--accent);
+  box-shadow: 0 0 6px var(--accent-soft);
+}
+
+/* Privacy footnote — small, muted, the last word on what leaves the device. */
+.voice-menu__note {
+  padding: 6px 8px 2px;
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--fg-3);
+}
+
+/* ── voice trigger + live chip ────────────────────────────────────────── */
+/* The trigger is a ghost chevron that opens the menu — quiet by default,
+   found on hover/focus, with a 0.35 floor so touch users always reach it.
+   The live chip shows only while hands-free is hot: a pulsing aqua dot. */
+
+.voice-trigger {
+  appearance: none;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--fg-3);
+  font-size: 12px;
+  opacity: 0.35;
+  cursor: pointer;
+  transition:
+    opacity var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.voice-trigger .icon,
+.voice-trigger svg {
+  width: 1em;
+  height: 1em;
+}
+
+.voice-wrap:hover .voice-trigger,
+.voice-wrap:focus-within .voice-trigger,
+.voice-wrap:has(.voice-menu) .voice-trigger {
+  opacity: 1;
+}
+
+.voice-trigger:hover {
+  color: var(--fg);
+  opacity: 1;
+}
+
+.voice-trigger:focus-visible {
+  outline: none;
+  opacity: 1;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-sm);
+}
+
+.voice-live-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-pill);
+  background: var(--bg-raised);
+  color: var(--fg-2);
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    border-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.voice-live-chip:hover {
+  border-color: var(--border-strong);
+  color: var(--fg);
+}
+
+.voice-live-chip:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* Pulsing dot — the hot aqua behind --glow-live (ocean-7 / --accent-bright),
+   the same live family the call styles ring speaking tiles with. */
+.voice-live-chip::before {
+  content: "";
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--accent-bright);
+  box-shadow: 0 0 6px var(--accent-soft);
+  animation: voice-chip-pulse 1.4s var(--ease) infinite;
+}
+
+@keyframes voice-chip-pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* coarse-pointer: grow the tiny trigger (20×20) and live chip (~14px tall) to a
+   ~44px tap target without touching their quiet desktop look or focus rings. The
+   pseudo-element sits behind content and captures taps. `.voice-wrap` spaces
+   these siblings by only 2px, so the hit area grows along the short (vertical)
+   axis into the composer's own padding — no horizontal bleed that could overlap
+   the neighbour. */
+@media (pointer: coarse) {
+  .voice-trigger,
+  .voice-live-chip {
+    position: relative;
+  }
+  .voice-trigger::after,
+  .voice-live-chip::after {
+    content: '';
+    position: absolute;
+    inset-inline: 0;
+  }
+  .voice-trigger::after {
+    inset-block: -12px; /* 20 + 24 = 44 */
+  }
+  .voice-live-chip::after {
+    inset-block: -15px; /* ~14 + 30 = 44 */
+  }
+}
+
+/* The orb speaks through color and its tooltip; a permanent caption under
+   it is knob noise. */
+.voice-hint { display: none; }
+
+/* ── context attachments ───────────────────────────────────────────────── */
+
+.ocean-composer__file-input {
+  position: fixed;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.ocean-composer__attach {
+  grid-area: attach;
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--ctl-h);
+  height: var(--ctl-h);
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--bg-elevated);
+  color: var(--fg-3);
+  cursor: pointer;
+  transition:
+    transform var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease);
+}
+
+.ocean-composer__attach:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.ocean-composer__attach:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.ocean-composer__attach:active {
+  transform: scale(0.985);
+}
+
+.ocean-composer__attachments {
+  grid-area: attachments;
+  display: flex;
+  min-width: 0;
+  gap: 6px;
+  overflow-x: auto;
+  padding: 0 2px 2px;
+  scrollbar-width: thin;
+}
+
+.ocean-composer__attachment {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  min-width: 0;
+  max-width: min(280px, 72vw);
+  height: 26px;
+  gap: 6px;
+  padding: 0 5px 0 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--bg-hover);
+  color: var(--fg-2);
+  font-size: 11px;
+}
+
+.ocean-composer__attachment-kind {
+  color: var(--accent);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.ocean-composer__attachment-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ocean-composer__attachment button {
+  appearance: none;
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--fg-3);
+  cursor: pointer;
+}
+
+.ocean-composer__attachment button:hover {
+  background: var(--bg-active);
+  color: var(--fg);
+}
+
+.ocean-composer__attachment button:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.ocean-composer__attachment .icon {
+  width: 12px;
+  height: 12px;
+}
+
+/* ── text composer ────────────────────────────────────────────────────── */
+
+.ocean-composer__input {
+  grid-area: input;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  min-height: 32px;
+  max-height: 240px;
+  overflow-y: hidden;
+  padding: 4px 4px 6px;
+  resize: none;
+  border: none;
+  border-radius: 0;
+  outline: none;
+  background: transparent;
+  box-shadow: none;
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.45;
+  transition:
+    background var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease),
+    opacity var(--dur-fast) var(--ease);
+}
+
+.ocean-composer__input::placeholder {
+  color: var(--fg-3);
+}
+
+.ocean-composer__input:focus,
+.ocean-composer__input:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
+.ocean-composer__input:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Trailing action — one circular icon slot shared by Send (idle, accent) and
+   Stop (streaming, halt-red). Mutually exclusive; both live in `action`. */
+.ocean-composer__send,
+.ocean-composer__halt {
+  grid-area: action;
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--ctl-h);      /* 34px circle */
+  height: var(--ctl-h);
+  padding: 0;
+  font-size: 18px;          /* drives the 1em icon */
+  border: none;
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  transition:
+    transform var(--dur-fast) var(--ease),
+    filter var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease),
+    opacity var(--dur-fast) var(--ease);
+}
+
+.ocean-composer__send {
+  background: var(--accent);
+  box-shadow: var(--elev-1);
+  color: var(--fg-on-accent);
+}
+
+.ocean-composer__send:hover {
+  filter: brightness(1.12);
+}
+
+.ocean-composer__send:focus-visible {
+  outline: none;
+  box-shadow: var(--elev-1), var(--focus-ring);
+}
+
+.ocean-composer__send:active {
+  transform: translateY(1px);
+  box-shadow: var(--pressed);
+}
+
+.ocean-composer__send:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  pointer-events: none;
+  filter: none;
+  box-shadow: none;
+}
+
+.ocean-composer__halt {
+  background: var(--err-soft);
+  box-shadow: var(--elev-1);
+  color: var(--err);
+}
+
+.ocean-composer__halt:hover {
+  filter: brightness(1.12);
+}
+
+.ocean-composer__halt:focus-visible {
+  outline: none;
+  box-shadow: var(--elev-1), var(--focus-ring);
+}
+
+.ocean-composer__halt:active {
+  transform: translateY(1px);
+  box-shadow: var(--pressed);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ocean-composer,
+  .voice-orb,
+  .voice-menu,
+  .voice-trigger,
+  .voice-live-chip,
+  .ocean-composer__input,
+  .ocean-composer__send,
+  .ocean-composer__halt {
+    transition: none;
+    animation: none;
+  }
+
+  .voice-orb.is-recording,
+  .voice-orb.is-transcribing,
+  .voice-orb.is-live,
+  .voice-orb.is-live.is-capturing,
+  .voice-orb.is-live.is-transcribing {
+    animation: none;
+  }
+
+  .voice-live-chip::before {
+    animation: none;
+  }
+}
+
+/* ── Realtime voice chat (voice phases 2/3) ──────────────────────────────
+   While a voice session is connecting/live and no components are on screen
+   (`.voice-chat-active` on the app root), the composer's text input, send
+   button, and per-turn controls hide — kept mounted so their signals stay
+   alive — and the orb takes center stage: floated above the composer,
+   enlarged, its glow breathing with the live mic level (`--voice-level`,
+   0..1, written by the level meter in voice/realtime.rs). Once the voice
+   agent renders components (`.voice-chat-docked` replaces `-active`) the
+   orb returns to its normal composer slot so they get the room. Both
+   Send and Stop share the action slot and hide in this mode. These states are
+   class-driven; stage Off removes them and reverts everything. */
+
+.voice-chat-active .ocean-composer__input,
+.voice-chat-active .ocean-composer__send,
+.voice-chat-active .ocean-composer__halt,
+.voice-chat-active .ocean-turn-controls,
+.voice-chat-active .ocean-slash-menu {
+  display: none;
+}
+
+.ocean-slash-menu {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 8px);
+  max-height: 280px;
+  overflow: auto;
+  z-index: 40;
+  padding: 6px;
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle, rgba(255,255,255,0.08));
+  box-shadow: var(--shadow-md, 0 8px 28px rgba(0,0,0,0.35));
+}
+.ocean-slash-menu__group {
+  padding: 4px 8px;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--fg-3);
+}
+/* Space every group after the first. Rows always sit between two headers, so a
+   header is spaced when it follows a row (i.e. begins a new group) — the
+   header-adjacent-header rule this replaces could never match. */
+.ocean-slash-menu__row + .ocean-slash-menu__group {
+  margin-top: 6px;
+}
+.ocean-slash-menu__row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 4px 12px;
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--fg, #e8ecf5);
+  cursor: pointer;
+}
+.ocean-slash-menu__row.is-selected,
+.ocean-slash-menu__row:hover {
+  background: var(--bg-hover);
+}
+.ocean-slash-menu__row.is-disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.ocean-slash-menu__title {
+  font-size: 13px;
+}
+.ocean-slash-menu__alias {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg-3);
+}
+.ocean-slash-menu__hint {
+  grid-column: 1 / -1;
+  font-size: 11px;
+  color: var(--fg-3);
+}
+
+.voice-chat-active .voice-wrap {
+  /* Release the named grid placement: an abs-pos grid child WITH a grid-area
+     uses that area as its containing block, which pinned the orb to the tiny
+     orb track instead of centering over the whole composer. */
+  grid-area: auto;
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 56px);
+  transform: translateX(-50%);
+  z-index: 30;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.voice-chat-active .voice-orb {
+  width: 108px;
+  height: 108px;
+  border-radius: 50%;
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  /* Mic-reactive breathing: scale + glow track the live level. Deliberately
+     NOT transitioned — the level writes at ~60Hz and must track instantly. */
+  transform: scale(calc(1 + var(--voice-level, 0) * 0.16));
+  box-shadow: 0 0 calc(16px + 44px * var(--voice-level, 0)) var(--accent-soft);
+  /* Promotion/dock animates size only; transform/box-shadow stay untransitioned
+     so the ~60Hz level writes track instantly. Color transitions kept. */
+  transition:
+    width 300ms var(--ease),
+    height 300ms var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.voice-chat-active .voice-orb__glyph .icon,
+.voice-chat-active .voice-orb__glyph svg {
+  width: 44px;
+  height: 44px;
+}
+
+.voice-chat-active .voice-hint {
+  position: static;
+  text-align: center;
+  font-size: 13px;
+  color: var(--fg-2);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .voice-chat-active .voice-orb {
+    transition: none;
+    transform: none;
+    box-shadow: 0 0 16px var(--accent-soft);
+  }
+}
+
+/* ── Voice Planner review card ─────────────────────────────────────────── */
+.voice-plan {
+  margin: 8px 18px 0;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--sheen), var(--bg-elevated);
+  box-shadow: var(--elev-2);
+  color: var(--fg-2);
+}
+
+.voice-plan__header,
+.voice-plan__actions {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.voice-plan h2,
+.voice-plan h3,
+.voice-plan h4,
+.voice-plan p {
+  margin: 0;
+}
+
+.voice-plan h2,
+.voice-plan h3 {
+  color: var(--fg);
+}
+
+.voice-plan__header p,
+.voice-plan__status {
+  margin-top: 4px;
+  color: var(--fg-3);
+  font-size: 12px;
+}
+
+.voice-plan__picker {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) auto;
+  align-items: end;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.voice-plan__picker label {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  color: var(--fg-3);
+  font-size: 11px;
+}
+
+.voice-plan select,
+.voice-plan button {
+  min-height: var(--ctl-h);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-well);
+  color: var(--fg);
+  font: inherit;
+}
+
+.voice-plan select {
+  width: 100%;
+  min-width: 0;
+  padding: 0 9px;
+}
+
+.voice-plan button {
+  padding: 0 12px;
+  cursor: pointer;
+}
+
+.voice-plan button:focus-visible,
+.voice-plan select:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.voice-plan button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.voice-plan .voice-plan__primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--fg-on-accent);
+}
+
+.voice-plan__close {
+  flex: 0 0 auto;
+  min-height: var(--ctl-h-sm) !important;
+  padding: 0 9px !important;
+  color: var(--fg-3) !important;
+}
+
+.voice-plan__context {
+  display: grid;
+  gap: 6px;
+  margin: 12px 0;
+  padding: 10px;
+  border-radius: var(--radius);
+  background: var(--bg-well);
+  box-shadow: var(--well);
+}
+
+.voice-plan__context div {
+  display: grid;
+  grid-template-columns: 78px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.voice-plan__context dt {
+  color: var(--fg-3);
+  font-size: 11px;
+}
+
+.voice-plan__context dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--fg-2);
+  font-family: var(--mono);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.voice-plan__brief {
+  display: grid;
+  gap: 10px;
+  max-height: min(46vh, 440px);
+  margin-top: 12px;
+  padding-right: 4px;
+  overflow-y: auto;
+}
+
+.voice-plan__brief section {
+  display: grid;
+  gap: 4px;
+}
+
+.voice-plan__brief h4 {
+  color: var(--fg-3);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.voice-plan__brief p,
+.voice-plan__brief li {
+  color: var(--fg-2);
+  font-size: 13px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.voice-plan__brief ul {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.voice-plan__error {
+  margin-top: 10px !important;
+  color: var(--err);
+  font-size: 12px;
+}
+
+.voice-plan__actions {
+  justify-content: flex-end;
+  margin-top: 14px;
+}
+
+.voice-plan__sr-status {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

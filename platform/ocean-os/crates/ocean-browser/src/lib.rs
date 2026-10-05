@@ -1,0 +1,410 @@
+//! Legacy typed async handle to a Chrome instance over the DevTools Protocol.
+//!
+//! **Quarantine:** this crate is the legacy Chromium backend and is scheduled
+//! for replacement by the OceanWebKit browser host. It compiles to an inert
+//! stub unless the default-off `legacy-chromium` feature is enabled (via
+//! `ocean-daemon --features legacy-chromium`); without it, no chromiumoxide
+//! enters the build graph.
+
+#[cfg(feature = "legacy-chromium")]
+pub mod downloads;
+#[cfg(feature = "legacy-chromium")]
+pub mod error;
+#[cfg(feature = "legacy-chromium")]
+pub mod launch;
+#[cfg(feature = "legacy-chromium")]
+pub mod netcap;
+#[cfg(feature = "legacy-chromium")]
+pub mod perception;
+#[cfg(feature = "legacy-chromium")]
+pub mod shell;
+
+#[cfg(feature = "legacy-chromium")]
+pub use downloads::{DownloadInfo, DownloadState};
+#[cfg(feature = "legacy-chromium")]
+pub use error::BrowserError;
+#[cfg(feature = "legacy-chromium")]
+pub use launch::{launch, LaunchConfig, LaunchedChrome};
+#[cfg(feature = "legacy-chromium")]
+pub use netcap::{CapturedResponse, NetCapture};
+#[cfg(feature = "legacy-chromium")]
+pub use perception::{ElementRef, PageRead};
+#[cfg(feature = "legacy-chromium")]
+pub use shell::{BrowserContext, TabId, TabInfo};
+
+/// Re-exported result alias used across the crate.
+#[cfg(feature = "legacy-chromium")]
+pub type Result<T> = std::result::Result<T, BrowserError>;
+
+#[cfg(feature = "legacy-chromium")]
+use std::sync::Arc;
+
+#[cfg(feature = "legacy-chromium")]
+use chromiumoxide::page::Page;
+#[cfg(feature = "legacy-chromium")]
+use tokio::sync::Mutex;
+
+/// Shared, cloneable handle to one Chrome + its active page. Cloning shares the
+/// same underlying browser (Arc). The active page is mutexed because tools may
+/// be called concurrently within a turn.
+#[cfg(feature = "legacy-chromium")]
+#[derive(Clone)]
+pub struct BrowserHandle {
+    inner: Arc<Mutex<LaunchedChrome>>,
+    page: Arc<Mutex<Option<Page>>>,
+    /// Active network capture (opt-in via `start_netcap`). None until started.
+    netcap: Arc<Mutex<Option<netcap::NetCapture>>>,
+    /// Active download tracking (opt-in via `enable_downloads`). None until on.
+    downloads: Arc<Mutex<Option<downloads::DownloadTracker>>>,
+}
+
+#[cfg(feature = "legacy-chromium")]
+impl BrowserHandle {
+    pub async fn launch(cfg: LaunchConfig) -> Result<Self> {
+        let chrome = launch(&cfg).await?;
+        Ok(Self {
+            inner: Arc::new(Mutex::new(chrome)),
+            page: Arc::new(Mutex::new(None)),
+            netcap: Arc::new(Mutex::new(None)),
+            downloads: Arc::new(Mutex::new(None)),
+        })
+    }
+
+    /// Quick health check: can we reach the browser over CDP?
+    /// Returns false if the websocket/process is gone, allowing callers to
+    /// drop this handle and re-launch fresh.
+    pub async fn is_alive(&self) -> bool {
+        let chrome = self.inner.lock().await;
+        chrome.browser.pages().await.is_ok()
+    }
+
+    /// Get (or create) the active page.
+    async fn active_page(&self) -> Result<Page> {
+        let mut guard = self.page.lock().await;
+        // Reuse our cached page only if it's still alive (the tab wasn't closed).
+        if let Some(p) = guard.as_ref() {
+            if p.url().await.is_ok() {
+                return Ok(p.clone());
+            }
+        }
+        let chrome = self.inner.lock().await;
+        // Prefer an EXISTING real tab — the window the user is actually looking
+        // at — over spawning a fresh blank one. This is what stops the agent
+        // from opening a brand-new window every turn: when you chat from the
+        // side panel, you're already in a browser, so drive that browser's tab.
+        // We skip the extension's own pages (chrome-extension://) and devtools.
+        let existing = match chrome.browser.pages().await {
+            Ok(pages) => {
+                // Prefer the tab the user is actually LOOKING AT, not an arbitrary
+                // one. `document.hasFocus()` is true only for the focused tab in
+                // the focused window. Fall back to the last real tab (the prior
+                // behavior) when no tab reports focus (e.g. Chrome isn't the
+                // foreground app) — so this is strictly better, never worse.
+                let mut focused = None;
+                let mut fallback = None;
+                for p in pages {
+                    let url = p.url().await.ok().flatten().unwrap_or_default();
+                    // Skip the extension's own pages, devtools, and chrome:// UI.
+                    // Anything else (a real site, or even about:blank/newtab the
+                    // user has open) is a usable tab to drive.
+                    if url.starts_with("chrome-extension://")
+                        || url.starts_with("devtools://")
+                        || url.starts_with("chrome://")
+                    {
+                        continue;
+                    }
+                    let is_focused = p
+                        .evaluate("document.hasFocus()")
+                        .await
+                        .ok()
+                        .and_then(|r| r.value().and_then(|v| v.as_bool()))
+                        .unwrap_or(false);
+                    if is_focused {
+                        focused = Some(p);
+                    } else {
+                        fallback = Some(p);
+                    }
+                }
+                focused.or(fallback)
+            }
+            Err(_) => None,
+        };
+        let page = match existing {
+            Some(p) => p,
+            None => chrome
+                .browser
+                .new_page("about:blank")
+                .await
+                .map_err(|e| BrowserError::Cdp(e.to_string()))?,
+        };
+        *guard = Some(page.clone());
+        Ok(page)
+    }
+
+    pub async fn navigate(&self, url: &str) -> Result<String> {
+        let page = self.active_page().await?;
+        page.goto(url)
+            .await
+            .map_err(|e| BrowserError::Navigation(e.to_string()))?;
+        page.wait_for_navigation()
+            .await
+            .map_err(|e| BrowserError::Navigation(e.to_string()))?;
+        let title = page.get_title().await.ok().flatten().unwrap_or_default();
+        Ok(title)
+    }
+
+    /// PNG screenshot, base64-encoded (ready for Content::Image).
+    pub async fn screenshot(&self, full_page: bool) -> Result<String> {
+        use base64::Engine;
+        use chromiumoxide::page::ScreenshotParams;
+        let page = self.active_page().await?;
+        let params = ScreenshotParams::builder().full_page(full_page).build();
+        let bytes = page
+            .screenshot(params)
+            .await
+            .map_err(|e| BrowserError::Cdp(e.to_string()))?;
+        Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+    }
+
+    /// Click an element by CSS selector (precise path).
+    pub async fn click_selector(&self, selector: &str) -> Result<()> {
+        let page = self.active_page().await?;
+        let el = page
+            .find_element(selector)
+            .await
+            .map_err(|_| BrowserError::ElementNotFound(selector.to_string()))?;
+        el.click()
+            .await
+            .map_err(|e| BrowserError::Cdp(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Click a raw viewport coordinate (works on canvas/video/anything).
+    pub async fn click_xy(&self, x: f64, y: f64) -> Result<()> {
+        use chromiumoxide::cdp::browser_protocol::input::{
+            DispatchMouseEventParams, DispatchMouseEventType, MouseButton,
+        };
+        let page = self.active_page().await?;
+        let press = DispatchMouseEventParams::builder()
+            .r#type(DispatchMouseEventType::MousePressed)
+            .x(x)
+            .y(y)
+            .button(MouseButton::Left)
+            .click_count(1)
+            .build()
+            .map_err(BrowserError::Cdp)?;
+        let release = DispatchMouseEventParams::builder()
+            .r#type(DispatchMouseEventType::MouseReleased)
+            .x(x)
+            .y(y)
+            .button(MouseButton::Left)
+            .click_count(1)
+            .build()
+            .map_err(BrowserError::Cdp)?;
+        page.execute(press)
+            .await
+            .map_err(|e| BrowserError::Cdp(e.to_string()))?;
+        page.execute(release)
+            .await
+            .map_err(|e| BrowserError::Cdp(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Type text into the currently focused element (real keystrokes). Each
+    /// char is dispatched as its own key event, mirroring chromiumoxide's
+    /// internal `type_str` — but on the public `Page` via raw CDP.
+    pub async fn type_text(&self, text: &str) -> Result<()> {
+        let page = self.active_page().await?;
+        for ch in text.split("").filter(|s| !s.is_empty()) {
+            dispatch_key(&page, ch).await?;
+        }
+        Ok(())
+    }
+
+    /// Press a single key, e.g. "Enter", "Tab", "Backspace".
+    pub async fn press_key(&self, key: &str) -> Result<()> {
+        let page = self.active_page().await?;
+        dispatch_key(&page, key).await
+    }
+
+    /// Scroll the page by a delta via window.scrollBy.
+    pub async fn scroll_by(&self, dx: f64, dy: f64) -> Result<()> {
+        let page = self.active_page().await?;
+        page.evaluate(format!("window.scrollBy({dx},{dy})"))
+            .await
+            .map_err(|e| BrowserError::Cdp(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Hybrid structured read of the page.
+    pub async fn read_page(&self) -> Result<perception::PageRead> {
+        let page = self.active_page().await?;
+        let val = page
+            .evaluate(perception::READ_PAGE_JS)
+            .await
+            .map_err(|e| BrowserError::Cdp(e.to_string()))?;
+        let json: String = val
+            .into_value()
+            .map_err(|e| BrowserError::Cdp(e.to_string()))?;
+        serde_json::from_str(&json).map_err(|e| BrowserError::Cdp(e.to_string()))
+    }
+
+    /// Evaluate arbitrary JS, return its result as a JSON string.
+    pub async fn eval_js(&self, source: &str) -> Result<String> {
+        let page = self.active_page().await?;
+        let val = page
+            .evaluate(source)
+            .await
+            .map_err(|e| BrowserError::Cdp(e.to_string()))?;
+        Ok(val.value().map(|v| v.to_string()).unwrap_or_default())
+    }
+
+    /// Recent network requests via the Performance API (resource timings).
+    pub async fn read_network(&self) -> Result<String> {
+        self.eval_js(
+            "JSON.stringify(performance.getEntriesByType('resource').slice(-50).map(e=>({name:e.name,type:e.initiatorType,dur:Math.round(e.duration)})))",
+        )
+        .await
+    }
+
+    /// Console capture. Installs a tiny buffer on first call, returns it after.
+    pub async fn read_console(&self) -> Result<String> {
+        self.eval_js(
+            "(()=>{if(!window.__oceanLogs){window.__oceanLogs=[];['log','warn','error'].forEach(k=>{const o=console[k];console[k]=(...a)=>{window.__oceanLogs.push(k+': '+a.join(' '));o.apply(console,a)}})}return JSON.stringify(window.__oceanLogs.slice(-100))})()",
+        )
+        .await
+    }
+
+    // --- shell-layer support (see shell.rs) -------------------------------
+    // The shell module needs to coordinate with the cached active page and the
+    // underlying chromiumoxide Browser. These are crate-internal seams so tab
+    // control and page-level tools share one notion of "the active tab".
+
+    /// Snapshot every open page. `chromiumoxide::Browser` isn't `Clone`, so the
+    /// shell can't hold a handle to it — instead we briefly lock `inner`, pull
+    /// the live `Vec<Page>` (pages *are* cloneable), and release. All shell tab
+    /// operations work off that snapshot.
+    pub(crate) async fn snapshot_pages(&self) -> Result<Vec<Page>> {
+        let chrome = self.inner.lock().await;
+        chrome
+            .browser
+            .pages()
+            .await
+            .map_err(|e| BrowserError::Cdp(e.to_string()))
+    }
+
+    /// Open a new page at `url` (locks `inner` briefly). Returns the page.
+    pub(crate) async fn new_page(&self, url: &str) -> Result<Page> {
+        let chrome = self.inner.lock().await;
+        chrome
+            .browser
+            .new_page(url)
+            .await
+            .map_err(|e| BrowserError::Cdp(e.to_string()))
+    }
+
+    /// The CDP target id of the currently cached active page, if any is live.
+    pub(crate) async fn active_target_id(&self) -> Option<shell::TabId> {
+        let guard = self.page.lock().await;
+        let p = guard.as_ref()?;
+        // Only report it if the tab is still alive.
+        if p.url().await.is_ok() {
+            Some(shell::TabId(p.target_id().inner().clone()))
+        } else {
+            None
+        }
+    }
+
+    /// Make `page` the active page that subsequent page-level tools act on.
+    pub(crate) async fn set_active_page(&self, page: Page) {
+        *self.page.lock().await = Some(page);
+    }
+
+    /// Drop the active-page cache if it points at `id` (e.g. that tab was
+    /// closed), so the next page-level call re-resolves a live tab.
+    pub(crate) async fn clear_active_if(&self, id: &shell::TabId) {
+        let mut guard = self.page.lock().await;
+        let is_match = match guard.as_ref() {
+            Some(p) => p.target_id().as_ref() == id.0.as_str(),
+            None => false,
+        };
+        if is_match {
+            *guard = None;
+        }
+    }
+}
+
+/// Dispatch a single key as a keyDown/keyUp pair via raw CDP. Mirrors
+/// chromiumoxide's internal `press_key` (which isn't exposed on the public
+/// `Page`). Looks up the US-layout key definition; for printable single chars
+/// the `text` field drives the inserted character.
+#[cfg(feature = "legacy-chromium")]
+async fn dispatch_key(page: &Page, key: &str) -> Result<()> {
+    use chromiumoxide::cdp::browser_protocol::input::{
+        DispatchKeyEventParams, DispatchKeyEventType,
+    };
+    use chromiumoxide::keys::get_key_definition;
+
+    let def = match get_key_definition(key) {
+        Some(def) => def,
+        None => {
+            // No US-layout key definition — an accented char (café), a smart
+            // quote / em-dash, emoji, or a non-Latin script. Don't fail the whole
+            // type_text: insert the raw character via the CDP `text` field. A
+            // keyDown carrying `text` inserts that character regardless of
+            // keyboard layout (what an IME or paste does), where a layout lookup
+            // can't. Without this, one accented char in a name aborts the typing.
+            let down = DispatchKeyEventParams::builder()
+                .r#type(DispatchKeyEventType::KeyDown)
+                .text(key)
+                .build()
+                .map_err(BrowserError::Cdp)?;
+            let up = DispatchKeyEventParams::builder()
+                .r#type(DispatchKeyEventType::KeyUp)
+                .text(key)
+                .build()
+                .map_err(BrowserError::Cdp)?;
+            page.execute(down)
+                .await
+                .map_err(|e| BrowserError::Cdp(e.to_string()))?;
+            page.execute(up)
+                .await
+                .map_err(|e| BrowserError::Cdp(e.to_string()))?;
+            return Ok(());
+        }
+    };
+
+    let mut cmd = DispatchKeyEventParams::builder();
+    let down_type = if let Some(txt) = def.text {
+        cmd = cmd.text(txt);
+        DispatchKeyEventType::KeyDown
+    } else if def.key.len() == 1 {
+        cmd = cmd.text(def.key);
+        DispatchKeyEventType::KeyDown
+    } else {
+        DispatchKeyEventType::RawKeyDown
+    };
+
+    cmd = cmd
+        .key(def.key)
+        .code(def.code)
+        .windows_virtual_key_code(def.key_code)
+        .native_virtual_key_code(def.key_code);
+
+    let down = cmd
+        .clone()
+        .r#type(down_type)
+        .build()
+        .map_err(BrowserError::Cdp)?;
+    let up = cmd
+        .r#type(DispatchKeyEventType::KeyUp)
+        .build()
+        .map_err(BrowserError::Cdp)?;
+    page.execute(down)
+        .await
+        .map_err(|e| BrowserError::Cdp(e.to_string()))?;
+    page.execute(up)
+        .await
+        .map_err(|e| BrowserError::Cdp(e.to_string()))?;
+    Ok(())
+}

@@ -1,0 +1,1682 @@
+//! The QuorumEngine — the daemon-computed heart of the longhouse.
+//!
+//! This module is **pure Rust and contains no LLM logic whatsoever**. LLM
+//! agents only ever *produce* marks (proposals, endorsements, inhibitions); the
+//! engine *evaluates* them. That separation is the entire point: convergence is
+//! deterministic, fully-testable arithmetic over a correlation-aware,
+//! time-decaying evidence field — never a model's say-so.
+//!
+//! Properties it implements, all from `docs/LONGHOUSE_ORCHESTRATION.md` §5:
+//!
+//! * **Credential-weighted stances (C1).** Each real agent contributes *one*
+//!   weight across the *whole field* — one live stance per agent, latest wins.
+//!   A chatty agent that posts 100 endorsements still counts as one credential,
+//!   and an agent that endorses A then switches to B no longer counts toward A:
+//!   posting a stance clears that agent's prior stance on any other proposal.
+//! * **Cross-inhibition (T2).** `endorse` marks add net weight; `inhibit` marks
+//!   subtract it. Two rival proposals actively suppress each other so a
+//!   symmetric split cannot silently "win".
+//! * **Time-decay (T3).** A mark's effective weight decays toward zero as
+//!   `weight * 2^(-Δt / ttl_ms)`, so a stale signal nobody re-asserts fades out.
+//! * **Sequential evidence (T4).** Reliability priors become log-likelihood
+//!   ratios, correlated reviewers share a capped evidence budget, and stopping
+//!   uses either a posterior error target or a value-of-information bound.
+//! * **Deadline / tie handling (T1).** Evidence mode aborts rather than invent a
+//!   low-confidence decision. Legacy net-weight mode retains forced resolution.
+//!
+//! The engine takes time as an explicit `now_ms` argument on every call, so
+//! tests are deterministic and never touch the wall clock.
+
+use std::collections::HashMap;
+
+use ocean_agent_sdk::{AbortReason, ProposalTally};
+use uuid::Uuid;
+
+use crate::evidence::{
+    evaluate_field, evaluate_field_full, ConvergenceBasis, EvidenceContribution, EvidenceSnapshot,
+    FieldEvaluation, GroupHeadroom, GroupId, ReviewerCredential, SequentialEvidenceConfig,
+};
+
+/// How the engine decides a proposal has crossed quorum.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum QuorumRule {
+    /// Converge when the leader's net weight is at least `cutoff` AND it leads
+    /// the runner-up by at least `margin`. The margin is what makes
+    /// cross-inhibition bite: two near-equal rivals never satisfy it.
+    NetWeight { cutoff: f32, margin: f32 },
+    /// Correlation-aware sequential evidence with cost-sensitive stopping.
+    /// This is the production default; unlike a sigmoid tested at its midpoint,
+    /// every parameter changes runtime behavior.
+    SequentialEvidence(SequentialEvidenceConfig),
+}
+
+impl QuorumRule {
+    /// Evidence policy, when this is the sequential production rule.
+    pub fn evidence_config(self) -> Option<SequentialEvidenceConfig> {
+        match self {
+            Self::SequentialEvidence(config) => Some(config),
+            Self::NetWeight { .. } => None,
+        }
+    }
+}
+
+/// Per-topic tuning. Defaults are a sane low-quorum, fast-resolving topic.
+#[derive(Debug, Clone, Copy)]
+pub struct QuorumConfig {
+    pub rule: QuorumRule,
+    /// Decay horizon for endorse/inhibit marks (ms). A mark loses half its
+    /// weight every `mark_ttl_ms`.
+    pub mark_ttl_ms: i64,
+    /// Seed for the deterministic tie-break on a forced deadline. Same seed +
+    /// same field ⇒ same winner, so tie-breaks are reproducible in tests.
+    pub tie_break_seed: u64,
+}
+
+impl Default for QuorumConfig {
+    fn default() -> Self {
+        Self {
+            rule: QuorumRule::SequentialEvidence(SequentialEvidenceConfig::default()),
+            mark_ttl_ms: 60_000,
+            tie_break_seed: 0xC0FFEE,
+        }
+    }
+}
+
+/// A single endorse/inhibit signal toward a proposal, as the engine stores it.
+/// Proposals themselves don't decay (ttl 0 in the design); only stances do.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Stance {
+    /// +1.0 base for endorse, -1.0 base for inhibit, scaled by the mark weight.
+    signed_weight: f32,
+    at_ms: i64,
+}
+
+impl Stance {
+    /// Effective weight after exponential decay relative to `now_ms`.
+    fn effective(&self, now_ms: i64, ttl_ms: i64) -> f32 {
+        if ttl_ms <= 0 {
+            return self.signed_weight;
+        }
+        let dt = (now_ms - self.at_ms).max(0) as f32;
+        let decay = 2f32.powf(-dt / ttl_ms as f32);
+        self.signed_weight * decay
+    }
+}
+
+/// One verbatim engine stance captured into an immutable decay trajectory.
+///
+/// Keeping the original [`Stance`] is load-bearing: projections must call the
+/// same `f32` [`Stance::effective`] function as the live engine and only then
+/// perform the existing per-contribution `as f64` cast.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DecayStance {
+    proposal: Uuid,
+    author: Uuid,
+    stance: Stance,
+}
+
+impl DecayStance {
+    /// Proposal this captured stance targets.
+    pub fn proposal(&self) -> Uuid {
+        self.proposal
+    }
+
+    /// Credential that owns the captured stance.
+    pub fn author(&self) -> Uuid {
+        self.author
+    }
+
+    /// Original, undecayed signed weight stored by the engine.
+    pub fn signed_weight(&self) -> f32 {
+        self.stance.signed_weight
+    }
+
+    /// Original engine timestamp for the captured stance.
+    pub fn at_ms(&self) -> i64 {
+        self.stance.at_ms
+    }
+}
+
+/// One proposal's accumulated state.
+#[derive(Debug, Default, Clone)]
+struct ProposalState {
+    /// Most-recent stance per author *on this proposal*. The credential rule is
+    /// stronger than per-proposal, though: an author holds only one live stance
+    /// across the entire field (see [`QuorumEngine::clear_author_elsewhere`]),
+    /// so the same id never appears in two `ProposalState`s at once. Author is
+    /// the agent's stable id.
+    stances: HashMap<Uuid, Stance>,
+    /// Author who proposed it (also counts as the proposer's implicit endorse).
+    proposer: Uuid,
+    seq: u64,
+}
+
+impl ProposalState {
+    fn net_weight(&self, now_ms: i64, ttl_ms: i64) -> f32 {
+        self.stances
+            .values()
+            .map(|s| s.effective(now_ms, ttl_ms))
+            .sum()
+    }
+}
+
+/// The outcome of feeding a mark to the engine: did the topic just resolve?
+#[derive(Debug, Clone, PartialEq)]
+pub enum QuorumOutcome {
+    /// No resolution yet; the topic is still open. Carries the current tallies.
+    Pending {
+        tallies: Vec<ProposalTally>,
+        leader: Option<Uuid>,
+        /// 0.0–1.0 how close the leader is to crossing quorum.
+        distance_to_quorum: f32,
+    },
+    /// The leader crossed quorum. The topic is decided.
+    Converged {
+        decision: Uuid,
+        tallies: Vec<ProposalTally>,
+        /// The auditable stopping condition that latched this decision.
+        basis: ConvergenceBasis,
+    },
+}
+
+/// The continuous-time instant when one saturated correlation group falls back
+/// to its configured evidence cap under the shared stance TTL.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GroupCapTransition {
+    /// Owned correlation identity whose raw evidence mass crosses the cap.
+    pub group: GroupId,
+    /// Absolute timestamp in milliseconds. This is `f64` because the exact
+    /// closed-form transition can fall between the engine's integer instants.
+    pub at_ms: f64,
+}
+
+/// Immutable, cap-aware projection of the engine's current decaying field.
+///
+/// The trajectory stores stances verbatim and re-evaluates them through the one
+/// canonical evidence evaluator at every requested instant. It never translates
+/// a current posterior, estimates a slope, or reimplements decay in another
+/// precision. Consequently [`snapshot_at`](Self::snapshot_at) at the capture
+/// instant is structurally identical to the live engine snapshot.
+#[derive(Debug, Clone)]
+pub struct DecayTrajectory {
+    captured_at_ms: i64,
+    mark_ttl_ms: i64,
+    config: SequentialEvidenceConfig,
+    proposals: Vec<(Uuid, u64)>,
+    stances: Vec<DecayStance>,
+    reviewers: HashMap<Uuid, ReviewerCredential>,
+}
+
+impl DecayTrajectory {
+    /// Instant at which the immutable trajectory was captured.
+    pub fn captured_at_ms(&self) -> i64 {
+        self.captured_at_ms
+    }
+
+    /// Verbatim stance identities available to a pure review planner.
+    /// Projection still remains private to this type so callers cannot bypass
+    /// the canonical `Stance::effective` -> `as f64` evaluator seam.
+    ///
+    /// This is the CURRENT latest-wins effective stance set only — replaced
+    /// stances are not retained — so exposing it does not violate the contract
+    /// rule that the planner never sees raw stance history.
+    pub fn stances(&self) -> &[DecayStance] {
+        &self.stances
+    }
+
+    /// Canonical field snapshot at `at_ms`.
+    ///
+    /// Each stored stance calls the exact live `f32` decay function before its
+    /// signed weight is cast to `f64` and passed to [`evaluate_field_full`].
+    pub fn snapshot_at(&self, at_ms: i64) -> EvidenceSnapshot {
+        let contributions = self.contributions_at(at_ms);
+        evaluate_field(
+            self.config,
+            &self.proposals,
+            &contributions,
+            &self.reviewers,
+        )
+    }
+
+    /// Leader-minus-runner-up log-evidence gap at `at_ms`.
+    ///
+    /// Returns `None` until at least two proposals exist. A tie is `Some(0.0)`.
+    pub fn leader_gap_at(&self, at_ms: i64) -> Option<f64> {
+        let evaluation = self.evaluate_at(at_ms);
+        let ranked = evaluation.snapshot.ranked();
+        (ranked.len() >= 2).then(|| ranked[0].log_evidence - ranked[1].log_evidence)
+    }
+
+    /// Exact continuous-time cap exits for groups saturated at capture time.
+    ///
+    /// All stances share one half-life, so raw group mass follows
+    /// `M_g(t) = C_g * 2^(-Δt / ttl)`. Every over-cap group is monotone and
+    /// exits its cap at most once, at `ttl * log2(C_g / cap)` after capture. No
+    /// time sampling is involved. Groups at/below cap and non-decaying fields
+    /// have no future transition.
+    ///
+    /// The closed form is exact for MIXED-AGE groups too: with a shared TTL,
+    /// `Σ Cᵢ·2^(-(t-aᵢ)/ttl) = [Σ Cᵢ·2^(aᵢ/ttl)]·2^(-t/ttl)` — stance ages only
+    /// rescale the constant, so group mass is a single exponential regardless
+    /// of when each stance landed. That factorization is why no sampling is
+    /// needed.
+    ///
+    /// These times are ADVISORY scheduling hints in the f64 mass model; the
+    /// actual mass at any instant is evaluated through the `f32` decay path,
+    /// which can differ by ulps near a boundary. [`snapshot_at`](Self::snapshot_at)
+    /// is the authority on boundary behavior — a planner must re-verify via a
+    /// fresh assessment's headroom before acting on a transition.
+    pub fn cap_transition_times(&self) -> Vec<GroupCapTransition> {
+        if self.mark_ttl_ms <= 0 {
+            return Vec::new();
+        }
+        let mut transitions: Vec<GroupCapTransition> = self
+            .evaluate_at(self.captured_at_ms)
+            .headroom
+            .into_iter()
+            .filter_map(|headroom| {
+                (headroom.used > headroom.cap).then(|| GroupCapTransition {
+                    at_ms: self.captured_at_ms as f64
+                        + self.mark_ttl_ms as f64 * (headroom.used / headroom.cap).log2(),
+                    group: headroom.group,
+                })
+            })
+            .collect();
+        transitions.sort_by(|a, b| a.at_ms.total_cmp(&b.at_ms).then(a.group.cmp(&b.group)));
+        transitions
+    }
+
+    fn evaluate_at(&self, at_ms: i64) -> FieldEvaluation {
+        let contributions = self.contributions_at(at_ms);
+        evaluate_field_full(
+            self.config,
+            &self.proposals,
+            &contributions,
+            &self.reviewers,
+        )
+    }
+
+    fn contributions_at(&self, at_ms: i64) -> Vec<EvidenceContribution> {
+        self.stances
+            .iter()
+            .filter_map(|captured| {
+                let signed_weight = captured.stance.effective(at_ms, self.mark_ttl_ms) as f64;
+                signed_weight.is_finite().then_some(EvidenceContribution {
+                    proposal: captured.proposal,
+                    author: captured.author,
+                    signed_weight,
+                })
+            })
+            .collect()
+    }
+}
+
+/// Read-only sequential state used by orchestration and review planning.
+///
+/// This wraps the canonical [`EvidenceSnapshot`] rather than duplicating its
+/// fields, adds the exact correlation budget state from that same evaluation,
+/// and carries an immutable decay trajectory. Callers must request a new
+/// assessment after every accepted stance mutation; no assessment may be
+/// cached across reviews in one orchestration tick.
+#[derive(Debug, Clone)]
+pub struct QuorumAssessment {
+    snapshot: EvidenceSnapshot,
+    correlation_headroom: Vec<GroupHeadroom>,
+    unused_groups: Vec<GroupId>,
+    trajectory: DecayTrajectory,
+}
+
+impl QuorumAssessment {
+    /// Canonical point-in-time evidence state used by the commitment gate.
+    pub fn snapshot(&self) -> &EvidenceSnapshot {
+        &self.snapshot
+    }
+
+    /// Raw used mass and cap for every live or registered correlation group.
+    pub fn correlation_headroom(&self) -> &[GroupHeadroom] {
+        &self.correlation_headroom
+    }
+
+    /// Registered correlation groups with no effective mass at this instant.
+    /// Eligibility remains a planner/roster decision, not an engine decision.
+    pub fn unused_groups(&self) -> &[GroupId] {
+        &self.unused_groups
+    }
+
+    /// Immutable exact projection captured with this assessment.
+    pub fn trajectory(&self) -> &DecayTrajectory {
+        &self.trajectory
+    }
+}
+
+/// The pure quorum engine for a single topic's blackboard.
+///
+/// Daemon-owned, LLM-free. Marks go in via [`endorse`](Self::endorse) /
+/// [`inhibit`](Self::inhibit) / [`propose`](Self::propose); the engine reports
+/// tallies and whether quorum crossed. Time is always passed in.
+#[derive(Debug, Clone)]
+pub struct QuorumEngine {
+    config: QuorumConfig,
+    proposals: HashMap<Uuid, ProposalState>,
+    reviewers: HashMap<Uuid, ReviewerCredential>,
+    /// Monotonic counter so ties break by proposal *order*, deterministically.
+    next_seq: u64,
+    converged: Option<(Uuid, ConvergenceBasis)>,
+}
+
+impl QuorumEngine {
+    pub fn new(config: QuorumConfig) -> Self {
+        Self {
+            config,
+            proposals: HashMap::new(),
+            reviewers: HashMap::new(),
+            next_seq: 0,
+            converged: None,
+        }
+    }
+
+    pub fn with_defaults() -> Self {
+        Self::new(QuorumConfig::default())
+    }
+
+    /// Register the daemon-owned evidence credential for a seated reviewer.
+    /// Re-registering the same agent replaces its prior metadata. Live councils
+    /// do this before posting any marks; old recordings without credentials are
+    /// replayed as independent reviewers for backward compatibility.
+    pub fn register_reviewer(
+        &mut self,
+        credential: ReviewerCredential,
+    ) -> Option<ReviewerCredential> {
+        self.reviewers.insert(credential.agent_id(), credential)
+    }
+
+    /// Current reviewer credentials, primarily for recording/audit surfaces.
+    pub fn reviewers(&self) -> impl Iterator<Item = &ReviewerCredential> {
+        self.reviewers.values()
+    }
+
+    /// Register a proposal. The proposer implicitly endorses their own proposal
+    /// with unit weight (one credential). Re-proposing the same id is a no-op
+    /// beyond refreshing the proposer's stance timestamp.
+    pub fn propose(&mut self, proposal: Uuid, author: Uuid, now_ms: i64) {
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        self.proposals
+            .entry(proposal)
+            .or_insert_with(|| ProposalState {
+                proposer: author,
+                seq,
+                ..Default::default()
+            });
+        // One stance per real agent, latest wins across the *whole* field: a
+        // proposal is also the proposer's implicit endorse, so clear any prior
+        // stance this author held on a different proposal first.
+        self.clear_author_elsewhere(author, proposal);
+        let entry = self
+            .proposals
+            .get_mut(&proposal)
+            .expect("proposal just inserted");
+        // The proposer counts as one endorsing credential.
+        entry.stances.insert(
+            author,
+            Stance {
+                signed_weight: 1.0,
+                at_ms: now_ms,
+            },
+        );
+    }
+
+    /// Remove this author's stance from every proposal *except* `keep`. Enforces
+    /// the "one stance per real agent, latest wins across the field" rule: when
+    /// an agent switches its target (endorse A, then endorse/inhibit B), the
+    /// stale mark on the old proposal must not keep contributing the agent's
+    /// credential weight, or the agent is counted multiple times across the
+    /// field and quorum converges on inflated/stale support.
+    fn clear_author_elsewhere(&mut self, author: Uuid, keep: Uuid) {
+        for (id, state) in self.proposals.iter_mut() {
+            if *id != keep {
+                state.stances.remove(&author);
+            }
+        }
+    }
+
+    /// Record an endorsement of `proposal` by `author` with `weight` (default
+    /// 1.0 when `None`). Overwrites this author's prior stance on this proposal
+    /// (credential-weighting: latest stance per agent wins).
+    pub fn endorse(&mut self, proposal: Uuid, author: Uuid, weight: Option<f32>, now_ms: i64) {
+        let w = weight.unwrap_or(1.0).abs();
+        self.set_stance(proposal, author, w, now_ms);
+    }
+
+    /// Record an inhibition (cross-inhibition) of `proposal` by `author`. The
+    /// weight is subtracted from the proposal's net support.
+    pub fn inhibit(&mut self, proposal: Uuid, author: Uuid, weight: Option<f32>, now_ms: i64) {
+        let w = weight.unwrap_or(1.0).abs();
+        self.set_stance(proposal, author, -w, now_ms);
+    }
+
+    fn set_stance(&mut self, proposal: Uuid, author: Uuid, signed_weight: f32, now_ms: i64) {
+        if !signed_weight.is_finite() {
+            return;
+        }
+        let seq = self.next_seq;
+        // A stance can arrive for a proposal we haven't seen a `propose` for yet
+        // (out-of-order marks). Create a placeholder so the signal still counts.
+        let entry = self
+            .proposals
+            .entry(proposal)
+            .or_insert_with(|| ProposalState {
+                proposer: author,
+                seq,
+                ..Default::default()
+            });
+        if entry.seq == seq {
+            self.next_seq += 1;
+        }
+        // One stance per real agent, latest wins across the *whole* field: drop
+        // any prior stance this author held on another proposal so its decayed
+        // weight stops counting once the agent moves its support/inhibition.
+        self.clear_author_elsewhere(author, proposal);
+        let entry = self
+            .proposals
+            .get_mut(&proposal)
+            .expect("proposal just inserted");
+        entry.stances.insert(
+            author,
+            Stance {
+                signed_weight,
+                at_ms: now_ms,
+            },
+        );
+    }
+
+    /// Number of distinct proposals currently tracked.
+    pub fn proposal_count(&self) -> usize {
+        self.proposals.len()
+    }
+
+    /// Current credential-weighted, decayed tallies, sorted by net weight desc
+    /// (ties broken by proposal order so output is deterministic).
+    pub fn tallies(&self, now_ms: i64) -> Vec<ProposalTally> {
+        let mut out: Vec<(u64, ProposalTally)> = self
+            .proposals
+            .iter()
+            .map(|(id, st)| {
+                (
+                    st.seq,
+                    ProposalTally {
+                        proposal: *id,
+                        net_weight: st.net_weight(now_ms, self.config.mark_ttl_ms),
+                    },
+                )
+            })
+            .collect();
+        // Sort by net weight desc, then by insertion seq asc for determinism.
+        out.sort_by(|a, b| {
+            b.1.net_weight
+                .partial_cmp(&a.1.net_weight)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.0.cmp(&b.0))
+        });
+        out.into_iter().map(|(_, t)| t).collect()
+    }
+
+    /// The current front-runner (highest net weight), if any proposal has
+    /// strictly positive net weight.
+    pub fn leader(&self, now_ms: i64) -> Option<Uuid> {
+        if matches!(self.config.rule, QuorumRule::SequentialEvidence(_)) {
+            return self
+                .evidence_snapshot(now_ms)
+                .and_then(|snapshot| snapshot.unique_leader())
+                .map(|leader| leader.proposal);
+        }
+        let tallies = self.tallies(now_ms);
+        tallies
+            .into_iter()
+            .find(|t| t.net_weight > 0.0)
+            .map(|t| t.proposal)
+    }
+
+    /// Correlation-capped posterior state for the sequential rule.
+    ///
+    /// Returns `None` in legacy [`QuorumRule::NetWeight`] mode.
+    pub fn evidence_snapshot(&self, now_ms: i64) -> Option<EvidenceSnapshot> {
+        self.assessment(now_ms)
+            .map(|assessment| assessment.snapshot)
+    }
+
+    /// Full pending-state assessment for sequential orchestration.
+    ///
+    /// Returns `None` in legacy [`QuorumRule::NetWeight`] mode. The assessment
+    /// is rebuilt from the current engine state on every call; callers must not
+    /// cache it across endorse/inhibit/reviewer/proposal mutations.
+    pub fn assessment(&self, now_ms: i64) -> Option<QuorumAssessment> {
+        let config = self.config.rule.evidence_config()?;
+        let trajectory = self.build_decay_trajectory(config, now_ms);
+        let FieldEvaluation { snapshot, headroom } = trajectory.evaluate_at(now_ms);
+        let unused_groups = headroom
+            .iter()
+            .filter(|group| group.used == 0.0)
+            .filter_map(|group| match &group.group {
+                GroupId::Registered(_) => Some(group.group.clone()),
+                GroupId::Independent(_) => None,
+            })
+            .collect();
+        Some(QuorumAssessment {
+            snapshot,
+            correlation_headroom: headroom,
+            unused_groups,
+            trajectory,
+        })
+    }
+
+    fn build_decay_trajectory(
+        &self,
+        config: SequentialEvidenceConfig,
+        now_ms: i64,
+    ) -> DecayTrajectory {
+        let proposals: Vec<(Uuid, u64)> = self
+            .proposals
+            .iter()
+            .map(|(proposal, state)| (*proposal, state.seq))
+            .collect();
+        let stances: Vec<DecayStance> = self
+            .proposals
+            .iter()
+            .flat_map(|(proposal, state)| {
+                state
+                    .stances
+                    .iter()
+                    .map(move |(author, stance)| DecayStance {
+                        proposal: *proposal,
+                        author: *author,
+                        stance: *stance,
+                    })
+            })
+            .collect();
+        DecayTrajectory {
+            captured_at_ms: now_ms,
+            mark_ttl_ms: self.config.mark_ttl_ms,
+            config,
+            proposals,
+            stances,
+            reviewers: self.reviewers.clone(),
+        }
+    }
+
+    /// Evaluate the current field. Returns `Converged` once (and stays
+    /// converged), else `Pending` with live tallies + distance to quorum.
+    pub fn evaluate(&mut self, now_ms: i64) -> QuorumOutcome {
+        let tallies = self.tallies(now_ms);
+
+        if let Some((decision, basis)) = self.converged {
+            return QuorumOutcome::Converged {
+                decision,
+                tallies,
+                basis,
+            };
+        }
+
+        match self.config.rule {
+            QuorumRule::NetWeight { cutoff, margin } => {
+                let leader_net = tallies.first().map(|t| t.net_weight).unwrap_or(0.0);
+                let runner_up = tallies.get(1).map(|t| t.net_weight).unwrap_or(0.0);
+                let leader_id = tallies.first().map(|t| t.proposal);
+                let progress = if cutoff <= 0.0 {
+                    if leader_net > 0.0 {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                } else {
+                    (leader_net / cutoff).clamp(0.0, 1.0)
+                };
+                let crosses =
+                    leader_net >= cutoff && leader_net > 0.0 && (leader_net - runner_up) >= margin;
+
+                if crosses {
+                    if let Some(decision) = leader_id {
+                        let basis = ConvergenceBasis::NetWeight;
+                        self.converged = Some((decision, basis));
+                        return QuorumOutcome::Converged {
+                            decision,
+                            tallies,
+                            basis,
+                        };
+                    }
+                }
+
+                QuorumOutcome::Pending {
+                    leader: leader_id.filter(|_| leader_net > 0.0),
+                    distance_to_quorum: progress,
+                    tallies,
+                }
+            }
+            QuorumRule::SequentialEvidence(_) => {
+                let snapshot = self
+                    .assessment(now_ms)
+                    .expect("sequential rule always produces an assessment")
+                    .snapshot;
+                let leader = snapshot.unique_leader().map(|item| item.proposal);
+                if let (Some(decision), Some(basis)) = (leader, snapshot.convergence_basis()) {
+                    self.converged = Some((decision, basis));
+                    return QuorumOutcome::Converged {
+                        decision,
+                        tallies,
+                        basis,
+                    };
+                }
+
+                QuorumOutcome::Pending {
+                    leader,
+                    distance_to_quorum: snapshot.progress() as f32,
+                    tallies,
+                }
+            }
+        }
+    }
+
+    /// Has this topic already converged?
+    pub fn is_converged(&self) -> bool {
+        self.converged.is_some()
+    }
+
+    /// The stopping condition that latched this topic, if it has converged.
+    pub fn convergence_basis(&self) -> Option<ConvergenceBasis> {
+        self.converged.map(|(_, basis)| basis)
+    }
+
+    /// The author that originally proposed `proposal`, if tracked. Used by the
+    /// convening flow to bind the firekeeper title to the winning proposer.
+    pub fn proposer_of(&self, proposal: Uuid) -> Option<Uuid> {
+        self.proposals.get(&proposal).map(|p| p.proposer)
+    }
+
+    /// Force resolution at a deadline (or budget ceiling). A clear leader
+    /// (positive net weight, satisfying the margin) converges. A true tie —
+    /// two+ leaders within the margin — is broken deterministically by the
+    /// configured seed when `tie_break` is true, else it aborts with `Split`.
+    ///
+    /// Returns either the converged proposal id, or an [`AbortReason`].
+    pub fn force_resolve(
+        &mut self,
+        now_ms: i64,
+        reason: AbortReason,
+        tie_break: bool,
+    ) -> Result<Uuid, AbortReason> {
+        if let Some((decision, _)) = self.converged {
+            return Ok(decision);
+        }
+        let margin = match self.config.rule {
+            QuorumRule::NetWeight { margin, .. } => margin,
+            QuorumRule::SequentialEvidence(_) => {
+                // A deadline is a stopping condition, not evidence. Sequential
+                // mode therefore terminates honestly with an abort instead of
+                // using a seeded coin flip to manufacture a supported answer.
+                return Err(reason);
+            }
+        };
+        let tallies = self.tallies(now_ms);
+        let Some(top) = tallies.first().cloned() else {
+            // No proposals at all.
+            return Err(reason);
+        };
+        if top.net_weight <= 0.0 {
+            // Nothing has positive support.
+            return Err(if reason == AbortReason::Timeout {
+                AbortReason::Split
+            } else {
+                reason
+            });
+        }
+        let runner_up = tallies.get(1).map(|t| t.net_weight).unwrap_or(0.0);
+        let is_tie = (top.net_weight - runner_up).abs() < margin;
+
+        if !is_tie {
+            self.converged = Some((top.proposal, ConvergenceBasis::ForcedDeadline));
+            return Ok(top.proposal);
+        }
+
+        // A genuine tie among the leaders.
+        if !tie_break {
+            return Err(AbortReason::Split);
+        }
+
+        // Deterministic seeded tie-break: pick among all proposals tied with the
+        // top within the margin, choosing by a hash of (seed, proposal bytes).
+        let leaders: Vec<Uuid> = tallies
+            .iter()
+            .filter(|t| (top.net_weight - t.net_weight).abs() < margin)
+            .map(|t| t.proposal)
+            .collect();
+        let winner = seeded_pick(&leaders, self.config.tie_break_seed);
+        self.converged = Some((winner, ConvergenceBasis::ForcedDeadline));
+        Ok(winner)
+    }
+}
+
+/// Deterministic pick from a non-empty slice using a tiny splitmix64-style hash
+/// of the seed mixed with each candidate's bytes. Stable across runs/platforms.
+fn seeded_pick(candidates: &[Uuid], seed: u64) -> Uuid {
+    debug_assert!(!candidates.is_empty());
+    let mut best = candidates[0];
+    let mut best_score = u64::MAX;
+    for c in candidates {
+        let mut h = seed ^ 0x9E37_79B9_7F4A_7C15;
+        for b in c.as_bytes() {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x100_0000_01B3); // FNV-ish prime
+            h ^= h >> 29;
+        }
+        if h < best_score {
+            best_score = h;
+            best = *c;
+        }
+    }
+    best
+}
+
+// ===========================================================================
+// Recall vote (OCEAN-302) — the no-confidence primitive behind quorum-of-recall.
+// ===========================================================================
+//
+// The [`QuorumEngine`] above decides *content* (which proposal a council adopts).
+// A **recall** is a different question: should the council *depose its seated
+// firekeeper*? It is still a credential-weighted quorum — but over a single
+// yes/no ("no confidence in this title"), not a field of rival proposals.
+//
+// Like the content engine, this is **pure Rust with no LLM** and the same
+// load-bearing discipline that makes a recall *unforgeable*:
+//
+//   * **One credential per voter, latest wins.** A voter is counted once no
+//     matter how many times it casts; re-casting only refreshes its vote. A
+//     single caller therefore cannot manufacture a recall by spamming — it is
+//     one credential. This is the [`QuorumEngine`] C1 rule, narrowed to recall.
+//   * **A genuine threshold of *distinct* credentials.** Convergence ("carried")
+//     fires only when the count of distinct voters meets a configured
+//     `threshold` (≥ 1). A lone vote never carries unless the council is so
+//     small the operator set the threshold to 1 — which is an explicit choice,
+//     not a forgery. The daemon couples the *execution* of the recall (pulling
+//     the title via the [`crate::escrow::Revoker`]) to a `Carried` outcome, so
+//     the title is never revoked on anything less than genuine quorum.
+//
+// The recall vote does NOT itself touch the title registry or the Revoker — it
+// only *counts*. Execution (decide ≠ execute) stays with the daemon, which
+// presents the server-minted `RevokerKey` once this reports `Carried`.
+
+/// The standing no-confidence tally against **one** seated title (firekeeper).
+///
+/// Records at most one recall vote per voter (latest wins, so a voter can also
+/// *withdraw* by being absent from a fresh round — though the common path is
+/// purely additive). Reports [`RecallOutcome::Carried`] once the count of
+/// distinct voters reaches the configured threshold, and latches there.
+#[derive(Debug, Clone)]
+pub struct RecallVote {
+    /// The title under recall (the firekeeper's persisted title id). The vote is
+    /// *about* this title; the daemon resolves it to a revoke target.
+    title_id: Uuid,
+    /// Distinct voters who currently hold a "no confidence" stance. A `HashSet`
+    /// enforces one-credential-per-voter structurally: re-inserting the same id
+    /// is a no-op, so a spammer is one element, not many.
+    voters: std::collections::HashSet<Uuid>,
+    /// Distinct credentialed votes required to carry the recall (≥ 1). Set by the
+    /// convener from the council's roster size; a single vote cannot carry unless
+    /// the operator deliberately set this to 1.
+    threshold: usize,
+    /// Latches once carried so the outcome cannot flip back (a deposition, once
+    /// reached, is reached — mirrors the content engine's `converged` latch).
+    carried: bool,
+}
+
+/// The outcome of a recall tally.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecallOutcome {
+    /// Not enough distinct credentialed votes yet. Carries how many votes are in
+    /// and how many are needed, for observability.
+    Pending { votes: usize, threshold: usize },
+    /// The recall reached quorum: at least `threshold` distinct voters hold a
+    /// no-confidence stance. The daemon executes the deposition (Revoker) on this.
+    Carried { title_id: Uuid, votes: usize },
+}
+
+impl RecallVote {
+    /// Open a recall tally against `title_id`, requiring `threshold` distinct
+    /// credentialed votes to carry. A `threshold` of 0 is clamped to 1: a recall
+    /// must always require at least one genuine vote, never zero (which would let
+    /// an empty tally "carry" and forge a deposition).
+    pub fn new(title_id: Uuid, threshold: usize) -> Self {
+        Self {
+            title_id,
+            voters: std::collections::HashSet::new(),
+            threshold: threshold.max(1),
+            carried: false,
+        }
+    }
+
+    /// The title this recall is about.
+    pub fn title_id(&self) -> Uuid {
+        self.title_id
+    }
+
+    /// Distinct credentialed votes required to carry.
+    pub fn threshold(&self) -> usize {
+        self.threshold
+    }
+
+    /// Distinct voters currently holding a no-confidence stance.
+    pub fn votes(&self) -> usize {
+        self.voters.len()
+    }
+
+    /// Cast (or re-affirm) a no-confidence vote by `voter`. Idempotent per voter:
+    /// the same voter voting twice still counts once. Returns the outcome after
+    /// the cast. A vote cast after the recall already carried is a no-op on the
+    /// verdict (it stays `Carried`).
+    pub fn cast(&mut self, voter: Uuid) -> RecallOutcome {
+        self.voters.insert(voter);
+        self.evaluate()
+    }
+
+    /// Withdraw `voter`'s no-confidence stance (the voter recants). Does not
+    /// un-latch an already-carried recall — a reached deposition stays reached.
+    pub fn withdraw(&mut self, voter: Uuid) -> RecallOutcome {
+        self.voters.remove(&voter);
+        self.evaluate()
+    }
+
+    /// The current verdict without mutating. `Carried` once distinct votes reach
+    /// the threshold (and stays carried thereafter).
+    pub fn evaluate(&mut self) -> RecallOutcome {
+        if self.carried || self.voters.len() >= self.threshold {
+            self.carried = true;
+            return RecallOutcome::Carried {
+                title_id: self.title_id,
+                votes: self.voters.len(),
+            };
+        }
+        RecallOutcome::Pending {
+            votes: self.voters.len(),
+            threshold: self.threshold,
+        }
+    }
+
+    /// Has this recall already carried?
+    pub fn is_carried(&self) -> bool {
+        self.carried
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn uid(n: u8) -> Uuid {
+        let mut b = [0u8; 16];
+        b[15] = n;
+        Uuid::from_bytes(b)
+    }
+
+    fn assert_assessment_round_trip(engine: &QuorumEngine, now_ms: i64) {
+        let assessment = engine
+            .assessment(now_ms)
+            .expect("sequential engine has an assessment");
+        let projected = assessment.trajectory.evaluate_at(now_ms);
+        assert_eq!(assessment.snapshot, projected.snapshot);
+        assert_eq!(assessment.correlation_headroom, projected.headroom);
+        assert_eq!(
+            assessment.trajectory.snapshot_at(now_ms),
+            engine.evidence_snapshot(now_ms).unwrap()
+        );
+    }
+
+    // A proposal that accrues endorsements climbs to convergence.
+    #[test]
+    fn proposal_climbs_to_convergence() {
+        let mut eng = QuorumEngine::new(QuorumConfig {
+            rule: QuorumRule::NetWeight {
+                cutoff: 3.0,
+                margin: 1.0,
+            },
+            mark_ttl_ms: 60_000,
+            tie_break_seed: 1,
+        });
+        let p = uid(1);
+        let (a, b, c) = (uid(10), uid(11), uid(12));
+        let t0 = 0;
+
+        eng.propose(p, a, t0); // proposer endorses: net 1.0
+        assert!(matches!(eng.evaluate(t0), QuorumOutcome::Pending { .. }));
+
+        eng.endorse(p, b, None, t0); // net 2.0
+        assert!(!eng.is_converged());
+
+        eng.endorse(p, c, None, t0); // net 3.0 -> crosses cutoff, margin (no rival) ok
+        match eng.evaluate(t0) {
+            QuorumOutcome::Converged {
+                decision,
+                basis: ConvergenceBasis::NetWeight,
+                ..
+            } => assert_eq!(decision, p),
+            other => panic!("expected convergence, got {other:?}"),
+        }
+        // Stays converged.
+        assert!(eng.is_converged());
+        assert!(matches!(
+            eng.evaluate(t0 + 1),
+            QuorumOutcome::Converged { .. }
+        ));
+    }
+
+    // Cross-inhibition keeps two rivals from converging: each suppresses the
+    // other so neither clears the margin.
+    #[test]
+    fn cross_inhibition_blocks_two_rivals() {
+        let mut eng = QuorumEngine::new(QuorumConfig {
+            rule: QuorumRule::NetWeight {
+                cutoff: 2.0,
+                margin: 1.0,
+            },
+            mark_ttl_ms: 60_000,
+            tie_break_seed: 1,
+        });
+        let (pa, pb) = (uid(1), uid(2));
+        let (a1, a2, b1, b2) = (uid(10), uid(11), uid(20), uid(21));
+        let t = 0;
+
+        // Two symmetric camps endorse their own and inhibit the rival.
+        eng.propose(pa, a1, t);
+        eng.propose(pb, b1, t);
+        eng.endorse(pa, a2, None, t); // A net = 2.0 (a1 + a2)
+        eng.endorse(pb, b2, None, t); // B net = 2.0 (b1 + b2)
+
+        // Cross-inhibition: each camp inhibits the rival.
+        eng.inhibit(pb, a1, None, t); // B net = 2.0 - 1.0 = 1.0
+        eng.inhibit(pb, a2, None, t); // B net = 2.0 - 2.0 = 0.0
+        eng.inhibit(pa, b1, None, t); // A net = 2.0 - 1.0 = 1.0
+        eng.inhibit(pa, b2, None, t); // A net = 2.0 - 2.0 = 0.0
+
+        match eng.evaluate(t) {
+            QuorumOutcome::Pending { .. } => {} // neither side wins
+            other => panic!("rivals should not converge: {other:?}"),
+        }
+        assert!(!eng.is_converged());
+    }
+
+    // Decay reduces a stale lead: an old endorsement fades, dropping the leader
+    // back below quorum over time.
+    #[test]
+    fn decay_reduces_stale_lead() {
+        let mut eng = QuorumEngine::new(QuorumConfig {
+            rule: QuorumRule::NetWeight {
+                cutoff: 2.5,
+                margin: 0.5,
+            },
+            mark_ttl_ms: 1_000, // half-life 1s
+            tie_break_seed: 1,
+        });
+        let p = uid(1);
+        let (a, b, c) = (uid(10), uid(11), uid(12));
+        let t0 = 0;
+
+        eng.propose(p, a, t0);
+        eng.endorse(p, b, None, t0);
+        eng.endorse(p, c, None, t0);
+        // Fresh: net = 3.0 >= cutoff 2.5 -> converged.
+        assert!(matches!(eng.evaluate(t0), QuorumOutcome::Converged { .. }));
+
+        // But evaluate a *fresh* engine at a later time to see decay (the first
+        // engine latched converged, which is correct — once decided, decided).
+        let mut eng2 = QuorumEngine::new(QuorumConfig {
+            rule: QuorumRule::NetWeight {
+                cutoff: 2.5,
+                margin: 0.5,
+            },
+            mark_ttl_ms: 1_000,
+            tie_break_seed: 1,
+        });
+        eng2.propose(p, a, t0);
+        eng2.endorse(p, b, None, t0);
+        eng2.endorse(p, c, None, t0);
+        // After 2 half-lives (2s): each 1.0 stance -> ~0.25, net ~0.75 < cutoff.
+        let later = t0 + 2_000;
+        match eng2.evaluate(later) {
+            QuorumOutcome::Pending {
+                distance_to_quorum, ..
+            } => {
+                let net = eng2.tallies(later)[0].net_weight;
+                assert!(net < 1.0, "stale net should have decayed, got {net}");
+                assert!(distance_to_quorum < 0.5);
+            }
+            other => panic!("decayed lead should be pending, got {other:?}"),
+        }
+    }
+
+    // A tie at the deadline aborts with Split when tie-break is off, and
+    // resolves deterministically when tie-break is on.
+    #[test]
+    fn tie_aborts_then_tiebreaks() {
+        let cfg = QuorumConfig {
+            rule: QuorumRule::NetWeight {
+                cutoff: 1.5,
+                margin: 1.0,
+            },
+            mark_ttl_ms: 60_000,
+            tie_break_seed: 42,
+        };
+        let (pa, pb) = (uid(1), uid(2));
+        let (a, b) = (uid(10), uid(20));
+
+        let mut eng = QuorumEngine::new(cfg);
+        eng.propose(pa, a, 0); // A net 1.0
+        eng.propose(pb, b, 0); // B net 1.0 -> exact tie, within margin 1.0
+
+        // No clear leader during normal evaluation.
+        assert!(matches!(eng.evaluate(0), QuorumOutcome::Pending { .. }));
+
+        // Deadline, no tie-break -> Split.
+        let mut eng_split = eng.clone();
+        assert_eq!(
+            eng_split.force_resolve(0, AbortReason::Timeout, false),
+            Err(AbortReason::Split)
+        );
+
+        // Deadline, with tie-break -> deterministic winner, repeatable.
+        let mut eng_tb1 = eng.clone();
+        let mut eng_tb2 = eng.clone();
+        let w1 = eng_tb1
+            .force_resolve(0, AbortReason::Timeout, true)
+            .unwrap();
+        let w2 = eng_tb2
+            .force_resolve(0, AbortReason::Timeout, true)
+            .unwrap();
+        assert_eq!(w1, w2, "seeded tie-break must be deterministic");
+        assert!(w1 == pa || w1 == pb);
+    }
+
+    // A chatty agent posting many endorsements still counts as ONE credential.
+    #[test]
+    fn credential_weighting_dedupes_chatty_agent() {
+        let mut eng = QuorumEngine::new(QuorumConfig {
+            rule: QuorumRule::NetWeight {
+                cutoff: 5.0,
+                margin: 1.0,
+            },
+            mark_ttl_ms: 60_000,
+            tie_break_seed: 1,
+        });
+        let p = uid(1);
+        let spammer = uid(99);
+        let t = 0;
+        eng.propose(p, uid(1), t); // proposer credential = 1.0
+
+        // Spammer floods 100 endorsements; only its latest stance counts.
+        for _ in 0..100 {
+            eng.endorse(p, spammer, None, t);
+        }
+        let net = eng.tallies(t)[0].net_weight;
+        assert!(
+            (net - 2.0).abs() < 1e-3,
+            "proposer(1) + one spammer credential(1) = 2.0, got {net}"
+        );
+        assert!(!eng.is_converged(), "two credentials < cutoff 5.0");
+    }
+
+    // Regression for the PR #33 review: an agent that endorses proposal A and
+    // then later endorses/inhibits proposal B must be counted only ONCE across
+    // the field — its prior stance on A must be cleared, not left contributing
+    // its credential weight to both proposals. "One stance per real agent,
+    // latest wins" applies field-wide, not per-proposal.
+    #[test]
+    fn agent_switching_proposals_drops_prior_stance() {
+        let mut eng = QuorumEngine::new(QuorumConfig {
+            rule: QuorumRule::NetWeight {
+                cutoff: 2.0,
+                margin: 1.0,
+            },
+            mark_ttl_ms: 60_000,
+            tie_break_seed: 1,
+        });
+        let (pa, pb) = (uid(1), uid(2));
+        // Distinct proposers so A and B each have a standing credential that is
+        // NOT the switching worker, isolating the worker's single moving stance.
+        let (pa_author, pb_author) = (uid(10), uid(20));
+        let worker = uid(50);
+        let t = 0;
+
+        eng.propose(pa, pa_author, t); // A net = 1.0 (pa_author)
+        eng.propose(pb, pb_author, t); // B net = 1.0 (pb_author)
+
+        // Round 2: the worker endorses A. A should now be 2.0, B still 1.0.
+        eng.endorse(pa, worker, None, t);
+        {
+            let tallies = eng.tallies(t);
+            let net_a = tallies
+                .iter()
+                .find(|x| x.proposal == pa)
+                .unwrap()
+                .net_weight;
+            let net_b = tallies
+                .iter()
+                .find(|x| x.proposal == pb)
+                .unwrap()
+                .net_weight;
+            assert!(
+                (net_a - 2.0).abs() < 1e-3,
+                "A should be 2.0 after worker endorse, got {net_a}"
+            );
+            assert!(
+                (net_b - 1.0).abs() < 1e-3,
+                "B should still be 1.0, got {net_b}"
+            );
+        }
+
+        // Later round: the same worker switches its support to B (endorse B).
+        // The BUG: without clearing, the worker's stance on A would remain, so A
+        // stays at 2.0 AND B climbs to 2.0 — the worker is credential-counted on
+        // both proposals at once. Correct behaviour: A drops back to 1.0 (only
+        // pa_author left) and B rises to 2.0 (pb_author + worker).
+        eng.endorse(pb, worker, None, t);
+        let tallies = eng.tallies(t);
+        let net_a = tallies
+            .iter()
+            .find(|x| x.proposal == pa)
+            .unwrap()
+            .net_weight;
+        let net_b = tallies
+            .iter()
+            .find(|x| x.proposal == pb)
+            .unwrap()
+            .net_weight;
+        assert!(
+            (net_a - 1.0).abs() < 1e-3,
+            "A must drop to 1.0 once the worker leaves it; got {net_a} (double-counting bug)"
+        );
+        assert!(
+            (net_b - 2.0).abs() < 1e-3,
+            "B should be 2.0 (pb_author + worker), got {net_b}"
+        );
+
+        // Same must hold when the switch is an *inhibit* on the new proposal:
+        // the worker's prior endorse on B must go, leaving B at pb_author - worker.
+        eng.inhibit(pa, worker, None, t); // worker now inhibits A
+        let tallies = eng.tallies(t);
+        let net_a = tallies
+            .iter()
+            .find(|x| x.proposal == pa)
+            .unwrap()
+            .net_weight;
+        let net_b = tallies
+            .iter()
+            .find(|x| x.proposal == pb)
+            .unwrap()
+            .net_weight;
+        assert!(
+            (net_a - 0.0).abs() < 1e-3,
+            "A should be 0.0 (pa_author 1.0 - worker inhibit 1.0), got {net_a}"
+        );
+        assert!(
+            (net_b - 1.0).abs() < 1e-3,
+            "B must drop back to 1.0 once the worker leaves it; got {net_b} (double-counting bug)"
+        );
+    }
+
+    // A clear leader at the deadline converges even without crossing quorum
+    // mid-flight (the deadline forces resolution on the front-runner).
+    #[test]
+    fn deadline_converges_clear_leader() {
+        let mut eng = QuorumEngine::new(QuorumConfig {
+            rule: QuorumRule::NetWeight {
+                cutoff: 10.0, // unreachably high so it never auto-converges
+                margin: 1.0,
+            },
+            mark_ttl_ms: 60_000,
+            tie_break_seed: 1,
+        });
+        let (pa, pb) = (uid(1), uid(2));
+        eng.propose(pa, uid(10), 0);
+        eng.endorse(pa, uid(11), None, 0);
+        eng.endorse(pa, uid(12), None, 0); // A net = 3.0
+        eng.propose(pb, uid(20), 0); // B net = 1.0 -> A leads by 2.0 >= margin
+
+        assert!(matches!(eng.evaluate(0), QuorumOutcome::Pending { .. }));
+        let winner = eng.force_resolve(0, AbortReason::Timeout, true).unwrap();
+        assert_eq!(winner, pa);
+        assert_eq!(
+            eng.convergence_basis(),
+            Some(ConvergenceBasis::ForcedDeadline)
+        );
+    }
+
+    #[test]
+    fn default_rule_is_sequential_evidence_not_a_relabelled_threshold() {
+        assert!(matches!(
+            QuorumConfig::default().rule,
+            QuorumRule::SequentialEvidence(_)
+        ));
+    }
+
+    #[test]
+    fn correlated_replicas_cannot_manufacture_independent_evidence() {
+        let config = SequentialEvidenceConfig::default();
+        let mut eng = QuorumEngine::with_defaults();
+        let (pa, pb) = (uid(1), uid(2));
+        let (a1, a2, b1) = (uid(10), uid(11), uid(20));
+        for agent in [a1, a2] {
+            eng.register_reviewer(
+                ReviewerCredential::with_default_prior(agent, "same-model", config).unwrap(),
+            );
+        }
+        eng.register_reviewer(
+            ReviewerCredential::with_default_prior(b1, "independent-model", config).unwrap(),
+        );
+
+        eng.propose(pa, a1, 0);
+        eng.propose(pb, b1, 0);
+        eng.endorse(pa, a2, None, 0);
+
+        let snapshot = eng.evidence_snapshot(0).unwrap();
+        assert_eq!(snapshot.convergence_basis(), None);
+        assert_eq!(snapshot.unique_leader(), None);
+        assert!(matches!(eng.evaluate(0), QuorumOutcome::Pending { .. }));
+    }
+
+    #[test]
+    fn independent_evidence_reaches_the_configured_error_bound() {
+        let config = SequentialEvidenceConfig::default();
+        let mut eng = QuorumEngine::with_defaults();
+        let (pa, pb) = (uid(1), uid(2));
+        let authors = [uid(10), uid(11), uid(12), uid(13), uid(20)];
+        for (index, author) in authors.into_iter().enumerate() {
+            eng.register_reviewer(
+                ReviewerCredential::with_default_prior(
+                    author,
+                    format!("independent-{index}"),
+                    config,
+                )
+                .unwrap(),
+            );
+        }
+
+        eng.propose(pa, uid(10), 0);
+        eng.propose(pb, uid(20), 0);
+        eng.endorse(pa, uid(11), None, 0);
+        eng.endorse(pa, uid(12), None, 0);
+        eng.endorse(pa, uid(13), None, 0);
+
+        assert!(matches!(
+            eng.evaluate(0),
+            QuorumOutcome::Converged {
+                decision,
+                basis: ConvergenceBasis::EvidenceBound,
+                ..
+            } if decision == pa
+        ));
+    }
+
+    #[test]
+    fn default_three_seat_two_group_roster_can_converge() {
+        let config = SequentialEvidenceConfig::default();
+        let mut eng = QuorumEngine::with_defaults();
+        let (deep_a, kimi, deep_b) = (uid(10), uid(20), uid(11));
+        for agent in [deep_a, deep_b] {
+            eng.register_reviewer(
+                ReviewerCredential::with_default_prior(agent, "deepseek:model", config).unwrap(),
+            );
+        }
+        eng.register_reviewer(
+            ReviewerCredential::with_default_prior(kimi, "kimi:model", config).unwrap(),
+        );
+        let (proposal_a, winner, proposal_b) = (uid(1), uid(2), uid(3));
+        eng.propose(proposal_a, deep_a, 0);
+        eng.propose(winner, kimi, 0);
+        eng.propose(proposal_b, deep_b, 0);
+
+        eng.endorse(winner, deep_a, None, 1);
+        eng.endorse(winner, kimi, None, 1);
+        eng.endorse(winner, deep_b, None, 1);
+
+        assert!(matches!(
+            eng.evaluate(1),
+            QuorumOutcome::Converged {
+                decision,
+                basis: ConvergenceBasis::EvidenceBound,
+                ..
+            } if decision == winner
+        ));
+    }
+
+    #[test]
+    fn sequential_deadline_aborts_instead_of_inventing_a_winner() {
+        let mut eng = QuorumEngine::with_defaults();
+        eng.propose(uid(1), uid(10), 0);
+        eng.propose(uid(2), uid(20), 0);
+
+        assert_eq!(
+            eng.force_resolve(1_000, AbortReason::Timeout, true),
+            Err(AbortReason::Timeout)
+        );
+        assert!(!eng.is_converged());
+    }
+
+    #[test]
+    fn assessment_round_trips_after_every_stance_mutation() {
+        let config = SequentialEvidenceConfig::default();
+        let mut eng = QuorumEngine::with_defaults();
+        let (pa, pb) = (uid(1), uid(2));
+        let (a, b, c, d) = (uid(10), uid(20), uid(30), uid(40));
+        for (reviewer, group) in [
+            (a, "model-a"),
+            (b, "model-b"),
+            (c, "model-c"),
+            (d, "model-d"),
+        ] {
+            eng.register_reviewer(
+                ReviewerCredential::with_default_prior(reviewer, group, config).unwrap(),
+            );
+        }
+
+        let empty = eng.assessment(0).unwrap();
+        assert_eq!(empty.unused_groups.len(), 4);
+        assert_assessment_round_trip(&eng, 0);
+
+        eng.propose(pa, a, 10);
+        assert_assessment_round_trip(&eng, 10);
+        eng.propose(pb, b, 11);
+        assert_assessment_round_trip(&eng, 11);
+        eng.endorse(pa, c, None, 12);
+        assert_assessment_round_trip(&eng, 12);
+        eng.inhibit(pa, d, Some(0.5), 13);
+        assert_assessment_round_trip(&eng, 13);
+        // Latest-wins target/sign flip: the rebuilt assessment must use only
+        // d's replacement stance, never a cached pre-review field.
+        eng.endorse(pb, d, None, 14);
+        assert_assessment_round_trip(&eng, 14);
+    }
+
+    #[test]
+    fn cap_transition_is_closed_form_and_round_trips_at_boundary() {
+        let config = SequentialEvidenceConfig::default();
+        let mut eng = QuorumEngine::new(QuorumConfig {
+            rule: QuorumRule::SequentialEvidence(config),
+            mark_ttl_ms: 1_000,
+            tie_break_seed: 7,
+        });
+        let (pa, pb) = (uid(1), uid(2));
+        let (a1, a2, b) = (uid(10), uid(11), uid(20));
+        for reviewer in [a1, a2] {
+            eng.register_reviewer(
+                ReviewerCredential::with_default_prior(reviewer, "same-model", config).unwrap(),
+            );
+        }
+        eng.register_reviewer(
+            ReviewerCredential::with_default_prior(b, "other-model", config).unwrap(),
+        );
+        eng.propose(pa, a1, 0);
+        eng.propose(pb, b, 0);
+        eng.endorse(pa, a2, None, 0);
+
+        let assessment = eng.assessment(0).unwrap();
+        let transitions = assessment.trajectory.cap_transition_times();
+        assert_eq!(transitions.len(), 1);
+        assert_eq!(
+            transitions[0].group,
+            GroupId::Registered("same-model".into())
+        );
+        assert!((transitions[0].at_ms - 1_000.0).abs() < 1e-9);
+
+        // The continuous transition is exactly at 1000ms; projections at the
+        // adjacent integer instants and the boundary itself remain identical to
+        // fresh live-engine evaluations because both call the same evaluator.
+        for at_ms in [999, 1_000, 1_001] {
+            assert_eq!(
+                assessment.trajectory.snapshot_at(at_ms),
+                eng.evidence_snapshot(at_ms).unwrap()
+            );
+        }
+        let at_boundary = assessment.trajectory.evaluate_at(1_000);
+        let group = at_boundary
+            .headroom
+            .iter()
+            .find(|entry| entry.group == GroupId::Registered("same-model".into()))
+            .unwrap();
+        assert!((group.used - group.cap).abs() < 1e-12);
+    }
+
+    #[test]
+    fn near_tie_assessment_stays_open() {
+        let config = SequentialEvidenceConfig::default();
+        let mut eng = QuorumEngine::with_defaults();
+        let (pa, pb) = (uid(1), uid(2));
+        let (a, b, edge) = (uid(10), uid(20), uid(30));
+        for (reviewer, group) in [(a, "a"), (b, "b"), (edge, "edge")] {
+            eng.register_reviewer(
+                ReviewerCredential::with_default_prior(reviewer, group, config).unwrap(),
+            );
+        }
+        eng.propose(pa, a, 0);
+        eng.propose(pb, b, 0);
+        eng.endorse(pa, edge, Some(1e-7), 0);
+
+        let assessment = eng.assessment(0).unwrap();
+        assert!(assessment.snapshot().unique_leader().is_some());
+        assert_eq!(assessment.snapshot().convergence_basis(), None);
+        assert!(assessment.trajectory().leader_gap_at(0).unwrap() > 0.0);
+        assert!(matches!(eng.evaluate(0), QuorumOutcome::Pending { .. }));
+    }
+
+    // This is the CostBound-tie case the `unique_leader` gate exists for.
+    // EvidenceBound can never be blocked by the tie gate (posterior error at or
+    // below a sub-0.5 target forces the leader's posterior above 0.5, which is
+    // strictly unique), so the gate does load-bearing work ONLY here: with an
+    // expensive query (query_cost >= 0.5 * decision_loss), an exactly tied
+    // field satisfies the CostBound economics (evpi = 0.5 * loss <= cost) and
+    // only the tie gate stops the engine from committing a coin flip.
+    #[test]
+    fn exact_tie_never_commits_cost_bound() {
+        let config = SequentialEvidenceConfig::new(0.20, 0.75, 1.10, 0.60, 1.0).unwrap();
+        let mut eng = QuorumEngine::new(QuorumConfig {
+            rule: QuorumRule::SequentialEvidence(config),
+            mark_ttl_ms: 60_000,
+            tie_break_seed: 3,
+        });
+        let (pa, pb) = (uid(1), uid(2));
+        let (a, b) = (uid(10), uid(20));
+        for (reviewer, group) in [(a, "a"), (b, "b")] {
+            eng.register_reviewer(
+                ReviewerCredential::with_default_prior(reviewer, group, config).unwrap(),
+            );
+        }
+        // Exactly equal opposing evidence: one default endorsement each.
+        eng.propose(pa, a, 0);
+        eng.propose(pb, b, 0);
+
+        let assessment = eng.assessment(0).unwrap();
+        let snapshot = assessment.snapshot();
+        // The stopping economics ARE satisfied by the tie...
+        assert!(snapshot.evpi_upper_bound() <= config.query_cost());
+        // ...but there is no unique leader, so no basis may latch.
+        assert!(snapshot.unique_leader().is_none());
+        assert_eq!(assessment.trajectory().leader_gap_at(0), Some(0.0));
+        assert_eq!(snapshot.convergence_basis(), None);
+        assert!(matches!(eng.evaluate(0), QuorumOutcome::Pending { .. }));
+        assert!(!eng.is_converged());
+    }
+
+    #[test]
+    fn latched_cost_basis_never_relabels_after_more_evidence() {
+        let config = SequentialEvidenceConfig::new(0.01, 0.75, 10.0, 0.30, 1.0).unwrap();
+        let mut eng = QuorumEngine::new(QuorumConfig {
+            rule: QuorumRule::SequentialEvidence(config),
+            mark_ttl_ms: 60_000,
+            tie_break_seed: 9,
+        });
+        let (pa, pb) = (uid(1), uid(2));
+        let reviewers = [
+            uid(10),
+            uid(11),
+            uid(12),
+            uid(13),
+            uid(14),
+            uid(15),
+            uid(20),
+        ];
+        for (index, reviewer) in reviewers.into_iter().enumerate() {
+            eng.register_reviewer(
+                ReviewerCredential::with_default_prior(
+                    reviewer,
+                    format!("independent-{index}"),
+                    config,
+                )
+                .unwrap(),
+            );
+        }
+        eng.propose(pa, uid(10), 0);
+        eng.propose(pb, uid(20), 0);
+        eng.endorse(pa, uid(11), None, 0);
+        assert!(matches!(
+            eng.evaluate(0),
+            QuorumOutcome::Converged {
+                decision,
+                basis: ConvergenceBasis::CostBound,
+                ..
+            } if decision == pa
+        ));
+
+        for reviewer in [uid(12), uid(13), uid(14), uid(15)] {
+            eng.endorse(pa, reviewer, None, 1);
+        }
+        assert_eq!(
+            eng.assessment(1).unwrap().snapshot().convergence_basis(),
+            Some(ConvergenceBasis::EvidenceBound),
+            "the unlatchable live field now clears the stricter evidence bound"
+        );
+        assert_eq!(eng.convergence_basis(), Some(ConvergenceBasis::CostBound));
+        assert!(matches!(
+            eng.evaluate(1),
+            QuorumOutcome::Converged {
+                basis: ConvergenceBasis::CostBound,
+                ..
+            }
+        ));
+    }
+
+    // ---- RecallVote (OCEAN-302): quorum-of-recall, unforgeable --------------
+
+    // A recall carries only once a genuine threshold of DISTINCT credentialed
+    // voters has voted no-confidence — and stays carried after.
+    #[test]
+    fn recall_carries_at_threshold_of_distinct_voters() {
+        let title = uid(1);
+        let mut recall = RecallVote::new(title, 3);
+
+        // First two distinct votes: still pending (2 < 3).
+        assert_eq!(
+            recall.cast(uid(10)),
+            RecallOutcome::Pending {
+                votes: 1,
+                threshold: 3
+            }
+        );
+        assert_eq!(
+            recall.cast(uid(11)),
+            RecallOutcome::Pending {
+                votes: 2,
+                threshold: 3
+            }
+        );
+        assert!(!recall.is_carried());
+
+        // Third DISTINCT vote crosses the threshold -> carried.
+        assert_eq!(
+            recall.cast(uid(12)),
+            RecallOutcome::Carried {
+                title_id: title,
+                votes: 3
+            }
+        );
+        assert!(recall.is_carried());
+
+        // Stays carried (a reached deposition is reached).
+        assert!(matches!(recall.evaluate(), RecallOutcome::Carried { .. }));
+    }
+
+    // THE UNFORGEABILITY PROPERTY: a single voter cannot manufacture a recall by
+    // spamming. One credential per voter, latest wins — 100 casts by one id is
+    // one vote, which never carries a threshold-3 recall.
+    #[test]
+    fn recall_single_voter_spamming_counts_once_and_never_carries() {
+        let title = uid(1);
+        let mut recall = RecallVote::new(title, 3);
+        let lone = uid(99);
+        for _ in 0..100 {
+            let out = recall.cast(lone);
+            assert_eq!(
+                out,
+                RecallOutcome::Pending {
+                    votes: 1,
+                    threshold: 3
+                },
+                "one voter is one credential no matter how many casts"
+            );
+        }
+        assert!(
+            !recall.is_carried(),
+            "a single forged voter must NOT carry a genuine-quorum recall"
+        );
+        assert_eq!(recall.votes(), 1);
+    }
+
+    // A threshold of 0 is clamped to 1: an empty recall can never "carry" with no
+    // votes (which would forge a deposition out of nothing).
+    #[test]
+    fn recall_threshold_zero_is_clamped_to_one() {
+        let title = uid(1);
+        let mut recall = RecallVote::new(title, 0);
+        assert_eq!(recall.threshold(), 1);
+        // No votes yet -> pending, not carried (the empty tally cannot depose).
+        assert_eq!(
+            recall.evaluate(),
+            RecallOutcome::Pending {
+                votes: 0,
+                threshold: 1
+            }
+        );
+        // One genuine vote then carries.
+        assert!(matches!(
+            recall.cast(uid(10)),
+            RecallOutcome::Carried { .. }
+        ));
+    }
+
+    // A voter can recant before quorum, dropping the count back below threshold.
+    #[test]
+    fn recall_withdraw_drops_count_before_quorum() {
+        let title = uid(1);
+        let mut recall = RecallVote::new(title, 2);
+        recall.cast(uid(10));
+        assert_eq!(
+            recall.cast(uid(11)),
+            RecallOutcome::Carried {
+                title_id: title,
+                votes: 2
+            }
+        );
+        // Already carried: withdrawing does NOT un-latch a reached deposition.
+        assert!(matches!(
+            recall.withdraw(uid(11)),
+            RecallOutcome::Carried { .. }
+        ));
+
+        // But on a fresh recall, withdrawing before quorum drops the count.
+        let mut recall2 = RecallVote::new(title, 2);
+        recall2.cast(uid(10));
+        assert_eq!(
+            recall2.withdraw(uid(10)),
+            RecallOutcome::Pending {
+                votes: 0,
+                threshold: 2
+            }
+        );
+        assert!(!recall2.is_carried());
+    }
+}

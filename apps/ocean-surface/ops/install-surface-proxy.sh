@@ -1,0 +1,227 @@
+#!/usr/bin/env bash
+# Install and supervise the Ocean Surface proxy plus automatic main deployment.
+#
+# Idempotent. Safe to re-run after a pull/rebuild. What it does:
+#   1. Builds the proxy and WASM release from MAIN, then atomically promotes it.
+#   2. Installs the proxy and auto-deploy LaunchAgent plists.
+#   3. By default PRINTS the bootstrap/kickstart commands for you to run.
+#      Pass --bootstrap to actually touch the live launchd on this box.
+#
+# The live bootstrap is OPT-IN. Without --bootstrap this script builds/promotes
+# the release and stages both plists, but does not touch launchd. It HARD-FAILS
+# on a non-main checkout (override with --allow-non-main). Mirrors ocean-os's
+# ops/install-ocean-daemon.sh (build-from-main guard + idempotency).
+set -euo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/../deploy/surface-release.sh"
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+PROXY_LABEL="dev.risingtides.ocean-surface-proxy"
+AUTO_LABEL="dev.risingtides.ocean-surface-auto-deploy"
+PROXY_PLIST_SRC="$REPO/deploy/$PROXY_LABEL.plist"
+AUTO_PLIST_SRC="$REPO/deploy/$AUTO_LABEL.plist"
+PROXY_PLIST_DST="$OWNER_HOME/Library/LaunchAgents/$PROXY_LABEL.plist"
+AUTO_PLIST_DST="$OWNER_HOME/Library/LaunchAgents/$AUTO_LABEL.plist"
+LAUNCHER_DIR="$OWNER_HOME/.config/ocean-surface/bin"
+DOMAIN="gui/$(id -u)"
+
+# --bootstrap (off by default) opts in to touching the live launchd domain.
+# --allow-non-main (off by default) is the deliberate escape hatch for the build-
+# from-main guard; without it the script HARD-FAILS on a non-main checkout.
+BOOTSTRAP=0
+ALLOW_NON_MAIN=0
+for arg in "$@"; do
+  case "$arg" in
+    --bootstrap) BOOTSTRAP=1 ;;
+    --allow-non-main) ALLOW_NON_MAIN=1 ;;
+    -h|--help)
+      sed -n '2,11p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      exit 0 ;;
+    *)
+      echo "unknown arg: $arg (use --bootstrap, --allow-non-main, or --help)" >&2
+      exit 2 ;;
+  esac
+done
+
+export PATH="$OWNER_HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$OWNER_HOME/.cargo/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"
+
+# --- auth-env preflight (prod contract) ----------------------------------------
+# Creds live in a 0600 env file sourced by deploy/ocean-surface-proxy.sh — never
+# in the plist. Fail early with an actionable message so a fresh install cannot
+# stage a supervised proxy that then refuses to boot (auth on, no creds) or,
+# worse, gets an ad-hoc AUTH=off override. This check does not print secrets.
+AUTH_ENV="$OWNER_HOME/.config/ocean-surface/proxy-auth.env"
+if [[ ! -f "$AUTH_ENV" ]]; then
+  echo "ERROR: missing $AUTH_ENV" >&2
+  echo "       Prod auth requires a 0600 env file that exports:" >&2
+  echo "         OCEAN_SURFACE_AUTH=on" >&2
+  echo "         OCEAN_SURFACE_USER=..." >&2
+  echo "         OCEAN_SURFACE_PASS=..." >&2
+  echo "         OCEAN_SURFACE_COOKIE_SECURE=on  # public HTTPS tunnel" >&2
+  echo "       Create it before installing (chmod 600). Password material" >&2
+  echo "       typically lives in ~/.config/ocean-surface/proxy-basic-auth.txt." >&2
+  echo "       There are no built-in operator credentials." >&2
+  exit 1
+fi
+# shellcheck disable=SC1090
+# Source in a subshell so we can validate without leaking into this script's env
+# permanently beyond the checks below.
+auth_mode="$(set -a; . "$AUTH_ENV"; set +a; printf '%s' "${OCEAN_SURFACE_AUTH:-}")"
+auth_user="$(set -a; . "$AUTH_ENV"; set +a; printf '%s' "${OCEAN_SURFACE_USER:-}")"
+auth_pass="$(set -a; . "$AUTH_ENV"; set +a; printf '%s' "${OCEAN_SURFACE_PASS:-}")"
+if [[ -z "$auth_mode" || -z "$auth_user" || -z "$auth_pass" ]]; then
+  echo "ERROR: $AUTH_ENV must export OCEAN_SURFACE_AUTH, OCEAN_SURFACE_USER, and OCEAN_SURFACE_PASS." >&2
+  echo "       Refusing to install an incomplete auth config (values not printed)." >&2
+  exit 1
+fi
+if [[ "$auth_mode" != "on" && "$auth_mode" != "off" ]]; then
+  echo "ERROR: OCEAN_SURFACE_AUTH in $AUTH_ENV must be 'on' or 'off' (got a non-empty other value)." >&2
+  exit 1
+fi
+if [[ "$auth_mode" == "off" ]]; then
+  echo "WARNING: OCEAN_SURFACE_AUTH=off in $AUTH_ENV — trusted-localhost escape hatch only." >&2
+fi
+# Never echo USER/PASS.
+
+# --- build-from-main guard (operator rule) -------------------------------------
+# The supervised service runs a PREBUILT binary; that binary must be built from
+# main. HARD-FAIL on a non-main checkout BEFORE any build/install — a warn+sleep
+# enforces nothing in unattended/operator runs. The only way past is the explicit
+# --allow-non-main flag. "On main" = the branch is `main`, OR HEAD is detached
+# exactly at origin/main (e.g. a CI checkout of the merge commit).
+branch="$(git -C "$REPO" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
+on_main=0
+if [[ "$branch" == "main" ]]; then
+  on_main=1
+else
+  head_sha="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo 'x')"
+  origin_main_sha="$(git -C "$REPO" rev-parse origin/main 2>/dev/null || echo 'y')"
+  [[ "$head_sha" == "$origin_main_sha" ]] && on_main=1
+fi
+if (( on_main == 0 )); then
+  if (( ALLOW_NON_MAIN == 1 )); then
+    echo "WARNING: repo at $REPO is on '$branch', not main — proceeding due to --allow-non-main." >&2
+  else
+    echo "ERROR: repo at $REPO is on branch '$branch', not 'main'." >&2
+    echo "       Operator rule: build/deploy the proxy from MAIN only." >&2
+    echo "       Refusing to build/install from a feature branch. Either:" >&2
+    echo "         git checkout main && git pull        # then re-run, or" >&2
+    echo "         re-run with --allow-non-main          # deliberate override." >&2
+    exit 1
+  fi
+fi
+
+# A revision stamp must describe committed source, including explicit overrides.
+require_clean_source() {
+  local source_status
+  source_status="$(git -C "$REPO" status --porcelain --untracked-files=normal -- .)" || release_fail "cannot read Surface source status"
+  [[ -z "$source_status" ]] || release_fail "commit Surface source changes before installing a revision"
+}
+require_clean_source
+STATE_DIR="$OWNER_HOME/.config/ocean-surface"
+SURFACE_DIR="$REPO"
+acquire_release_lock
+CLIENT_BACKUP=""
+PROMOTION_STARTED=0
+cleanup_install() {
+  local status=$?
+  RECOVERY_FAILED=0
+  set +e
+  if [[ -n "$CLIENT_BACKUP" ]]; then
+    if (( status != 0 )); then
+      restore_clients "$CLIENT_BACKUP" || retain_recovery "$CLIENT_BACKUP" "client/config restoration incomplete"
+      restore_legacy_proxy || retain_recovery "$CLIENT_BACKUP" "prior legacy executable restoration incomplete"
+    fi
+    if (( RECOVERY_FAILED == 0 )) && { (( status == 0 )) || (( PROMOTION_STARTED == 0 )); }; then
+      rm -f "$CLIENT_BACKUP/recovery-pending" || retain_recovery "$CLIENT_BACKUP" "backup cleanup incomplete"
+    fi
+    finish_client_backup "$CLIENT_BACKUP"
+  fi
+  release_lock
+  exit "$status"
+}
+trap cleanup_install EXIT
+capture_legacy_proxy
+snapshot_clients
+
+export CARGO_TARGET_DIR="$REPO/target"
+
+deploy_sha="$(git -C "$REPO" rev-parse HEAD)" || release_fail "cannot read source revision"
+echo "==> [1/3] building proxy + wasm bundle (release) from '$branch' at $deploy_sha"
+( cd "$REPO" && cargo build -p ocean-surface-proxy --release )
+BIN="$REPO/target/release/ocean-surface-proxy"
+if [[ ! -x "$BIN" ]]; then
+  echo "FATAL: build did not produce an executable at $BIN" >&2
+  exit 1
+fi
+if ! command -v trunk >/dev/null 2>&1; then
+  echo "FATAL: 'trunk' is required to build the release bundle." >&2
+  exit 1
+fi
+( cd "$REPO" && env -u NO_COLOR trunk build --release )
+build_sha="$(git -C "$REPO" rev-parse HEAD)" || release_fail "cannot verify built source revision"
+[[ "$build_sha" == "$deploy_sha" ]] || release_fail "Surface HEAD changed during build; release not selected"
+require_clean_source
+OCEAN_SURFACE_BOOTSTRAP="$BOOTSTRAP" snapshot_supervision "$CLIENT_BACKUP"
+
+echo "==> [2/3] installing stable launchers and launch agents"
+mkdir -p "$LAUNCHER_DIR" "$OWNER_HOME/Library/LaunchAgents"
+cp "$REPO/deploy/ocean-surface-proxy.sh" "$LAUNCHER_DIR/ocean-surface-proxy.sh"
+cp "$REPO/deploy/ocean-surface-auto-deploy.sh" "$LAUNCHER_DIR/ocean-surface-auto-deploy.sh"
+cp "$REPO/deploy/surface-release.sh" "$LAUNCHER_DIR/surface-release.sh"
+chmod 755 "$LAUNCHER_DIR/ocean-surface-proxy.sh" "$LAUNCHER_DIR/ocean-surface-auto-deploy.sh"
+# Parse templates and serialize strings, so spaces and XML-sensitive path
+# characters survive without shell or XML interpolation.
+python3 - "$OWNER_HOME" "$REPO" "$PROXY_PLIST_SRC" "$PROXY_PLIST_DST" "$AUTO_PLIST_SRC" "$AUTO_PLIST_DST" <<'PYTHON'
+import plistlib
+import sys
+
+owner_home, component, *paths = sys.argv[1:]
+
+def render(value):
+    if isinstance(value, str):
+        return value.replace('__OCEAN_HOME__', owner_home).replace('__OCEAN_SURFACE_REPO__', component)
+    if isinstance(value, list):
+        return [render(item) for item in value]
+    if isinstance(value, dict):
+        return {key: render(item) for key, item in value.items()}
+    return value
+
+for source, destination in zip(paths[::2], paths[1::2]):
+    with open(source, 'rb') as template:
+        config = render(plistlib.load(template))
+    with open(destination, 'wb') as output:
+        plistlib.dump(config, output, sort_keys=False)
+PYTHON
+plutil -lint "$PROXY_PLIST_DST"
+plutil -lint "$AUTO_PLIST_DST"
+PROMOTION_STARTED=1
+OCEAN_SURFACE_REPO="$REPO" OCEAN_SURFACE_STATE_DIR="$STATE_DIR" \
+  OCEAN_SURFACE_CLIENT_BACKUP="$CLIENT_BACKUP" OCEAN_SURFACE_NO_RESTART="$((1 - BOOTSTRAP))" \
+  OCEAN_SURFACE_BOOTSTRAP="$BOOTSTRAP" \
+  "$REPO/deploy/ocean-surface-auto-deploy.sh" --promote "$REPO/dist" "$deploy_sha" "$BIN"
+
+if (( BOOTSTRAP == 0 )); then
+  echo
+  echo "==> [3/3] plists staged. Live bootstrap is OPT-IN — not touching launchd."
+  echo "    Re-run with --bootstrap to start the proxy and automatic main deployment."
+  echo
+  echo "        launchctl bootout   $DOMAIN/$PROXY_LABEL 2>/dev/null || true"
+  echo "        launchctl bootout   $DOMAIN/$AUTO_LABEL 2>/dev/null || true"
+  echo "        launchctl bootstrap $DOMAIN \"$PROXY_PLIST_DST\""
+  echo "        launchctl bootstrap $DOMAIN \"$AUTO_PLIST_DST\""
+  echo "        launchctl kickstart -k $DOMAIN/$PROXY_LABEL"
+  echo
+  echo "    Then check it's listening:  lsof -nP -iTCP:8790 -sTCP:LISTEN"
+  echo "    Tail proxy logs:             tail -f /private/tmp/ocean-surface-proxy.log"
+  echo "    Tail deploy logs:            tail -f /private/tmp/ocean-surface-auto-deploy.log"
+  exit 0
+fi
+
+echo
+echo "==> done. status:"
+launchctl print "$DOMAIN/$PROXY_LABEL" 2>/dev/null | grep -E 'state|pid|program|path =' | sed 's/^/    proxy: /' || true
+launchctl print "$DOMAIN/$AUTO_LABEL" 2>/dev/null | grep -E 'state|pid|program|path =' | sed 's/^/    deploy: /' || true
+echo
+echo "    Check it's listening:   lsof -nP -iTCP:8790 -sTCP:LISTEN"
+echo "    Tail proxy logs:        tail -f /private/tmp/ocean-surface-proxy.log"
+echo "    Tail deploy logs:       tail -f /private/tmp/ocean-surface-auto-deploy.log"

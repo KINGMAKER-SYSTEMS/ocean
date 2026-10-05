@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Ocean Surface proxy supervisor (OCEAN-161, SEV1).
+       Serves the atomically selected PWA release and reverse-proxies /v1/* to the daemon on
+       0.0.0.0:8790. KeepAlive respawns it whenever it dies so the web surface
+       never silently goes offline. Install via ops/install-surface-proxy.sh.
+       Auth creds are NOT in this plist — deploy/ocean-surface-proxy.sh sources
+       ~/.config/ocean-surface/proxy-auth.env (0600). Do not add
+       OCEAN_SURFACE_AUTH/USER/PASS here.
+       Paths are rendered by ops/install-surface-proxy.sh for the active user. -->
+  <key>Label</key>
+  <string>dev.risingtides.ocean-surface-proxy</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__OCEAN_HOME__/.config/ocean-surface/bin/ocean-surface-proxy.sh</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__OCEAN_SURFACE_REPO__</string>
+
+  <!-- Respawn on crash/exit. -->
+  <key>KeepAlive</key>
+  <true/>
+
+  <!-- Start as soon as the agent is bootstrapped (and on login). -->
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- Don't hot-loop a hard-failing binary: wait 10s between respawns. -->
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>ProcessType</key>
+  <string>Interactive</string>
+
+  <key>StandardOutPath</key>
+  <string>/private/tmp/ocean-surface-proxy.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/private/tmp/ocean-surface-proxy.log</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>OCEAN_SURFACE_REPO</key>
+    <string>__OCEAN_SURFACE_REPO__</string>
+    <!-- LAN/tailnet bind (default). Use 127.0.0.1:8790 to keep it host-local. -->
+    <key>OCEAN_SURFACE_BIND</key>
+    <string>0.0.0.0:8790</string>
+    <!-- Atomic symlink advanced only after a verified origin/main build. -->
+    <key>OCEAN_SURFACE_DIST</key>
+    <string>__OCEAN_HOME__/.config/ocean-surface/current</string>
+    <!-- Daemon the proxy reverse-proxies /v1/* to. -->
+    <key>OCEAN_DAEMON_URL</key>
+    <string>http://127.0.0.1:4780</string>
+    <!-- launchd starts with a minimal PATH; give the launcher a sane one. -->
+    <key>PATH</key>
+    <string>__OCEAN_HOME__/.cargo/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+</dict>
+</plist>
