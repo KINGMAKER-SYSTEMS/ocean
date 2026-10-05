@@ -294,11 +294,10 @@ CARVED → inset well). The names and recipes travel; only the renderer changes.
 
 ## 6. Per-surface notes
 
-- Landing (`transcript__landing`): the OCEAN banner hero — 8 `pre` rows, one
-  ramp color per row, fluid mono sizing. Title is visually-hidden (screen
-  readers only). Below the banner sits ONE quiet secondary control
-  (`transcript__sessions-launcher`, "Sessions") that opens the sessions
-  modal — no icon, no subtitle, no card, no glow bath.
+- Empty session (`transcript__landing`): one static 64px circular Ocean mark,
+  an accessible title, and the shared composer below. Sessions lives in the
+  header/native navigation. No full-pane hero, idle animation or duplicate
+  navigation.
 - Tool drawers: quiet single-line disclosures, mono label, status dot
   (ok/err/running) instead of colored rails.
 - Thinking: italic 13px `--fg-3` with pill toggle; never louder than answers.

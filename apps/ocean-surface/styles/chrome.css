@@ -86,8 +86,7 @@
 
 .ocean-brand__word {
   display: inline-flex;
-  /* Brand font — the same --wm-font (Poppins) the landing reveal letters
-     use; the old --mono terminal face predates the wordmark switch. */
+  /* The header wordmark uses the shared Poppins brand font. */
   font-family: var(--wm-font);
   font-size: 14px;
   font-weight: 700;

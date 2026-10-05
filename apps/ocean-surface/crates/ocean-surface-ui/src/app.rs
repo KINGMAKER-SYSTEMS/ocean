@@ -1419,6 +1419,7 @@ fn producer_decide(intent: Option<(String, u64)>, in_tauri: bool) -> PreviewProd
 #[component]
 pub fn App() -> impl IntoView {
     let daemon = Daemon::new(daemon_url_from_env());
+    let endpoint_ready = daemon.endpoint_ready;
     let planner_state = RwSignal::new(PlannerState::Idle);
     let planner_project = RwSignal::new(String::new());
     let planner_workspace = RwSignal::new(String::new());
@@ -2719,7 +2720,7 @@ pub fn App() -> impl IntoView {
             // retain the existing session transcript/composer and are reached
             // explicitly from the app menu; selecting a room never swaps in a
             // separate stage or overlay.
-            <Show when=move || show_rooms.get()>
+            <Show when=move || show_rooms.get() && endpoint_ready.get()>
                 <RoomsWorkspace rooms=rooms on_close=Callback::new(move |()| show_rooms.set(false)) />
             </Show>
 
@@ -2733,7 +2734,7 @@ pub fn App() -> impl IntoView {
                         // it collapses again on `call_ended`. Purely additive.
                         <crate::call::CallPanel daemon=daemon.clone() />
 
-                        <Transcript daemon=daemon.clone() show_sessions=show_sessions />
+                        <Transcript daemon=daemon.clone() />
 
                         // Agent canvas (OCEAN-178 → OCEAN-248). Folds the
                         // daemon's `surface_patch` stream into a client-side
@@ -2825,20 +2826,8 @@ pub fn App() -> impl IntoView {
                                     />
                                 </div>
                             </Show>
-                            // Push-to-talk only when the proxy has a usable xAI key;
-                            // otherwise a dim, disabled placeholder explains why.
-                            <Show
-                                when=move || voice_ready.get()
-                                fallback=|| view! {
-                                    <div class="voice-wrap">
-                                        <button class="voice-orb is-disabled" type="button" disabled=true
-                                                title="voice off — set xAI key in ~/.config/ocean-surface/xai.key">
-                                            <span class="voice-orb__glyph"><crate::icons::Mic /></span>
-                                        </button>
-                                        <span class="voice-hint">"voice off"</span>
-                                    </div>
-                                }
-                            >
+                            // Render voice only when the host offers a usable transport.
+                            <Show when=move || voice_ready.get()>
                                 <VoiceOrb on_transcript=on_transcript on_status=on_voice_status muted=muted on_dictate=on_dictate on_plan=on_plan />
                             </Show>
                             <div class="ocean-turn-controls">

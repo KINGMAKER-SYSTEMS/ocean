@@ -115,6 +115,15 @@ The web proxy reads the daemon-minted mode-0600 observer token immediately
 before each upstream request and injects it server-side. Never expose that
 token to browser code, bundle it, or cache it in client storage.
 
+## Empty Session Surface
+
+- Empty transcripts show the existing static circular Ocean mark and an
+  accessible title. Keep the composer primary: no full-pane animated hero,
+  repeated Sessions action, marketing copy or idle rendering loop.
+- Sessions navigation stays in the existing header/native navigation. Hide
+  unavailable voice controls instead of showing disabled setup placeholders
+  or local credential paths. Existing voice transport readiness owns visibility.
+
 ## Model and Effort Control
 
 - `crates/ocean-surface-ui/src/model_control.rs` owns the composer's single model/effort disclosure.
@@ -195,6 +204,9 @@ Web surface session UI:
   accumulated text with the authoritative done transcript. Keep this projection
   conversation-only (Planner has no chat transcript), and do not represent it as
   daemon-persisted history: a later session refresh remains authoritative.
+- Mount the Rooms workspace only after `daemon.endpoint_ready` confirms proxy
+  config or the host fallback has resolved. Its mount fetch must never race
+  bootstrap against an initial fallback daemon URL.
 - Idle web/extension headers stay single-bar: project/session context may stay
   visible, but call/join affordances live behind overflow until intentionally
   opened or actively connected.

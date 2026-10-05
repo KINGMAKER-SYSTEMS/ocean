@@ -292,18 +292,15 @@
 .wave-badge__ping-ring { stroke: var(--badge-foam); }
 .wave-badge__ping-glint { fill: var(--badge-foam); }
 
-/* ── Landing hero field — the Soundings scene owns the whole pane. The
-   canvas host is absolute inset:0, so the reveal wrapper must stretch to
-   the full landing box (the old 340px cap sized the retired wordmark SVG). */
-.transcript__landing-reveal {
-  flex: 1 1 auto;
-  align-self: stretch;
-  width: 100%;
-  min-height: 0;
+/* Static empty-session mark: no full-pane canvas or idle animation. */
+.transcript__landing-mark {
+  width: 64px;
+  height: 64px;
+  font-size: 64px;
+  line-height: 1;
 }
 
-
-/* Screen-reader title; visually quiet under the banner. */
+/* Keep one accessible title without repeating header branding. */
 .transcript__landing-title {
   position: absolute;
   width: 1px;
@@ -311,44 +308,6 @@
   overflow: hidden;
   clip: rect(0 0 0 0);
   white-space: nowrap;
-}
-
-.transcript__sessions-launcher {
-  appearance: none;
-  display: inline-flex;
-  align-items: center;
-  align-self: center;
-  height: var(--ctl-h);
-  margin-top: 4px;
-  padding: 0 18px;
-  background: var(--bg-elevated);
-  box-shadow: var(--elev-1);
-  border-radius: var(--radius);
-  color: var(--fg-2);
-  font-family: var(--font);
-  font-size: 13px;
-  font-weight: 500;
-  line-height: 1;
-  cursor: pointer;
-  user-select: none;
-  transition:
-    background var(--dur-fast) var(--ease),
-    color var(--dur-fast) var(--ease),
-    transform var(--dur-fast) var(--ease);
-}
-
-.transcript__sessions-launcher:hover {
-  background: var(--bg-hover);
-  color: var(--fg);
-}
-
-.transcript__sessions-launcher:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
-}
-
-.transcript__sessions-launcher:active {
-  transform: scale(0.985);
 }
 
 /* ── Turns and prose blocks ──────────────────────────────────────── */
@@ -920,77 +879,6 @@
     transition: none;
   }
 
-  /* Landing hero + thinking plate render a single settled GL frame in Rust;
-     no CSS motion to kill beyond the shared rules above. */
-}
-
-/* ── Soundings hero + thinking plate ─────────────────────────────────
-   Geometry/motion live in Rust WebGL (loader.rs); colors arrive as shader
-/* ── Full-glass landing — the reveal's water floods the whole pane ────
-   The scene svg overflows its centered box (water paths span far beyond
-   the 600×600 viewBox); the landing clips it at the pane edges, reading
-   as a glass filled up to the orb. */
-.transcript__landing {
-  position: relative;
-  justify-content: center;
-  min-height: 100%;
-  overflow: hidden;
-}
-
-.transcript__landing-reveal {
-  position: relative;
-}
-
-.transcript__landing-reveal .soundings-landing canvas {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  display: block;
-}
-
-.ocean-reveal {
-  overflow: visible;
-  /* No drop-shadow here: a filter would rasterize the full-bleed water's
-     ink overflow every frame (huge layer, mobile jank). */
-  filter: none;
-}
-
-/* Sessions launcher — submerged in the scene's water zone. Surfaces when
-   the rAF wavefront crosses its spot (SoundingsLanding stamps
-   `data-flooded` on its host div — no hardcoded delay). */
-.transcript__landing-reveal .transcript__sessions-launcher {
-  position: absolute;
-  left: 50%;
-  top: 75%;
-  transform: translateX(-50%);
-  margin-top: 0;
-  z-index: 1;
-  color: var(--water-crest);
-  background: color-mix(in srgb, var(--water-mid) 32%, transparent);
-  border: 1px solid color-mix(in srgb, var(--water-crest-soft) 30%, transparent);
-  box-shadow: none;
-  backdrop-filter: blur(2px);
-}
-
-.transcript__landing-reveal .transcript__sessions-launcher:hover {
-  background: color-mix(in srgb, var(--water-mid) 50%, transparent);
-  color: var(--badge-foam);
-}
-
-@media (prefers-reduced-motion: no-preference) {
-  .transcript__landing-reveal .transcript__sessions-launcher {
-    opacity: 0;
-    transform: translateX(-50%) translateY(10px);
-    transition: opacity 0.7s ease-out, transform 0.7s ease-out;
-    pointer-events: none;
-  }
-
-  .transcript__landing-reveal [data-flooded] ~ .transcript__sessions-launcher {
-    opacity: 1;
-    transform: translateX(-50%) translateY(0);
-    pointer-events: auto;
-  }
 }
 
 /* ── Return-to-latest affordance ─────────────────────────────────────────

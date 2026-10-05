@@ -154,3 +154,17 @@ Final Ocean workspace: 3,340 passed, ten ignored; strict providers/agent/daemon 
 
 Owning Surface/providers/agent/daemon docs and shared catalog index updated. Root ownership and Child devlog indexes stay unchanged because no boundaries moved. Fresh review and new-head hosted builds remain required; runtime migration compatibility, connection repair and broader UI acceptance remain active.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [12:45] [05-10-26]
+agent: [codex] [gpt-6]
+worktree: [feat/model-effort-control] [/Users/risingtidesdev/dev/ocean-ui-current]
+type: [refactor]
+area: [frontend] [design] [testing]
+
+PR #2 replaces the empty-session full-pane animated banner and duplicate Sessions action with the existing static circular mark. Unavailable voice renders no disabled setup placeholder. Removed the unused WebGL hero module/features/styles, retired two hero-only tests, retained Sessions chrome tests, and removed two unreferenced agent-picker helpers that caused Surface's existing strict-Clippy failures. Pending-response indicators and accepted Rooms behavior remain intact.
+
+A preview exposed Rooms mounting before proxy bootstrap resolved the daemon URL. The new endpoint-ready signal gates its mount/fetch until proxy config or the host fallback is resolved. An eight-second delayed-config browser fixture proves Rooms stays unmounted before resolution and then fetches the same-origin fixture. Desktop and 390px previews prove the quiet start and combined picker; compact viewport/scroll width are both 390 and the panel stays within x=30..360. These are fixture checks, not live acceptance.
+
+Final Surface: 895 tests passed (two retired hero tests removed), strict WASM Clippy and Trunk build passed; docs-check passed. Initial build failed for disk space; clearing this task's disposable Ocean incremental compiler cache recovered space, and final checks reran successfully. No user data or live service changed. Surface devlog/design guidance updated; root and Child devlog indexes stay unchanged because ownership boundaries did not move. Prior auth-route head a5ac9279 has both hosted builds green. Fresh review, new-head CI, account repair, runtime compatibility and broader UI/live acceptance remain required.
+_________________________________________________________________________________

@@ -339,7 +339,7 @@ fn tool_run_failed_count(turns: &[crate::model::Turn], anchor: usize) -> usize {
 }
 
 #[component]
-pub fn Transcript(daemon: Daemon, show_sessions: RwSignal<bool>) -> impl IntoView {
+pub fn Transcript(daemon: Daemon) -> impl IntoView {
     let turns = daemon.turns;
     // Project turns into top-level rows: normal turns render one-to-one, but a
     // run of consecutive tool-only assistant turns collapses into a single
@@ -407,10 +407,8 @@ pub fn Transcript(daemon: Daemon, show_sessions: RwSignal<bool>) -> impl IntoVie
 
     // Empty until the first turn lands. On a fresh load (no session, no
     // project) `turns` is empty, so without this the main pane would be a
-    // blank scroll container — the operator's "blank right pane". Render a
-    // usable landing instead: a clear "start typing" prompt that points at the
-    // composer below, which creates a session on the first message. A selected
-    // session always has ≥1 turn, so this never shadows a real transcript.
+    // blank scroll container. Keep the empty rail quiet; the composer remains
+    // the primary affordance and creates a session only on the first message.
     let is_empty = move || turns.with(Vec::is_empty);
 
     // Focused permission: true iff daemon.session_id matches active AND
@@ -447,17 +445,8 @@ pub fn Transcript(daemon: Daemon, show_sessions: RwSignal<bool>) -> impl IntoVie
         <div class="transcript" node_ref=container on:scroll=on_scroll>
             <Show when=is_empty>
                 <div class="transcript__landing">
-                    // Approved v22 hero landing: Soundings field with
-                    // dispersive wave physics, letter etches, and the
-                    // launcher etching in when a wavefront crosses it.
-                    <div class="transcript__landing-reveal">
-                        <crate::loader::SoundingsLanding />
-                        <button
-                            class="transcript__sessions-launcher"
-                            on:click=move |_| show_sessions.set(true)
-                        >
-                            "Sessions"
-                        </button>
+                    <div class="transcript__landing-mark" aria-hidden="true">
+                        <WaveBadge />
                     </div>
                     <h1 class="transcript__landing-title">"Ocean"</h1>
                 </div>

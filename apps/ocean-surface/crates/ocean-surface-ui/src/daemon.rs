@@ -1966,6 +1966,8 @@ struct PlannerStreamSources {
 #[derive(Clone)]
 pub struct Daemon {
     pub url: RwSignal<String>,
+    /// True only after proxy configuration or the host fallback is resolved.
+    pub endpoint_ready: RwSignal<bool>,
     pub turns: RwSignal<Vec<Turn>>,
     pub streaming: RwSignal<bool>,
     pub session_id: RwSignal<Option<String>>,
@@ -2473,6 +2475,7 @@ impl Daemon {
     pub fn new(url: impl Into<String>) -> Self {
         Self {
             url: RwSignal::new(url.into()),
+            endpoint_ready: RwSignal::new(false),
             turns: RwSignal::new(Vec::new()),
             streaming: RwSignal::new(false),
             session_id: RwSignal::new(None),
@@ -2557,6 +2560,7 @@ impl Daemon {
     pub fn dummy() -> Self {
         Self {
             url: RwSignal::new("http://127.0.0.1:4780".into()),
+            endpoint_ready: RwSignal::new(false),
             turns: RwSignal::new(Vec::new()),
             streaming: RwSignal::new(false),
             session_id: RwSignal::new(None),
@@ -2645,6 +2649,7 @@ impl Daemon {
             let is_extension = running_as_extension();
             if is_extension {
                 daemon.url.set(DEFAULT_DAEMON_URL.to_string());
+                daemon.endpoint_ready.set(true);
                 // No proxy fronts the side panel: voice goes daemon-direct to
                 // `/v1/voice/*`, so readiness is host-neutral (offered) and any
                 // missing-credential state surfaces per request. There is no
@@ -2707,6 +2712,7 @@ impl Daemon {
                     // No proxy in front (e.g. trunk serve direct). Keep fallback.
                 }
             }
+            daemon.endpoint_ready.set(true);
             // Seed voice readiness from the host-neutral decision. Web with a
             // proxy honors its `has_auth`; Tauri and proxy-less web fall through
             // to `None` → offered (daemon-direct), credential state per request.
