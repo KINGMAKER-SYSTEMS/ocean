@@ -1,9 +1,11 @@
 //! Session-scoped provider context history for the mutable right-rail surface.
 //!
-//! This projection records only daemon-reported final-request context usage from
-//! finished turns. It never substitutes cumulative input tokens or estimates,
-//! and a stream gap is shown as partial rather than silently claiming complete
-//! session history.
+//! This projection records only daemon-reported context usage from finished
+//! turns: the final request, or the last completed request of a turn that
+//! failed or ran out of rounds, captioned as such. It never substitutes
+//! cumulative input tokens or
+//! estimates, and a stream gap is shown as partial rather than silently
+//! claiming complete session history.
 
 use std::collections::VecDeque;
 
@@ -29,6 +31,9 @@ struct UsageSample {
     model: Option<String>,
     used_tokens: u64,
     context_window: u64,
+    /// The reading predates a failure or a turn-limit stop; the saved
+    /// transcript can be larger.
+    floor: bool,
 }
 
 impl UsageSample {
@@ -38,6 +43,14 @@ impl UsageSample {
             .saturating_mul(100)
             .checked_div(self.context_window)
             .unwrap_or(0)
+    }
+
+    fn caption(&self) -> &'static str {
+        if self.floor {
+            "last completed request"
+        } else {
+            "final request"
+        }
     }
 }
 
@@ -96,6 +109,7 @@ impl SessionUsageComponent {
                         model: self.turn_model.clone(),
                         used_tokens: usage.used_tokens,
                         context_window: usage.context_window,
+                        floor: usage.is_floor(),
                     };
                     if self.samples.back().map(|sample| sample.turn_id) == Some(*turn_id) {
                         self.samples.pop_back();
@@ -182,7 +196,7 @@ impl Component for SessionUsageComponent {
                 if self.partial {
                     "partial · stream gap"
                 } else {
-                    "final requests · provider measured"
+                    "finished turns · provider measured"
                 },
             );
             return;
@@ -225,7 +239,7 @@ impl Component for SessionUsageComponent {
             )),
             Line::from(Span::styled(
                 panel::fit_cells(
-                    &format!(" {}% · final request", latest.percent()),
+                    &format!(" {}% · {}", latest.percent(), latest.caption()),
                     rows[1].width as usize,
                 ),
                 Style::default().fg(theme::COMMENT),
@@ -258,6 +272,23 @@ mod tests {
 
     fn tid(value: u128) -> AgentTurnId {
         AgentTurnId(uuid::Uuid::from_u128(value))
+    }
+
+    fn render(usage: &mut SessionUsageComponent) -> String {
+        let backend = ratatui::backend::TestBackend::new(40, 8);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| usage.draw(frame, frame.area()))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let mut out = String::new();
+        for y in buf.area.top()..buf.area.bottom() {
+            for x in buf.area.left()..buf.area.right() {
+                out.push_str(buf.cell((x, y)).unwrap().symbol());
+            }
+            out.push('\n');
+        }
+        out
     }
 
     fn finished(session_id: AgentSessionId, turn_id: AgentTurnId) -> AgentTurnEvent {
@@ -301,6 +332,47 @@ mod tests {
             usage.latest().and_then(|sample| sample.model.as_deref()),
             Some("model-a")
         );
+    }
+
+    #[test]
+    fn a_reading_taken_before_a_failure_is_not_captioned_final() {
+        let mut usage = SessionUsageComponent::default();
+        let session_id = sid(11);
+        usage.update(&Action::SessionBound(session_id));
+        for (turn, source) in [
+            (12, ocean_agent_sdk::CONTEXT_SOURCE_FINAL_ROUND),
+            (13, ocean_agent_sdk::CONTEXT_SOURCE_LAST_COMPLETED_ROUND),
+        ] {
+            usage.update(&Action::AgentEvent(Box::new(AgentTurnEvent::TurnStarted {
+                session_id,
+                turn_id: tid(turn),
+                model: None,
+            })));
+            let mut event = finished(session_id, tid(turn));
+            if let AgentTurnEvent::TurnFinished {
+                status,
+                context_usage: Some(context),
+                ..
+            } = &mut event
+            {
+                context.source = source.into();
+                if context.is_floor() {
+                    *status = AgentTurnStatus::Failed;
+                }
+            }
+            usage.update(&Action::AgentEvent(Box::new(event)));
+        }
+
+        let captions: Vec<_> = usage.samples.iter().map(UsageSample::caption).collect();
+        assert_eq!(captions, ["final request", "last completed request"]);
+
+        // The panel draws the newest sample, which is the marked one.
+        let screen = render(&mut usage);
+        assert!(screen.contains("50% · last completed request"), "{screen}");
+        assert!(!screen.contains("final request"), "{screen}");
+        usage.samples.pop_back();
+        let screen = render(&mut usage);
+        assert!(screen.contains("50% · final request"), "{screen}");
     }
 
     #[test]

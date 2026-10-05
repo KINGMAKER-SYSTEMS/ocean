@@ -112,16 +112,44 @@ struct MessageDeltaPayload {
     stop_reason: Option<String>,
 }
 
+/// Usage as it appears on `message_start` and `message_delta`. The API types
+/// the input-side and cache fields as nullable, and Anthropic-compatible
+/// endpoints do send `null`. `#[serde(default)]` covers only a missing key, so
+/// an explicit `null` used to fail the whole frame, and a dropped
+/// `message_delta` frame takes the turn's `stop_reason` with it.
 #[derive(Deserialize, Debug, Default)]
 struct UsageDelta {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_zero")]
     input_tokens: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_zero")]
     output_tokens: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_zero")]
     cache_read_input_tokens: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_zero")]
     cache_creation_input_tokens: u64,
+}
+
+fn null_as_zero<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<u64, D::Error> {
+    Ok(Option::<u64>::deserialize(deserializer)?.unwrap_or(0))
+}
+
+/// Fold a `message_delta` usage report into the running usage. The report is
+/// cumulative for the whole message, so it replaces rather than adds; the
+/// input-side fields are absent or zero on older API versions and must not
+/// erase what `message_start` reported.
+fn apply_message_delta_usage(usage: &mut Usage, delta: &UsageDelta) {
+    usage.output = usage.output.max(delta.output_tokens);
+    if delta.input_tokens > 0 {
+        usage.input = delta.input_tokens;
+    }
+    if delta.cache_read_input_tokens > 0 {
+        usage.cache_read = delta.cache_read_input_tokens;
+    }
+    if delta.cache_creation_input_tokens > 0 {
+        usage.cache_write = delta.cache_creation_input_tokens;
+    }
 }
 
 #[derive(Deserialize, Debug)]
@@ -376,8 +404,11 @@ fn build_body(model: &Model, context: &Context, options: &StreamOptions) -> Valu
     if let Some(t) = options.temperature {
         body["temperature"] = json!(t);
     }
+    let id = model.id.trim_start_matches("claude-code-");
+    // Models on adaptive thinking. Each rejects `budget_tokens` and sampling
+    // parameters with a 400, whatever the thinking mode.
     let adaptive = matches!(
-        model.id.trim_start_matches("claude-code-"),
+        id,
         "claude-fable-5-1"
             | "fable-5-1"
             | "claude-fable-5"
@@ -386,28 +417,45 @@ fn build_body(model: &Model, context: &Context, options: &StreamOptions) -> Valu
             | "opus-5-5"
             | "claude-opus-5"
             | "opus-5"
+            | "claude-opus-4-8"
+            | "opus-4-8"
+            | "claude-opus-4-7"
+            | "opus-4-7"
             | "claude-sonnet-5"
             | "sonnet-5"
             | "claude-sonnet-5-5"
             | "sonnet-5-5"
     );
-    if adaptive
-        && options.reasoning == Some(ThinkingLevel::Off)
-        && matches!(
-            model.id.trim_start_matches("claude-code-"),
-            "claude-opus-5" | "opus-5" | "claude-sonnet-5" | "sonnet-5"
-        )
-    {
+    // Opus 4.8/4.7 run without thinking unless asked; the rest of the family
+    // thinks by default. With no level chosen each keeps its own default.
+    let off_by_default = matches!(
+        id,
+        "claude-opus-4-8" | "opus-4-8" | "claude-opus-4-7" | "opus-4-7"
+    );
+    // Where Off is sent as `disabled`. Opus 5 accepts it too, but with
+    // thinking disabled it can write a tool call into its visible text instead
+    // of a `tool_use` block: the turn succeeds, the tool never runs, and the
+    // text pollutes later rounds. In a tool loop Off is low effort there.
+    let can_disable = off_by_default || matches!(id, "claude-sonnet-5" | "sonnet-5");
+    if adaptive {
+        body.as_object_mut().unwrap().remove("temperature");
+    }
+    if adaptive && off_by_default && options.reasoning.is_none() {
+        // Provider default: no `thinking` field, no thinking.
+    } else if adaptive && can_disable && options.reasoning == Some(ThinkingLevel::Off) {
         body["thinking"] = json!({"type": "disabled"});
     } else if adaptive {
-        body.as_object_mut().unwrap().remove("temperature");
         let between_tools = options.reasoning == Some(ThinkingLevel::Off)
-            && matches!(
-                model.id.trim_start_matches("claude-code-"),
-                "claude-sonnet-5-5" | "sonnet-5-5"
-            );
-        body["thinking"] =
-            json!({"type": if between_tools { "between_tools" } else { "adaptive" }});
+            && matches!(id, "claude-sonnet-5-5" | "sonnet-5-5");
+        body["thinking"] = if between_tools {
+            // `between_tools` accepts no other field.
+            json!({"type": "between_tools"})
+        } else {
+            // These models stream empty thinking text unless a summary is
+            // requested, which leaves every client's reasoning view blank.
+            // `display` changes visibility only; thinking is billed the same.
+            json!({"type": "adaptive", "display": "summarized"})
+        };
         if let Some(level) = options.reasoning {
             let effort = match level {
                 ThinkingLevel::Off | ThinkingLevel::Minimal | ThinkingLevel::Low => "low",
@@ -755,7 +803,7 @@ impl Provider for AnthropicProvider {
                     }
                     SseEvent::MessageDelta { delta, usage: maybe_usage } => {
                         if let Some(u) = maybe_usage {
-                            usage.output += u.output_tokens;
+                            apply_message_delta_usage(&mut usage, &u);
                         }
                         if let Some(reason) = delta.stop_reason {
                             stop = map_stop_reason(reason.as_str());
@@ -764,6 +812,7 @@ impl Provider for AnthropicProvider {
                     SseEvent::MessageStop => {}
                     SseEvent::Error { error } => {
                         let err_msg = format!("{}: {}", error.kind, error.message);
+                        usage.total_tokens = total_tokens(&usage);
                         let am = AssistantMessage {
                             content: vec![],
                             api: api.clone(),
@@ -843,14 +892,23 @@ mod tests {
     }
     #[test]
     fn current_claude_models_use_adaptive_effort_without_budget() {
+        let summarized = json!({"type":"adaptive","display":"summarized"});
         for id in [
             "claude-fable-5-1",
             "claude-opus-5-5",
             "claude-code-opus-5",
             "claude-sonnet-5",
+            "claude-opus-4-8",
+            "claude-code-opus-4-7",
         ] {
             let mut model = anthropic_model();
             model.id = id.into();
+            // Off is `disabled` only where that is both accepted and safe in a
+            // tool loop. Opus 5 accepts it but then writes tool calls as text.
+            let off_disables = matches!(
+                id,
+                "claude-sonnet-5" | "claude-opus-4-8" | "claude-code-opus-4-7"
+            );
             for (level, expected) in [
                 (ThinkingLevel::Off, "low"),
                 (ThinkingLevel::Medium, "medium"),
@@ -863,20 +921,65 @@ mod tests {
                     ..Default::default()
                 };
                 let body = build_body(&model, &Context::default(), &options);
-                if level == ThinkingLevel::Off
-                    && matches!(id, "claude-code-opus-5" | "claude-sonnet-5")
-                {
+                if level == ThinkingLevel::Off && off_disables {
                     assert_eq!(body["thinking"], json!({"type":"disabled"}), "{id}");
                     assert!(body.get("output_config").is_none());
                 } else {
-                    assert_eq!(body["thinking"], json!({"type":"adaptive"}), "{id}");
+                    assert_eq!(body["thinking"], summarized, "{id}");
                     assert_eq!(body["output_config"]["effort"], expected, "{id}");
-                    assert!(body.get("temperature").is_none());
                 }
+                // Sampling parameters are a 400 on every one of these models,
+                // with thinking on or off.
+                assert!(body.get("temperature").is_none(), "{id}");
+                assert!(body["thinking"].get("budget_tokens").is_none(), "{id}");
             }
-            let body = build_body(&model, &Context::default(), &StreamOptions::default());
-            assert_eq!(body["thinking"]["type"], "adaptive");
-            assert!(body.get("output_config").is_none());
+
+            // No level chosen: each model keeps its own provider default.
+            // Opus 4.8/4.7 do not think unless asked, so nothing is sent.
+            let options = StreamOptions {
+                temperature: Some(1.0),
+                ..Default::default()
+            };
+            let body = build_body(&model, &Context::default(), &options);
+            if matches!(id, "claude-opus-4-8" | "claude-code-opus-4-7") {
+                assert!(body.get("thinking").is_none(), "{id}");
+            } else {
+                assert_eq!(body["thinking"], summarized, "{id}");
+            }
+            assert!(body.get("output_config").is_none(), "{id}");
+            assert!(body.get("temperature").is_none(), "{id}");
+        }
+    }
+
+    #[test]
+    fn budget_models_keep_enabled_thinking_and_never_request_a_display() {
+        for model in [
+            Model::anthropic_claude_haiku_4_5(),
+            Model::anthropic_claude_sonnet_4_6(),
+        ] {
+            let body = build_body(
+                &model,
+                &Context::default(),
+                &StreamOptions {
+                    reasoning: Some(ThinkingLevel::Medium),
+                    ..Default::default()
+                },
+            );
+            assert_eq!(body["thinking"]["type"], "enabled", "{}", model.id);
+            assert!(body["thinking"].get("display").is_none(), "{}", model.id);
+            assert!(body.get("output_config").is_none(), "{}", model.id);
+
+            for reasoning in [Some(ThinkingLevel::Off), None] {
+                let body = build_body(
+                    &model,
+                    &Context::default(),
+                    &StreamOptions {
+                        reasoning,
+                        ..Default::default()
+                    },
+                );
+                assert!(body.get("thinking").is_none(), "{}", model.id);
+            }
         }
     }
 
@@ -902,12 +1005,21 @@ mod tests {
                         ..Default::default()
                     },
                 );
-                assert_eq!(body["thinking"], json!({"type":thinking}));
+                let expected = if thinking == "between_tools" {
+                    // Any field beside `type` is a 400 with `between_tools`.
+                    json!({"type":"between_tools"})
+                } else {
+                    json!({"type":"adaptive","display":"summarized"})
+                };
+                assert_eq!(body["thinking"], expected);
                 assert_eq!(body["output_config"]["effort"], effort);
                 assert!(body.get("temperature").is_none());
             }
             let body = build_body(&model, &Context::default(), &StreamOptions::default());
-            assert_eq!(body["thinking"], json!({"type":"adaptive"}));
+            assert_eq!(
+                body["thinking"],
+                json!({"type":"adaptive","display":"summarized"})
+            );
         }
     }
 
@@ -1210,6 +1322,99 @@ mod tests {
             total_tokens(&usage),
             862,
             "total must be input + output + cache_write + cache_read"
+        );
+    }
+
+    // The API types these counts as nullable and compatible endpoints do send
+    // `null`. A `message_delta` frame that failed to parse was skipped whole,
+    // and that frame is the only carrier of the turn's `stop_reason`.
+    #[test]
+    fn usage_frames_with_null_counts_still_parse_and_keep_the_stop_reason() {
+        let frame = r#"{
+            "type": "message_delta",
+            "delta": {"stop_reason": "tool_use", "stop_sequence": null},
+            "usage": {
+                "input_tokens": null,
+                "output_tokens": 12,
+                "cache_creation_input_tokens": null,
+                "cache_read_input_tokens": null
+            }
+        }"#;
+        let SseEvent::MessageDelta { delta, usage } =
+            serde_json::from_str(frame).expect("a null count must not fail the frame")
+        else {
+            panic!("expected message_delta");
+        };
+        assert_eq!(delta.stop_reason.as_deref(), Some("tool_use"));
+        let usage = usage.expect("usage present");
+        assert_eq!(usage.output_tokens, 12);
+        assert_eq!(usage.input_tokens, 0);
+
+        let start = r#"{
+            "type": "message_start",
+            "message": {
+                "model": "claude-opus-5-5",
+                "usage": {
+                    "input_tokens": 9,
+                    "output_tokens": 1,
+                    "cache_creation_input_tokens": null,
+                    "cache_read_input_tokens": null
+                }
+            }
+        }"#;
+        let SseEvent::MessageStart { message } =
+            serde_json::from_str(start).expect("a null cache count must not fail message_start")
+        else {
+            panic!("expected message_start");
+        };
+        assert_eq!(message.usage.expect("usage present").input_tokens, 9);
+    }
+
+    // `message_delta` usage is cumulative for the whole message. Adding each
+    // report double-counted output on any stream with more than one, and a
+    // report that omits the input side must not erase what `message_start` said.
+    #[test]
+    fn message_delta_usage_replaces_cumulative_counts_and_keeps_reported_input() {
+        let mut usage = Usage {
+            input: 1_000,
+            cache_read: 50_000,
+            cache_write: 2_000,
+            ..Default::default()
+        };
+        for output_tokens in [150, 300] {
+            apply_message_delta_usage(
+                &mut usage,
+                &UsageDelta {
+                    output_tokens,
+                    ..Default::default()
+                },
+            );
+        }
+        assert_eq!(usage.output, 300, "cumulative reports must not be summed");
+        assert_eq!(
+            (usage.input, usage.cache_read, usage.cache_write),
+            (1_000, 50_000, 2_000)
+        );
+        assert_eq!(total_tokens(&usage), 53_300);
+
+        // A newer API version restates the input side cumulatively.
+        apply_message_delta_usage(
+            &mut usage,
+            &UsageDelta {
+                input_tokens: 1_200,
+                output_tokens: 320,
+                cache_read_input_tokens: 51_000,
+                cache_creation_input_tokens: 2_000,
+            },
+        );
+        assert_eq!(
+            (
+                usage.input,
+                usage.output,
+                usage.cache_read,
+                usage.cache_write
+            ),
+            (1_200, 320, 51_000, 2_000)
         );
     }
 

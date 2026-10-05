@@ -266,6 +266,42 @@ Validation: all 899 Surface tests, strict WASM Clippy and docs-check pass. New r
 _________________________________________________________________________________
 
 _________________________________________________________________________________
+time: [16:59] [05-10-26]
+agent: [claude] [claude code]
+worktree: [claude/subagent-lost-run-recovery] [/Users/risingtidesdev/dev/ocean-claude-audit]
+type: [bug report]
+area: [backend] [testing]
+
+Repaired ocean-subagents lifecycle recovery. The daemon's request registry is in memory, so a run whose request disappeared (daemon restart, or a finished turn evicted after an hour) stayed active forever; four such runs exhausted the concurrency cap and blocked spawn for every session. An untracked active run now settles as terminal lost from session truth after a short grace, a cancel the daemon answers ok:false settles from daemon truth instead of parking in cancelling, and the elapsed-time watchdog retries because plugins start before the listener binds. The recursion guard now fails closed: spawn and send first confirm the worker profile resolves with a non-empty allowlist that omits subagent tools, since an unresolved named agent or empty allowlist runs with every tool. Also: optional per-child thinking_level, catalog guidance on an unroutable model, wait returns when a permission prompt appears, unchanged polls no longer rewrite and fsync state, finished runs are retained to 200, state updates are bound to the turn they were read for, and --check no longer starts watchdogs. README now states that the daemon launches plugins with a cleared environment, so the documented environment variables apply only to hand-started plugins.
+
+Validation: 20 unit tests against a test daemon corrected to the real control contract (volatile registry, HTTP 200 ok:false cancel refusals, cancelling before cancelled, 404 for an unknown session); four of the new tests fail against the previous plugin with the reported symptoms. Wire test passes on Python 3.13 and on system Python 3.9 under a cleared environment; py_compile on both; sh -n; docs-check. The new read-only preflight and catalog reads were exercised against the operated daemon with a temporary state directory; no child was spawned and no live state or installation changed. The installed plugin copy is unchanged until install.sh is rerun and the daemon restarted. Plugin devlog and README updated; parent indexes unchanged.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [17:11] [05-10-26]
+agent: [claude] [claude code]
+worktree: [claude/thinking-levels-truthful] [/Users/risingtidesdev/dev/ocean-claude-audit]
+type: [bug report]
+area: [backend] [testing]
+
+Made thinking levels do what they say. The runtime dropped an explicit Off before any encoder saw it, so "off" silently ran at the provider default on every model that thinks by default; AgentConfig now carries an optional level and passes Off through, which makes the existing off shapes reachable (Anthropic disabled or between_tools, Codex none, DeepSeek disabled). Adaptive Claude requests now send display summarized: current models otherwise stream empty thinking text, so TUI and Surface reasoning views stayed blank. Opus 4.8 and 4.7 joined the adaptive family because budget_tokens is rejected there, and no adaptive-family request carries a sampling parameter with thinking on or off. The GPT-4 chat family no longer receives reasoning_effort. Catalog effort metadata now lists a level only when choosing it changes the request: collapsed levels are gone (Haiku xhigh, DeepSeek low and medium, older Codex xhigh and off, Kimi K3 everything but max) and routes whose encoder sends nothing (GLM, MiniMax, Kimi K2.x, GPT-4o) advertise an empty list, which clients already render as no effort control.
+
+Validation: full suites for ocean-protocol (173 plus 5), ocean-providers (65), ocean-runtime, ocean-agent (260, live probe ignored), ocean-daemon (878) and ocean-acp pass; workspace test compilation, rustfmt check and docs-check pass. New runtime end-to-end tests prove unset stays unset, Off and High reach the provider, and a stream-option level still wins. The daemon and provider fixtures that required a non-empty effort list now check the vocabulary instead. No provider was called: the Anthropic display field, the Opus 4.8/4.7 adaptive shape and Codex effort none follow the published provider contracts and are not live-verified here. Protocol, providers, runtime and daemon devlogs updated; indexes unchanged.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [17:21] [05-10-26]
+agent: [claude] [claude code]
+worktree: [claude/token-accounting-accuracy] [/Users/risingtidesdev/dev/ocean-claude-audit-b]
+type: [bug report]
+area: [backend] [testing]
+
+Corrected token accounting at the edges where it was wrong. A failed, cancelled or timed-out turn reported zero tokens and no context reading at every layer although its completed rounds were billed and checkpointed; it now reports those rounds from the usage the checkpointed assistant messages carry. Transcript estimates priced an image by its base64 length, about 64K tokens for one retained screenshot against roughly 1.6K billed, so three screenshots trimmed the task and every screenshot out of a 200K model's request and two tripped compaction; the runtime trim and agent compaction now share one estimator that prices an image flat at 6,000 tokens. A Responses round that hit the output cap dropped its usage. Anthropic message_delta usage was added although it is cumulative, and an explicit null in any usage count failed the frame, which for message_delta also loses the stop reason. Gemini output left thinking tokens out. A stop-hook continuation kept the earlier turn's context reading.
+
+Validation: full suites pass for ocean-protocol (176 plus 5), ocean-runtime (130 plus integration), ocean-agent (265, live probe ignored), ocean-providers (66), ocean-daemon (878), ocean-acp and ocean-cli; workspace test compilation, rustfmt check and docs-check pass on current main. New tests drive a scripted provider through prompt: one tool round then a provider error reports 1,000 input, 300 output, 50,000 cache read, 2,000 cache write and a 53,300 context reading with the round checkpointed, and a failure before any round still reports zero. No provider was called. Protocol, runtime and agent devlogs updated; indexes unchanged.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
 time: [17:26] [05-10-26]
 agent: [claude] [claude code]
 worktree: [claude/tui-slash-fixes] [/Users/risingtidesdev/dev/ocean-claude-audit]
@@ -275,6 +311,30 @@ area: [frontend] [testing]
 Fixed the TUI slash commands that misbehaved. /clear during a running turn dropped the busy latch, after which /stop answered "nothing is running" and Esc did nothing while the daemon kept executing tools; it now clears the view only and leaves the turn, its queue and any pause owner alone. /copy copied the /help list, a /beam block or a command hint once any of them had run, because Ocean's own transcript text was stored as assistant replies; that text is now a separate Notice turn that renders the same, is skipped by /copy and is never appended to by streamed deltas. The palette claimed Tab even when nothing matched, so /zz plus Tab did nothing instead of cycling focus. Command names are now case-insensitive, so /Model x is the command rather than a prompt sent to the model. /thinking acknowledges the new level in the status row.
 
 Validation: all 506 TUI tests pass (4 ignored), including new cases for each fix; cargo check, rustfmt check, the required release build of ocean-tui and docs-check pass. The installed operator binary is unchanged until the TUI installer is run from main after merge. TUI devlog updated; indexes unchanged.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [17:40] [05-10-26]
+agent: [claude] [claude code]
+worktree: [claude/subagent-lost-run-recovery] [/Users/risingtidesdev/dev/ocean-claude-audit]
+type: [review]
+area: [backend] [testing]
+
+Applied the independent review of the ocean-subagents repair. The recursion guard still passed an allowlist that matched no existing tool (the daemon then keeps every tool) and ignored subprocess capabilities, whose tools are added after narrowing; it now requires an always-present built-in tool and no subprocess capability. thinking_level accepts max. Output is the latest turn's text only, so a lost run no longer reports an earlier turn's answer. A run settles even when its session cannot be read, and a settled run with no output re-reads it later; a completed run whose session read failed used to stay active. A request list that is not a list is an error instead of settling every run as lost. wait reports each permission prompt once by id, including one raised between waits. send counts against the concurrency cap. The watchdog survives malformed responses, is re-armed by refresh if it gave up, does not re-cancel a run already cancelling, and the elapsed-time reason survives a later lost settlement. The unroutable-model hint now points at a new spawn because send reuses the model.
+
+Validation: 27 unit tests pass; ten mutations of the new logic are each killed by a test, including the three the review found surviving. The prune test now uses distinct finish times out of insertion order, and the retry test no longer races. Wire test on Python 3.13 and system 3.9 under a cleared environment, py_compile, sh -n and docs-check pass. The revised preflight passes against the operated daemon read-only. Plugin devlog and README updated.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [17:44] [05-10-26]
+agent: [claude] [claude code]
+worktree: [claude/thinking-levels-truthful] [/Users/risingtidesdev/dev/ocean-claude-audit]
+type: [review]
+area: [backend] [testing]
+
+Applied the independent review of the thinking-level change. Opus 4.8 and 4.7 do not think unless asked, so with no level chosen they again get no thinking field; the first version switched adaptive thinking on for them, which broke "unset means provider default" and would have spent their small output caps on thinking. Off on Opus 5 is now low effort rather than disabled: with thinking disabled that model can write a tool call into its visible text, so the tool never runs. OpenAI Chat Completions sends reasoning_effort only to reasoning families (o-series, GPT-5 and later) instead of blocking only GPT-4. Gemini 2.0 Flash, whose descriptor says it does not reason, never receives thinkingConfig and advertises no effort levels. Three tests that passed vacuously behind the new gate now use a reasoning model, and a test no longer pins a temperature beside enabled thinking.
+
+Validation: full suites pass for ocean-protocol (174 plus 5), ocean-providers (66), ocean-runtime, ocean-agent (260, live probe ignored), ocean-daemon (878) and ocean-acp on current main; workspace test compilation, rustfmt check and docs-check pass. Still no provider call. Known trade-off recorded in the PR: thinking summaries arrive as stream output, so a stream that drops mid-thinking now fails the turn instead of being retried as a clean round. Protocol and providers devlogs updated.
 _________________________________________________________________________________
 
 _________________________________________________________________________________
@@ -290,6 +350,18 @@ Validation: all 509 TUI tests pass (4 ignored), with new cases for a follow-up q
 _________________________________________________________________________________
 
 _________________________________________________________________________________
+time: [17:53] [05-10-26]
+agent: [claude] [claude code]
+worktree: [claude/token-accounting-accuracy] [/Users/risingtidesdev/dev/ocean-claude-audit]
+type: [review]
+area: [backend] [testing]
+
+Applied the independent review of the token-accounting change, and withdrew one part of it. The flat image price is reverted: pricing an image by its base64 length was also the only thing bounding how many images a request carried, and without it a long screenshot session can exceed a provider's image-count rule and wedge, while a flat 6,000 under-prices images on GPT-4o-mini by a factor of four. The estimator is back to the shipped behaviour; image-aware budgeting needs a count cap, a byte ceiling and a per-model price, and is left as open work. Kept and extended the accounting fixes the review confirmed. A stop-hook continuation that completes rounds and then fails now adds those rounds instead of dropping them. A failed turn's context reading is the last completed round, which is a floor for the saved transcript, so the daemon labels it provider_reported_last_completed_round instead of final. The capped-round fix is now proven through the real stream path, and the failed-turn test gives the failing round usage of its own to prove it is not counted.
+
+Validation: full suites pass for ocean-protocol (177 plus 5), ocean-runtime, ocean-agent (265, live probe ignored), ocean-agent-sdk, ocean-daemon (878), ocean-acp and ocean-cli; workspace test compilation, rustfmt check and docs-check pass. One ocean-tui test, shell::herdr::tests::resume_session_reports_agent_session_id_with_resume_source, failed once while two other builds were running and passed five times in a row alone; this change does not touch ocean-tui. No provider was called. Agent devlog updated; the runtime devlog line about the estimator is removed with the code.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
 time: [17:58] [05-10-26]
 agent: [claude] [claude code]
 worktree: [claude/tui-slash-fixes] [/Users/risingtidesdev/dev/ocean-claude-audit]
@@ -299,4 +371,52 @@ area: [frontend] [testing]
 Second review round on the TUI slash fixes. The /copy join introduced in the previous round merged every adjacent assistant block, and a resumed or re-synced transcript lists each round's text as its own block with the tool rows gone, so /copy returned a turn's interim narration glued to its answer. The join now bridges only across one of Ocean's own notices. The turn-lifecycle line in the contract names history load (resume, switch or a fenced idle snapshot) as a way busy clears. Known and left alone: an approval card orphaned by a turn that was stopped while waiting stays undecided, as it did before this work, and a busy /clear now keeps it with the live ones.
 
 Validation: all 510 TUI tests pass (4 ignored), with a new case built in the resumed-transcript shape; rustfmt check and the release build pass.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [18:00] [05-10-26]
+agent: [claude] [claude code]
+worktree: [claude/subagent-lost-run-recovery] [/Users/risingtidesdev/dev/ocean-claude-audit]
+type: [review]
+area: [backend] [testing]
+
+The reviewer acknowledged the ocean-subagents repair with nothing blocking; this applies its three remaining low-severity points before landing. The daemon reuses one permission id for an identical tool call, so a child that re-ran the same command raised a prompt wait had already marked reported; the mark is now cleared once the prompt is answered or gone. permissions refreshes before it lists, so it never marks a prompt its response did not show. A run persisted as cancelling gets its startup watchdog again and settles on its own after a daemon restart; only the per-poll re-arm skips cancelling runs.
+
+Validation: 29 unit tests pass, with new cases for the reused permission id and the persisted cancelling run; wire test on Python 3.13 and system 3.9, py_compile and sh -n pass. Merged current main, keeping every ledger entry in time order.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [18:10] [05-10-26]
+agent: [claude] [claude code]
+worktree: [claude/token-accounting-accuracy] [/Users/risingtidesdev/dev/ocean-claude-audit]
+type: [review]
+area: [backend] [testing]
+
+Closed the last review point on the token-accounting change: the daemon chose a context reading's label from whether the turn succeeded, which mislabels a successful turn whose stop-hook continuation failed, because that turn carries the continuation's reading and published it as a final round. The provenance now travels with the reading. TokenUsage gains context_is_floor, which the agent sets for the rounds of a turn or continuation that went on to fail and keeps when a continuation's reading replaces the turn's; the daemon labels from that mark through a small helper, the two label strings are shared SDK constants, and the TUI usage panel captions a marked reading "last completed request" instead of "final request". Compatibility: the field is additive and serde-default false, so older payloads read as a final-round measurement and nothing in the monorepo rejects the extra boolean; clients that only know the first label still show the reading. No provider was called.
+
+Validation: on current main, full suites pass for ocean-core (62), ocean-agent (265, live probe ignored), ocean-agent-sdk, ocean-daemon (879), ocean-cli, ocean-protocol (180 plus 5), ocean-providers (66), ocean-runtime, ocean-acp and ocean-tui (501, 4 ignored); workspace test compilation, rustfmt check and docs-check pass. New tests: a payload from before the flag reads false and the flag round-trips; the daemon helper labels by the mark and publishes nothing when unmeasured; the failed-continuation end-to-end test asserts an ok response still carries the mark; the TUI captions the two readings differently.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [18:16] [05-10-26]
+agent: [claude] [claude code]
+worktree: [claude/subagent-lost-run-recovery] [/Users/risingtidesdev/dev/ocean-claude-audit-c]
+type: [review]
+area: [backend] [testing]
+
+Fixed a regression the delta review found in the previous subagent commit. A run cancelled by the elapsed-time ceiling keeps its reason in the run record, but the startup watchdog's first call always fails because the daemon launches plugins before its listener binds, and the failure handler overwrote that reason with the connection error; after a restart the lost settlement read "Earlier: Ocean daemon unavailable" instead of saying the ceiling had been reached. A failed attempt now records its error only when the run has none. Status, slot release and output were never affected. The same review listed three fixes with no test behind them, and they now have one each: forgetting a reported prompt once the run is seen to move on, `permissions` marking only what it listed (both the empty-list case and a prompt raised between its two reads), and not asking twice for a cancellation still in flight after a restart.
+
+Validation: 33 plugin tests pass on Python 3.13 and `--check` passes. The new restart test fails on the previous commit; each of the three coverage tests fails when its fix is removed. No daemon was contacted, installed or restarted, and the installed plugin copy is unchanged.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [18:24] [05-10-26]
+agent: [claude] [claude code]
+worktree: [claude/token-accounting-accuracy] [/Users/risingtidesdev/dev/ocean-claude-audit]
+type: [review]
+area: [backend] [testing]
+
+Applied the delta review of the context-reading provenance change. It found one success path with the same problem: a turn that runs out of rounds on a tool call is ok, but its tool results and stand-in reply are saved after the last measured request, so its reading was still published as a final round. The success path now sets context_is_floor from the runtime's stopped-at-turn-limit result, and the contract and doc lines say so. Two tests stopped a step short and now do not: the failed-turn end-to-end test asserts the mark, and the TUI test reads the caption from the drawn panel instead of the helper that produces it. Known and left alone: a tool that ends a turn early below the limit would leave the same gap, but no tool in the tree does that today.
+
+Validation: ocean-agent (266, live probe ignored), ocean-core (62), ocean-agent-sdk and ocean-tui (501, 4 ignored) pass; workspace test compilation, rustfmt check and docs-check pass. The new one-round test is ok and marked, and fails when the mark is hard-coded false. The reviewer re-ran the agent suite and the usage-panel tests independently. No provider was called.
 _________________________________________________________________________________

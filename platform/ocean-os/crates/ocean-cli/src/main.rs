@@ -864,6 +864,7 @@ mod tests {
                 total_tokens: 38,
                 context_tokens: 12,
                 context_window: 200_000,
+                context_is_floor: false,
             },
         }
     }

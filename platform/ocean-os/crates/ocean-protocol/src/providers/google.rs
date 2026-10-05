@@ -277,6 +277,28 @@ fn thinking_budget(level: ThinkingLevel) -> Option<u32> {
     }
 }
 
+/// Map Gemini `usageMetadata` onto the shared usage. `candidatesTokenCount`
+/// leaves thinking tokens out while `totalTokenCount` includes them, so output
+/// taken from candidates alone under-reports and breaks the shared rule that
+/// reasoning is a subset of output. The provider's own total decides whether
+/// thoughts still need adding, which stays correct if a variant ever folds
+/// them into the candidates count.
+fn apply_usage_metadata(usage: &mut Usage, reported: &UsageMetadata) {
+    let thoughts_are_separate = reported.total_token_count
+        >= reported.prompt_token_count
+            + reported.candidates_token_count
+            + reported.thoughts_token_count;
+    usage.input = reported.prompt_token_count;
+    usage.output = if thoughts_are_separate {
+        reported.candidates_token_count + reported.thoughts_token_count
+    } else {
+        reported.candidates_token_count
+    };
+    usage.total_tokens = reported.total_token_count;
+    usage.cache_read = reported.cached_content_token_count;
+    usage.reasoning = reported.thoughts_token_count;
+}
+
 /// Injects the reasoning budget onto the Gemini request body under
 /// `generationConfig.thinkingConfig`, using the REST shape the v1beta
 /// `generateContent` endpoint expects:
@@ -307,6 +329,17 @@ fn apply_reasoning(body: &mut Value, level: ThinkingLevel) {
     body["generationConfig"]["thinkingConfig"] = json!({
         "thinkingBudget": budget,
     });
+}
+
+/// The options a request body is built from. A model that does not think
+/// rejects `thinkingConfig`, which fails the whole turn, so its reasoning
+/// level is dropped here rather than encoded.
+fn body_options(model: &Model, options: &StreamOptions) -> StreamOptions {
+    let mut options = options.clone();
+    if !model.reasoning {
+        options.reasoning = None;
+    }
+    options
 }
 
 fn build_body(context: &Context, options: &StreamOptions) -> Value {
@@ -392,7 +425,7 @@ impl Provider for GoogleProvider {
             model.id,
             api_key,
         );
-        let body = build_body(context, options);
+        let body = build_body(context, &body_options(model, options));
         crate::prompt_capture::capture_request_body(&model.api, &model.provider, &model.id, &body);
         let cancel = options.cancel.clone();
         let extra_headers: BTreeMap<String, String> = options.headers.clone();
@@ -491,11 +524,7 @@ impl Provider for GoogleProvider {
                 };
                 if let Some(m) = chunk.model_version { response_model = Some(m); }
                 if let Some(u) = chunk.usage_metadata {
-                    usage.input = u.prompt_token_count;
-                    usage.output = u.candidates_token_count;
-                    usage.total_tokens = u.total_token_count;
-                    usage.cache_read = u.cached_content_token_count;
-                    usage.reasoning = u.thoughts_token_count;
+                    apply_usage_metadata(&mut usage, &u);
                 }
                 for cand in chunk.candidates {
                     if let Some(reason) = cand.finish_reason {
@@ -825,6 +854,32 @@ mod tests {
     }
 
     #[test]
+    fn non_reasoning_model_never_gets_a_thinking_config() {
+        let options = StreamOptions {
+            reasoning: Some(ThinkingLevel::High),
+            temperature: Some(0.2),
+            ..Default::default()
+        };
+        // Gemini 2.0 Flash is the only constructible Gemini model and does not think.
+        let flash = Model::gemini_2_0_flash();
+        assert!(!flash.reasoning);
+        let body = build_body(&empty_context(), &body_options(&flash, &options));
+        assert!(
+            body["generationConfig"].get("thinkingConfig").is_none(),
+            "{body}"
+        );
+        assert_eq!(body["generationConfig"]["temperature"], json!(0.2f32));
+
+        let mut thinker = flash;
+        thinker.reasoning = true;
+        let body = build_body(&empty_context(), &body_options(&thinker, &options));
+        assert_eq!(
+            body["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+            16384
+        );
+    }
+
+    #[test]
     fn build_body_omits_thinking_config_when_unset() {
         let body = build_body(&empty_context(), &StreamOptions::default());
         assert!(
@@ -1120,6 +1175,36 @@ mod tests {
             usage.thoughts_token_count, 200,
             "thoughtsTokenCount must decode from the camelCase wire shape"
         );
+
+        // 1500 + 30 + 200 = 1730: thoughts are billed output that the
+        // candidates count leaves out. Output taken from candidates alone was
+        // 30, so input + output fell 200 short of the provider's own total.
+        let mut mapped = Usage::default();
+        apply_usage_metadata(&mut mapped, &usage);
+        assert_eq!(mapped.input, 1500);
+        assert_eq!(mapped.output, 230);
+        assert_eq!(mapped.reasoning, 200);
+        assert_eq!(mapped.total_tokens, 1730);
+        assert_eq!(mapped.input + mapped.output, mapped.total_tokens);
+        assert!(
+            mapped.reasoning <= mapped.output,
+            "reasoning is a subset of output"
+        );
+    }
+
+    #[test]
+    fn thoughts_already_inside_the_candidates_count_are_not_added_twice() {
+        let reported = UsageMetadata {
+            prompt_token_count: 1500,
+            candidates_token_count: 230,
+            total_token_count: 1730,
+            thoughts_token_count: 200,
+            ..Default::default()
+        };
+        let mut mapped = Usage::default();
+        apply_usage_metadata(&mut mapped, &reported);
+        assert_eq!(mapped.output, 230);
+        assert_eq!(mapped.input + mapped.output, mapped.total_tokens);
     }
 
     // OCEAN-145 (2): two PARALLEL calls to the SAME tool must be distinguishable.
