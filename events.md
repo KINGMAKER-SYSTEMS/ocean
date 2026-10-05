@@ -278,6 +278,18 @@ Validation: 20 unit tests against a test daemon corrected to the real control co
 _________________________________________________________________________________
 
 _________________________________________________________________________________
+time: [17:11] [05-10-26]
+agent: [claude] [claude code]
+worktree: [claude/thinking-levels-truthful] [/Users/risingtidesdev/dev/ocean-claude-audit]
+type: [bug report]
+area: [backend] [testing]
+
+Made thinking levels do what they say. The runtime dropped an explicit Off before any encoder saw it, so "off" silently ran at the provider default on every model that thinks by default; AgentConfig now carries an optional level and passes Off through, which makes the existing off shapes reachable (Anthropic disabled or between_tools, Codex none, DeepSeek disabled). Adaptive Claude requests now send display summarized: current models otherwise stream empty thinking text, so TUI and Surface reasoning views stayed blank. Opus 4.8 and 4.7 joined the adaptive family because budget_tokens is rejected there, and no adaptive-family request carries a sampling parameter with thinking on or off. The GPT-4 chat family no longer receives reasoning_effort. Catalog effort metadata now lists a level only when choosing it changes the request: collapsed levels are gone (Haiku xhigh, DeepSeek low and medium, older Codex xhigh and off, Kimi K3 everything but max) and routes whose encoder sends nothing (GLM, MiniMax, Kimi K2.x, GPT-4o) advertise an empty list, which clients already render as no effort control.
+
+Validation: full suites for ocean-protocol (173 plus 5), ocean-providers (65), ocean-runtime, ocean-agent (260, live probe ignored), ocean-daemon (878) and ocean-acp pass; workspace test compilation, rustfmt check and docs-check pass. New runtime end-to-end tests prove unset stays unset, Off and High reach the provider, and a stream-option level still wins. The daemon and provider fixtures that required a non-empty effort list now check the vocabulary instead. No provider was called: the Anthropic display field, the Opus 4.8/4.7 adaptive shape and Codex effort none follow the published provider contracts and are not live-verified here. Protocol, providers, runtime and daemon devlogs updated; indexes unchanged.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
 time: [17:40] [05-10-26]
 agent: [claude] [claude code]
 worktree: [claude/subagent-lost-run-recovery] [/Users/risingtidesdev/dev/ocean-claude-audit]
@@ -287,4 +299,16 @@ area: [backend] [testing]
 Applied the independent review of the ocean-subagents repair. The recursion guard still passed an allowlist that matched no existing tool (the daemon then keeps every tool) and ignored subprocess capabilities, whose tools are added after narrowing; it now requires an always-present built-in tool and no subprocess capability. thinking_level accepts max. Output is the latest turn's text only, so a lost run no longer reports an earlier turn's answer. A run settles even when its session cannot be read, and a settled run with no output re-reads it later; a completed run whose session read failed used to stay active. A request list that is not a list is an error instead of settling every run as lost. wait reports each permission prompt once by id, including one raised between waits. send counts against the concurrency cap. The watchdog survives malformed responses, is re-armed by refresh if it gave up, does not re-cancel a run already cancelling, and the elapsed-time reason survives a later lost settlement. The unroutable-model hint now points at a new spawn because send reuses the model.
 
 Validation: 27 unit tests pass; ten mutations of the new logic are each killed by a test, including the three the review found surviving. The prune test now uses distinct finish times out of insertion order, and the retry test no longer races. Wire test on Python 3.13 and system 3.9 under a cleared environment, py_compile, sh -n and docs-check pass. The revised preflight passes against the operated daemon read-only. Plugin devlog and README updated.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [17:44] [05-10-26]
+agent: [claude] [claude code]
+worktree: [claude/thinking-levels-truthful] [/Users/risingtidesdev/dev/ocean-claude-audit]
+type: [review]
+area: [backend] [testing]
+
+Applied the independent review of the thinking-level change. Opus 4.8 and 4.7 do not think unless asked, so with no level chosen they again get no thinking field; the first version switched adaptive thinking on for them, which broke "unset means provider default" and would have spent their small output caps on thinking. Off on Opus 5 is now low effort rather than disabled: with thinking disabled that model can write a tool call into its visible text, so the tool never runs. OpenAI Chat Completions sends reasoning_effort only to reasoning families (o-series, GPT-5 and later) instead of blocking only GPT-4. Gemini 2.0 Flash, whose descriptor says it does not reason, never receives thinkingConfig and advertises no effort levels. Three tests that passed vacuously behind the new gate now use a reasoning model, and a test no longer pins a temperature beside enabled thinking.
+
+Validation: full suites pass for ocean-protocol (174 plus 5), ocean-providers (66), ocean-runtime, ocean-agent (260, live probe ignored), ocean-daemon (878) and ocean-acp on current main; workspace test compilation, rustfmt check and docs-check pass. Still no provider call. Known trade-off recorded in the PR: thinking summaries arrive as stream output, so a stream that drops mid-thinking now fails the turn instead of being retried as a clean round. Protocol and providers devlogs updated.
 _________________________________________________________________________________
