@@ -376,8 +376,11 @@ fn build_body(model: &Model, context: &Context, options: &StreamOptions) -> Valu
     if let Some(t) = options.temperature {
         body["temperature"] = json!(t);
     }
+    let id = model.id.trim_start_matches("claude-code-");
+    // Models on adaptive thinking. Each rejects `budget_tokens` and sampling
+    // parameters with a 400, whatever the thinking mode.
     let adaptive = matches!(
-        model.id.trim_start_matches("claude-code-"),
+        id,
         "claude-fable-5-1"
             | "fable-5-1"
             | "claude-fable-5"
@@ -386,28 +389,44 @@ fn build_body(model: &Model, context: &Context, options: &StreamOptions) -> Valu
             | "opus-5-5"
             | "claude-opus-5"
             | "opus-5"
+            | "claude-opus-4-8"
+            | "opus-4-8"
+            | "claude-opus-4-7"
+            | "opus-4-7"
             | "claude-sonnet-5"
             | "sonnet-5"
             | "claude-sonnet-5-5"
             | "sonnet-5-5"
     );
-    if adaptive
-        && options.reasoning == Some(ThinkingLevel::Off)
-        && matches!(
-            model.id.trim_start_matches("claude-code-"),
-            "claude-opus-5" | "opus-5" | "claude-sonnet-5" | "sonnet-5"
-        )
-    {
+    // The subset that accepts an explicit `disabled`.
+    let can_disable = matches!(
+        id,
+        "claude-opus-5"
+            | "opus-5"
+            | "claude-opus-4-8"
+            | "opus-4-8"
+            | "claude-opus-4-7"
+            | "opus-4-7"
+            | "claude-sonnet-5"
+            | "sonnet-5"
+    );
+    if adaptive {
+        body.as_object_mut().unwrap().remove("temperature");
+    }
+    if adaptive && can_disable && options.reasoning == Some(ThinkingLevel::Off) {
         body["thinking"] = json!({"type": "disabled"});
     } else if adaptive {
-        body.as_object_mut().unwrap().remove("temperature");
         let between_tools = options.reasoning == Some(ThinkingLevel::Off)
-            && matches!(
-                model.id.trim_start_matches("claude-code-"),
-                "claude-sonnet-5-5" | "sonnet-5-5"
-            );
-        body["thinking"] =
-            json!({"type": if between_tools { "between_tools" } else { "adaptive" }});
+            && matches!(id, "claude-sonnet-5-5" | "sonnet-5-5");
+        body["thinking"] = if between_tools {
+            // `between_tools` accepts no other field.
+            json!({"type": "between_tools"})
+        } else {
+            // These models stream empty thinking text unless a summary is
+            // requested, which leaves every client's reasoning view blank.
+            // `display` changes visibility only; thinking is billed the same.
+            json!({"type": "adaptive", "display": "summarized"})
+        };
         if let Some(level) = options.reasoning {
             let effort = match level {
                 ThinkingLevel::Off | ThinkingLevel::Minimal | ThinkingLevel::Low => "low",
@@ -843,11 +862,14 @@ mod tests {
     }
     #[test]
     fn current_claude_models_use_adaptive_effort_without_budget() {
+        let summarized = json!({"type":"adaptive","display":"summarized"});
         for id in [
             "claude-fable-5-1",
             "claude-opus-5-5",
             "claude-code-opus-5",
             "claude-sonnet-5",
+            "claude-opus-4-8",
+            "claude-code-opus-4-7",
         ] {
             let mut model = anthropic_model();
             model.id = id.into();
@@ -864,19 +886,56 @@ mod tests {
                 };
                 let body = build_body(&model, &Context::default(), &options);
                 if level == ThinkingLevel::Off
-                    && matches!(id, "claude-code-opus-5" | "claude-sonnet-5")
+                    && !matches!(id, "claude-fable-5-1" | "claude-opus-5-5")
                 {
                     assert_eq!(body["thinking"], json!({"type":"disabled"}), "{id}");
                     assert!(body.get("output_config").is_none());
                 } else {
-                    assert_eq!(body["thinking"], json!({"type":"adaptive"}), "{id}");
+                    assert_eq!(body["thinking"], summarized, "{id}");
                     assert_eq!(body["output_config"]["effort"], expected, "{id}");
-                    assert!(body.get("temperature").is_none());
                 }
+                // Sampling parameters are a 400 on every one of these models,
+                // with thinking on or off.
+                assert!(body.get("temperature").is_none(), "{id}");
+                assert!(body["thinking"].get("budget_tokens").is_none(), "{id}");
             }
             let body = build_body(&model, &Context::default(), &StreamOptions::default());
-            assert_eq!(body["thinking"]["type"], "adaptive");
+            assert_eq!(body["thinking"], summarized, "{id}");
             assert!(body.get("output_config").is_none());
+        }
+    }
+
+    #[test]
+    fn budget_models_keep_enabled_thinking_and_never_request_a_display() {
+        for model in [
+            Model::anthropic_claude_haiku_4_5(),
+            Model::anthropic_claude_sonnet_4_6(),
+        ] {
+            let body = build_body(
+                &model,
+                &Context::default(),
+                &StreamOptions {
+                    reasoning: Some(ThinkingLevel::Medium),
+                    temperature: Some(0.5),
+                    ..Default::default()
+                },
+            );
+            assert_eq!(body["thinking"]["type"], "enabled", "{}", model.id);
+            assert!(body["thinking"].get("display").is_none(), "{}", model.id);
+            assert!(body.get("output_config").is_none(), "{}", model.id);
+            assert_eq!(body["temperature"], 0.5, "{}", model.id);
+
+            for reasoning in [Some(ThinkingLevel::Off), None] {
+                let body = build_body(
+                    &model,
+                    &Context::default(),
+                    &StreamOptions {
+                        reasoning,
+                        ..Default::default()
+                    },
+                );
+                assert!(body.get("thinking").is_none(), "{}", model.id);
+            }
         }
     }
 
@@ -902,12 +961,21 @@ mod tests {
                         ..Default::default()
                     },
                 );
-                assert_eq!(body["thinking"], json!({"type":thinking}));
+                let expected = if thinking == "between_tools" {
+                    // Any field beside `type` is a 400 with `between_tools`.
+                    json!({"type":"between_tools"})
+                } else {
+                    json!({"type":"adaptive","display":"summarized"})
+                };
+                assert_eq!(body["thinking"], expected);
                 assert_eq!(body["output_config"]["effort"], effort);
                 assert!(body.get("temperature").is_none());
             }
             let body = build_body(&model, &Context::default(), &StreamOptions::default());
-            assert_eq!(body["thinking"], json!({"type":"adaptive"}));
+            assert_eq!(
+                body["thinking"],
+                json!({"type":"adaptive","display":"summarized"})
+            );
         }
     }
 

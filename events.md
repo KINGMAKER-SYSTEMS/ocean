@@ -252,3 +252,15 @@ Corrected shared model/effort compatibility fallback. A saved provider-qualified
 
 Validation: all 899 Surface tests, strict WASM Clippy and docs-check pass. New regressions cover qualified saved API/subscription routes, missing-vs-empty metadata and legacy Max exclusion. The actual editor renderer with a synthetic host adapter also confirms Max resets to Default when switching to a model supporting only Low/High, and returns to API/Max correctly; this is renderer evidence, not native editor/account acceptance. Screenshot: /private/tmp/ocean-model-effort-verified.png. Owning Surface contract updated; root/index docs unchanged because ownership boundaries remain unchanged. No installation, live provider calls or credential mutations in this slice. Fresh review, other-account acceptance and operated-runtime compatibility remain unresolved.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [17:11] [05-10-26]
+agent: [claude] [claude code]
+worktree: [claude/thinking-levels-truthful] [/Users/risingtidesdev/dev/ocean-claude-audit]
+type: [bug report]
+area: [backend] [testing]
+
+Made thinking levels do what they say. The runtime dropped an explicit Off before any encoder saw it, so "off" silently ran at the provider default on every model that thinks by default; AgentConfig now carries an optional level and passes Off through, which makes the existing off shapes reachable (Anthropic disabled or between_tools, Codex none, DeepSeek disabled). Adaptive Claude requests now send display summarized: current models otherwise stream empty thinking text, so TUI and Surface reasoning views stayed blank. Opus 4.8 and 4.7 joined the adaptive family because budget_tokens is rejected there, and no adaptive-family request carries a sampling parameter with thinking on or off. The GPT-4 chat family no longer receives reasoning_effort. Catalog effort metadata now lists a level only when choosing it changes the request: collapsed levels are gone (Haiku xhigh, DeepSeek low and medium, older Codex xhigh and off, Kimi K3 everything but max) and routes whose encoder sends nothing (GLM, MiniMax, Kimi K2.x, GPT-4o) advertise an empty list, which clients already render as no effort control.
+
+Validation: full suites for ocean-protocol (173 plus 5), ocean-providers (65), ocean-runtime, ocean-agent (260, live probe ignored), ocean-daemon (878) and ocean-acp pass; workspace test compilation, rustfmt check and docs-check pass. New runtime end-to-end tests prove unset stays unset, Off and High reach the provider, and a stream-option level still wins. The daemon and provider fixtures that required a non-empty effort list now check the vocabulary instead. No provider was called: the Anthropic display field, the Opus 4.8/4.7 adaptive shape and Codex effort none follow the published provider contracts and are not live-verified here. Protocol, providers, runtime and daemon devlogs updated; indexes unchanged.
+_________________________________________________________________________________

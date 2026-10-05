@@ -766,6 +766,11 @@ pub struct ReadyModel {
 
 /// Effort choices supported by Ocean's current wire encoder for this model.
 /// This is additive catalog metadata; older clients can ignore it.
+///
+/// A level is listed only when choosing it changes the request: levels the
+/// encoder folds into another level are left out, and a route whose encoder
+/// sends no effort parameter gets an empty list, which clients render as no
+/// effort control. `off` appears only where the encoder can turn thinking off.
 pub fn model_effort_levels(id: &str) -> &'static [&'static str] {
     if matches!(
         id,
@@ -776,6 +781,27 @@ pub fn model_effort_levels(id: &str) -> &'static [&'static str] {
         || id.starts_with("gpt-5.6")
     {
         &["off", "low", "medium", "high", "xhigh", "max"]
+    } else if id.starts_with("deepseek-") {
+        // DeepSeek has an explicit off and two efforts.
+        &["off", "high", "max"]
+    } else if id == "kimi-k3" {
+        // K3 accepts only `max`; leaving effort unset sends nothing.
+        &["max"]
+    } else if id == "claude-haiku-4-5" {
+        // Budgets above `high` clamp to the same value under the 16K output cap.
+        &["off", "minimal", "low", "medium", "high"]
+    } else if matches!(
+        id,
+        "gpt-5.5" | "gpt-5.4" | "gpt-5.4-mini" | "gpt-5.3-codex-spark"
+    ) {
+        // These reason by default, cannot be switched off, and top out at `high`.
+        &["minimal", "low", "medium", "high"]
+    } else if id.starts_with("glm-")
+        || id.starts_with("MiniMax-")
+        || matches!(id, "kimi-k2.6" | "kimi-k2" | "gpt-4o" | "gpt-4o-mini")
+    {
+        // No effort parameter is sent on these routes.
+        &[]
     } else {
         &["off", "minimal", "low", "medium", "high", "xhigh"]
     }
@@ -1879,7 +1905,15 @@ mod tests {
             .unwrap();
             assert_eq!(selection.model, route.model_id);
             assert_eq!(selection.provider.as_str(), route.provider);
-            assert!(!route.effort_levels.is_empty());
+            // An empty list is meaningful: the route sends no effort parameter.
+            for level in &route.effort_levels {
+                assert!(
+                    ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+                        .contains(&level.as_str()),
+                    "{}: unknown effort level {level}",
+                    route.id
+                );
+            }
         }
         for invalid in [
             "/gpt-6-astra",
@@ -2368,6 +2402,35 @@ mod tests {
             assert!(model_effort_levels(id).contains(&"max"));
         }
         assert!(!model_effort_levels("claude-haiku-4-5").contains(&"max"));
+        // Levels the encoder folds together, or cannot honour, are not offered.
+        assert_eq!(
+            model_effort_levels("claude-haiku-4-5"),
+            ["off", "minimal", "low", "medium", "high"]
+        );
+        assert_eq!(
+            model_effort_levels("deepseek-v4-pro"),
+            ["off", "high", "max"]
+        );
+        assert_eq!(model_effort_levels("kimi-k3"), ["max"]);
+        for id in ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"] {
+            assert_eq!(
+                model_effort_levels(id),
+                ["minimal", "low", "medium", "high"],
+                "{id}"
+            );
+        }
+        // Routes whose encoder sends no effort parameter offer no control.
+        for id in [
+            "glm-5.3",
+            "glm-4.5-flash",
+            "MiniMax-M2.7",
+            "kimi-k2.6",
+            "kimi-k2",
+            "gpt-4o",
+            "gpt-4o-mini",
+        ] {
+            assert!(model_effort_levels(id).is_empty(), "{id}");
+        }
         let catalog = known_models_with_readiness(&ProviderEnv::default());
         let sol = catalog
             .iter()

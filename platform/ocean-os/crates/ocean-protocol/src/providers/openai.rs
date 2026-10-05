@@ -679,7 +679,9 @@ fn deepseek_reasoning_effort(level: ThinkingLevel) -> Option<&'static str> {
 fn apply_reasoning(body: &mut Value, model: &Model, level: ThinkingLevel) {
     match model.provider.as_str() {
         "openai" => {
-            if level == ThinkingLevel::Off {
+            // The GPT-4 chat family does not reason and rejects the parameter
+            // with a 400, which would fail the whole turn.
+            if level == ThinkingLevel::Off || model.id.starts_with("gpt-4") {
                 return;
             }
             if let Some(effort) = openai_reasoning_effort(level) {
@@ -1926,6 +1928,14 @@ mod tests {
     // OCEAN-134: reasoning-effort parity. `build_body` must translate
     // `options.reasoning` into the right wire param for the routed backend, and
     // must omit it entirely when no reasoning level is set (or it's Off).
+    /// An OpenAI reasoning model on the Chat Completions route.
+    fn openai_reasoning_model() -> Model {
+        let mut model = Model::openai_gpt_4o();
+        model.id = "o4-mini".into();
+        model.reasoning = true;
+        model
+    }
+
     fn openai_model() -> Model {
         Model::openai_gpt_4o()
     }
@@ -2368,12 +2378,35 @@ mod tests {
     }
 
     #[test]
+    fn build_body_never_sends_reasoning_effort_to_the_gpt_4_chat_family() {
+        for id in ["gpt-4o", "gpt-4o-mini", "gpt-4.1"] {
+            let mut model = openai_model();
+            model.id = id.into();
+            for level in [
+                ThinkingLevel::Minimal,
+                ThinkingLevel::High,
+                ThinkingLevel::Max,
+            ] {
+                let opts = StreamOptions {
+                    reasoning: Some(level),
+                    ..Default::default()
+                };
+                let body = test_body(&model, &Context::default(), &opts);
+                assert!(
+                    body.get("reasoning_effort").is_none(),
+                    "{id} is not a reasoning model and rejects the parameter: {body}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn build_body_emits_openai_reasoning_effort() {
         let opts = StreamOptions {
             reasoning: Some(ThinkingLevel::High),
             ..Default::default()
         };
-        let body = test_body(&openai_model(), &Context::default(), &opts);
+        let body = test_body(&openai_reasoning_model(), &Context::default(), &opts);
         assert_eq!(
             body["reasoning_effort"], "high",
             "OpenAI o-series must receive top-level reasoning_effort: {body}"
@@ -2398,7 +2431,7 @@ mod tests {
                 reasoning: Some(level),
                 ..Default::default()
             };
-            let body = test_body(&openai_model(), &Context::default(), &opts);
+            let body = test_body(&openai_reasoning_model(), &Context::default(), &opts);
             assert_eq!(
                 body["reasoning_effort"], expected,
                 "level {level:?} mismapped: {body}"

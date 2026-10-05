@@ -14,7 +14,8 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
 
 - Daemon health is `GET /health`, not `/v1/health`.
 - `/v1/models` preserves current/id/provider/label/readiness/provenance and
-  additively exposes provider-owned `effort_levels`; the route fixture verifies
+  additively exposes provider-owned `effort_levels` (an empty list is
+  authoritative: that route sends no effort parameter); the route fixture verifies
   canonical metadata and ordering without performing inference. Legacy `models`
   stays intact; additive `routes` and `current.route` carry provider-qualified
   selections. Session creation/config accept both legacy ids and qualified
