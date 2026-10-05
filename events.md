@@ -217,3 +217,50 @@ spellings) now resolves with the Codex backend's served 272k context window
 instead of the advertised 400k, so a session cannot overfill and fail.
 Regression test gpt_5_5_resolves_with_codex_backend_served_limit added.
 Validation: cargo test -p ocean-providers --locked (see PR).
+
+time: [13:28] [05-10-26]
+agent: [codex] [gpt-6]
+worktree: [feat/model-effort-control] [/Users/risingtidesdev/dev/ocean-ui-current]
+type: [feature-request]
+area: [frontend] [design] [testing]
+
+VS Code/Cursor now uses one model/effort disclosure in the composer instead of separate permanent runtime-bar selects. ACP forwards optional namespaced readiness and effort-level metadata; the extension preserves qualified ids, disables explicitly disconnected choices and uses model-specific effort lists. Max is supported by settings, command picker and prompt metadata. Explicit model changes clear incompatible effort; missing/pinned choices stay represented. Escape closes the disclosure and restores focus, outside clicks close it, and the top status no longer repeats the selected model id.
+
+Extension TypeScript lint and production package passed after installing locked dependencies into the task checkout. JS syntax check passed. ACP: 23 unit plus three permission-ordering integration tests passed; strict all-target Clippy and docs-check passed. Read-only renderer fixture using actual HTML/CSS/JS proves API/max display, disabled disconnected option, incompatible max clearing after model change, Escape/focus, missing pin preservation and 390px viewport bounds x=12..378 with scroll width 390. Fixture evidence does not prove a native editor host or account inference. Owning Surface/crates devlogs updated; root and Child devlog indexes unchanged because no ownership boundaries changed. Prior head 3c4a1320 has hosted CI green. Fresh review, new-head CI, native/live acceptance, account repair and runtime migration compatibility remain pending; no live installation or provider call occurred.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [13:48] [05-10-26]
+agent: [codex] [gpt-6]
+worktree: [feat/model-effort-control] [/Users/risingtidesdev/dev/ocean-ui-current]
+type: [bug report]
+area: [backend] [testing]
+
+Fixed missing native Claude Code login discovery. Explicit env and valid Ocean OAuth credentials retain precedence; read-only native macOS keychain discovery is bounded to two seconds/32 KiB, with native credential-file fallback. Custom CLAUDE_CONFIG_DIR bypasses default account discovery. Future expiry and inference scope are required; native secrets are never imported, refreshed, written or logged, and cannot supply Anthropic API auth.
+
+Validation: 65 provider tests, strict all-target provider Clippy, six OAuth storage tests, seven Agent refresh tests, workspace test compilation and docs-check pass. Readiness-only candidate snapshot now reports 39/44 routes (Claude Code 4/4; Anthropic API 0/4 and Google 0/1). All four Claude Code choices completed bounded live no-tools prompts through production resolver/factory: Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 4.5. Existing other-account acceptance failures remain unresolved. No live installation or durable service/database changes. Provider devlog updated; parent contracts and child indexes unchanged because ownership boundaries are unchanged. Fresh review and operated-runtime compatibility remain required before release.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [13:53] [05-10-26]
+agent: [codex] [gpt-6]
+worktree: [feat/model-effort-control] [/Users/risingtidesdev/dev/ocean-ui-current]
+type: [bug report]
+area: [frontend] [testing]
+
+Restored Surface compatibility with the operated daemon caller projection. Installed revision 6912315 exposes self_member_id from its private credential row; the candidate used caller_member_id and dropped that identity, incorrectly disabling Share for otherwise eligible live owners. Surface now accepts the equivalent legacy wire field as a read alias and serializes the current field only. Conflicting duplicate fields fail decoding; live human-owner membership checks remain unchanged. The shared projection decoder covers HTTP hydration and room_access SSE.
+
+Validation: all 897 Surface tests, strict WASM Clippy and docs-check pass. Added a production-decoder-to-Share-policy regression for legacy owner, ordinary member, mismatched caller, duplicate identity and current-only serialization. Surface owning contract updated; parent/index docs unchanged because ownership boundaries did not change. No live room, service, database or installation mutation. This repairs one client compatibility issue and does not lift the daemon migration hold or establish cross-machine Rooms acceptance.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [13:59] [05-10-26]
+agent: [codex] [gpt-6]
+worktree: [feat/model-effort-control] [/Users/risingtidesdev/dev/ocean-ui-current]
+type: [bug report]
+area: [frontend] [testing]
+
+Corrected shared model/effort compatibility fallback. A saved provider-qualified route now derives legacy effort choices from its wire model when capability metadata is absent, preventing always-thinking GPT/Claude routes from offering Off/Minimal. Explicit empty daemon effort metadata remains authoritative instead of repopulating generic levels. Max is still metadata-only, and pinned stored values are preserved.
+
+Validation: all 899 Surface tests, strict WASM Clippy and docs-check pass. New regressions cover qualified saved API/subscription routes, missing-vs-empty metadata and legacy Max exclusion. The actual editor renderer with a synthetic host adapter also confirms Max resets to Default when switching to a model supporting only Low/High, and returns to API/Max correctly; this is renderer evidence, not native editor/account acceptance. Screenshot: /private/tmp/ocean-model-effort-verified.png. Owning Surface contract updated; root/index docs unchanged because ownership boundaries remain unchanged. No installation, live provider calls or credential mutations in this slice. Fresh review, other-account acceptance and operated-runtime compatibility remain unresolved.
+_________________________________________________________________________________

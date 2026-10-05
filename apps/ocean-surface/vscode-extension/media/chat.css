@@ -85,21 +85,14 @@ body {
   padding: 5px 12px;
   border-bottom: 1px solid var(--ocean-border);
   display: grid;
-  grid-template-columns:
-    minmax(130px, 1.35fr)
-    minmax(112px, 0.9fr)
-    auto
-    minmax(92px, 0.55fr)
-    auto
-    auto;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
   gap: 8px;
   align-items: center;
   background: color-mix(in srgb, var(--ocean-panel) 68%, transparent);
 }
 
 .model-control,
-.session-control,
-.thinking-control {
+.session-control {
   min-width: 0;
 }
 
@@ -684,6 +677,7 @@ button:disabled {
   border-top: 1px solid var(--ocean-border);
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas: "input input" "model actions";
   gap: 10px;
   align-items: end;
   background: var(--ocean-panel);
@@ -742,6 +736,7 @@ button:disabled {
 }
 
 #input {
+  grid-area: input;
   width: 100%;
   height: auto;
   min-height: 40px;
@@ -783,10 +778,6 @@ button:disabled {
     grid-template-columns: minmax(0, 1fr) auto auto;
   }
 
-  .model-control {
-    grid-column: 1 / -1;
-  }
-
   .session-control {
     grid-column: 1 / 2;
   }
@@ -794,10 +785,6 @@ button:disabled {
   #newSession {
     grid-column: 2 / 4;
     justify-self: end;
-  }
-
-  .thinking-control {
-    grid-column: 1 / 2;
   }
 
   .runtime-stat {
@@ -809,9 +796,6 @@ button:disabled {
     justify-self: end;
   }
 
-  #composer {
-    grid-template-columns: 1fr;
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -827,4 +811,31 @@ button:disabled {
   50% {
     opacity: 0;
   }
+}
+
+/* One composer disclosure, using the editor's existing theme tokens. */
+#composer .actions { grid-area: actions; }
+.model-control { grid-area: model; }
+.model-control summary {
+  min-height: 28px; display: flex; align-items: center; gap: 8px;
+  cursor: pointer; list-style: none; color: var(--ocean-ink);
+}
+.model-control summary::-webkit-details-marker { display: none; }
+.model-control summary:focus-visible { outline: 1px solid var(--ocean-focus); outline-offset: 3px; }
+#modelLabel { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#effortLabel { flex: none; color: var(--ocean-muted); font-size: 11px; }
+.model-control summary svg { width: 12px; height: 12px; flex: none; fill: none; stroke: currentColor; }
+.model-control[open] summary svg { transform: rotate(180deg); }
+.model-control-panel {
+  position: absolute; z-index: 5; bottom: calc(100% + 6px); left: 12px; right: 12px;
+  max-width: 480px; padding: 12px; display: grid; gap: 12px;
+  border: 1px solid var(--ocean-border); border-radius: 4px;
+  background: var(--vscode-editor-background);
+}
+.model-control-panel label { display: grid; gap: 4px; min-width: 0; }
+.model-control-panel label > span { color: var(--ocean-muted); font-size: 11px; }
+.model-control-panel select { min-height: 32px; }
+@media (pointer: coarse) {
+  .model-control summary, .model-control-panel select { min-height: 44px; }
+  .model-control-panel select { font-size: 16px; }
 }

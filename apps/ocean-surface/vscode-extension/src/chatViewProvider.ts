@@ -876,8 +876,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       { label: "Medium", description: current === "medium" ? "current" : "", value: "medium" },
       { label: "High", description: current === "high" ? "current" : "", value: "high" },
       { label: "Extra high", description: current === "xhigh" ? "current" : "", value: "xhigh" },
+      { label: "Max", description: current === "max" ? "current" : "", value: "max" },
     ];
-    const picked = await vscode.window.showQuickPick(options, {
+    const levels = this.connection.modelOptions.find((mode) => mode.id === this.connection.currentModelId)?.effortLevels
+      ?? ["off", "minimal", "low", "medium", "high", "xhigh"];
+    const picked = await vscode.window.showQuickPick(options.filter((option) => option.value === "" || levels.includes(option.value)), {
       title: "Ocean: Thinking Level",
       placeHolder: "Choose per-turn thinking level",
       ignoreFocusOut: true,
@@ -2471,12 +2474,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       <span id="status">Disconnected</span>
     </header>
     <section id="runtime-bar" aria-label="Ocean runtime">
-      <label class="model-control">
-        <span class="sr-only">Model</span>
-        <select id="modelSelect" title="Set the model for this Ocean session">
-          <option value="">Connect to load models</option>
-        </select>
-      </label>
       <label class="session-control">
         <span class="sr-only">Session</span>
         <select id="sessionSelect" title="Load a previous Ocean session">
@@ -2484,18 +2481,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         </select>
       </label>
       <button type="button" id="newSession" class="text-button" title="Start a new Ocean session">New</button>
-      <label class="thinking-control">
-        <span class="sr-only">Thinking level</span>
-        <select id="thinkingSelect" title="Per-turn thinking level">
-          <option value="">Think default</option>
-          <option value="off">Think off</option>
-          <option value="minimal">Think minimal</option>
-          <option value="low">Think low</option>
-          <option value="medium">Think medium</option>
-          <option value="high">Think high</option>
-          <option value="xhigh">Think xhigh</option>
-        </select>
-      </label>
       <span id="contextValue" class="runtime-stat" title="Context window usage">ctx</span>
       <details id="settingsMenu" class="runtime-menu">
         <summary title="Ocean settings">Settings</summary>
@@ -2531,6 +2516,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     <form id="composer">
       <div id="mentionMenu" class="mention-menu" role="listbox" hidden></div>
       <textarea id="input" rows="2" placeholder="Ask Ocean about this workspace" title="Enter sends. Shift+Enter inserts a line."></textarea>
+      <details id="modelControl" class="model-control">
+        <summary aria-label="Model and effort">
+          <span id="modelLabel">Default model</span><span id="effortLabel">default</span>
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg>
+        </summary>
+        <div class="model-control-panel">
+          <label><span>Model</span><select id="modelSelect" aria-label="Model for this session"><option value="">Default model</option></select></label>
+          <label><span>Effort</span><select id="thinkingSelect" aria-label="Reasoning effort"><option value="">Default</option></select></label>
+        </div>
+      </details>
       <div class="actions">
         <button type="button" id="connect" class="connect-button" title="Connect to Ocean">Connect</button>
         <button type="submit" class="send-button" title="Send with Enter">Send</button>

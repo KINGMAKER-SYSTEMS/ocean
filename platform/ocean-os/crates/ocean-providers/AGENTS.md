@@ -10,6 +10,7 @@ auth-file write custody. Provider wire encoding remains in `ocean-protocol`.
 - Scope: `crates/ocean-providers/`; parent: `../AGENTS.md`.
 - `src/lib.rs` owns routing/catalog and exports the shared custody interface.
 - `src/auth_file.rs` owns cooperating Ocean writers' lease and publication.
+- `src/native_claude.rs` owns read-only native Claude login discovery.
 
 ## Local Contracts
 
@@ -33,6 +34,13 @@ auth-file write custody. Provider wire encoding remains in `ocean-protocol`.
   advertise max only where Ocean's encoder supports the provider vocabulary.
 - Every public catalog id resolves back to the same wire id and provider.
   Credential readiness remains separate from account entitlement and live inference.
+- Claude Code credential precedence is explicit environment, valid Ocean OAuth,
+  then native login. Default macOS discovery reads `Claude Code-credentials`
+  through `/usr/bin/security` with a two-second deadline and 32 KiB cap, then
+  checks the native `.claude/.credentials.json`. Native tokens require future
+  expiry and `user:inference`; never refresh, import, write, or log them.
+  `CLAUDE_CONFIG_DIR` selects only its own credential file and bypasses the
+  default keychain. Native subscription auth never supplies Anthropic API keys.
 - OAuth login/API-key storage and Agent refresh acquire `lock_auth_file` before
   fresh read/merge/publication. Never hold custody across network I/O or await.
 - The process mutex and exclusive sibling file lock share a five-second

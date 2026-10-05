@@ -512,6 +512,8 @@ pub struct ModelInfo {
     pub provider: Option<String>,
     #[serde(default)]
     pub ready: Option<bool>,
+    #[serde(default)]
+    pub effort_levels: Option<Vec<String>>,
 }
 
 impl ModelInfo {

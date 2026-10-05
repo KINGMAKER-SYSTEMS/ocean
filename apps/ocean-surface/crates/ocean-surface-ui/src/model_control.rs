@@ -37,6 +37,7 @@ fn model_label(models: &[ModelInfo], id: &str) -> String {
 }
 
 fn effort_levels(id: &str) -> &'static [&'static str] {
+    let id = id.split_once('/').map_or(id, |(_, model)| model);
     if matches!(
         id,
         "gpt-6-astra" | "gpt-6.1-sol" | "claude-fable-5-1" | "claude-opus-5-5"
@@ -58,7 +59,6 @@ fn available_efforts(models: &[ModelInfo], id: &str) -> Vec<String> {
         .iter()
         .find(|model| matches_model(model, id))
         .and_then(|model| model.effort_levels.clone())
-        .filter(|levels| !levels.is_empty())
         .unwrap_or_else(|| {
             effort_levels(id)
                 .iter()
@@ -208,6 +208,40 @@ mod tests {
         assert!(available_efforts(&models, "gpt-6.1-sol").contains(&"max".into()));
         assert_eq!(available_efforts(&models, "custom"), ["low", "high"]);
         assert!(!available_efforts(&[], "gpt-6.1-sol").contains(&"max".into()));
+    }
+
+    #[test]
+    fn missing_metadata_uses_wire_model_for_qualified_saved_routes() {
+        for id in [
+            "openai/gpt-6.1-sol",
+            "openai-codex/gpt-6-astra",
+            "claude-code/claude-fable-5-1",
+            "anthropic/claude-opus-5-5",
+        ] {
+            let levels = available_efforts(&[], id);
+            assert!(!levels.contains(&"off".into()), "{id}");
+            assert!(!levels.contains(&"minimal".into()), "{id}");
+            assert!(
+                !levels.contains(&"max".into()),
+                "legacy metadata cannot establish max support"
+            );
+            assert!(levels.contains(&"high".into()));
+        }
+        assert!(available_efforts(&[], "openai-codex/gpt-6-luna").contains(&"off".into()));
+    }
+
+    #[test]
+    fn explicit_empty_effort_capability_does_not_restore_legacy_options() {
+        let models: Vec<ModelInfo> = serde_json::from_value(serde_json::json!([
+            {"id":"openai/gpt-6.1-sol", "effort_levels":[]},
+            {"id":"openai-codex/gpt-6.1-sol"}
+        ]))
+        .unwrap();
+        assert!(available_efforts(&models, "openai/gpt-6.1-sol").is_empty());
+        assert_eq!(
+            available_efforts(&models, "openai-codex/gpt-6.1-sol"),
+            ["low", "medium", "high", "xhigh"]
+        );
     }
 
     #[test]
