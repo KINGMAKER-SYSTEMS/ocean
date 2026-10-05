@@ -15,7 +15,11 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
 - Daemon health is `GET /health`, not `/v1/health`.
 - `/v1/models` preserves current/id/provider/label/readiness/provenance and
   additively exposes provider-owned `effort_levels`; the route fixture verifies
-  canonical metadata and ordering without performing inference.
+  canonical metadata and ordering without performing inference. Legacy `models`
+  stays intact; additive `routes` and `current.route` carry provider-qualified
+  selections. Session creation/config accept both legacy ids and qualified
+  catalog routes, persist the wire model/provider pair, and reconstruct the
+  qualified route for resumed turns through `SessionModelConfig::model_spec`.
 - Restart the daemon only by specific PID; do not use blind `pkill` sweeps.
 - HTTP turn routes must resolve effective cwd from client cwd/project metadata and must never fall back to daemon process cwd.
 - Do not bypass runtime permission gates from daemon route code.

@@ -50,6 +50,9 @@ transcripts by session id.
   `config_revision`; explicit creation may atomically seed one already-resolved
   model/provider pair at revision one, while legacy session files deserialize
   that revision as zero.
+  `SessionModelConfig::model_spec` reconstructs catalog provider/model routes
+  for turn resolution so resumed API pins retain their selected auth; custom
+  and non-catalog legacy ids keep bare-id behavior.
   Detail and bounded sync projections carry the same revision. Optional config reads must distinguish
   an absent session from unreadable/corrupt storage so daemon adapters map only
   genuine absence to 404.
@@ -205,6 +208,8 @@ transcripts by session id.
 - Explicit live diagnostic: `OCEAN_LIVE_MODEL_PROBE=1 cargo test -p ocean-agent live_catalog_models_complete_tool_free_prompt --locked -- --ignored --nocapture` (contacts configured providers).
 
 - `cargo test -p ocean-agent every_catalog_model_constructs --locked`
+- `cargo test -p ocean-agent every_auth_route_constructs --locked`
+- `cargo test -p ocean-agent session_model_spec --locked`
 - `cargo test -p ocean-agent production_model_validation --locked`
 
 - `cargo test -p ocean-agent provider_refusal --locked` — synthetic primary and

@@ -2232,6 +2232,8 @@ pub struct Daemon {
 pub struct ModelInfo {
     pub id: String,
     #[serde(default)]
+    pub aliases: Vec<String>,
+    #[serde(default)]
     pub provider: String,
     #[serde(default)]
     pub label: String,
@@ -4088,11 +4090,15 @@ impl Daemon {
             struct Current {
                 #[serde(default)]
                 model: String,
+                #[serde(default)]
+                route: Option<String>,
             }
             #[derive(Deserialize)]
             struct ModelsResponse {
                 #[serde(default)]
                 models: Vec<ModelInfo>,
+                #[serde(default)]
+                routes: Option<Vec<ModelInfo>>,
                 #[serde(default)]
                 current: Option<Current>,
             }
@@ -4102,11 +4108,16 @@ impl Daemon {
                     Ok(r) => {
                         if let Some(cur) = r.current {
                             if !cur.model.is_empty() {
-                                default_model.set(Some(cur.model.clone()));
+                                let default_id = if r.routes.is_some() {
+                                    cur.route.unwrap_or_else(|| cur.model.clone())
+                                } else {
+                                    cur.model.clone()
+                                };
+                                default_model.set(Some(default_id));
                                 model.set(Some(cur.model));
                             }
                         }
-                        models.set(r.models);
+                        models.set(r.routes.unwrap_or(r.models));
                     }
                     Err(err) => log::warn!("models decode error: {err}"),
                 },

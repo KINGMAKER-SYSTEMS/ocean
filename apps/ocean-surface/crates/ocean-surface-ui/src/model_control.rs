@@ -4,10 +4,22 @@ use wasm_bindgen::JsCast;
 
 use crate::daemon::{Daemon, ModelInfo};
 
+fn matches_model(model: &ModelInfo, id: &str) -> bool {
+    model.id == id || model.aliases.iter().any(|alias| alias == id)
+}
+
+fn choice_id(models: &[ModelInfo], id: &str) -> String {
+    models
+        .iter()
+        .find(|model| matches_model(model, id))
+        .map(|model| model.id.clone())
+        .unwrap_or_else(|| id.into())
+}
+
 fn model_label(models: &[ModelInfo], id: &str) -> String {
     models
         .iter()
-        .find(|model| model.id == id)
+        .find(|model| matches_model(model, id))
         .map(|model| {
             if model.label.is_empty() {
                 id.to_owned()
@@ -44,7 +56,7 @@ fn effort_levels(id: &str) -> &'static [&'static str] {
 fn available_efforts(models: &[ModelInfo], id: &str) -> Vec<String> {
     models
         .iter()
-        .find(|model| model.id == id)
+        .find(|model| matches_model(model, id))
         .and_then(|model| model.effort_levels.clone())
         .filter(|levels| !levels.is_empty())
         .unwrap_or_else(|| {
@@ -97,7 +109,7 @@ pub fn ModelControl(daemon: Daemon) -> impl IntoView {
             <div class="ocean-model-control__panel">
                 <label class="ocean-model-control__field">
                     <span>"Model"</span>
-                    <select aria-label="Model for next turn" prop:value=move || selected.get().unwrap_or_default()
+                    <select aria-label="Model for next turn" prop:value=move || choice_id(&models.get(), &selected.get().unwrap_or_default())
                         on:change=move |event| {
                             let id = event_target_value(&event);
                             let effective = if id.is_empty() { current.get_untracked().unwrap_or_default() } else { id.clone() };
@@ -109,7 +121,7 @@ pub fn ModelControl(daemon: Daemon) -> impl IntoView {
                             });
                         }>
                         <option value="" prop:selected=move || selected.get().is_none()>"Default model"</option>
-                        <Show when=move || selected.get().is_some_and(|id| !models.get().iter().any(|model| model.id == id))>
+                        <Show when=move || selected.get().is_some_and(|id| !models.get().iter().any(|model| matches_model(model, &id)))>
                             <option prop:value=move || selected.get().unwrap_or_default() prop:selected=true>
                                 {move || selected.get().unwrap_or_default()}
                             </option>
@@ -119,7 +131,7 @@ pub fn ModelControl(daemon: Daemon) -> impl IntoView {
                             let label = model_label(std::slice::from_ref(&model), &id);
                             let unavailable = model.ready == Some(false);
                             view! {
-                                <option value=id.clone() disabled=unavailable prop:selected=move || selected.get().as_deref() == Some(id.as_str())>
+                                <option value=id.clone() disabled=unavailable prop:selected=move || selected.get().is_some_and(|selected| choice_id(&models.get(), &selected) == id)>
                                     {if unavailable { format!("{label} · connect {}", model.provider) } else { label }}
                                 </option>
                             }
@@ -196,6 +208,29 @@ mod tests {
         assert!(available_efforts(&models, "gpt-6.1-sol").contains(&"max".into()));
         assert_eq!(available_efforts(&models, "custom"), ["low", "high"]);
         assert!(!available_efforts(&[], "gpt-6.1-sol").contains(&"max".into()));
+    }
+
+    #[test]
+    fn auth_choices_preserve_legacy_alias_and_api_identity() {
+        let models: Vec<ModelInfo> = serde_json::from_value(serde_json::json!([
+            {"id":"openai-codex/gpt-6.1-sol", "aliases":["gpt-6.1-sol"], "label":"GPT-6.1 Sol (Codex)", "effort_levels":["low","max"]},
+            {"id":"openai/gpt-6.1-sol", "label":"GPT-6.1 Sol (API)", "effort_levels":["low","max"]}
+        ])).unwrap();
+        assert_eq!(
+            choice_id(&models, "gpt-6.1-sol"),
+            "openai-codex/gpt-6.1-sol"
+        );
+        assert_eq!(model_label(&models, "gpt-6.1-sol"), "GPT-6.1 Sol (Codex)");
+        assert_eq!(
+            model_label(&models, "openai/gpt-6.1-sol"),
+            "GPT-6.1 Sol (API)"
+        );
+        assert_eq!(
+            available_efforts(&models, "openai/gpt-6.1-sol"),
+            ["low", "max"]
+        );
+        assert_eq!(choice_id(&models, ""), "");
+        assert_eq!(choice_id(&models, "custom-pinned"), "custom-pinned");
     }
 
     #[test]

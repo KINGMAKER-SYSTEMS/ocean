@@ -119,7 +119,10 @@ token to browser code, bundle it, or cache it in client storage.
 
 - `crates/ocean-surface-ui/src/model_control.rs` owns the composer's single model/effort disclosure.
   It consumes the daemon's shared model catalog and current selection; choices
-  remain per-turn overrides rather than global model mutations.
+  remain per-turn overrides rather than global model mutations. Prefer additive
+  `/v1/models.routes` and `current.route` when present, with legacy `models`
+  fallback. Provider-qualified ids distinguish API and subscription auth;
+  aliases render older saved selections without rewriting their stored value.
 - Honor additive `ready` metadata: disable explicitly disconnected provider
   entries, retain compatibility when an older daemon omits readiness, and
   preserve pinned ids while the catalog loads. Readiness proves credentials,

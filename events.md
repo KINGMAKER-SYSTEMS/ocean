@@ -140,3 +140,17 @@ Direct OpenAI API-key GPT-6/5.6 now uses Responses for tool calling, with shared
 
 Provider/agent/protocol final verification: 493 tests passed, opt-in live probe ignored, strict all-target Clippy passed; final workspace check includes test targets. Workspace sweep before the final Claude-limit correction: 3,334 passed, ten ignored; corrected limits passed final owner checks. Explicit-provider probe requires exact model ids and reports fixed stream-error classes. Real OpenAI API Sol/Astra attempts did not complete; focused Sol retry classifies a quota rejection. Prior pushed head 45fcbd54 Build Ocean/Build Surface passed. No billing/auth edits or live deployment occurred. Owning devlogs updated; parent ownership/indexes unchanged. Separate auth-route picker exposure, connection repair, fresh review and live compatibility/acceptance remain in the full goal.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [12:28] [05-10-26]
+agent: [codex] [gpt-6]
+worktree: [feat/model-effort-control] [/Users/risingtidesdev/dev/ocean-ui-current]
+type: [feature-request]
+area: [frontend] [backend] [testing]
+
+PR #2 exposes 44 provider-qualified model choices, including separate OpenAI API/Codex and Anthropic API/Claude Code routes. Qualified selections override ambient provider pins; legacy catalog fields and saved bare-id aliases remain compatible. Readiness follows each auth route. Session creation/config persist wire model/provider pairs and resumed turns reconstruct the selected auth route rather than silently returning to subscription auth.
+
+Final Ocean workspace: 3,340 passed, ten ignored; strict providers/agent/daemon all-target Clippy passed. An unrelated registry subprocess UUID read failed in the first parallel sweep; the complete final rerun passed. Workspace test compilation and docs-check passed. Surface: 897 passed and Trunk built. Isolated read-only browser fixture verifies distinct auth labels, disabled disconnected choices, API plus max selection and reload retention; it provides renderer evidence, not account inference acceptance. No new live model calls, credentials/billing writes or installation occurred.
+
+Owning Surface/providers/agent/daemon docs and shared catalog index updated. Root ownership and Child devlog indexes stay unchanged because no boundaries moved. Fresh review and new-head hosted builds remain required; runtime migration compatibility, connection repair and broader UI acceptance remain active.
+_________________________________________________________________________________

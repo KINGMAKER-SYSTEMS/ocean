@@ -20,16 +20,20 @@ pub(super) async fn models_list(State(state): State<AppState>) -> Json<serde_jso
     // picker can tell the menu apart from what's actually selectable. Additive:
     // entries keep id/provider/label top-level and gain ready/credential_source.
     // Auth-file reads are blocking I/O, so they ride spawn_blocking.
-    let models = tokio::task::spawn_blocking(|| {
+    let (models, routes) = tokio::task::spawn_blocking(|| {
         let env = ocean_agent::ProviderEnv::from_process();
-        ocean_agent::known_models_with_readiness(&env)
+        (
+            ocean_agent::known_models_with_readiness(&env),
+            ocean_providers::model_routes_with_readiness(&env),
+        )
     })
     .await
     .unwrap_or_default();
     Json(json!({
         "ok": true,
-        "current": { "provider": provider, "model": model },
+        "current": { "provider": provider, "model": model, "route": format!("{provider}/{model}") },
         "models": models,
+        "routes": routes,
     }))
 }
 

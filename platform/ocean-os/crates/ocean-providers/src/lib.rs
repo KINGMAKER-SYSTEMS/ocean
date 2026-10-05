@@ -795,6 +795,7 @@ pub fn known_models_with_readiness(env: &ProviderEnv) -> Vec<ReadyModel> {
                 .or_insert_with(|| {
                     let mut probe = env.clone();
                     probe.vars.insert("OCEAN_MODEL".into(), m.id.clone());
+                    probe.vars.remove("OCEAN_PROVIDER");
                     match resolve_provider_config(&probe) {
                         Ok(cfg) => {
                             let r = cfg.readiness();
@@ -817,6 +818,99 @@ pub fn known_models_with_readiness(env: &ProviderEnv) -> Vec<ReadyModel> {
         .collect()
 }
 
+/// Additive picker entries with an unambiguous provider-qualified selection id.
+/// Legacy `KnownModel.id` stays equal to the provider wire model id.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelRoute {
+    pub id: String,
+    pub model_id: String,
+    pub provider: String,
+    pub label: String,
+    pub ready: bool,
+    pub effort_levels: Vec<String>,
+    pub aliases: Vec<String>,
+}
+
+/// Pure catalog; readiness is resolved separately from the caller's environment.
+pub fn model_routes() -> Vec<ModelRoute> {
+    let legacy = known_models();
+    let mut routes = Vec::new();
+    for model in &legacy {
+        let label = if model.provider == "claude-code" {
+            format!("{} (Claude Code)", model.label)
+        } else {
+            model.label.clone()
+        };
+        routes.push(ModelRoute {
+            id: format!("{}/{}", model.provider, model.id),
+            model_id: model.id.clone(),
+            provider: model.provider.clone(),
+            label,
+            ready: false,
+            effort_levels: model_effort_levels(&model.id)
+                .iter()
+                .map(|s| (*s).into())
+                .collect(),
+            aliases: vec![model.id.clone()],
+        });
+    }
+    for model in legacy {
+        let api_provider = if model.provider == "openai-codex" && openai_uses_responses(&model.id) {
+            "openai"
+        } else if model.provider == "claude-code" {
+            "anthropic"
+        } else {
+            continue;
+        };
+        let label = if api_provider == "openai" {
+            model.label.replace("(Codex)", "(API)")
+        } else {
+            format!("{} (API)", model.label)
+        };
+        routes.push(ModelRoute {
+            id: format!("{api_provider}/{}", model.id),
+            effort_levels: model_effort_levels(&model.id)
+                .iter()
+                .map(|s| (*s).into())
+                .collect(),
+            model_id: model.id,
+            provider: api_provider.into(),
+            label,
+            ready: false,
+            aliases: Vec::new(),
+        });
+    }
+    routes
+}
+
+/// Catalog-only membership check for both legacy and qualified selection ids.
+/// Returns the durable wire-model/provider pair without accessing credentials.
+pub fn catalog_model(spec: &str) -> Option<KnownModel> {
+    model_routes()
+        .into_iter()
+        .find(|route| route.id == spec || route.aliases.iter().any(|alias| alias == spec))
+        .map(|route| KnownModel {
+            id: route.model_id,
+            provider: route.provider,
+            label: route.label,
+        })
+}
+
+pub fn model_routes_with_readiness(env: &ProviderEnv) -> Vec<ModelRoute> {
+    let mut readiness = BTreeMap::new();
+    model_routes()
+        .into_iter()
+        .map(|mut route| {
+            route.ready = *readiness.entry(route.provider.clone()).or_insert_with(|| {
+                let mut probe = env.clone();
+                probe.vars.insert("OCEAN_MODEL".into(), route.id.clone());
+                resolve_provider_config(&probe).is_ok_and(|config| config.readiness().ok)
+            });
+            route
+        })
+        .collect()
+}
+
 /// Resolve model selection without reading credential values.
 pub fn resolve_model_selection(env: &ProviderEnv) -> Result<ModelSelection, ProviderConfigError> {
     // No hardcoded model. The operator's choice flows in as OCEAN_MODEL (set
@@ -833,6 +927,22 @@ pub fn resolve_model_selection(env: &ProviderEnv) -> Result<ModelSelection, Prov
         return Err(ProviderConfigError::NoModelSelected);
     };
     let model = normalize_model_id(chosen);
+    if let Some((provider, id)) = model.split_once('/') {
+        if provider.is_empty() || id.is_empty() || id.contains('/') {
+            return Err(ProviderConfigError::UnknownModel { model });
+        }
+        // An explicit picker route outranks an ambient provider pin. First
+        // preserve canonical bare-route aliases/limits, then use explicit auth.
+        let mut bare = env.clone();
+        bare.vars.remove("OCEAN_PROVIDER");
+        bare.vars.insert("OCEAN_MODEL".into(), id.into());
+        if let Ok(selection) = resolve_model_selection(&bare) {
+            if selection.provider.as_str() == provider {
+                return Ok(selection);
+            }
+        }
+        return model_for_explicit_provider(provider, id, env);
+    }
     let provider_override = env.get("OCEAN_PROVIDER").map(str::trim);
 
     if let Some(provider) = provider_override {
@@ -1752,6 +1862,76 @@ mod tests {
         let selection = resolve_model_selection(&env(&[("OCEAN_MODEL", "gemini")])).unwrap();
         assert_eq!(selection.provider, ProviderId::Google);
         assert_eq!(selection.model, "gemini-2.0-flash");
+    }
+
+    #[test]
+    fn qualified_routes_round_trip_wire_id_provider_and_efforts() {
+        let routes = model_routes_with_readiness(&env(&[("OCEAN_PROVIDER", "openai")]));
+        let mut ids = std::collections::HashSet::new();
+        for route in routes {
+            assert!(ids.insert(route.id.clone()), "duplicate route");
+            let selection = resolve_model_selection(&env(&[
+                ("OCEAN_MODEL", &route.id),
+                ("OCEAN_PROVIDER", "google"),
+            ]))
+            .unwrap();
+            assert_eq!(selection.model, route.model_id);
+            assert_eq!(selection.provider.as_str(), route.provider);
+            assert!(!route.effort_levels.is_empty());
+        }
+        for invalid in [
+            "/gpt-6-astra",
+            "openai/",
+            "openai/x/y",
+            "foreign/gpt-6-astra",
+        ] {
+            assert!(resolve_model_selection(&env(&[("OCEAN_MODEL", invalid)])).is_err());
+        }
+    }
+
+    #[test]
+    fn picker_readiness_is_per_auth_route_despite_global_provider_pin() {
+        let env = env(&[
+            ("OCEAN_PROVIDER", "openai"),
+            ("OPENAI_API_KEY", "synthetic-api-key"),
+        ]);
+        let routes = model_routes_with_readiness(&env);
+        assert!(
+            routes
+                .iter()
+                .find(|r| r.id == "openai/gpt-6.1-sol")
+                .unwrap()
+                .ready
+        );
+        assert!(
+            !routes
+                .iter()
+                .find(|r| r.id == "openai-codex/gpt-6.1-sol")
+                .unwrap()
+                .ready
+        );
+        assert!(
+            !routes
+                .iter()
+                .find(|r| r.id == "claude-code/claude-opus-5-5")
+                .unwrap()
+                .ready
+        );
+        assert!(
+            !routes
+                .iter()
+                .find(|r| r.id == "anthropic/claude-opus-5-5")
+                .unwrap()
+                .ready
+        );
+        let legacy = known_models_with_readiness(&env);
+        assert!(
+            !legacy
+                .iter()
+                .find(|m| m.model.provider == "deepseek")
+                .unwrap()
+                .ready
+        );
     }
 
     #[test]

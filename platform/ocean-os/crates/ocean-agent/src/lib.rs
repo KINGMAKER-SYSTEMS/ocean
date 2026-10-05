@@ -182,6 +182,17 @@ impl SessionModelConfig {
     pub fn is_session_pinned(&self, global_model: &str) -> bool {
         self.config_revision > 0 || (!self.model.trim().is_empty() && self.model != global_model)
     }
+
+    /// Preserve a catalog pin's auth route when reconstructing turn selection.
+    /// Non-catalog legacy/custom models retain their existing bare-id behavior.
+    pub fn model_spec(&self) -> String {
+        let route = format!("{}/{}", self.provider, self.model);
+        if ocean_providers::catalog_model(&route).is_some() {
+            route
+        } else {
+            self.model.clone()
+        }
+    }
 }
 
 /// Classification of a deterministic transcript-text match.
@@ -5931,6 +5942,31 @@ done
     }
 
     #[test]
+    fn every_auth_route_constructs_the_selected_runtime_model() {
+        for route in ocean_providers::model_routes() {
+            let env = ProviderEnv {
+                vars: [
+                    ("OCEAN_MODEL".into(), route.id.clone()),
+                    ("OCEAN_PROVIDER".into(), "google".into()),
+                ]
+                .into(),
+                auth_file: None,
+                codex_auth_file: None,
+            };
+            let config = ocean_providers::resolve_provider_config(&env).unwrap();
+            let model = model_from_provider_config(&config).unwrap();
+            assert_eq!(model.id, route.model_id);
+            assert_eq!(config.selection.provider.as_str(), route.provider);
+            assert_eq!(model.context_window, config.selection.context_window);
+            assert_eq!(model.max_tokens, config.selection.max_output_tokens);
+            if route.provider == "openai" && ocean_providers::openai_uses_responses(&route.model_id)
+            {
+                assert_eq!(model.api, "openai-responses");
+            }
+        }
+    }
+
+    #[test]
     fn every_catalog_model_constructs_a_runtime_wire_model() {
         for known in ocean_providers::known_models() {
             // Selection-only resolution never reads auth or calls a provider.
@@ -6077,6 +6113,30 @@ done
         assert!(config(1).is_session_pinned("fake-ok"));
         assert!(!config(0).is_session_pinned("fake-ok"));
         assert!(config(0).is_session_pinned("fake-surface"));
+        assert_eq!(config(1).model_spec(), "fake-ok");
+    }
+
+    #[test]
+    fn session_model_spec_preserves_catalog_auth_route_for_turn_resolution() {
+        for route in ocean_providers::model_routes() {
+            let config = SessionModelConfig {
+                model: route.model_id.clone(),
+                provider: route.provider.clone(),
+                config_revision: 1,
+                client_type: None,
+            };
+            assert_eq!(config.model_spec(), route.id);
+            let selection = ocean_providers::resolve_model_selection(&ProviderEnv {
+                vars: std::collections::BTreeMap::from([
+                    ("OCEAN_MODEL".into(), config.model_spec()),
+                    ("OCEAN_PROVIDER".into(), "google".into()),
+                ]),
+                ..Default::default()
+            })
+            .unwrap();
+            assert_eq!(selection.model, route.model_id);
+            assert_eq!(selection.provider.as_str(), route.provider);
+        }
     }
 
     #[tokio::test]

@@ -6174,7 +6174,7 @@ async fn agent_turn(
             .ok()
             .flatten()
             .filter(|config| config.is_session_pinned(&global_model))
-            .map(|config| config.model)
+            .map(|config| config.model_spec())
     };
 
     // Approval policy is daemon-owned and captured at turn start. The default
@@ -7736,10 +7736,7 @@ async fn agent_sessions_create(
     let initial_model = match model {
         Some(requested) => {
             let requested = requested.trim();
-            let Some(known) = ocean_agent::known_models()
-                .into_iter()
-                .find(|known| known.id == requested)
-            else {
+            let Some(known) = ocean_providers::catalog_model(requested) else {
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(AgentSessionCreateResponse {
@@ -7988,13 +7985,15 @@ async fn agent_session_config_patch(
         );
     };
     let requested = req.model.trim();
-    let Some(known) = ocean_agent::known_models()
-        .into_iter()
-        .find(|m| m.id == requested)
-    else {
-        let valid: Vec<String> = ocean_agent::known_models()
+    let Some(known) = ocean_providers::catalog_model(requested) else {
+        let valid: Vec<String> = ocean_providers::model_routes()
             .into_iter()
-            .map(|m| m.id)
+            .map(|route| route.id)
+            .chain(
+                ocean_agent::known_models()
+                    .into_iter()
+                    .map(|model| model.id),
+            )
             .collect();
         return (
             StatusCode::BAD_REQUEST,
@@ -14175,11 +14174,13 @@ mod tests {
         let top = body
             .as_object()
             .expect("model list response must be an object");
-        assert_eq!(top.len(), 3, "top-level model-list keys must stay exact");
+        assert_eq!(top.len(), 4, "legacy keys plus additive auth routes");
         assert_eq!(top.get("ok"), Some(&json!(true)));
         assert_eq!(
             top.get("current"),
-            Some(&json!({"provider": provider, "model": model}))
+            Some(
+                &json!({"provider": provider, "model": model, "route": format!("{provider}/{model}")})
+            )
         );
 
         assert_eq!(
@@ -14187,6 +14188,16 @@ mod tests {
             Some(&expected_models),
             "daemon picker ordering, ids, labels, readiness, and credential provenance must match the canonical owner"
         );
+        let routes = top["routes"].as_array().expect("auth routes array");
+        assert!(routes
+            .iter()
+            .any(|r| r["id"] == "openai/gpt-6.1-sol" && r["model_id"] == "gpt-6.1-sol"));
+        assert!(routes
+            .iter()
+            .any(|r| r["id"] == "anthropic/claude-opus-5-5"));
+        let ids: std::collections::HashSet<_> =
+            routes.iter().map(|r| r["id"].as_str().unwrap()).collect();
+        assert_eq!(ids.len(), routes.len());
         let models = top
             .get("models")
             .and_then(serde_json::Value::as_array)
@@ -16156,6 +16167,60 @@ mod tests {
                     if extension == "ocean.session_changed"
             )),
             "model metadata must not emit a transcript invalidation"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_config_auth_routes_persist_wire_model_and_provider() {
+        let state = permission_test_state();
+        let workspace = tempfile::tempdir().unwrap();
+        let (status, created) = agent_sessions_create(
+            State(state.clone()),
+            Json(AgentSessionCreateRequest {
+                workspace_root: workspace.path().to_string_lossy().into_owned(),
+                project_id: None,
+                model: Some("openai/gpt-6.1-sol".into()),
+                client_type: Some("surface-web".into()),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let detail = state
+            .runtime
+            .session_detail(core_sid(created.session_id))
+            .unwrap();
+        assert_eq!(detail.model, "gpt-6.1-sol");
+        assert_eq!(detail.provider, "openai");
+        assert_eq!(detail.config_revision, 1);
+        let app = app_router(BrowserOrigins::default(), AllowedHosts::default())
+            .with_state(state.clone());
+        let uri = format!("/v1/agent/sessions/{}/config", created.session_id);
+        let (status, raw) = session_config_http_request(
+            app,
+            Method::PATCH,
+            uri,
+            Some(json!({"model":"anthropic/claude-opus-5-5"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let patched = session_config_response_json(&raw);
+        assert_eq!(patched["model"], "claude-opus-5-5");
+        assert_eq!(patched["provider"], "anthropic");
+        assert_eq!(patched["config_revision"], 2);
+        let detail = state
+            .runtime
+            .session_detail(core_sid(created.session_id))
+            .unwrap();
+        assert_eq!(detail.model, "claude-opus-5-5");
+        assert_eq!(detail.provider, "anthropic");
+        assert_eq!(
+            state
+                .runtime
+                .session_model_config_optional(core_sid(created.session_id))
+                .unwrap()
+                .unwrap()
+                .model_spec(),
+            "anthropic/claude-opus-5-5"
         );
     }
 

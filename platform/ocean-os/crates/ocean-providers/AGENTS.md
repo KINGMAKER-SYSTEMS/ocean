@@ -24,6 +24,11 @@ auth-file write custody. Provider wire encoding remains in `ocean-protocol`.
   1,050,000/128,000 limits. `openai_uses_responses` is the shared exact-model
   selection predicate for runtime construction and history replay; bare ids
   keep their existing Codex OAuth routing.
+- `model_routes` owns provider-qualified picker ids (`provider/model`), wire
+  `model_id`, legacy aliases and separate API/subscription choices. Qualified
+  selections override ambient `OCEAN_PROVIDER`; bare ids retain prior routing.
+  `catalog_model` validates membership without credentials. Readiness is resolved
+  per auth route and never inherits a global provider pin.
 - Readiness catalog responses include additive model-specific `effort_levels`;
   advertise max only where Ocean's encoder supports the provider vocabulary.
 - Every public catalog id resolves back to the same wire id and provider.
