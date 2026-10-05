@@ -140,7 +140,9 @@ token to browser code, bundle it, or cache it in client storage.
   not provider entitlement or successful inference.
 - Use additive daemon `effort_levels` metadata for model-specific choices,
   including max on current models. Older daemons retain the existing fallback
-  vocabulary. Model changes clear incompatible overrides; stored max survives
+  vocabulary based on the wire model even for qualified saved ids. Explicit
+  empty effort metadata remains authoritative; do not synthesize extra choices.
+  Model changes clear incompatible overrides; stored max survives
   reload. The default selection comes only from `/v1/models.current`, never
   the most recent executed turn. Escape closes an open disclosure and restores
   focus; a closed disclosure lets Escape reach the global reveal handler.

@@ -240,3 +240,15 @@ Restored Surface compatibility with the operated daemon caller projection. Insta
 
 Validation: all 897 Surface tests, strict WASM Clippy and docs-check pass. Added a production-decoder-to-Share-policy regression for legacy owner, ordinary member, mismatched caller, duplicate identity and current-only serialization. Surface owning contract updated; parent/index docs unchanged because ownership boundaries did not change. No live room, service, database or installation mutation. This repairs one client compatibility issue and does not lift the daemon migration hold or establish cross-machine Rooms acceptance.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [13:59] [05-10-26]
+agent: [codex] [gpt-6]
+worktree: [feat/model-effort-control] [/Users/risingtidesdev/dev/ocean-ui-current]
+type: [bug report]
+area: [frontend] [testing]
+
+Corrected shared model/effort compatibility fallback. A saved provider-qualified route now derives legacy effort choices from its wire model when capability metadata is absent, preventing always-thinking GPT/Claude routes from offering Off/Minimal. Explicit empty daemon effort metadata remains authoritative instead of repopulating generic levels. Max is still metadata-only, and pinned stored values are preserved.
+
+Validation: all 899 Surface tests, strict WASM Clippy and docs-check pass. New regressions cover qualified saved API/subscription routes, missing-vs-empty metadata and legacy Max exclusion. The actual editor renderer with a synthetic host adapter also confirms Max resets to Default when switching to a model supporting only Low/High, and returns to API/Max correctly; this is renderer evidence, not native editor/account acceptance. Screenshot: /private/tmp/ocean-model-effort-verified.png. Owning Surface contract updated; root/index docs unchanged because ownership boundaries remain unchanged. No installation, live provider calls or credential mutations in this slice. Fresh review, other-account acceptance and operated-runtime compatibility remain unresolved.
+_________________________________________________________________________________
