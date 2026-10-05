@@ -633,6 +633,15 @@ fn openai_reasoning_effort(level: ThinkingLevel) -> Option<&'static str> {
     }
 }
 
+/// Whether an OpenAI Chat Completions model id belongs to a reasoning family:
+/// the o-series (`o1`, `o3`, `o4-mini`, …) or GPT-5 and later.
+fn openai_chat_model_reasons(id: &str) -> bool {
+    let o_series = id
+        .strip_prefix('o')
+        .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()));
+    o_series || id.starts_with("gpt-5") || id.starts_with("gpt-6")
+}
+
 /// DeepSeek's effort scale differs from OpenAI's: it accepts only `high | max`,
 /// and documents that `low`/`medium` map up to `high` while `xhigh` maps to
 /// `max` (per the DeepSeek thinking-mode guide). DeepSeek also requires the
@@ -679,9 +688,10 @@ fn deepseek_reasoning_effort(level: ThinkingLevel) -> Option<&'static str> {
 fn apply_reasoning(body: &mut Value, model: &Model, level: ThinkingLevel) {
     match model.provider.as_str() {
         "openai" => {
-            // The GPT-4 chat family does not reason and rejects the parameter
-            // with a 400, which would fail the whole turn.
-            if level == ThinkingLevel::Off || model.id.starts_with("gpt-4") {
+            // Only reasoning families take the parameter. Anything else (the
+            // GPT-4 chat family, fine-tunes, older ids) rejects it with a 400
+            // that fails the whole turn, so an unknown id gets nothing.
+            if level == ThinkingLevel::Off || !openai_chat_model_reasons(&model.id) {
                 return;
             }
             if let Some(effort) = openai_reasoning_effort(level) {
@@ -2350,7 +2360,7 @@ mod tests {
     #[test]
     fn build_body_omits_reasoning_when_unset() {
         let body = test_body(
-            &openai_model(),
+            &openai_reasoning_model(),
             &Context::default(),
             &StreamOptions::default(),
         );
@@ -2370,7 +2380,9 @@ mod tests {
             reasoning: Some(ThinkingLevel::Off),
             ..Default::default()
         };
-        let body = test_body(&openai_model(), &Context::default(), &opts);
+        // A reasoning model, so the omission is the Off rule and not the
+        // non-reasoning gate.
+        let body = test_body(&openai_reasoning_model(), &Context::default(), &opts);
         assert!(
             body.get("reasoning_effort").is_none(),
             "ThinkingLevel::Off must not emit reasoning_effort: {body}"
@@ -2378,8 +2390,26 @@ mod tests {
     }
 
     #[test]
-    fn build_body_never_sends_reasoning_effort_to_the_gpt_4_chat_family() {
-        for id in ["gpt-4o", "gpt-4o-mini", "gpt-4.1"] {
+    fn build_body_sends_reasoning_effort_only_to_reasoning_families() {
+        for id in ["o1", "o3-mini", "o4-mini", "gpt-5.5", "gpt-6-sol"] {
+            let mut model = openai_model();
+            model.id = id.into();
+            let opts = StreamOptions {
+                reasoning: Some(ThinkingLevel::High),
+                ..Default::default()
+            };
+            let body = test_body(&model, &Context::default(), &opts);
+            assert_eq!(body["reasoning_effort"], "high", "{id}");
+        }
+        for id in [
+            "gpt-4o",
+            "gpt-4o-mini",
+            "gpt-4.1",
+            "gpt-3.5-turbo",
+            "chatgpt-4o-latest",
+            "omni-moderation-latest",
+            "ft:gpt-4o:acme::abc",
+        ] {
             let mut model = openai_model();
             model.id = id.into();
             for level in [
@@ -2535,7 +2565,7 @@ mod tests {
             reasoning: Some(ThinkingLevel::Off),
             ..Default::default()
         };
-        let body = test_body(&openai_model(), &Context::default(), &opts);
+        let body = test_body(&openai_reasoning_model(), &Context::default(), &opts);
         assert!(
             body.get("reasoning_effort").is_none() && body.get("thinking").is_none(),
             "OpenAI must receive no reasoning params when off: {body}"

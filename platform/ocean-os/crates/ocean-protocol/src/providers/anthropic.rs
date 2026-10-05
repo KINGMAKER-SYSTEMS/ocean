@@ -398,22 +398,23 @@ fn build_body(model: &Model, context: &Context, options: &StreamOptions) -> Valu
             | "claude-sonnet-5-5"
             | "sonnet-5-5"
     );
-    // The subset that accepts an explicit `disabled`.
-    let can_disable = matches!(
+    // Opus 4.8/4.7 run without thinking unless asked; the rest of the family
+    // thinks by default. With no level chosen each keeps its own default.
+    let off_by_default = matches!(
         id,
-        "claude-opus-5"
-            | "opus-5"
-            | "claude-opus-4-8"
-            | "opus-4-8"
-            | "claude-opus-4-7"
-            | "opus-4-7"
-            | "claude-sonnet-5"
-            | "sonnet-5"
+        "claude-opus-4-8" | "opus-4-8" | "claude-opus-4-7" | "opus-4-7"
     );
+    // Where Off is sent as `disabled`. Opus 5 accepts it too, but with
+    // thinking disabled it can write a tool call into its visible text instead
+    // of a `tool_use` block: the turn succeeds, the tool never runs, and the
+    // text pollutes later rounds. In a tool loop Off is low effort there.
+    let can_disable = off_by_default || matches!(id, "claude-sonnet-5" | "sonnet-5");
     if adaptive {
         body.as_object_mut().unwrap().remove("temperature");
     }
-    if adaptive && can_disable && options.reasoning == Some(ThinkingLevel::Off) {
+    if adaptive && off_by_default && options.reasoning.is_none() {
+        // Provider default: no `thinking` field, no thinking.
+    } else if adaptive && can_disable && options.reasoning == Some(ThinkingLevel::Off) {
         body["thinking"] = json!({"type": "disabled"});
     } else if adaptive {
         let between_tools = options.reasoning == Some(ThinkingLevel::Off)
@@ -873,6 +874,12 @@ mod tests {
         ] {
             let mut model = anthropic_model();
             model.id = id.into();
+            // Off is `disabled` only where that is both accepted and safe in a
+            // tool loop. Opus 5 accepts it but then writes tool calls as text.
+            let off_disables = matches!(
+                id,
+                "claude-sonnet-5" | "claude-opus-4-8" | "claude-code-opus-4-7"
+            );
             for (level, expected) in [
                 (ThinkingLevel::Off, "low"),
                 (ThinkingLevel::Medium, "medium"),
@@ -885,9 +892,7 @@ mod tests {
                     ..Default::default()
                 };
                 let body = build_body(&model, &Context::default(), &options);
-                if level == ThinkingLevel::Off
-                    && !matches!(id, "claude-fable-5-1" | "claude-opus-5-5")
-                {
+                if level == ThinkingLevel::Off && off_disables {
                     assert_eq!(body["thinking"], json!({"type":"disabled"}), "{id}");
                     assert!(body.get("output_config").is_none());
                 } else {
@@ -899,9 +904,21 @@ mod tests {
                 assert!(body.get("temperature").is_none(), "{id}");
                 assert!(body["thinking"].get("budget_tokens").is_none(), "{id}");
             }
-            let body = build_body(&model, &Context::default(), &StreamOptions::default());
-            assert_eq!(body["thinking"], summarized, "{id}");
-            assert!(body.get("output_config").is_none());
+
+            // No level chosen: each model keeps its own provider default.
+            // Opus 4.8/4.7 do not think unless asked, so nothing is sent.
+            let options = StreamOptions {
+                temperature: Some(1.0),
+                ..Default::default()
+            };
+            let body = build_body(&model, &Context::default(), &options);
+            if matches!(id, "claude-opus-4-8" | "claude-code-opus-4-7") {
+                assert!(body.get("thinking").is_none(), "{id}");
+            } else {
+                assert_eq!(body["thinking"], summarized, "{id}");
+            }
+            assert!(body.get("output_config").is_none(), "{id}");
+            assert!(body.get("temperature").is_none(), "{id}");
         }
     }
 
@@ -916,14 +933,12 @@ mod tests {
                 &Context::default(),
                 &StreamOptions {
                     reasoning: Some(ThinkingLevel::Medium),
-                    temperature: Some(0.5),
                     ..Default::default()
                 },
             );
             assert_eq!(body["thinking"]["type"], "enabled", "{}", model.id);
             assert!(body["thinking"].get("display").is_none(), "{}", model.id);
             assert!(body.get("output_config").is_none(), "{}", model.id);
-            assert_eq!(body["temperature"], 0.5, "{}", model.id);
 
             for reasoning in [Some(ThinkingLevel::Off), None] {
                 let body = build_body(

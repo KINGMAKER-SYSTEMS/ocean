@@ -798,7 +798,10 @@ pub fn model_effort_levels(id: &str) -> &'static [&'static str] {
         &["minimal", "low", "medium", "high"]
     } else if id.starts_with("glm-")
         || id.starts_with("MiniMax-")
-        || matches!(id, "kimi-k2.6" | "kimi-k2" | "gpt-4o" | "gpt-4o-mini")
+        || matches!(
+            id,
+            "kimi-k2.6" | "kimi-k2" | "gpt-4o" | "gpt-4o-mini" | "gemini-2.0-flash"
+        )
     {
         // No effort parameter is sent on these routes.
         &[]
@@ -2444,6 +2447,7 @@ mod tests {
             "kimi-k2",
             "gpt-4o",
             "gpt-4o-mini",
+            "gemini-2.0-flash",
         ] {
             assert!(model_effort_levels(id).is_empty(), "{id}");
         }

@@ -309,6 +309,17 @@ fn apply_reasoning(body: &mut Value, level: ThinkingLevel) {
     });
 }
 
+/// The options a request body is built from. A model that does not think
+/// rejects `thinkingConfig`, which fails the whole turn, so its reasoning
+/// level is dropped here rather than encoded.
+fn body_options(model: &Model, options: &StreamOptions) -> StreamOptions {
+    let mut options = options.clone();
+    if !model.reasoning {
+        options.reasoning = None;
+    }
+    options
+}
+
 fn build_body(context: &Context, options: &StreamOptions) -> Value {
     let mut body = json!({
         "contents": convert_messages(&context.messages),
@@ -392,7 +403,7 @@ impl Provider for GoogleProvider {
             model.id,
             api_key,
         );
-        let body = build_body(context, options);
+        let body = build_body(context, &body_options(model, options));
         crate::prompt_capture::capture_request_body(&model.api, &model.provider, &model.id, &body);
         let cancel = options.cancel.clone();
         let extra_headers: BTreeMap<String, String> = options.headers.clone();
@@ -822,6 +833,32 @@ mod tests {
             }],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn non_reasoning_model_never_gets_a_thinking_config() {
+        let options = StreamOptions {
+            reasoning: Some(ThinkingLevel::High),
+            temperature: Some(0.2),
+            ..Default::default()
+        };
+        // Gemini 2.0 Flash is the only constructible Gemini model and does not think.
+        let flash = Model::gemini_2_0_flash();
+        assert!(!flash.reasoning);
+        let body = build_body(&empty_context(), &body_options(&flash, &options));
+        assert!(
+            body["generationConfig"].get("thinkingConfig").is_none(),
+            "{body}"
+        );
+        assert_eq!(body["generationConfig"]["temperature"], json!(0.2f32));
+
+        let mut thinker = flash;
+        thinker.reasoning = true;
+        let body = build_body(&empty_context(), &body_options(&thinker, &options));
+        assert_eq!(
+            body["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+            16384
+        );
     }
 
     #[test]

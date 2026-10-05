@@ -276,3 +276,15 @@ Made thinking levels do what they say. The runtime dropped an explicit Off befor
 
 Validation: full suites for ocean-protocol (173 plus 5), ocean-providers (65), ocean-runtime, ocean-agent (260, live probe ignored), ocean-daemon (878) and ocean-acp pass; workspace test compilation, rustfmt check and docs-check pass. New runtime end-to-end tests prove unset stays unset, Off and High reach the provider, and a stream-option level still wins. The daemon and provider fixtures that required a non-empty effort list now check the vocabulary instead. No provider was called: the Anthropic display field, the Opus 4.8/4.7 adaptive shape and Codex effort none follow the published provider contracts and are not live-verified here. Protocol, providers, runtime and daemon devlogs updated; indexes unchanged.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [17:44] [05-10-26]
+agent: [claude] [claude code]
+worktree: [claude/thinking-levels-truthful] [/Users/risingtidesdev/dev/ocean-claude-audit]
+type: [review]
+area: [backend] [testing]
+
+Applied the independent review of the thinking-level change. Opus 4.8 and 4.7 do not think unless asked, so with no level chosen they again get no thinking field; the first version switched adaptive thinking on for them, which broke "unset means provider default" and would have spent their small output caps on thinking. Off on Opus 5 is now low effort rather than disabled: with thinking disabled that model can write a tool call into its visible text, so the tool never runs. OpenAI Chat Completions sends reasoning_effort only to reasoning families (o-series, GPT-5 and later) instead of blocking only GPT-4. Gemini 2.0 Flash, whose descriptor says it does not reason, never receives thinkingConfig and advertises no effort levels. Three tests that passed vacuously behind the new gate now use a reasoning model, and a test no longer pins a temperature beside enabled thinking.
+
+Validation: full suites pass for ocean-protocol (174 plus 5), ocean-providers (66), ocean-runtime, ocean-agent (260, live probe ignored), ocean-daemon (878) and ocean-acp on current main; workspace test compilation, rustfmt check and docs-check pass. Still no provider call. Known trade-off recorded in the PR: thinking summaries arrive as stream output, so a stream that drops mid-thinking now fails the turn instead of being retried as a clean round. Protocol and providers devlogs updated.
+_________________________________________________________________________________

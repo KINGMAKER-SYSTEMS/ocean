@@ -33,8 +33,9 @@ auth-file write custody. Provider wire encoding remains in `ocean-protocol`.
 - `model_effort_levels` lists a level only when choosing it changes the request
   the encoder builds. Levels the encoder folds into another are omitted, `off`
   appears only where thinking can be turned off, and a route whose encoder
-  sends no effort parameter (GLM, MiniMax, Kimi K2.x, GPT-4o) has an empty
-  list, which clients render as no effort control. Change it with the encoder.
+  sends no effort parameter (GLM, MiniMax, Kimi K2.x, GPT-4o, Gemini 2.0
+  Flash) has an empty list, which clients render as no effort control. Change
+  it with the encoder.
 - Readiness catalog responses include additive model-specific `effort_levels`;
   advertise max only where Ocean's encoder supports the provider vocabulary.
 - Every public catalog id resolves back to the same wire id and provider.
