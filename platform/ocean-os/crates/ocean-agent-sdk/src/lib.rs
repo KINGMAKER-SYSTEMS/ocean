@@ -28,18 +28,39 @@ use uuid::Uuid;
 /// crate directly.
 pub use ocean_protocol::ThinkingLevel;
 
+/// [`ContextUsage::source`] for a reading taken at a completed turn's final
+/// round.
+pub const CONTEXT_SOURCE_FINAL_ROUND: &str = "provider_reported_final_round";
+/// [`ContextUsage::source`] for a reading taken before a failure or a
+/// turn-limit stop. Tool results saved after that request are not in it.
+pub const CONTEXT_SOURCE_LAST_COMPLETED_ROUND: &str = "provider_reported_last_completed_round";
+
 /// Truthful context-window occupancy measured at one provider request boundary.
-/// `used_tokens` is the provider-reported total token consumption for the final
-/// round, not cumulative turn usage or a local estimate.
+/// `used_tokens` is the provider-reported total token consumption for one
+/// request, not cumulative turn usage or a local estimate. For a completed
+/// turn it is the final round. For a failed, cancelled or timed-out turn, or
+/// one stopped at its turn limit, it is the last round that completed, so tool
+/// results saved after that request are not in it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextUsage {
     pub used_tokens: u64,
     pub context_window: u64,
-    /// Stable provenance label. Currently `provider_reported_final_round`.
+    /// Stable provenance label: [`CONTEXT_SOURCE_FINAL_ROUND`], or
+    /// [`CONTEXT_SOURCE_LAST_COMPLETED_ROUND`] when the reading was taken
+    /// before a failure (a failed turn, or a stop-hook continuation that failed
+    /// after an otherwise successful turn) or before a turn-limit stop.
     pub source: String,
-    /// Daemon wall-clock timestamp (Unix milliseconds) when the completed turn's
-    /// provider measurement was published.
+    /// Daemon wall-clock timestamp (Unix milliseconds) when the turn's provider
+    /// measurement was published.
     pub measured_at_ms: i64,
+}
+
+impl ContextUsage {
+    /// True when the reading was taken before a failure or a turn-limit stop,
+    /// so the saved transcript can be larger than `used_tokens`.
+    pub fn is_floor(&self) -> bool {
+        self.source == CONTEXT_SOURCE_LAST_COMPLETED_ROUND
+    }
 }
 
 /// Ocean Buddy watch/iPhone/backend card and event vocabulary.
@@ -421,7 +442,9 @@ pub struct AgentTurnResponse {
     /// `None` on pre-turn error paths.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wall_ms: Option<u64>,
-    /// Final-round provider context measurement for the effective model.
+    /// Provider context measurement for the effective model: the final round,
+    /// or the last completed round when results were saved after it (see
+    /// [`ContextUsage::source`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_usage: Option<ContextUsage>,
 }
@@ -660,8 +683,10 @@ pub enum AgentTurnEvent {
         /// Output tokens per second (output_tokens / wall time).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tokens_per_second: Option<f64>,
-        /// Final-round provider context measurement. `None` means unknown; clients
-        /// must not substitute cumulative input usage or a local estimate.
+        /// Provider context measurement: the final round, or the last completed
+        /// round when results were saved after it (see [`ContextUsage::source`]).
+        /// `None` means unknown; clients must not substitute cumulative input
+        /// usage or a local estimate.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context_usage: Option<ContextUsage>,
     },

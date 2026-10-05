@@ -637,7 +637,7 @@ mod tests {
         // Give the detached reporter thread a moment to finish.
         std::thread::sleep(Duration::from_millis(50));
 
-        let args = wait_for_marker(&marker);
+        let args = wait_for_marker(&marker, &["startup", "new"]);
         assert!(args.contains("report-agent-session"));
         assert!(args.contains("--agent-session-id"));
         assert!(args.contains(&sid.0.to_string()));
@@ -685,7 +685,7 @@ mod tests {
         );
         std::thread::sleep(Duration::from_millis(50));
 
-        let args = wait_for_marker(&marker);
+        let args = wait_for_marker(&marker, &["resume"]);
         assert!(args.contains("report-agent-session"));
         assert!(args.contains("--agent-session-id"));
         assert!(args.contains(&sid.0.to_string()));
@@ -698,21 +698,33 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn wait_for_marker(path: &std::path::Path) -> String {
+    fn wait_for_marker(path: &std::path::Path, last: &[&str]) -> String {
         // Waits for a spawned subprocess to write its marker file. The old
         // 1s budget (50 * 20ms) plus a hard `.expect()` on the final read
         // flaked under full-suite parallel load, where the fake-herdr spawn
         // can take longer than a second to land its write. Widen the budget
         // to 5s and keep polling to the deadline instead of asserting on one
         // last read — the content check, not the clock, decides success.
+        //
+        // Binding a session launches two reports, the session report and a
+        // state report, as separate processes that append to the same file in
+        // either order, one argument per line. Returning on the first
+        // non-empty read could return the state report alone. `last` names
+        // the session report's final argument: once that line is present the
+        // report these tests assert on has been written in full.
+        let mut seen = String::new();
         for _ in 0..250 {
             if let Ok(contents) = std::fs::read_to_string(path) {
-                if !contents.trim().is_empty() {
+                if contents.lines().any(|line| last.contains(&line)) {
                     return contents;
                 }
+                seen = contents;
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-        panic!("marker at {} was not written within 5s", path.display())
+        panic!(
+            "session report at {} was not written within 5s; last read: {seen:?}",
+            path.display()
+        )
     }
 }

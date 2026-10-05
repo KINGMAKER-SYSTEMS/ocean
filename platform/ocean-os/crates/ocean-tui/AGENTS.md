@@ -27,7 +27,16 @@ This crate owns the full-screen terminal steering cockpit (`ocean` binary) for i
 - Model and advisor pickers prefer additive `/v1/models.routes` plus `current.route`; legacy catalogs remain compatible and explicit disconnected entries stay unselectable. Qualified selection ids retain auth identity in session creation, PATCH, config GET, revisioned events and fenced snapshots. Bare catalog aliases normalize to their qualified default route when the daemon advertises qualified choices; legacy catalogs keep bare request ids. Alias-aware authority comparisons retain older acknowledgements without equating different auth routes. Footer presentation uses daemon catalog labels; unknown custom ids remain unchanged. Do not compare a qualified pending pin against a provider-less wire id or discard provider authority during config decoding.
 - `/thinking max` carries the additive shared effort value and renders max in
   the footer. Keyboard cycling includes max after xhigh; provider encoders
-  normalize values for older wire vocabularies.
+  normalize values for older wire vocabularies. Setting a level acknowledges it
+  in the status row.
+- Slash command names are case-insensitive. The palette claims Tab only while
+  a command matches the query; with no match Tab cycles focus as usual.
+- Text Ocean writes into the transcript itself (`/help`, `/beam`, an
+  unknown-command hint, a send-failure notice) is `Turn::Notice`. It renders
+  like assistant text but is not a model reply: `/copy` skips it and streamed
+  deltas never append to it. A notice pushed while a reply streams splits that
+  reply into two blocks; `/copy` joins blocks only across such a notice, never
+  blocks that are merely adjacent, which a resumed transcript has per round.
 - `/web` and `/desk` hand the bound session to sibling surfaces owned by the
   `ocean-surface` repo: the web PWA consumes `?session=<id>` at boot (proxy
   default `http://127.0.0.1:8790`, override via `OCEAN_SURFACE_URL`) and the
@@ -107,7 +116,9 @@ This crate owns the full-screen terminal steering cockpit (`ocean` binary) for i
 - Metrics are truthful or absent: tok/s and context occupancy render only from
   daemon-reported values for the LAST finished turn (both clear on
   `TurnStarted`; context also clears on stream gaps or adoption after a missing
-  start). Context occupancy uses the provider-reported final request,
+  start). Context occupancy uses the provider-reported final request (or the
+  last completed request of a turn or continuation that failed or ran out of
+  rounds, which the daemon labels `provider_reported_last_completed_round`),
   never cumulative multi-round usage; unknown values remain absent. The model
   row falls back to the startup `/v1/models` fetch only before a session is bound.
   A bound session's model is daemon-owned config: `/model` and the picker must
@@ -162,7 +173,10 @@ This crate owns the full-screen terminal steering cockpit (`ocean` binary) for i
   they never replace a visible operator selection. Explicit Files navigation
   restores `FileTreeComponent`.
 - The `USAGE` representation records a bounded history of only daemon-reported
-  final-request context measurements from correlated finished turns. It never
+  context measurements from correlated finished turns: the final request, or
+  the last completed request when the daemon labels the reading
+  `provider_reported_last_completed_round`, captioned
+  `last completed request` instead of `final request`. It never
   substitutes cumulative input tokens or local estimates, follows model reroutes,
   clears on session switch, and labels retained history partial after an SSE gap.
   A todo may reveal an honestly empty Usage surface while awaiting the first
@@ -346,10 +360,17 @@ This crate owns the full-screen terminal steering cockpit (`ocean` binary) for i
   have run; keep input latched and reconcile through the generation-scoped
   fenced session activity probe until `TurnFinished` or an idle snapshot is
   authoritative.
-- Turn lifecycle: only `TurnFinished`/`TurnSendFailed`/`TurnOutcomeUnknown` (or
-  explicit new/clear/history reset) may clear `busy` — never generic SSE
-  reconnect statuses; failed turns render `Turn::ErrorNotice`, not advisor
-  cards.
+- Turn lifecycle: `busy` is cleared only by an authoritative `TurnFinished`, a
+  `TurnSendFailed`, a `TurnAccepted` whose finish had already arrived, a
+  history load (session resume or switch, or a fenced idle snapshot), or an
+  explicit new session — never by
+  generic SSE reconnect statuses, never by `TurnOutcomeUnknown` (it latches
+  `busy` until the activity probe settles), and never by `/clear`. During an
+  active turn `/clear` empties the view but keeps the rows the turn still acts
+  through, queued follow-ups and an undecided approval card, and leaves `busy`,
+  the queue and any pause owner alone, so `/stop`, Esc and `Ctrl+Y`/`Ctrl+N`
+  still reach the running turn. A promoted follow-up always has a user row.
+  Failed turns render `Turn::ErrorNotice`, not advisor cards.
 - Render-protocol components project into terminal-native chat cards. Component
   IDs are unique across inline and pinned slots when `replace` is set; unmount,
   history load, and new-session reset must not leak pinned state. Treat every

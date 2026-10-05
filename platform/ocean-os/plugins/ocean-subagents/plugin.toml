@@ -5,21 +5,21 @@ entry = "ocean-subagents.py"
 [[tool]]
 name = "spawn"
 description = "Start a bounded Ocean subagent in a new durable child session. Returns immediately with run_id, turn_id, and session_id. Use status or wait to collect its result."
-input_schema = { type = "object", properties = { task = { type = "string", description = "The complete task for the subagent." }, role = { type = "string", description = "Short specialist role, for example reviewer or researcher." }, cwd = { type = "string", description = "Absolute working directory. Defaults to the configured subagent working directory." }, model = { type = "string", description = "Optional Ocean model alias for this child turn." }, timeout_seconds = { type = "integer", minimum = 30, maximum = 1800, description = "Elapsed-time ceiling; default 600 seconds." } }, required = ["task"] }
+input_schema = { type = "object", properties = { task = { type = "string", description = "The complete task for the subagent." }, role = { type = "string", description = "Short specialist role, for example reviewer or researcher." }, cwd = { type = "string", description = "Absolute working directory. Defaults to the configured subagent working directory." }, model = { type = "string", description = "Optional Ocean model id or alias for this child turn. Omit to use the daemon's current model; a name the daemon cannot route fails the child turn." }, thinking_level = { type = "string", enum = ["off", "minimal", "low", "medium", "high", "xhigh", "max"], description = "Optional reasoning effort for this child. Omit to use the model's default." }, timeout_seconds = { type = "integer", minimum = 30, maximum = 1800, description = "Elapsed-time ceiling; default 600 seconds." } }, required = ["task"] }
 
 [[tool]]
 name = "status"
-description = "Refresh one Ocean subagent from daemon request/session truth and return its status and result when complete."
+description = "Refresh one Ocean subagent from daemon request/session truth and return its status and result when complete. Status lost means the daemon no longer tracks the turn; output is then whatever the child wrote in that turn."
 input_schema = { type = "object", properties = { run_id = { type = "string" } }, required = ["run_id"] }
 
 [[tool]]
 name = "wait"
-description = "Wait up to 20 seconds for one Ocean subagent, then return its current status and result. Call again when still running or waiting for permission."
+description = "Wait up to 20 seconds for one Ocean subagent, then return its current status and result. Returns early when the run finishes or raises a permission prompt not yet reported. Call again when still running."
 input_schema = { type = "object", properties = { run_id = { type = "string" }, timeout_seconds = { type = "number", minimum = 0, maximum = 20 } }, required = ["run_id"] }
 
 [[tool]]
 name = "send"
-description = "Send a follow-up task to a completed Ocean subagent's existing durable session. Returns immediately with the new turn id."
+description = "Send a follow-up task to a finished Ocean subagent's existing durable session (completed, failed, cancelled, or lost). Returns immediately with the new turn id."
 input_schema = { type = "object", properties = { run_id = { type = "string" }, message = { type = "string" } }, required = ["run_id", "message"] }
 
 [[tool]]

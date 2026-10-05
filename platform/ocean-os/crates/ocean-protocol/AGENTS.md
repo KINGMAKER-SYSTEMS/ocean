@@ -29,15 +29,38 @@ This crate owns the multi-provider LLM wire protocol layer for Anthropic, OpenAI
   `version` header; ChatGPT version-gates newly released Codex models.
 - Current Fable/Opus/Sonnet adaptive models use `thinking.type=adaptive` and
   `output_config.effort`, never `budget_tokens`; legacy Off/Minimal requests
-  normalize to low only on always-thinking models. Opus/Sonnet 5 retain Off
-  as disabled thinking. Sonnet 5.5 Off uses `between_tools` at low effort;
-  other settings use adaptive thinking and omit temperature. Extended-only
-  models retain their bounded token budgets.
+  normalize to low only on always-thinking models. Sonnet 5 and Opus 4.8/4.7
+  send Off as disabled thinking. Opus 5 accepts `disabled` but then writes
+  tool calls into visible text, so Off is low effort there. Sonnet 5.5 Off uses
+  `between_tools` at low effort; other settings use adaptive thinking. Opus
+  4.8/4.7 belong to the adaptive family (`budget_tokens` is a 400 there) but do
+  not think unless asked: with no level chosen they get no `thinking` field.
+  No adaptive-family request carries a sampling parameter, with thinking on or
+  off. Extended-only models retain their bounded token budgets.
+- Adaptive requests send `display: "summarized"`. These models stream empty
+  thinking text otherwise, so no client could render reasoning. `between_tools`
+  takes no other field, so it never carries `display`.
+- An explicit `ThinkingLevel::Off` reaches every encoder (the runtime no longer
+  drops it), so each encoder's off shape is live: Anthropic `disabled` or
+  `between_tools`, Codex `none`, DeepSeek `disabled`. `None` means the caller
+  made no choice and sends the provider default.
+- On OpenAI Chat Completions only reasoning families (the o-series, GPT-5 and
+  later) receive `reasoning_effort`. Every other id rejects it with a 400, so
+  an unrecognized id gets nothing. A Gemini model whose descriptor says it
+  does not reason never receives `thinkingConfig`.
 - Shared `ThinkingLevel::Max` serializes as max. Current adaptive Claude and
   Codex GPT-6/5.6 encode max directly; older provider vocabularies retain their
   existing bounded highest-effort fallback.
 - Codex GPT-6/5.6 preserves xhigh and max. Astra/Sol 6.1 normalize unsupported
   Off/Minimal to low; other GPT-6 models encode Off as none.
+- Usage is what the provider reported, mapped onto one shape. Anthropic
+  `message_delta` usage is cumulative for the message: replace the running
+  counts, never add, and never let a report that omits the input side erase
+  what `message_start` said. Every Anthropic usage count tolerates `null`; a
+  `message_delta` frame that fails to parse loses the turn's `stop_reason`. A
+  Responses round reports usage on `response.completed` and on a length-capped
+  `response.incomplete` alike. Gemini output includes thinking tokens, so
+  `Usage.reasoning` is a subset of `output` on every provider.
 - Anthropic extended-thinking requests must keep `budget_tokens` at least 1024
   and strictly below `max_tokens`; preserve explicit output caps by clamping the
   thinking budget rather than raising the cap.

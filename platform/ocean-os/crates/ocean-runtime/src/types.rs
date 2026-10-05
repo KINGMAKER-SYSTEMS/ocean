@@ -177,7 +177,11 @@ pub fn tool_def(t: &dyn AgentTool) -> Tool {
 #[derive(Clone)]
 pub struct AgentConfig {
     pub model: Model,
-    pub thinking_level: ThinkingLevel,
+    /// Reasoning effort for this run. `None` leaves the provider's default in
+    /// force. `Some(ThinkingLevel::Off)` is an instruction to disable thinking
+    /// where the provider can, so it must reach the encoder: several models
+    /// think by default and bill for it.
+    pub thinking_level: Option<ThinkingLevel>,
     pub stream_options: StreamOptions,
     pub max_turns: u32,
     /// Total wall-clock deadline for a single turn's LLM stream
@@ -209,7 +213,7 @@ impl AgentConfig {
     pub fn new(model: Model, system_prompt: impl Into<String>) -> Self {
         Self {
             model,
-            thinking_level: ThinkingLevel::Off,
+            thinking_level: None,
             stream_options: StreamOptions::default(),
             max_turns: 32,
             turn_timeout_secs: None,
@@ -255,7 +259,7 @@ impl AgentConfig {
     }
 
     pub fn with_thinking(mut self, level: ThinkingLevel) -> Self {
-        self.thinking_level = level;
+        self.thinking_level = Some(level);
         self
     }
 

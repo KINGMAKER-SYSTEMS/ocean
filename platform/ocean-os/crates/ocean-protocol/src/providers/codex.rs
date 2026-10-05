@@ -266,6 +266,31 @@ fn reasoning_effort(model: &str, level: ThinkingLevel) -> Option<&'static str> {
     }
 }
 
+/// Record the usage carried by a terminal Responses envelope
+/// (`response.completed`, or `response.incomplete` for a length cap). An
+/// envelope without usage leaves the running figures untouched.
+fn apply_terminal_usage(usage: &mut Usage, envelope: Value) {
+    let Ok(event) = serde_json::from_value::<CompletedEvent>(envelope) else {
+        return;
+    };
+    let Some(reported) = event.response.usage else {
+        return;
+    };
+    usage.input = reported.input_tokens;
+    usage.output = reported.output_tokens;
+    usage.total_tokens = if reported.total_tokens > 0 {
+        reported.total_tokens
+    } else {
+        reported.input_tokens + reported.output_tokens
+    };
+    if let Some(details) = reported.input_tokens_details {
+        usage.cache_read = details.cached_tokens;
+    }
+    if let Some(details) = reported.output_tokens_details {
+        usage.reasoning = details.reasoning_tokens;
+    }
+}
+
 /// Pull `response.incomplete_details.reason` out of a `response.incomplete` SSE
 /// frame. The Responses API nests it as
 /// `{"response": {"incomplete_details": {"reason": "..."}}}`.
@@ -1073,23 +1098,7 @@ impl Provider for CodexProvider {
                         }
                     }
                     "response.completed" => {
-                        if let Ok(c) = serde_json::from_value::<CompletedEvent>(value) {
-                            if let Some(u) = c.response.usage {
-                                usage.input = u.input_tokens;
-                                usage.output = u.output_tokens;
-                                usage.total_tokens = if u.total_tokens > 0 {
-                                    u.total_tokens
-                                } else {
-                                    u.input_tokens + u.output_tokens
-                                };
-                                if let Some(d) = u.input_tokens_details {
-                                    usage.cache_read = d.cached_tokens;
-                                }
-                                if let Some(d) = u.output_tokens_details {
-                                    usage.reasoning = d.reasoning_tokens;
-                                }
-                            }
-                        }
+                        apply_terminal_usage(&mut usage, value);
                         break;
                     }
                     // Safety refusal. The Responses API streams a decline through
@@ -1128,6 +1137,10 @@ impl Provider for CodexProvider {
                     "response.incomplete" => {
                         let reason = incomplete_reason(&value);
                         if incomplete_is_length_cap(reason.as_deref()) {
+                            // A capped round is billed like a completed one and
+                            // its envelope carries the same usage. Dropping it
+                            // reported zero tokens for the most expensive rounds.
+                            apply_terminal_usage(&mut usage, value);
                             stop = StopReason::Length;
                             break;
                         }
@@ -1445,6 +1458,92 @@ mod tests {
             .unwrap();
     }
 
+    /// Answer one request on `listener` with `events` as an SSE body, after
+    /// reading the whole request so the client sees a clean exchange.
+    async fn serve_one_sse(listener: tokio::net::TcpListener, events: &'static str) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut bytes = Vec::new();
+        let mut chunk = [0u8; 4096];
+        let expected = loop {
+            let n = socket.read(&mut chunk).await.unwrap();
+            assert!(n > 0, "request ended before headers");
+            bytes.extend_from_slice(&chunk[..n]);
+            assert!(bytes.len() < 64 * 1024, "fixture request exceeds bound");
+            if let Some(end) = bytes.windows(4).position(|v| v == b"\r\n\r\n") {
+                let headers = String::from_utf8_lossy(&bytes[..end]);
+                let length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap();
+                break end + 4 + length;
+            }
+        };
+        while bytes.len() < expected {
+            let n = socket.read(&mut chunk).await.unwrap();
+            assert!(n > 0);
+            bytes.extend_from_slice(&chunk[..n]);
+        }
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{events}",
+            events.len()
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    }
+
+    /// The whole stream path, not just the helper: a round that ends on the
+    /// output cap finishes as `Length` with its partial text and its usage.
+    #[tokio::test]
+    async fn length_capped_stream_finishes_with_text_and_usage() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(serve_one_sse(
+            listener,
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\ndata: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"usage\":{\"input_tokens\":250000,\"input_tokens_details\":{\"cached_tokens\":240000},\"output_tokens\":128000,\"output_tokens_details\":{\"reasoning_tokens\":90000},\"total_tokens\":378000}}}\n\n",
+        ));
+        let model = Model::openai_responses(
+            "gpt-6.1-sol",
+            format!("http://{address}/v1"),
+            1_050_000,
+            128_000,
+        );
+        let context = Context {
+            messages: vec![Message::user_text("fixture")],
+            ..Default::default()
+        };
+        let options = StreamOptions {
+            api_key: Some("synthetic-api-key".into()),
+            ..Default::default()
+        };
+        let probe = async {
+            let mut stream = crate::stream_simple(&model, &context, &options)
+                .await
+                .unwrap();
+            let mut done = None;
+            while let Some(event) = stream.next().await {
+                if let AssistantMessageEvent::Done { reason, message } = event.unwrap() {
+                    done = Some((reason, message));
+                }
+            }
+            server.await.unwrap();
+            let (reason, message) = done.expect("a capped round still completes");
+            assert_eq!(reason, StopReason::Length);
+            assert_eq!(message.content[0].as_text(), Some("partial"));
+            assert_eq!(message.usage.input, 250_000);
+            assert_eq!(message.usage.output, 128_000);
+            assert_eq!(message.usage.cache_read, 240_000);
+            assert_eq!(message.usage.reasoning, 90_000);
+            assert_eq!(message.usage.total_tokens, 378_000);
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), probe)
+            .await
+            .unwrap();
+    }
+
     // OCEAN-99: vision parity for the OpenAI Responses API. A user image must
     // serialize as an input_image content part (data-URL), not be dropped.
     #[test]
@@ -1711,6 +1810,61 @@ mod tests {
     // the nested reason from the real Responses-API frame shape and classify it
     // as a length cap, so it `break`s to the normal TextEnd/Done path (preserving
     // accumulated text, finishing as StopReason::Length) instead of yielding Err.
+    // A round that hit the output cap is the most expensive kind, and its
+    // envelope carries the same usage as a completed one. It used to be dropped,
+    // so the round reported zero tokens and the context meter went blank.
+    #[test]
+    fn length_capped_round_keeps_its_usage() {
+        let frame = json!({
+            "type": "response.incomplete",
+            "response": {
+                "status": "incomplete",
+                "incomplete_details": { "reason": "max_output_tokens" },
+                "usage": {
+                    "input_tokens": 250_000,
+                    "input_tokens_details": { "cached_tokens": 240_000 },
+                    "output_tokens": 128_000,
+                    "output_tokens_details": { "reasoning_tokens": 90_000 },
+                    "total_tokens": 378_000
+                }
+            }
+        });
+        assert!(incomplete_is_length_cap(
+            incomplete_reason(&frame).as_deref()
+        ));
+
+        let mut usage = Usage::default();
+        apply_terminal_usage(&mut usage, frame);
+        assert_eq!(usage.input, 250_000);
+        assert_eq!(usage.output, 128_000);
+        assert_eq!(usage.cache_read, 240_000);
+        assert_eq!(usage.reasoning, 90_000);
+        assert_eq!(usage.total_tokens, 378_000);
+    }
+
+    #[test]
+    fn terminal_envelope_without_usage_leaves_the_running_figures_alone() {
+        let mut usage = Usage {
+            input: 7,
+            output: 3,
+            total_tokens: 10,
+            ..Default::default()
+        };
+        apply_terminal_usage(
+            &mut usage,
+            json!({"type": "response.incomplete", "response": {"status": "incomplete"}}),
+        );
+        apply_terminal_usage(&mut usage, json!({"type": "response.completed"}));
+        assert_eq!((usage.input, usage.output, usage.total_tokens), (7, 3, 10));
+
+        // A total the backend omits falls back to input + output.
+        apply_terminal_usage(
+            &mut usage,
+            json!({"response": {"usage": {"input_tokens": 40, "output_tokens": 2}}}),
+        );
+        assert_eq!(usage.total_tokens, 42);
+    }
+
     #[test]
     fn incomplete_max_output_tokens_is_a_length_cap() {
         // Exact shape the Responses API emits when the output cap is reached.

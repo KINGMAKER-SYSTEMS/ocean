@@ -24,6 +24,9 @@ This crate owns shared protocol types used across Ocean clients, daemon, runtime
 - `PermissionMode` wire names are stable (`manual`, `automatic`, `skip_all`);
   clients display daemon-reported saved/effective settings rather than deriving
   policy locally.
+- `TokenUsage.context_is_floor` is additive and legacy-default false. It marks
+  a `context_tokens` reading taken before a failure or a turn-limit stop;
+  consumers must not present a marked reading as the final request.
 - The closed Track-0 `RoomId` projection family is retired. Durable room contracts use the open `RoomKey` model; do not recreate projection DTOs without a new audited API design.
 
 ### Federation types

@@ -17,6 +17,10 @@ This crate owns the Ocean agent loop and permission-gated tool execution runtime
   and the loop's own clean-round replay — emit `AgentEvent::ProviderRetrying`
   with a `RetryScope`. Silent retrying is what makes a degraded network
   indistinguishable from a hung agent; do not add a third quiet wait.
+- `AgentConfig::thinking_level` is optional. `None` leaves the provider default
+  in force; `Some(ThinkingLevel::Off)` is an instruction and must reach
+  `StreamOptions::reasoning`, because several models think by default and each
+  encoder has a distinct off shape. Never fold Off into "unset".
 - Permission gates are mandatory; do not add execution paths that bypass them.
   `PermissionPolicy::should_check` owns the approval-mode boundary: manual may
   broaden checks to all known tools, automatic follows each tool's conservative
