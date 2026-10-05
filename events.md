@@ -312,3 +312,15 @@ Applied the independent review of the token-accounting change, and withdrew one 
 
 Validation: full suites pass for ocean-protocol (177 plus 5), ocean-runtime, ocean-agent (265, live probe ignored), ocean-agent-sdk, ocean-daemon (878), ocean-acp and ocean-cli; workspace test compilation, rustfmt check and docs-check pass. One ocean-tui test, shell::herdr::tests::resume_session_reports_agent_session_id_with_resume_source, failed once while two other builds were running and passed five times in a row alone; this change does not touch ocean-tui. No provider was called. Agent devlog updated; the runtime devlog line about the estimator is removed with the code.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [18:10] [05-10-26]
+agent: [claude] [claude code]
+worktree: [claude/token-accounting-accuracy] [/Users/risingtidesdev/dev/ocean-claude-audit]
+type: [review]
+area: [backend] [testing]
+
+Closed the last review point on the token-accounting change: the daemon chose a context reading's label from whether the turn succeeded, which mislabels a successful turn whose stop-hook continuation failed, because that turn carries the continuation's reading and published it as a final round. The provenance now travels with the reading. TokenUsage gains context_is_floor, which the agent sets for the rounds of a turn or continuation that went on to fail and keeps when a continuation's reading replaces the turn's; the daemon labels from that mark through a small helper, the two label strings are shared SDK constants, and the TUI usage panel captions a marked reading "last completed request" instead of "final request". Compatibility: the field is additive and serde-default false, so older payloads read as a final-round measurement and nothing in the monorepo rejects the extra boolean; clients that only know the first label still show the reading. No provider was called.
+
+Validation: on current main, full suites pass for ocean-core (62), ocean-agent (265, live probe ignored), ocean-agent-sdk, ocean-daemon (879), ocean-cli, ocean-protocol (180 plus 5), ocean-providers (66), ocean-runtime, ocean-acp and ocean-tui (501, 4 ignored); workspace test compilation, rustfmt check and docs-check pass. New tests: a payload from before the flag reads false and the flag round-trips; the daemon helper labels by the mark and publishes nothing when unmeasured; the failed-continuation end-to-end test asserts an ok response still carries the mark; the TUI captions the two readings differently.
+_________________________________________________________________________________
