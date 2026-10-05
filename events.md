@@ -312,3 +312,15 @@ Applied the independent review of the thinking-level change. Opus 4.8 and 4.7 do
 
 Validation: full suites pass for ocean-protocol (174 plus 5), ocean-providers (66), ocean-runtime, ocean-agent (260, live probe ignored), ocean-daemon (878) and ocean-acp on current main; workspace test compilation, rustfmt check and docs-check pass. Still no provider call. Known trade-off recorded in the PR: thinking summaries arrive as stream output, so a stream that drops mid-thinking now fails the turn instead of being retried as a clean round. Protocol and providers devlogs updated.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [18:00] [05-10-26]
+agent: [claude] [claude code]
+worktree: [claude/subagent-lost-run-recovery] [/Users/risingtidesdev/dev/ocean-claude-audit]
+type: [review]
+area: [backend] [testing]
+
+The reviewer acknowledged the ocean-subagents repair with nothing blocking; this applies its three remaining low-severity points before landing. The daemon reuses one permission id for an identical tool call, so a child that re-ran the same command raised a prompt wait had already marked reported; the mark is now cleared once the prompt is answered or gone. permissions refreshes before it lists, so it never marks a prompt its response did not show. A run persisted as cancelling gets its startup watchdog again and settles on its own after a daemon restart; only the per-poll re-arm skips cancelling runs.
+
+Validation: 29 unit tests pass, with new cases for the reused permission id and the persisted cancelling run; wire test on Python 3.13 and system 3.9, py_compile and sh -n pass. Merged current main, keeping every ledger entry in time order.
+_________________________________________________________________________________

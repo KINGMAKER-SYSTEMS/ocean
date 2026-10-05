@@ -638,8 +638,10 @@ class Subagents:
                         run_id, expect_request=run["request_id"], output=output
                     )
             return self._public(run)
-        # Re-arm the elapsed-time ceiling if an earlier watchdog gave up.
-        self._start_watchdog(run_id)
+        # Re-arm the elapsed-time ceiling if an earlier watchdog gave up. A
+        # cancellation already in flight is not asked for again on every poll.
+        if run["status"] != "cancelling":
+            self._start_watchdog(run_id)
         request = self.client.request_status(run["request_id"])
         if request is None:
             return self._settle_untracked(run)
@@ -650,6 +652,11 @@ class Subagents:
             if status == "waiting_for_permission"
             else None,
         }
+        if status != "waiting_for_permission" and run.get("reported_permission_id"):
+            # The daemon reuses one permission id for an identical tool call.
+            # Forgetting the report once the prompt is gone lets a repeat of
+            # the same call be reported again.
+            fields["reported_permission_id"] = None
         message = request.get("message")
         if status == "failed":
             fields["error"] = self._failure_detail(str(message or "subagent turn failed"))
@@ -799,6 +806,9 @@ class Subagents:
     def permissions(self, args: dict[str, Any]) -> dict[str, Any]:
         run_id = bounded_text(args.get("run_id"), "run_id", 100)
         assert run_id is not None
+        # Refresh first, then list: a prompt raised in between is then in the
+        # list, so nothing is marked reported that this response does not show.
+        status = self.refresh(run_id)["status"]
         run = self.store.get(run_id)
         pending = [
             permission
@@ -806,8 +816,8 @@ class Subagents:
             if permission.get("request_id") == run["request_id"]
             and permission.get("session_id") == run["session_id"]
         ]
-        status = self.refresh(run_id)["status"]
-        self._report_permission(run_id)
+        if pending:
+            self._report_permission(run_id)
         return {
             "run_id": run_id,
             "status": status,
@@ -844,6 +854,11 @@ class Subagents:
         response = self.client.decide_permission(
             permission_id, decision, run["decision_token"], reason
         )
+        if response.get("ok"):
+            # Answered: the next prompt is new even if the daemon reuses the id.
+            self.store.update(
+                run_id, expect_request=run["request_id"], reported_permission_id=None
+            )
         return {
             "run_id": run_id,
             "permission_id": permission_id,
@@ -912,10 +927,6 @@ class Subagents:
 
     def _start_watchdog(self, run_id: str) -> None:
         run = self.store.get(run_id)
-        # A cancellation is already in flight; asking again on every poll
-        # would only repeat it.
-        if run.get("status") == "cancelling":
-            return
         request_id = run["request_id"]
         key = (run_id, request_id)
         with self.watchdog_lock:

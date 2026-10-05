@@ -442,6 +442,44 @@ class OceanSubagentTests(unittest.TestCase):
             manager.wait({"run_id": run["run_id"], "timeout_seconds": 0.6})
             self.assertGreaterEqual(time.monotonic() - started, 0.5)
 
+    def test_a_repeated_identical_tool_call_is_reported_again(self):
+        # The daemon mints one permission id per (tool, arguments) within a
+        # turn, so a child that re-runs the same command raises a prompt with
+        # an id the parent has already seen.
+        with tempfile.TemporaryDirectory() as root, FakeDaemon() as daemon:
+            manager = self.manager(root, daemon)
+            run = manager.spawn({"task": "runs the tests twice", "cwd": root})
+            reused = daemon.add_permission(run["turn_id"], "bash")
+            first = manager.wait({"run_id": run["run_id"], "timeout_seconds": 10})
+            self.assertEqual(first["status"], "waiting_for_permission")
+            manager.decide(
+                {
+                    "run_id": run["run_id"],
+                    "permission_id": reused,
+                    "expected_tool": "bash",
+                    "decision": "allow",
+                }
+            )
+
+            # The same call again: same id, new prompt.
+            with daemon.lock:
+                request = daemon.requests[run["turn_id"]]
+                daemon.permissions[reused] = {
+                    "permission_id": reused,
+                    "request_id": run["turn_id"],
+                    "session_id": request["session_id"],
+                    "tool": "bash",
+                    "reason": "test permission",
+                    "args": {"command": "true"},
+                    "created_at": "2026-07-29T12:00:01Z",
+                }
+                request["state"] = "waiting_for_permission"
+                request["permission_id"] = reused
+            started = time.monotonic()
+            again = manager.wait({"run_id": run["run_id"], "timeout_seconds": 10})
+            self.assertEqual(again["status"], "waiting_for_permission")
+            self.assertLess(time.monotonic() - started, 5)
+
     def test_concurrency_is_bounded(self):
         with tempfile.TemporaryDirectory() as root, FakeDaemon() as daemon:
             manager = self.manager(root, daemon)
@@ -782,6 +820,19 @@ class OceanSubagentTests(unittest.TestCase):
             self.assertEqual(lost["status"], "lost")
             self.assertIn("no longer tracks this turn", lost["error"])
             self.assertIn("elapsed-time ceiling", lost["error"])
+
+    def test_a_cancelling_run_persisted_across_a_restart_settles_on_its_own(self):
+        with tempfile.TemporaryDirectory() as root, FakeDaemon() as daemon:
+            run_id = self.overdue_run(root, str(uuid.uuid4()), str(uuid.uuid4()))
+            state = Path(root) / "state/runs.json"
+            data = json.loads(state.read_text())
+            data["runs"][run_id]["status"] = "cancelling"
+            state.write_text(json.dumps(data))
+            # The daemon restarted and no longer knows the request. Nobody has
+            # to call a tool for the startup watchdog to notice.
+            manager = self.manager(root, daemon)
+            self.assertTrue(wait_until(lambda: manager.store.get(run_id)["status"] == "lost"))
+            self.assertEqual(daemon.cancel_calls, [])
 
     def test_refresh_rearms_a_watchdog_that_gave_up(self):
         with tempfile.TemporaryDirectory() as root, FakeDaemon() as daemon:
