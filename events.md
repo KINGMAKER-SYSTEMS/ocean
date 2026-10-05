@@ -204,3 +204,16 @@ Terminal model/advisor catalogs now prefer qualified auth routes and current.rou
 
 Final TUI: 500 passed, four ignored; cargo check, strict all-target Clippy, docs-check and required release build passed. A real client HTTP fixture proves API-qualified PATCH and matching provider acknowledgement. A dispatch regression proves Codex authority cannot retire a pending OpenAI API pin for the same wire model, while matching API authority can. Existing model queue/revision regressions use canonical selection ids; legacy catalog/provider-less response compatibility remains covered. No inference, live installation or credential changes occurred. Owning TUI devlog updated; root and Child devlog indexes stay unchanged because package boundaries did not move. Prior ACP head 934c7b2e has both hosted builds green. Fresh review, new-head CI, connected-account inference and runtime compatibility remain pending. VS Code composer still exposes separate model/effort controls and lacks max; that integration remains active goal work.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [10:24] [05-10-26]
+agent: [Claude Code] [Claude Opus 5.5]
+worktree: [fix/gpt-5-5-served-context]
+type: [fix]
+area: [providers]
+
+Ported Risingtides-dev/ocean-os#531 (b7839a45) onto PR #2: gpt-5.5 (both
+spellings) now resolves with the Codex backend's served 272k context window
+instead of the advertised 400k, so a session cannot overfill and fail.
+Regression test gpt_5_5_resolves_with_codex_backend_served_limit added.
+Validation: cargo test -p ocean-providers --locked (see PR).
