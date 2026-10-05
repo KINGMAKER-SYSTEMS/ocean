@@ -447,3 +447,15 @@ ________________________________________________________________________________
 
 Independent adversarial review of draft PR #16 found that a failed npm publish or latest-tag reconciliation could leave a public GitHub Release for an incomplete cross-registry release. The workflow now creates the tag-addressed GitHub Release as a draft and publishes it only after package integrity and registry-latest convergence succeed; the offline contract check asserts this ordering. Cross-registry publication remains retry-based rather than atomic.
 _________________________________________________________________________________
+
+time: [18:33] [05-10-26]
+agent: [codex desktop] [gpt-6.1-sol]
+worktree: [codex/reconcile-ocean-release-workflow]
+type: [workflow]
+area: [review] [gh actions] [release]
+
+After PRs #5 and #9 advanced canonical main, fetched `6d03dfa1` and rebased the factory-owned PR #16 changes onto it. Kept the new main ledger intact and appended the release records after its current entries. On prior PR head `a2d12566`, Build scope, Build Ocean, and Build Surface passed; release package validation remained in progress, so those hosted results do not validate the rebased commit. No package, tag, GitHub Release, or deployment was created.
+
+Validation on the rebased content: release workflow contract test, Ruby YAML parse, append-only ledger check, and `git diff --check` pass. `actionlint` is unavailable locally. Fresh hosted checks and adversarial review are required for the rebased head.
+_________________________________________________________________________________
+_________________________________________________________________________________
