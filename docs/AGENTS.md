@@ -7,6 +7,7 @@ Keep canonical repository routing and the public/private split discoverable.
 ## Ownership
 
 - `MIGRATION.md` owns cutover and existing-work migration instructions.
+- `SOURCE_RECONCILIATION.md` owns verified source-tip comparisons, unresolved divergence, and catch-up constraints.
 
 ## Local Contracts
 
