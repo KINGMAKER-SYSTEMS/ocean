@@ -1375,6 +1375,11 @@ impl AgentRuntime {
                 Err(e) => {
                     // Fail-open: the operator's turn already completed and
                     // persisted; a failed continuation is reported, not fatal.
+                    // The rounds it completed before failing were billed and
+                    // checkpointed, so they count like any other.
+                    let mut billed = TokenUsage::default();
+                    let e = take_turn_failure(e, &mut billed);
+                    add_continuation_usage(&mut usage, &billed);
                     tracing::warn!(%session_id, error = %e, "stop-hook continuation turn failed");
                     stderr.push_str(&format!("stop-hook continuation failed: {e}\n"));
                     break;
@@ -2733,7 +2738,9 @@ fn add_continuation_usage(usage: &mut TokenUsage, continuation: &TokenUsage) {
 
 /// Usage for the provider rounds recorded in `messages`, read from the usage
 /// each checkpointed assistant message carries. `context_tokens` is the last
-/// round's request, which is what the persisted transcript now holds.
+/// request a provider measured. Tool results checkpointed after that request
+/// are not in it, so on a failed turn it is a floor for the saved transcript,
+/// not its size.
 fn usage_of_completed_rounds(messages: &[Message], context_window: u32) -> TokenUsage {
     let mut usage = TokenUsage::default();
     for message in messages {
@@ -4068,11 +4075,10 @@ const COMPACTION_MARKER: &str =
     "[old tool output elided to keep this session inside its token budget; \
      re-run the tool if you need it]";
 
-/// Rough token estimate for one message. This is the runtime's own function, so
-/// compaction and the per-request trim cannot disagree about sizes; it prices
-/// an image flat instead of by its base64 length.
-fn estimate_tokens(message: &Message) -> usize {
-    ocean_runtime::estimate_message_tokens(message)
+/// Rough token estimate: serialized JSON length / 4 — the same heuristic the
+/// runtime's request trim uses, so the two layers agree about sizes.
+fn estimate_tokens<T: serde::Serialize>(value: &T) -> usize {
+    serde_json::to_string(value).map(|s| s.len()).unwrap_or(0) / 4
 }
 
 /// Threshold-based, cache-stable compaction of stored session history.
@@ -4813,41 +4819,6 @@ mod tests {
         [call, result]
     }
 
-    fn screenshot_round(id: &str) -> [Message; 2] {
-        let [call, _] = tool_round(id, 0);
-        let result = Message::ToolResult(ocean_protocol::ToolResultMessage {
-            tool_call_id: id.into(),
-            tool_name: "read".into(),
-            // The largest image a transcript retains: 256 KB of base64.
-            content: vec![ocean_protocol::Content::Image {
-                data: "A".repeat(256 * 1024),
-                mime_type: "image/png".into(),
-            }],
-            is_error: false,
-            timestamp: 0,
-        });
-        [call, result]
-    }
-
-    /// Two screenshots are a few thousand real tokens. Priced by base64 length
-    /// they came to about 131K, over a 200K model's 100K compaction trigger.
-    #[test]
-    fn compact_history_does_not_trigger_on_a_couple_of_screenshots() {
-        let mut msgs: Vec<Message> = ["a", "b"]
-            .into_iter()
-            .flat_map(screenshot_round)
-            .chain(tool_round("c", 40))
-            .collect();
-        assert_eq!(compact_history(&mut msgs, 200_000), 0);
-        let Message::ToolResult(oldest) = &msgs[1] else {
-            panic!()
-        };
-        assert!(
-            matches!(oldest.content[0], ocean_protocol::Content::Image { .. }),
-            "the oldest screenshot must survive"
-        );
-    }
-
     fn assistant_with_usage(usage: ocean_protocol::Usage) -> Message {
         Message::Assistant(ocean_protocol::AssistantMessage {
             content: vec![Content::text("round")],
@@ -4989,6 +4960,14 @@ mod tests {
         failure.content.clear();
         failure.stop_reason = ocean_protocol::StopReason::Error;
         failure.error_message = Some("overloaded_error: scripted outage".into());
+        // The failed round reports usage too. It was not completed, so none of
+        // it may appear in the turn's figures.
+        failure.usage = ocean_protocol::Usage {
+            input: 7_777,
+            output: 99,
+            total_tokens: 7_876,
+            ..Default::default()
+        };
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         runtime.test_turn_provider = Some(TestCompactProvider(Arc::new(ScriptedTurnProvider {
             calls: calls.clone(),
@@ -5050,6 +5029,126 @@ mod tests {
                 .filter(|message| matches!(message, Message::ToolResult(_)))
                 .count(),
             1
+        );
+        let _ = std::fs::remove_dir_all(config_dir);
+    }
+
+    /// A stop-hook continuation that completes rounds and then fails was billed
+    /// for those rounds. The turn it extends succeeded, so the response is ok,
+    /// but its usage used to stop at the main turn and keep that turn's
+    /// context reading.
+    #[tokio::test]
+    async fn failed_stop_hook_continuation_still_reports_the_rounds_it_completed() {
+        let config_dir = temp_config_dir("stop-hook-continuation-failure");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let hook_path = config_dir.join("stop-hook-test.sh");
+        std::fs::write(
+            &hook_path,
+            "#!/bin/sh\ninput=$(cat)\ncase \"$input\" in\n  *'\"stop_hook_active\":true'*) exit 0 ;;\nesac\nprintf '{\"decision\":\"block\",\"reason\":\"hook continuation ping\"}\\n'\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut runtime = runtime(
+            config_dir.clone(),
+            provider_config(ProviderId::Fake, ocean_runtime::FAKE_TOOL_MODEL, false),
+        );
+        runtime.hooks = ocean_hooks::HooksConfig {
+            stop: vec![ocean_hooks::HookCommand {
+                command: hook_path.display().to_string(),
+                args: vec![],
+                timeout_secs: 10,
+                enabled: true,
+            }],
+        };
+
+        let round = |content: Vec<Content>, stop_reason, total_tokens: u64| {
+            ocean_protocol::AssistantMessage {
+                content,
+                api: "test".into(),
+                provider: "test".into(),
+                model: "scripted".into(),
+                usage: ocean_protocol::Usage {
+                    input: 1_000,
+                    output: 100,
+                    total_tokens,
+                    ..Default::default()
+                },
+                stop_reason,
+                error_message: None,
+                timestamp: 0,
+            }
+        };
+        let mut failure = scripted_assistant("");
+        failure.content.clear();
+        failure.stop_reason = ocean_protocol::StopReason::Error;
+        failure.error_message = Some("overloaded_error: scripted outage".into());
+        runtime.test_turn_provider = Some(TestCompactProvider(Arc::new(ScriptedTurnProvider {
+            calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            rounds: vec![
+                // The operator's turn: one round, done.
+                vec![ocean_protocol::AssistantMessageEvent::Done {
+                    reason: ocean_protocol::StopReason::Stop,
+                    message: round(
+                        vec![Content::text("done")],
+                        ocean_protocol::StopReason::Stop,
+                        60_000,
+                    ),
+                }],
+                // The continuation: a tool round completes, then the provider fails.
+                vec![ocean_protocol::AssistantMessageEvent::Done {
+                    reason: ocean_protocol::StopReason::ToolUse,
+                    message: round(
+                        vec![Content::ToolCall {
+                            id: "call-1".into(),
+                            name: "ls".into(),
+                            arguments: serde_json::json!({ "path": "." }),
+                        }],
+                        ocean_protocol::StopReason::ToolUse,
+                        95_000,
+                    ),
+                }],
+                vec![ocean_protocol::AssistantMessageEvent::Error {
+                    reason: ocean_protocol::StopReason::Error,
+                    error: failure,
+                }],
+            ],
+        })));
+
+        let res = runtime
+            .prompt(
+                PromptRequest {
+                    prompt: "hello".into(),
+                    images: None,
+                    request_id: None,
+                    session_id: None,
+                    create_if_missing: true,
+                    max_turns: None,
+                    yolo: true,
+                    cwd: config_dir.display().to_string(),
+                    project_id: None,
+                    client_type: None,
+                    decision_token: None,
+                },
+                PromptControl::yolo(true),
+            )
+            .await;
+
+        assert!(res.ok, "the operator's turn succeeded: {}", res.stderr);
+        assert!(
+            res.stderr.contains("stop-hook continuation failed"),
+            "{}",
+            res.stderr
+        );
+        assert_eq!(res.usage.input, 2_000, "both completed rounds are counted");
+        assert_eq!(res.usage.output, 200);
+        assert_eq!(res.usage.total_tokens, 155_000);
+        assert_eq!(
+            res.usage.context_tokens, 95_000,
+            "the continuation's round is the latest measured request"
         );
         let _ = std::fs::remove_dir_all(config_dir);
     }

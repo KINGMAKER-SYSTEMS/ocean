@@ -38,10 +38,13 @@ transcripts by session id.
   credentials alone do not prove entitlement or completed inference.
 - A failed, cancelled or timed-out turn reports the usage of the rounds it
   completed, read from the checkpointed assistant messages, with the last
-  round's request as its context measurement. Those rounds were billed and
-  saved. Only a turn that fails before any round completes reports zero.
-  Stop-hook continuations add their counters and replace the context
-  measurement, which describes the latest provider request.
+  completed round's request as its context measurement. Those rounds were
+  billed and saved. That reading is a floor: tool results saved after it are
+  unmeasured, and the daemon labels it `provider_reported_last_completed_round`.
+  Only a turn that fails before any round completes reports zero. Stop-hook
+  continuations add their counters and replace the context measurement, which
+  describes the latest provider request; a continuation that fails still adds
+  the rounds it completed.
 - Preserve session compatibility unless a migration is documented.
 - Every advertised catalog model must construct a runtime wire model with the
   same id and limits. Current Opus/Sonnet 5.5 constructors use 1M/128K;

@@ -276,3 +276,15 @@ Corrected token accounting at the edges where it was wrong. A failed, cancelled 
 
 Validation: full suites pass for ocean-protocol (176 plus 5), ocean-runtime (130 plus integration), ocean-agent (265, live probe ignored), ocean-providers (66), ocean-daemon (878), ocean-acp and ocean-cli; workspace test compilation, rustfmt check and docs-check pass on current main. New tests drive a scripted provider through prompt: one tool round then a provider error reports 1,000 input, 300 output, 50,000 cache read, 2,000 cache write and a 53,300 context reading with the round checkpointed, and a failure before any round still reports zero. No provider was called. Protocol, runtime and agent devlogs updated; indexes unchanged.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [17:53] [05-10-26]
+agent: [claude] [claude code]
+worktree: [claude/token-accounting-accuracy] [/Users/risingtidesdev/dev/ocean-claude-audit]
+type: [review]
+area: [backend] [testing]
+
+Applied the independent review of the token-accounting change, and withdrew one part of it. The flat image price is reverted: pricing an image by its base64 length was also the only thing bounding how many images a request carried, and without it a long screenshot session can exceed a provider's image-count rule and wedge, while a flat 6,000 under-prices images on GPT-4o-mini by a factor of four. The estimator is back to the shipped behaviour; image-aware budgeting needs a count cap, a byte ceiling and a per-model price, and is left as open work. Kept and extended the accounting fixes the review confirmed. A stop-hook continuation that completes rounds and then fails now adds those rounds instead of dropping them. A failed turn's context reading is the last completed round, which is a floor for the saved transcript, so the daemon labels it provider_reported_last_completed_round instead of final. The capped-round fix is now proven through the real stream path, and the failed-turn test gives the failing round usage of its own to prove it is not counted.
+
+Validation: full suites pass for ocean-protocol (177 plus 5), ocean-runtime, ocean-agent (265, live probe ignored), ocean-agent-sdk, ocean-daemon (878), ocean-acp and ocean-cli; workspace test compilation, rustfmt check and docs-check pass. One ocean-tui test, shell::herdr::tests::resume_session_reports_agent_session_id_with_resume_source, failed once while two other builds were running and passed five times in a row alone; this change does not touch ocean-tui. No provider was called. Agent devlog updated; the runtime devlog line about the estimator is removed with the code.
+_________________________________________________________________________________

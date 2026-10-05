@@ -14,9 +14,7 @@ pub mod fake_tool_provider;
 pub mod tools;
 pub mod types;
 
-pub use agent_loop::{
-    estimate_message_tokens, run_agent, run_agent_with_history, AgentRun, IMAGE_TOKEN_ESTIMATE,
-};
+pub use agent_loop::{run_agent, run_agent_with_history, AgentRun};
 pub use artifacts::{Artifact, ArtifactStore, SharedArtifacts};
 pub use capability::{
     BuiltinProvider, CapabilityProvider, CapabilityRegistry, ProviderHealth, SessionContext,

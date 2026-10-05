@@ -6944,11 +6944,18 @@ async fn agent_turn(
         // This measurement is provider-reported for the final request/round.
         // Never substitute the cumulative `usage.input`: multi-round turns resend
         // prior context and summing those requests overstates current occupancy.
+        // A turn that did not complete reports its last completed round, which
+        // is a floor rather than the final request, and is labelled as such.
         let context_usage =
             (res.usage.context_tokens > 0 && res.usage.context_window > 0).then(|| ContextUsage {
                 used_tokens: res.usage.context_tokens,
                 context_window: res.usage.context_window,
-                source: "provider_reported_final_round".into(),
+                source: if res.ok {
+                    "provider_reported_final_round"
+                } else {
+                    "provider_reported_last_completed_round"
+                }
+                .into(),
                 measured_at_ms: Utc::now().timestamp_millis(),
             });
         // NOTE: assistant text already streamed delta-by-delta through the bridge,

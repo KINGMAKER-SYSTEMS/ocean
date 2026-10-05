@@ -29,13 +29,18 @@ use uuid::Uuid;
 pub use ocean_protocol::ThinkingLevel;
 
 /// Truthful context-window occupancy measured at one provider request boundary.
-/// `used_tokens` is the provider-reported total token consumption for the final
-/// round, not cumulative turn usage or a local estimate.
+/// `used_tokens` is the provider-reported total token consumption for one
+/// request, not cumulative turn usage or a local estimate. For a completed
+/// turn it is the final round. For a failed, cancelled or timed-out turn it is
+/// the last round that completed, so tool results saved after that request are
+/// not in it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextUsage {
     pub used_tokens: u64,
     pub context_window: u64,
-    /// Stable provenance label. Currently `provider_reported_final_round`.
+    /// Stable provenance label: `provider_reported_final_round` for a completed
+    /// turn, `provider_reported_last_completed_round` for one that did not
+    /// complete.
     pub source: String,
     /// Daemon wall-clock timestamp (Unix milliseconds) when the completed turn's
     /// provider measurement was published.

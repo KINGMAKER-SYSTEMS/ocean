@@ -1458,6 +1458,92 @@ mod tests {
             .unwrap();
     }
 
+    /// Answer one request on `listener` with `events` as an SSE body, after
+    /// reading the whole request so the client sees a clean exchange.
+    async fn serve_one_sse(listener: tokio::net::TcpListener, events: &'static str) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut bytes = Vec::new();
+        let mut chunk = [0u8; 4096];
+        let expected = loop {
+            let n = socket.read(&mut chunk).await.unwrap();
+            assert!(n > 0, "request ended before headers");
+            bytes.extend_from_slice(&chunk[..n]);
+            assert!(bytes.len() < 64 * 1024, "fixture request exceeds bound");
+            if let Some(end) = bytes.windows(4).position(|v| v == b"\r\n\r\n") {
+                let headers = String::from_utf8_lossy(&bytes[..end]);
+                let length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap();
+                break end + 4 + length;
+            }
+        };
+        while bytes.len() < expected {
+            let n = socket.read(&mut chunk).await.unwrap();
+            assert!(n > 0);
+            bytes.extend_from_slice(&chunk[..n]);
+        }
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{events}",
+            events.len()
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    }
+
+    /// The whole stream path, not just the helper: a round that ends on the
+    /// output cap finishes as `Length` with its partial text and its usage.
+    #[tokio::test]
+    async fn length_capped_stream_finishes_with_text_and_usage() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(serve_one_sse(
+            listener,
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\ndata: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"usage\":{\"input_tokens\":250000,\"input_tokens_details\":{\"cached_tokens\":240000},\"output_tokens\":128000,\"output_tokens_details\":{\"reasoning_tokens\":90000},\"total_tokens\":378000}}}\n\n",
+        ));
+        let model = Model::openai_responses(
+            "gpt-6.1-sol",
+            format!("http://{address}/v1"),
+            1_050_000,
+            128_000,
+        );
+        let context = Context {
+            messages: vec![Message::user_text("fixture")],
+            ..Default::default()
+        };
+        let options = StreamOptions {
+            api_key: Some("synthetic-api-key".into()),
+            ..Default::default()
+        };
+        let probe = async {
+            let mut stream = crate::stream_simple(&model, &context, &options)
+                .await
+                .unwrap();
+            let mut done = None;
+            while let Some(event) = stream.next().await {
+                if let AssistantMessageEvent::Done { reason, message } = event.unwrap() {
+                    done = Some((reason, message));
+                }
+            }
+            server.await.unwrap();
+            let (reason, message) = done.expect("a capped round still completes");
+            assert_eq!(reason, StopReason::Length);
+            assert_eq!(message.content[0].as_text(), Some("partial"));
+            assert_eq!(message.usage.input, 250_000);
+            assert_eq!(message.usage.output, 128_000);
+            assert_eq!(message.usage.cache_read, 240_000);
+            assert_eq!(message.usage.reasoning, 90_000);
+            assert_eq!(message.usage.total_tokens, 378_000);
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), probe)
+            .await
+            .unwrap();
+    }
+
     // OCEAN-99: vision parity for the OpenAI Responses API. A user image must
     // serialize as an input_image content part (data-URL), not be dropped.
     #[test]
