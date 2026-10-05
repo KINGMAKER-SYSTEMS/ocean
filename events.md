@@ -459,3 +459,15 @@ After PRs #5 and #9 advanced canonical main, fetched `6d03dfa1` and rebased the 
 Validation on the rebased content: release workflow contract test, Ruby YAML parse, append-only ledger check, and `git diff --check` pass. `actionlint` is unavailable locally. Fresh hosted checks and adversarial review are required for the rebased head.
 _________________________________________________________________________________
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [18:50] [05-10-26]
+agent: [codex desktop] [gpt-6.1-sol]
+worktree: [codex/reconcile-ocean-release-workflow]
+type: [workflow]
+area: [review] [gh actions] [release]
+
+Canonical main advanced through PR #10 to `10368594` after the earlier PR #16 validation. Rebased the factory-owned release workflow branch onto that current main and retained the new main ledger entries. The prior head's hosted Build and package checks passed, but are stale after this base update; the new head must pass fresh checks and review before merge. GitHub Release/tag publication and deployment remain absent.
+
+Validation on the rebased content: release workflow contract test, Ruby YAML parse, append-only ledger check, and `git diff --check` pass. `actionlint` is unavailable locally.
+_________________________________________________________________________________
