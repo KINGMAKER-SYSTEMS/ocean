@@ -14273,8 +14273,13 @@ mod tests {
                 .get("effort_levels")
                 .and_then(serde_json::Value::as_array)
                 .expect("picker effort choices must remain an array");
-            assert!(!efforts.is_empty());
-            assert!(efforts.iter().all(serde_json::Value::is_string));
+            // Empty is meaningful: the route sends no effort parameter, and
+            // clients then show no effort control.
+            assert!(efforts.iter().all(|level| {
+                level.as_str().is_some_and(|level| {
+                    ["off", "minimal", "low", "medium", "high", "xhigh", "max"].contains(&level)
+                })
+            }));
             assert!(
                 entry.len() == 5 || (entry.len() == 6 && entry.contains_key("credential_source")),
                 "picker entries contain required catalog fields and optional credential_source: {entry:?}"

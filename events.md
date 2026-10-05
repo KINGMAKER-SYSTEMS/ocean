@@ -266,6 +266,18 @@ Validation: all 899 Surface tests, strict WASM Clippy and docs-check pass. New r
 _________________________________________________________________________________
 
 _________________________________________________________________________________
+time: [17:11] [05-10-26]
+agent: [claude] [claude code]
+worktree: [claude/thinking-levels-truthful] [/Users/risingtidesdev/dev/ocean-claude-audit]
+type: [bug report]
+area: [backend] [testing]
+
+Made thinking levels do what they say. The runtime dropped an explicit Off before any encoder saw it, so "off" silently ran at the provider default on every model that thinks by default; AgentConfig now carries an optional level and passes Off through, which makes the existing off shapes reachable (Anthropic disabled or between_tools, Codex none, DeepSeek disabled). Adaptive Claude requests now send display summarized: current models otherwise stream empty thinking text, so TUI and Surface reasoning views stayed blank. Opus 4.8 and 4.7 joined the adaptive family because budget_tokens is rejected there, and no adaptive-family request carries a sampling parameter with thinking on or off. The GPT-4 chat family no longer receives reasoning_effort. Catalog effort metadata now lists a level only when choosing it changes the request: collapsed levels are gone (Haiku xhigh, DeepSeek low and medium, older Codex xhigh and off, Kimi K3 everything but max) and routes whose encoder sends nothing (GLM, MiniMax, Kimi K2.x, GPT-4o) advertise an empty list, which clients already render as no effort control.
+
+Validation: full suites for ocean-protocol (173 plus 5), ocean-providers (65), ocean-runtime, ocean-agent (260, live probe ignored), ocean-daemon (878) and ocean-acp pass; workspace test compilation, rustfmt check and docs-check pass. New runtime end-to-end tests prove unset stays unset, Off and High reach the provider, and a stream-option level still wins. The daemon and provider fixtures that required a non-empty effort list now check the vocabulary instead. No provider was called: the Anthropic display field, the Opus 4.8/4.7 adaptive shape and Codex effort none follow the published provider contracts and are not live-verified here. Protocol, providers, runtime and daemon devlogs updated; indexes unchanged.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
 time: [17:21] [05-10-26]
 agent: [claude] [claude code]
 worktree: [claude/token-accounting-accuracy] [/Users/risingtidesdev/dev/ocean-claude-audit-b]
@@ -275,6 +287,18 @@ area: [backend] [testing]
 Corrected token accounting at the edges where it was wrong. A failed, cancelled or timed-out turn reported zero tokens and no context reading at every layer although its completed rounds were billed and checkpointed; it now reports those rounds from the usage the checkpointed assistant messages carry. Transcript estimates priced an image by its base64 length, about 64K tokens for one retained screenshot against roughly 1.6K billed, so three screenshots trimmed the task and every screenshot out of a 200K model's request and two tripped compaction; the runtime trim and agent compaction now share one estimator that prices an image flat at 6,000 tokens. A Responses round that hit the output cap dropped its usage. Anthropic message_delta usage was added although it is cumulative, and an explicit null in any usage count failed the frame, which for message_delta also loses the stop reason. Gemini output left thinking tokens out. A stop-hook continuation kept the earlier turn's context reading.
 
 Validation: full suites pass for ocean-protocol (176 plus 5), ocean-runtime (130 plus integration), ocean-agent (265, live probe ignored), ocean-providers (66), ocean-daemon (878), ocean-acp and ocean-cli; workspace test compilation, rustfmt check and docs-check pass on current main. New tests drive a scripted provider through prompt: one tool round then a provider error reports 1,000 input, 300 output, 50,000 cache read, 2,000 cache write and a 53,300 context reading with the round checkpointed, and a failure before any round still reports zero. No provider was called. Protocol, runtime and agent devlogs updated; indexes unchanged.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [17:44] [05-10-26]
+agent: [claude] [claude code]
+worktree: [claude/thinking-levels-truthful] [/Users/risingtidesdev/dev/ocean-claude-audit]
+type: [review]
+area: [backend] [testing]
+
+Applied the independent review of the thinking-level change. Opus 4.8 and 4.7 do not think unless asked, so with no level chosen they again get no thinking field; the first version switched adaptive thinking on for them, which broke "unset means provider default" and would have spent their small output caps on thinking. Off on Opus 5 is now low effort rather than disabled: with thinking disabled that model can write a tool call into its visible text, so the tool never runs. OpenAI Chat Completions sends reasoning_effort only to reasoning families (o-series, GPT-5 and later) instead of blocking only GPT-4. Gemini 2.0 Flash, whose descriptor says it does not reason, never receives thinkingConfig and advertises no effort levels. Three tests that passed vacuously behind the new gate now use a reasoning model, and a test no longer pins a temperature beside enabled thinking.
+
+Validation: full suites pass for ocean-protocol (174 plus 5), ocean-providers (66), ocean-runtime, ocean-agent (260, live probe ignored), ocean-daemon (878) and ocean-acp on current main; workspace test compilation, rustfmt check and docs-check pass. Still no provider call. Known trade-off recorded in the PR: thinking summaries arrive as stream output, so a stream that drops mid-thinking now fails the turn instead of being retried as a clean round. Protocol and providers devlogs updated.
 _________________________________________________________________________________
 
 _________________________________________________________________________________
