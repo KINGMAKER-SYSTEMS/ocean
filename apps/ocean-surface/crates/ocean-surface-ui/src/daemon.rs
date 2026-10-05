@@ -2658,11 +2658,12 @@ impl Daemon {
                     .voice_ready
                     .set(crate::voice::transport::voice_ready_decision(None));
                 // Restore persisted session before connecting fresh.
+                let boot_intent = daemon.session_intent_generation.get_untracked();
                 if let Some(id) = should_restore_session(
                     load_persisted_session().as_deref(),
                     daemon.session_id.get_untracked().as_deref(),
                 ) {
-                    if restore_session_or_clear(&daemon, id).await {
+                    if restore_session_or_clear(&daemon, id, boot_intent).await {
                         daemon.fetch_models();
                         daemon.fetch_projects();
                         return;
@@ -2737,19 +2738,33 @@ impl Daemon {
                         DEFAULT_LIVEKIT_ROOM_ID,
                     ));
             }
+            // The user can start or open a session while boot is still asking
+            // the daemon about an old one. Both restores below then stand down.
+            let boot_intent = daemon.session_intent_generation.get_untracked();
             // A `?session=<id>` link names the chat to open: it is how the
             // TUI's `/web` and `/beam` hand a session to this surface. It wins
             // over the session this browser last used. A link to a session this
             // daemon does not have falls through to that one, untouched.
-            if let Some(id) = should_restore_session(
-                requested_session().as_deref(),
-                daemon.session_id.get_untracked().as_deref(),
-            ) {
-                if try_restore_session(&daemon, id).await {
-                    clear_requested_session();
-                    daemon.fetch_models();
-                    daemon.fetch_projects();
-                    return;
+            if let Some(requested) = requested_session() {
+                // A link is honoured once. Left in the address bar it would
+                // pull a later reload back to that session after the user had
+                // moved on.
+                clear_requested_session();
+                if let Some(id) = should_restore_session(
+                    Some(&requested),
+                    daemon.session_id.get_untracked().as_deref(),
+                ) {
+                    match try_restore_session(&daemon, id, boot_intent).await {
+                        SessionRestore::Restored => {
+                            daemon.fetch_models();
+                            daemon.fetch_projects();
+                            return;
+                        }
+                        SessionRestore::Missing => {
+                            daemon.status.set("linked session not found".into());
+                        }
+                        SessionRestore::Superseded => {}
+                    }
                 }
             }
             // Restore persisted session before connecting fresh.
@@ -2757,7 +2772,7 @@ impl Daemon {
                 load_persisted_session().as_deref(),
                 daemon.session_id.get_untracked().as_deref(),
             ) {
-                if restore_session_or_clear(&daemon, id).await {
+                if restore_session_or_clear(&daemon, id, boot_intent).await {
                     daemon.fetch_models();
                     daemon.fetch_projects();
                     return;
@@ -7868,7 +7883,8 @@ const MODEL_OVERRIDE_STORAGE_KEY: &str = "ocean.model_override";
 /// `ocean_protocol::ThinkingLevel` (serde lowercase) and with the composer's
 /// dropdown in `app.rs` — otherwise a level the dropdown offers gets silently
 /// dropped on reload by this restore filter. (OCEAN-202 added minimal + xhigh.)
-const THINKING_LEVELS: &[&str] = &["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+pub(crate) const THINKING_LEVELS: &[&str] =
+    &["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 /// The persisted per-turn thinking level, restored on construction. Filtered to
 /// known values so only a valid `ThinkingLevel` string is ever loaded.
@@ -7956,18 +7972,50 @@ fn should_restore_session<'a>(persisted: Option<&'a str>, active: Option<&str>) 
 /// Pre-flight fetch to verify a persisted session exists on the daemon, then
 /// restore via [`Daemon::switch_session`]. On failure (non-200, decode error,
 /// missing session) the persisted key is cleared and this returns `false` so
-/// the caller falls through to the normal boot path with state untouched.
-async fn restore_session_or_clear(daemon: &Daemon, id: &str) -> bool {
-    if try_restore_session(daemon, id).await {
-        return true;
+/// the caller falls through to the normal boot path with state untouched. A
+/// restore the user overtook also returns `false`, and keeps the key.
+async fn restore_session_or_clear(daemon: &Daemon, id: &str, boot_intent: u64) -> bool {
+    match try_restore_session(daemon, id, boot_intent).await {
+        SessionRestore::Restored => true,
+        SessionRestore::Missing => {
+            clear_persisted_session();
+            false
+        }
+        SessionRestore::Superseded => false,
     }
-    clear_persisted_session();
-    false
 }
 
-/// Verify `id` exists on the daemon and switch to it. Returns `false`, with
-/// all state untouched, when it does not or the daemon cannot be asked.
-async fn try_restore_session(daemon: &Daemon, id: &str) -> bool {
+/// How an attempt to open a named session at boot ended.
+#[derive(Debug, PartialEq, Eq)]
+enum SessionRestore {
+    /// The session exists and is now the one in view.
+    Restored,
+    /// The daemon does not have it, or could not be asked. State is untouched.
+    Missing,
+    /// The user started or opened a session while the daemon was being asked,
+    /// so the answer no longer applies. State is untouched.
+    Superseded,
+}
+
+/// True when a session focus was established after boot captured
+/// `boot_intent`: a restore must not switch away from what the user chose.
+fn restore_superseded(boot_intent: u64, intent_now: u64, active_now: Option<&str>) -> bool {
+    intent_now != boot_intent || active_now.is_some()
+}
+
+/// Verify `id` exists on the daemon and switch to it, unless the user has
+/// chosen a session since `boot_intent` was read.
+async fn try_restore_session(daemon: &Daemon, id: &str, boot_intent: u64) -> SessionRestore {
+    let superseded = || {
+        restore_superseded(
+            boot_intent,
+            daemon.session_intent_generation.get_untracked(),
+            daemon.session_id.get_untracked().as_deref(),
+        )
+    };
+    if superseded() {
+        return SessionRestore::Superseded;
+    }
     let url = daemon.url.get_untracked();
     let get_url = format!(
         "{}/v1/sessions/{}",
@@ -7978,8 +8026,12 @@ async fn try_restore_session(daemon: &Daemon, id: &str) -> bool {
         Ok(resp) => match resp.json::<SessionDetailResponse>().await {
             Ok(r) if r.ok => {
                 if let Some(detail) = r.session {
+                    // The fetch took a while; the user may not have waited.
+                    if superseded() {
+                        return SessionRestore::Superseded;
+                    }
                     daemon.switch_session(detail.id, detail.title);
-                    return true;
+                    return SessionRestore::Restored;
                 }
             }
             Err(err) => {
@@ -7991,7 +8043,7 @@ async fn try_restore_session(daemon: &Daemon, id: &str) -> bool {
             log::error!("session restore fetch error: {err}");
         }
     }
-    false
+    SessionRestore::Missing
 }
 
 /// The session a `?session=<id>` query names, if it is a well-formed session
@@ -8051,7 +8103,7 @@ fn requested_session() -> Option<String> {
     }
 }
 
-/// Drop `session` from the address bar once the link has been honoured, so a
+/// Drop `session` from the address bar once the link has been read, so a
 /// reload restores whatever session the user is on by then instead of jumping
 /// back to the linked one.
 fn clear_requested_session() {
@@ -12029,6 +12081,32 @@ mod tests {
             should_restore_session(Some("sess-abc"), Some("sess-abc")),
             None
         );
+    }
+
+    #[test]
+    fn a_restore_stands_down_once_the_user_has_chosen_a_session() {
+        // Nothing happened since boot: restore.
+        assert!(!restore_superseded(4, 4, None));
+        // New Session bumps the intent and leaves no active session.
+        assert!(restore_superseded(4, 5, None));
+        // A switch bumps the intent and sets one.
+        assert!(restore_superseded(4, 5, Some("session-x")));
+        // A first prompt can create a session without a switch.
+        assert!(restore_superseded(4, 4, Some("session-y")));
+
+        // The same decision read from a live daemon handle.
+        let daemon = Daemon::dummy();
+        let boot_intent = daemon.session_intent_generation.get_untracked();
+        let superseded = |daemon: &Daemon| {
+            restore_superseded(
+                boot_intent,
+                daemon.session_intent_generation.get_untracked(),
+                daemon.session_id.get_untracked().as_deref(),
+            )
+        };
+        assert!(!superseded(&daemon));
+        daemon.new_session();
+        assert!(superseded(&daemon));
     }
 
     #[test]

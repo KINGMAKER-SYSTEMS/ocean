@@ -174,53 +174,77 @@ impl CommandRegistry {
         ranked.into_iter().map(|(_, cmd)| cmd).collect()
     }
 
-    /// Decide what a composer line that begins with `/` means.
+    /// The command whose slash alias is exactly `name` (already lowercased,
+    /// without the slash).
+    fn slash_exact(&self, name: &str) -> Option<Command> {
+        self.commands.get_untracked().into_iter().find(|cmd| {
+            cmd.slash
+                .is_some_and(|alias| alias.trim_start_matches('/').eq_ignore_ascii_case(name))
+        })
+    }
+
+    /// The rows the composer popover shows for `text`, best match first.
+    ///
+    /// While the name is still being typed this is the ranked
+    /// [`slash_filter`](Self::slash_filter) list. Once whitespace follows the
+    /// name it is the one command that name spells, or nothing: the popover
+    /// then shows exactly what [`resolve_slash`](Self::resolve_slash) will
+    /// run, so a highlighted row is never a different command from the one
+    /// Enter dispatches, and a sentence that merely starts with a slash shows
+    /// no menu at all.
+    pub fn slash_rows(&self, text: &str) -> Vec<Command> {
+        let Some(line) = SlashLine::parse(text) else {
+            return Vec::new();
+        };
+        match line.command_name() {
+            SlashName::Command(name) if line.finished => {
+                self.slash_exact(&name).into_iter().collect()
+            }
+            SlashName::Command(name) => self.slash_filter(&name),
+            SlashName::Path | SlashName::Other => Vec::new(),
+        }
+    }
+
+    /// Decide what a composer line means when it is submitted. `picked` is the
+    /// popover row the user chose (highlighted on Enter or Tab, or clicked),
+    /// when there is one.
     ///
     /// The line used to be matched fuzzily and then cleared whatever happened,
     /// so `/etc/hosts what does this do` was thrown away with "unknown
     /// command" and `/so what do you think` toggled the Sessions panel.
-    pub fn classify_slash(&self, text: &str) -> SlashInput {
-        let Some(rest) = text.trim_start().strip_prefix('/') else {
+    ///
+    /// - A line that does not start with `/`, or whose first word is a path
+    ///   (`/etc/hosts`, `/notes.md`), is a message.
+    /// - While the name is still being typed (no whitespace after it), the
+    ///   picked row runs; without a pick, the best match does.
+    /// - Once whitespace follows the name, only the command that name spells
+    ///   exactly runs. An abbreviation followed by words is not a command:
+    ///   `/s what do you think` must not toggle a panel.
+    pub fn resolve_slash(&self, text: &str, picked: Option<&str>) -> SlashInput {
+        let Some(line) = SlashLine::parse(text) else {
             return SlashInput::Prompt;
         };
-        let (token, args) = match rest.split_once(char::is_whitespace) {
-            Some((token, args)) => (token, args.trim()),
-            None => (rest.trim_end(), ""),
+        let name = match line.command_name() {
+            SlashName::Command(name) => name,
+            SlashName::Path => return SlashInput::Prompt,
+            SlashName::Other => return SlashInput::Unknown,
         };
-        if token.is_empty() {
-            return SlashInput::Unknown;
-        }
-        // A command name is letters, digits and hyphens. Anything else is a
-        // path or prose that happens to start with a slash.
-        if !token.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
-            return SlashInput::Prompt;
-        }
-        let name = token.to_lowercase();
-        let alias = |cmd: &Command| {
-            cmd.slash
-                .unwrap_or("")
-                .trim_start_matches('/')
-                .to_lowercase()
-        };
-        let ranked = self.slash_filter(&name);
-        let chosen = if let Some(exact) = ranked.iter().find(|cmd| alias(cmd) == name) {
-            Some(exact)
-        } else if args.is_empty() {
-            // Still naming the command: take the best match, as the popover shows.
-            ranked.first()
+        let chosen = if line.finished {
+            self.slash_exact(&name)
+        } else if let Some(id) = picked {
+            self.commands
+                .get_untracked()
+                .into_iter()
+                .find(|cmd| cmd.id == id && cmd.slash.is_some())
+        } else if name.is_empty() {
+            None
         } else {
-            // Arguments follow, so the name is finished. Only an unambiguous
-            // prefix is close enough to act on.
-            let mut prefixed = ranked.iter().filter(|cmd| alias(cmd).starts_with(&name));
-            match (prefixed.next(), prefixed.next()) {
-                (Some(only), None) => Some(only),
-                _ => None,
-            }
+            self.slash_filter(&name).into_iter().next()
         };
         match chosen {
             Some(cmd) if cmd.enabled.get_untracked() => SlashInput::Command {
                 id: cmd.id,
-                args: args.to_string(),
+                args: line.args.to_string(),
             },
             Some(_) => SlashInput::Disabled,
             None => SlashInput::Unknown,
@@ -228,17 +252,81 @@ impl CommandRegistry {
     }
 }
 
-/// The text after the command name on a `/` line, trimmed; empty when the
-/// line is only a name.
-pub fn slash_arguments(text: &str) -> &str {
-    text.trim_start()
-        .strip_prefix('/')
-        .and_then(|rest| rest.split_once(char::is_whitespace))
-        .map_or("", |(_, args)| args.trim())
+/// A composer line that starts with `/`, split once. The popover and the
+/// dispatcher both read this, so they cannot disagree about what was typed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SlashLine<'a> {
+    /// The first word after the slash, as typed.
+    pub name: &'a str,
+    /// The text after the name, trimmed.
+    pub args: &'a str,
+    /// Whitespace follows the name, so it is no longer being typed.
+    pub finished: bool,
 }
 
-/// What a composer line beginning with `/` means. See
-/// [`CommandRegistry::classify_slash`].
+/// Punctuation a sentence, or a phone keyboard's double-space, leaves after a
+/// command name.
+const NAME_TRAILERS: [char; 6] = ['?', '!', '.', ',', ';', ':'];
+
+/// What the first word of a `/` line is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SlashName {
+    /// A command name, lowercased, trailing punctuation removed. Empty for a
+    /// bare `/`.
+    Command(String),
+    /// A filesystem path or file name: the line is a message.
+    Path,
+    /// Neither: a second leading slash, an underscore, non-ASCII text.
+    Other,
+}
+
+impl<'a> SlashLine<'a> {
+    /// `None` unless `text` starts with `/`. A leading space is therefore
+    /// always a way to send a line that begins with a slash as a message.
+    pub fn parse(text: &'a str) -> Option<Self> {
+        let rest = text.strip_prefix('/')?;
+        Some(match rest.split_once(char::is_whitespace) {
+            Some((name, args)) => Self {
+                name,
+                args: args.trim(),
+                finished: true,
+            },
+            None => Self {
+                name: rest,
+                args: "",
+                finished: false,
+            },
+        })
+    }
+
+    /// Classify the first word. Command names are ASCII letters, digits and
+    /// hyphens.
+    pub fn command_name(&self) -> SlashName {
+        let core = self.name.trim_end_matches(NAME_TRAILERS);
+        if core.is_empty() {
+            // A bare `/` lists every command; `/ model` or `/..` names none.
+            return if self.name.is_empty() && !self.finished {
+                SlashName::Command(String::new())
+            } else {
+                SlashName::Other
+            };
+        }
+        if core.starts_with('/') {
+            return SlashName::Other;
+        }
+        if core.contains('/') || core.contains('.') {
+            return SlashName::Path;
+        }
+        if core.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            SlashName::Command(core.to_ascii_lowercase())
+        } else {
+            SlashName::Other
+        }
+    }
+}
+
+/// What a submitted composer line means. See
+/// [`CommandRegistry::resolve_slash`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SlashInput {
     /// Run this command with the text that follows its name.
@@ -247,7 +335,7 @@ pub enum SlashInput {
     Disabled,
     /// It reads as a command and matches none: keep the draft and say so.
     Unknown,
-    /// Not a command (a path, prose): send it as a message.
+    /// Not a command (a path, or no leading slash): send it as a message.
     Prompt,
 }
 
@@ -771,11 +859,12 @@ mod tests {
         assert_eq!(ids, vec!["toggle-files"]);
     }
 
-    /// The composer's commands in their registration order.
+    /// The composer's slash commands, with the ids and order `app.rs`
+    /// registers them in.
     fn composer_registry() -> CommandRegistry {
         let registry = CommandRegistry::new();
         for (id, alias) in [
-            ("open-floor", "/floor"),
+            ("open-ocean-floor", "/floor"),
             ("new-session", "/new"),
             ("toggle-files", "/files"),
             ("toggle-repo", "/repo"),
@@ -783,6 +872,7 @@ mod tests {
             ("toggle-sessions", "/sessions"),
             ("toggle-rooms", "/rooms"),
             ("open-council", "/council"),
+            ("workspace-toggle", "/workspace"),
             ("clear", "/clear"),
             ("model", "/model"),
             ("thinking", "/thinking"),
@@ -790,11 +880,27 @@ mod tests {
         ] {
             registry.register(slash_filter_cmd(id, Some(alias)));
         }
+        // Listed, but not runnable yet.
+        registry.register(Command {
+            enabled: Signal::derive(|| false),
+            ..slash_filter_cmd("resume", Some("/resume"))
+        });
         registry
     }
 
     fn first_match(registry: &CommandRegistry, query: &str) -> &'static str {
         registry.slash_filter(query)[0].id
+    }
+
+    fn row_ids(registry: &CommandRegistry, text: &str) -> Vec<&'static str> {
+        registry.slash_rows(text).iter().map(|c| c.id).collect()
+    }
+
+    fn command(id: &'static str, args: &str) -> SlashInput {
+        SlashInput::Command {
+            id,
+            args: args.into(),
+        }
     }
 
     /// Enter runs the first row, so a prefix has to outrank a scattered match
@@ -815,80 +921,238 @@ mod tests {
     }
 
     #[test]
-    fn classify_slash_runs_commands_with_their_full_arguments() {
-        let registry = composer_registry();
+    fn slash_line_splits_the_name_from_its_arguments_once() {
+        assert_eq!(SlashLine::parse("plain text"), None);
+        // A leading space is the way to send a line that starts with a slash.
+        assert_eq!(SlashLine::parse(" /model gpt-5"), None);
         assert_eq!(
-            registry.classify_slash("/model openai/gpt-6 sol"),
-            SlashInput::Command {
-                id: "model",
-                args: "openai/gpt-6 sol".into()
-            }
+            SlashLine::parse("/model"),
+            Some(SlashLine {
+                name: "model",
+                args: "",
+                finished: false
+            })
         );
         assert_eq!(
-            registry.classify_slash("/Thinking high"),
-            SlashInput::Command {
-                id: "thinking",
-                args: "high".into()
-            }
+            SlashLine::parse("/model "),
+            Some(SlashLine {
+                name: "model",
+                args: "",
+                finished: true
+            })
         );
-        // No arguments yet: the best match, as the popover highlights it.
         assert_eq!(
-            registry.classify_slash("/h"),
-            SlashInput::Command {
-                id: "help",
-                args: String::new()
-            }
+            SlashLine::parse("/model   gpt-5.5 \n thanks "),
+            Some(SlashLine {
+                name: "model",
+                args: "gpt-5.5 \n thanks",
+                finished: true
+            })
         );
-        // With arguments, an unambiguous prefix still counts.
         assert_eq!(
-            registry.classify_slash("/mod gpt-5.5"),
-            SlashInput::Command {
-                id: "model",
-                args: "gpt-5.5".into()
-            }
+            SlashLine::parse("/ model"),
+            Some(SlashLine {
+                name: "",
+                args: "model",
+                finished: true
+            })
         );
     }
 
     #[test]
-    fn classify_slash_never_eats_prose_or_paths() {
+    fn the_first_word_is_a_command_name_a_path_or_neither() {
+        let name = |text: &str| SlashLine::parse(text).unwrap().command_name();
+        assert_eq!(name("/Model"), SlashName::Command("model".into()));
+        assert_eq!(name("/"), SlashName::Command(String::new()));
+        // Punctuation a sentence or a phone keyboard leaves behind.
+        assert_eq!(name("/help?"), SlashName::Command("help".into()));
+        assert_eq!(name("/new. "), SlashName::Command("new".into()));
+        // Paths and file names are messages.
+        assert_eq!(name("/etc/hosts what is this"), SlashName::Path);
+        assert_eq!(name("/notes.md"), SlashName::Path);
+        assert_eq!(name("/Users/me/app.rs:12"), SlashName::Path);
+        // Not a name, and not a path either.
+        assert_eq!(name("//model gpt-5"), SlashName::Other);
+        assert_eq!(name("/ model"), SlashName::Other);
+        assert_eq!(name("/new_session"), SlashName::Other);
+        assert_eq!(name("/..."), SlashName::Other);
+        assert_eq!(name("/\u{e9}t\u{e9}"), SlashName::Other);
+    }
+
+    #[test]
+    fn popover_rows_narrow_to_the_exact_command_once_the_name_is_finished() {
+        let registry = composer_registry();
+        // Still typing the name: the ranked list.
+        assert_eq!(
+            row_ids(&registry, "/m"),
+            vec!["model", "toggle-rooms", "resume"]
+        );
+        assert_eq!(row_ids(&registry, "/").len(), 14);
+        // Name finished: that command, or nothing.
+        assert_eq!(row_ids(&registry, "/model "), vec!["model"]);
+        assert_eq!(row_ids(&registry, "/MODEL gpt-5"), vec!["model"]);
+        assert!(row_ids(&registry, "/m gpt-5").is_empty());
+        // A sentence shows no menu, so Tab and Enter have nothing to pick.
+        assert!(row_ids(&registry, "/so what do you think").is_empty());
+        assert!(row_ids(&registry, "/s what do you think").is_empty());
+        // Nor does a path, a doubled slash, or a line that is not a command.
+        assert!(row_ids(&registry, "/etc/hosts").is_empty());
+        assert!(row_ids(&registry, "//model gpt-5").is_empty());
+        assert!(row_ids(&registry, "/ model").is_empty());
+        assert!(row_ids(&registry, "plain").is_empty());
+    }
+
+    #[test]
+    fn resolve_slash_runs_the_command_that_was_typed() {
+        let registry = composer_registry();
+        assert_eq!(
+            registry.resolve_slash("/model openai/gpt-6", None),
+            command("model", "openai/gpt-6")
+        );
+        assert_eq!(
+            registry.resolve_slash("/Thinking high", None),
+            command("thinking", "high")
+        );
+        // The words after a name are handed over whole; the command decides
+        // what to do with them.
+        assert_eq!(
+            registry.resolve_slash("/help me fix this bug", None),
+            command("help", "me fix this bug")
+        );
+        // Trailing punctuation does not turn a command into a message.
+        assert_eq!(registry.resolve_slash("/help?", None), command("help", ""));
+        assert_eq!(
+            registry.resolve_slash("/new. ", None),
+            command("new-session", "")
+        );
+        // No arguments yet and nothing picked: the best match, which is the
+        // row the popover lists first.
+        assert_eq!(registry.resolve_slash("/h", None), command("help", ""));
+        assert_eq!(registry.resolve_slash("/m", None), command("model", ""));
+    }
+
+    #[test]
+    fn resolve_slash_runs_the_picked_row_while_the_name_is_being_typed() {
+        let registry = composer_registry();
+        assert_eq!(
+            registry.resolve_slash("/m", Some("toggle-rooms")),
+            command("toggle-rooms", "")
+        );
+        assert_eq!(
+            registry.resolve_slash("/", Some("toggle-files")),
+            command("toggle-files", "")
+        );
+        // A finished name is what runs, whatever row an old highlight was on.
+        assert_eq!(
+            registry.resolve_slash("/model gpt-5", Some("toggle-rooms")),
+            command("model", "gpt-5")
+        );
+        assert_eq!(
+            registry.resolve_slash("/m gpt-5", Some("toggle-rooms")),
+            SlashInput::Unknown
+        );
+        // A pick is a slash command or it is nothing.
+        assert_eq!(
+            registry.resolve_slash("/m", Some("no-such-command")),
+            SlashInput::Unknown
+        );
+    }
+
+    #[test]
+    fn resolve_slash_never_runs_a_command_for_prose_or_a_path() {
         let registry = composer_registry();
         // A path is a message.
         assert_eq!(
-            registry.classify_slash("/etc/hosts what does this do"),
+            registry.resolve_slash("/etc/hosts what does this do", None),
             SlashInput::Prompt
         );
-        assert_eq!(registry.classify_slash("plain message"), SlashInput::Prompt);
-        // "so" is scattered inside "sessions". With words after it, that is
-        // not close enough to toggle a panel and discard the sentence.
         assert_eq!(
-            registry.classify_slash("/so what do you think"),
-            SlashInput::Unknown
+            registry.resolve_slash("/notes.md", None),
+            SlashInput::Prompt
         );
-        // Ambiguous prefix with arguments: /repo or /rooms?
-        assert_eq!(registry.classify_slash("/r now"), SlashInput::Unknown);
-        assert_eq!(registry.classify_slash("/zz"), SlashInput::Unknown);
-        assert_eq!(registry.classify_slash("/"), SlashInput::Unknown);
+        assert_eq!(
+            registry.resolve_slash("plain message", None),
+            SlashInput::Prompt
+        );
+        // An abbreviation followed by words is not a command. Each of these
+        // used to toggle a panel or change the model and discard the text.
+        for text in [
+            "/so what do you think",
+            "/s what do you think",
+            "/r now",
+            "/m gpt-5",
+            "/mod gpt-5.5",
+            "/tmp is full, clean it",
+        ] {
+            assert_eq!(
+                registry.resolve_slash(text, None),
+                SlashInput::Unknown,
+                "{text}"
+            );
+        }
+        // Not names at all: kept as a draft, never sent to the model.
+        for text in ["/", "/zz", "//model gpt-5", "/ model", "/new_session"] {
+            assert_eq!(
+                registry.resolve_slash(text, None),
+                SlashInput::Unknown,
+                "{text}"
+            );
+        }
     }
 
+    /// The row the popover highlights is the command that runs: for every
+    /// line, picking any listed row resolves to that row.
     #[test]
-    fn slash_arguments_is_everything_after_the_name() {
-        assert_eq!(
-            slash_arguments("/model openai/gpt-6 sol"),
-            "openai/gpt-6 sol"
-        );
-        assert_eq!(slash_arguments("/model   gpt-5.5  "), "gpt-5.5");
-        assert_eq!(slash_arguments("/model"), "");
-        assert_eq!(slash_arguments("/model "), "");
-        assert_eq!(slash_arguments("plain text here"), "");
-    }
-
-    #[test]
-    fn classify_slash_reports_a_disabled_command_as_disabled() {
+    fn every_listed_row_resolves_to_itself() {
         let registry = composer_registry();
-        registry.register(Command {
-            enabled: Signal::derive(|| false),
-            ..slash_filter_cmd("workspace-toggle", Some("/workspace"))
-        });
-        assert_eq!(registry.classify_slash("/workspace"), SlashInput::Disabled);
+        for text in [
+            "/",
+            "/m",
+            "/mo",
+            "/model",
+            "/model ",
+            "/model gpt-5",
+            "/h",
+            "/help?",
+            "/r",
+            "/res",
+            "/resume now",
+            "/so what do you think",
+            "/etc/hosts",
+        ] {
+            let rows = registry.slash_rows(text);
+            if SlashLine::parse(text).is_some_and(|line| line.finished) {
+                assert!(rows.len() <= 1, "{text}");
+            }
+            for row in rows {
+                let resolved = registry.resolve_slash(text, Some(row.id));
+                if row.enabled.get_untracked() {
+                    assert!(
+                        matches!(resolved, SlashInput::Command { id, .. } if id == row.id),
+                        "{text}: {} resolved to {resolved:?}",
+                        row.id
+                    );
+                } else {
+                    assert_eq!(resolved, SlashInput::Disabled, "{text}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_slash_reports_a_disabled_command_as_disabled() {
+        let registry = composer_registry();
+        assert_eq!(
+            registry.resolve_slash("/resume", None),
+            SlashInput::Disabled
+        );
+        assert_eq!(
+            registry.resolve_slash("/resume last", None),
+            SlashInput::Disabled
+        );
+        assert_eq!(
+            registry.resolve_slash("/res", Some("resume")),
+            SlashInput::Disabled
+        );
     }
 }

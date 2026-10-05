@@ -191,18 +191,31 @@ Web surface session UI:
 - A `?session=<id>` link names the chat to open. The TUI's `/web` and `/beam`
   hand a session over with exactly that URL, so on boot it wins over the
   session this browser last used; only a well-formed session id is honoured,
-  a link to a session this daemon does not have falls back to the persisted
-  one untouched, and the parameter is dropped from the address bar once
-  honoured so a reload does not jump back. The URL shape is a cross-client
-  contract with `ocean-tui`; change it only together.
-- The composer treats a `/` line as a command only when it names one
-  (`CommandRegistry::classify_slash`). The popover ranks an exact alias, then
-  prefixes, then scattered matches, because Enter runs the first row. With
-  arguments typed, only an exact alias or an unambiguous prefix runs; an
-  unknown or unavailable command keeps the draft and shows a hint; a path or
-  prose that merely starts with a slash is sent as a message. Selection resets
-  whenever the query changes. A bare `/thinking` shows the choices and never
-  changes the level.
+  and a link to a session this daemon does not have falls back to the
+  persisted one untouched with a status note. The link is single-use: the
+  parameter is dropped from the address bar as soon as it is read, so a reload
+  never jumps back. A boot restore (linked or persisted) stands down when the
+  user starts or opens a session while the daemon is being asked. The URL
+  shape is a cross-client contract with `ocean-tui`; change it only together.
+  Known limit, owned by `ocean-surface-proxy`: an unauthenticated navigation is
+  redirected to `/login` and then to `/`, which drops the parameter, so the
+  link only works once this browser is signed in to the origin it names.
+- The composer splits a `/` line once (`palette::SlashLine`) and both the
+  popover (`CommandRegistry::slash_rows`) and dispatch
+  (`CommandRegistry::resolve_slash`) read that split, so the highlighted row is
+  always the command that runs. While the name is being typed the popover
+  ranks an exact alias, then prefixes, then scattered matches, and Enter, Tab
+  or a click run the chosen row. Once whitespace follows the name, only the
+  command that name spells exactly is listed or run: an abbreviation followed
+  by words (`/s what do you think`) is not a command and shows no menu. A
+  command that takes no arguments is not run with words after it. In each of
+  those cases, and for an unknown or unavailable command, the draft stays in
+  the composer at its height with a hint. Only a line whose first word is a
+  path (`/etc/hosts`, `/notes.md`) is sent as a message; a leading space sends
+  any other line that starts with a slash. `/model` and `/thinking` read the
+  first word after their name. A bare `/thinking` shows the choices and never
+  changes the level. Selection resets when the name changes, not while
+  arguments are typed.
 - The sessions panel is project-first: prefer daemon-provided `owning_project`,
   fall back to exact `workspace_root`/`cwd` matches against the project catalog,
   and put everything else in an explicit `Other` bucket.
