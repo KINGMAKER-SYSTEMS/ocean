@@ -204,3 +204,15 @@ Terminal model/advisor catalogs now prefer qualified auth routes and current.rou
 
 Final TUI: 500 passed, four ignored; cargo check, strict all-target Clippy, docs-check and required release build passed. A real client HTTP fixture proves API-qualified PATCH and matching provider acknowledgement. A dispatch regression proves Codex authority cannot retire a pending OpenAI API pin for the same wire model, while matching API authority can. Existing model queue/revision regressions use canonical selection ids; legacy catalog/provider-less response compatibility remains covered. No inference, live installation or credential changes occurred. Owning TUI devlog updated; root and Child devlog indexes stay unchanged because package boundaries did not move. Prior ACP head 934c7b2e has both hosted builds green. Fresh review, new-head CI, connected-account inference and runtime compatibility remain pending. VS Code composer still exposes separate model/effort controls and lacks max; that integration remains active goal work.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [13:28] [05-10-26]
+agent: [codex] [gpt-6]
+worktree: [feat/model-effort-control] [/Users/risingtidesdev/dev/ocean-ui-current]
+type: [feature-request]
+area: [frontend] [design] [testing]
+
+VS Code/Cursor now uses one model/effort disclosure in the composer instead of separate permanent runtime-bar selects. ACP forwards optional namespaced readiness and effort-level metadata; the extension preserves qualified ids, disables explicitly disconnected choices and uses model-specific effort lists. Max is supported by settings, command picker and prompt metadata. Explicit model changes clear incompatible effort; missing/pinned choices stay represented. Escape closes the disclosure and restores focus, outside clicks close it, and the top status no longer repeats the selected model id.
+
+Extension TypeScript lint and production package passed after installing locked dependencies into the task checkout. JS syntax check passed. ACP: 23 unit plus three permission-ordering integration tests passed; strict all-target Clippy and docs-check passed. Read-only renderer fixture using actual HTML/CSS/JS proves API/max display, disabled disconnected option, incompatible max clearing after model change, Escape/focus, missing pin preservation and 390px viewport bounds x=12..378 with scroll width 390. Fixture evidence does not prove a native editor host or account inference. Owning Surface/crates devlogs updated; root and Child devlog indexes unchanged because no ownership boundaries changed. Prior head 3c4a1320 has hosted CI green. Fresh review, new-head CI, native/live acceptance, account repair and runtime migration compatibility remain pending; no live installation or provider call occurred.
+_________________________________________________________________________________

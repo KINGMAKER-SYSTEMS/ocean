@@ -10,6 +10,11 @@
   const newSessionButton = document.getElementById("newSession");
   const cancelButton = document.getElementById("cancel");
   const statusEl = document.getElementById("status");
+  const modelControl = document.getElementById("modelControl");
+  const modelLabel = document.getElementById("modelLabel");
+  const effortLabel = document.getElementById("effortLabel");
+  const legacyEfforts = ["off", "minimal", "low", "medium", "high", "xhigh"];
+  const knownEfforts = [...legacyEfforts, "max"];
   const modelSelect = document.getElementById("modelSelect");
   const sessionSelect = document.getElementById("sessionSelect");
   const thinkingSelect = document.getElementById("thinkingSelect");
@@ -189,7 +194,7 @@
       : turnInProgress
         ? "Working"
         : connected
-          ? state.currentModelId || "Live"
+          ? "Live"
           : "Offline";
   }
 
@@ -200,22 +205,24 @@
     renderModelSelect(models, state.currentModelId, Boolean(state.connected));
     renderSessionSelect(state.sessionOptions || [], sessionId, Boolean(state.connected));
     renderThinkingSelect(state.thinkingLevel || "");
+    renderModelSummary();
     renderContextValue(state);
     renderSettings(state.settings || {});
   }
 
   function renderModelSelect(models, currentModelId, connected) {
     const previous = modelSelect.value;
+    const previousLabel = modelSelect.selectedOptions[0]?.textContent;
     modelSelect.innerHTML = "";
 
     if (!connected) {
-      modelSelect.append(new Option("Connect to load models", ""));
+      modelSelect.append(new Option(previousLabel || "Default model", currentModelId || previous || ""));
       modelSelect.disabled = true;
       return;
     }
 
     if (!models.length) {
-      modelSelect.append(new Option("No model roster", ""));
+      modelSelect.append(new Option(currentModelId || previousLabel || "Default model", currentModelId || previous || ""));
       modelSelect.disabled = true;
       return;
     }
@@ -223,11 +230,16 @@
     for (const model of models) {
       const option = new Option(model.name || model.id, model.id);
       option.title = model.description || model.id;
+      option.disabled = model.ready === false;
       modelSelect.append(option);
     }
 
+    const selected = currentModelId || previous || models[0].id;
+    if (!models.some((model) => model.id === selected)) {
+      modelSelect.append(new Option(selected, selected));
+    }
     modelSelect.disabled = Boolean(latestState.turnInProgress);
-    modelSelect.value = currentModelId || previous || models[0].id;
+    modelSelect.value = selected;
   }
 
   function renderSessionSelect(sessions, currentSessionId, connected) {
@@ -257,12 +269,30 @@
     sessionSelect.value = currentSessionId || previous || normalized[0].id;
   }
 
+  function allowedEfforts() {
+    const model = (latestState.modelOptions || []).find((option) => option.id === modelSelect.value);
+    return Array.isArray(model?.effortLevels)
+      ? model.effortLevels.filter((level) => knownEfforts.includes(level))
+      : legacyEfforts;
+  }
+
   function renderThinkingSelect(value) {
-    const next = value || "";
-    if (thinkingSelect.value !== next) {
-      thinkingSelect.value = next;
+    thinkingSelect.replaceChildren(new Option("Default", ""));
+    for (const level of allowedEfforts()) {
+      thinkingSelect.append(new Option(level === "xhigh" ? "Extra high" : level[0].toUpperCase() + level.slice(1), level));
     }
+    if (value && !allowedEfforts().includes(value)) {
+      const pinned = new Option(value, value);
+      pinned.disabled = true;
+      thinkingSelect.append(pinned);
+    }
+    thinkingSelect.value = value || "";
     thinkingSelect.disabled = Boolean(latestState.turnInProgress);
+  }
+
+  function renderModelSummary() {
+    modelLabel.textContent = modelSelect.selectedOptions[0]?.textContent || "Default model";
+    effortLabel.textContent = thinkingSelect.value || "default";
   }
 
   function renderContextValue(state) {
@@ -1611,7 +1641,24 @@
     }, 120);
   });
 
+  modelControl.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || !modelControl.open) return;
+    event.preventDefault();
+    event.stopPropagation();
+    modelControl.open = false;
+    modelControl.querySelector("summary").focus();
+  });
+  document.addEventListener("click", (event) => {
+    if (modelControl.open && !modelControl.contains(event.target)) modelControl.open = false;
+  });
+
   modelSelect.addEventListener("change", () => {
+    if (thinkingSelect.value && !allowedEfforts().includes(thinkingSelect.value)) {
+      latestState.thinkingLevel = "";
+      pushSetting("setThinkingLevel", "");
+    }
+    renderThinkingSelect(latestState.thinkingLevel || "");
+    renderModelSummary();
     vscode.postMessage({ type: "setModel", value: modelSelect.value });
   });
 
@@ -1620,6 +1667,8 @@
   });
 
   thinkingSelect.addEventListener("change", () => {
+    latestState.thinkingLevel = thinkingSelect.value;
+    renderModelSummary();
     pushSetting("setThinkingLevel", thinkingSelect.value);
   });
 

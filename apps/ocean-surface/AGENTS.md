@@ -127,8 +127,8 @@ token to browser code, bundle it, or cache it in client storage.
 ## Model and Effort Control
 
 - `crates/ocean-surface-ui/src/model_control.rs` owns the composer's single model/effort disclosure.
-  Main and floating chat use this same component and daemon selection state;
-  do not add a second model/effort picker for an alternate chat host.
+  Main and floating Leptos chat use this same component and daemon selection state;
+  do not add a second Leptos model/effort picker for an alternate chat host.
   It consumes the daemon's shared model catalog and current selection; choices
   remain per-turn overrides rather than global model mutations. Prefer additive
   `/v1/models.routes` and `current.route` when present, with legacy `models`
@@ -450,6 +450,7 @@ The daemon must be running from `../ocean-os` for live agent behavior.
 
 ## Cursor / VS Code Extension UI Contract
 
+- The editor composer uses one native model/effort disclosure. ACP mode metadata owns readiness and model-specific effort options; older bridges use the legacy vocabulary. Keep selected ids intact, retain missing/pinned choices, clear incompatible effort on explicit model changes, and preserve Escape focus restoration. Max must remain supported by settings, the command picker and prompt metadata.
 - Keep `vscode-extension/` transcript-first: do not add command decks, fake
   logos, sparkle/AI ornament, or rows of location/action buttons unless the
   operator explicitly asks for that UI.

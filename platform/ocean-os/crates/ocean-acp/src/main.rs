@@ -1123,7 +1123,24 @@ fn build_mode_state(roster: &daemon::ModelsResponse) -> SessionModeState {
     let mut available_modes: Vec<SessionMode> = choices
         .iter()
         .filter(|m| m.ready != Some(false) || m.id == current)
-        .map(|m| SessionMode::new(SessionModeId::new(m.id.clone()), m.display_name()))
+        .map(|m| {
+            let mut ocean = serde_json::Map::new();
+            if let Some(ready) = m.ready {
+                ocean.insert("ready".into(), Value::Bool(ready));
+            }
+            if let Some(levels) = &m.effort_levels {
+                ocean.insert("effort_levels".into(), serde_json::json!(levels));
+            }
+            let mode = SessionMode::new(SessionModeId::new(m.id.clone()), m.display_name());
+            if ocean.is_empty() {
+                mode
+            } else {
+                mode.meta(serde_json::Map::from_iter([(
+                    "ocean".into(),
+                    Value::Object(ocean),
+                )]))
+            }
+        })
         .collect();
     // Keep retired/pinned ids representable without selecting a different auth.
     if !available_modes
@@ -1246,13 +1263,19 @@ mod tests {
             "current": {"model": "gpt-6.1-sol", "route": "openai/gpt-6.1-sol"},
             "models": [{"id": "gpt-6.1-sol"}],
             "routes": [
-                {"id": "openai/gpt-6.1-sol", "label": "GPT-6.1 Sol (API)", "ready": true},
+                {"id": "openai/gpt-6.1-sol", "label": "GPT-6.1 Sol (API)", "ready": true, "effort_levels": ["low", "max"]},
                 {"id": "openai-codex/gpt-6.1-sol", "label": "GPT-6.1 Sol (Codex)", "ready": true},
                 {"id": "anthropic/claude-opus-5-5", "ready": false}
             ]
         }));
         assert_eq!(modes.current_mode_id.0.as_ref(), "openai/gpt-6.1-sol");
         assert_eq!(modes.available_modes.len(), 2);
+        let metadata = modes.available_modes[0].meta.as_ref().unwrap();
+        assert_eq!(metadata["ocean"]["ready"], true);
+        assert_eq!(
+            metadata["ocean"]["effort_levels"],
+            serde_json::json!(["low", "max"])
+        );
         let sessions = Sessions::default();
         sessions.insert("api".into(), "/tmp/api".into());
         sessions.insert("oauth".into(), "/tmp/oauth".into());

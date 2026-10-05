@@ -329,7 +329,8 @@
             "low",
             "medium",
             "high",
-            "xhigh"
+            "xhigh",
+            "max"
           ],
           "enumItemLabels": [
             "Daemon default",
@@ -338,7 +339,8 @@
             "Low",
             "Medium",
             "High",
-            "Extra high"
+            "Extra high",
+            "Max"
           ],
           "default": "",
           "description": "Per-turn Ocean thinking-level override. Empty leaves the daemon default in force."
