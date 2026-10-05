@@ -7,7 +7,7 @@ Root GitHub Actions builds for the public Ocean monorepo.
 ## Ownership
 
 - `workflows/ci.yml` owns root PR, main-push and manual builds.
-- `build-scope.py` selects changed components; `test-build-scope.py` checks scope decisions. Unknown or unavailable diffs build both.
+- `build-scope.py` selects changed components; `test-build-scope.py` checks scope decisions, including NUL-terminated Git output. Unknown or unavailable diffs build both.
 - Root CI builds Ocean OS and the active Surface deliverables. Publishing and
   deployment remain owned by their component workflows and installers.
 
