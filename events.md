@@ -192,3 +192,15 @@ ACP editor model modes now consume additive qualified auth routes and current.ro
 
 ACP: 23 unit and three permission-ordering integration tests passed; strict all-target Clippy and docs-check passed. A local HTTP fixture drives the real models client, mode projection, session override and turn client, proving OpenAI API qualified selection plus uppercase MAX metadata reaches the request as exact route plus max. No provider inference, credential change or live installation occurred. Crates owning devlog updated; root and Child devlog indexes intentionally unchanged because no package boundary changed. Preceding head 1c946d0d has both hosted builds green. Fresh review, new-head builds, connected-account acceptance and runtime migration compatibility remain pending.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [13:18] [05-10-26]
+agent: [codex] [gpt-6]
+worktree: [feat/model-effort-control] [/Users/risingtidesdev/dev/ocean-ui-current]
+type: [bug report]
+area: [frontend] [backend] [testing]
+
+Terminal model/advisor catalogs now prefer qualified auth routes and current.route, retaining legacy catalog fallback and disconnected readiness. Session config decoding, scoped revisioned events and fenced snapshots retain provider identity. Alias-aware authority comparisons preserve legacy acknowledgements without treating API and subscription pins for the same wire model as equal. Existing generation, queue barrier, stale-save and revision guards remain exercised. Bare aliases normalize only when qualified choices are advertised; legacy requests stay bare. Footer presentation uses catalog labels.
+
+Final TUI: 500 passed, four ignored; cargo check, strict all-target Clippy, docs-check and required release build passed. A real client HTTP fixture proves API-qualified PATCH and matching provider acknowledgement. A dispatch regression proves Codex authority cannot retire a pending OpenAI API pin for the same wire model, while matching API authority can. Existing model queue/revision regressions use canonical selection ids; legacy catalog/provider-less response compatibility remains covered. No inference, live installation or credential changes occurred. Owning TUI devlog updated; root and Child devlog indexes stay unchanged because package boundaries did not move. Prior ACP head 934c7b2e has both hosted builds green. Fresh review, new-head CI, connected-account inference and runtime compatibility remain pending. VS Code composer still exposes separate model/effort controls and lacks max; that integration remains active goal work.
+_________________________________________________________________________________

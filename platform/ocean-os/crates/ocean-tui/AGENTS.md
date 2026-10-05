@@ -24,6 +24,7 @@ This crate owns the full-screen terminal steering cockpit (`ocean` binary) for i
   multi-second PTY launch—`--help` exits before terminal setup and proves
   nothing.
 - Keep TUI behavior aligned with daemon API contracts; clients do not own sessions.
+- Model and advisor pickers prefer additive `/v1/models.routes` plus `current.route`; legacy catalogs remain compatible and explicit disconnected entries stay unselectable. Qualified selection ids retain auth identity in session creation, PATCH, config GET, revisioned events and fenced snapshots. Bare catalog aliases normalize to their qualified default route when the daemon advertises qualified choices; legacy catalogs keep bare request ids. Alias-aware authority comparisons retain older acknowledgements without equating different auth routes. Footer presentation uses daemon catalog labels; unknown custom ids remain unchanged. Do not compare a qualified pending pin against a provider-less wire id or discard provider authority during config decoding.
 - `/thinking max` carries the additive shared effort value and renders max in
   the footer. Keyboard cycling includes max after xhigh; provider encoders
   normalize values for older wire vocabularies.

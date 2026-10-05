@@ -820,6 +820,8 @@ fn bool_true() -> bool {
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct CurrentModel {
     pub model: String,
+    #[serde(default)]
+    pub route: Option<String>,
 }
 
 /// Response shape of `GET /v1/models`.
@@ -828,14 +830,71 @@ pub struct ModelsResponse {
     pub current: CurrentModel,
     #[serde(default)]
     pub models: Vec<ModelEntry>,
+    #[serde(default)]
+    pub routes: Option<Vec<ModelEntry>>,
+}
+
+impl ModelsResponse {
+    pub fn into_choices(self) -> (String, Vec<ModelEntry>) {
+        match self.routes {
+            Some(routes) => (self.current.route.unwrap_or(self.current.model), routes),
+            None => (self.current.model, self.models),
+        }
+    }
 }
 /// Authoritative model pin for one daemon-owned session.
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct SessionConfigResponse {
     pub session_id: AgentSessionId,
     pub model: String,
-    #[serde(default)]
     pub config_revision: u64,
+}
+
+/// Preserve explicit daemon provider authority; bare input uses catalog aliases.
+/// Custom ids and legacy responses without a provider remain compatible.
+pub fn model_route_id(model: &str, provider: Option<&str>) -> String {
+    if model.contains('/') {
+        return model.to_owned();
+    }
+    if let Some(provider) = provider.filter(|p| !p.is_empty() && *p != "fake") {
+        return format!("{provider}/{model}");
+    }
+    ocean_providers::catalog_model(model)
+        .map(|m| format!("{}/{}", m.provider, m.id))
+        .unwrap_or_else(|| model.to_owned())
+}
+
+pub fn model_routes_match(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    if a.contains('/') && b.contains('/') {
+        return false;
+    }
+    model_route_id(a, None) == model_route_id(b, None)
+}
+
+impl<'de> serde::Deserialize<'de> for SessionConfigResponse {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        struct Wire {
+            session_id: AgentSessionId,
+            model: String,
+            #[serde(default)]
+            provider: Option<String>,
+            #[serde(default)]
+            config_revision: u64,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        Ok(Self {
+            session_id: wire.session_id,
+            model: wire.provider.as_deref().map_or_else(
+                || wire.model.clone(),
+                |provider| model_route_id(&wire.model, Some(provider)),
+            ),
+            config_revision: wire.config_revision,
+        })
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -1167,6 +1226,65 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn qualified_catalog_and_legacy_catalog_project_their_own_current_ids() {
+        for (payload, current, count) in [
+            (
+                serde_json::json!({"current": {"model": "gpt-6-astra"},
+                "models": [{"id":"gpt-6-astra","provider":"openai-codex","label":"Astra"}]}),
+                "gpt-6-astra",
+                1,
+            ),
+            (
+                serde_json::json!({"current": {"model":"gpt-6-astra","route":"openai/gpt-6-astra"},
+                "models": [], "routes": [
+                    {"id":"openai/gpt-6-astra","provider":"openai","label":"Astra (API)","ready":true},
+                    {"id":"openai-codex/gpt-6-astra","provider":"openai-codex","label":"Astra (Codex)","ready":false}]}),
+                "openai/gpt-6-astra",
+                2,
+            ),
+        ] {
+            let response: ModelsResponse = serde_json::from_value(payload).unwrap();
+            let (id, choices) = response.into_choices();
+            assert_eq!(id, current);
+            assert_eq!(choices.len(), count);
+            if count == 2 {
+                assert!(!choices[1].ready);
+            }
+        }
+    }
+
+    #[test]
+    fn session_config_keeps_auth_identity_and_legacy_without_provider() {
+        for (provider, expected) in [
+            (Some("openai"), "openai/gpt-6-astra"),
+            (Some("openai-codex"), "openai-codex/gpt-6-astra"),
+            (None, "gpt-6-astra"),
+        ] {
+            let response: SessionConfigResponse = serde_json::from_value(serde_json::json!({
+                "session_id": uuid::Uuid::from_u128(19), "model": "gpt-6-astra",
+                "provider": provider, "config_revision": 4
+            }))
+            .unwrap();
+            assert_eq!(response.model, expected);
+            assert_eq!(response.config_revision, 4);
+        }
+        assert_eq!(
+            model_route_id("openai/gpt-6-astra", None),
+            "openai/gpt-6-astra"
+        );
+        assert_eq!(
+            model_route_id("gpt-6-astra", None),
+            "openai-codex/gpt-6-astra"
+        );
+        assert_eq!(model_route_id("custom-model", None), "custom-model");
+        assert!(model_routes_match(
+            "gpt-6-astra",
+            "openai-codex/gpt-6-astra"
+        ));
+        assert!(!model_routes_match("gpt-6-astra", "openai/gpt-6-astra"));
+    }
+
     #[tokio::test]
     async fn session_model_round_trip_uses_authoritative_config_routes() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1178,7 +1296,11 @@ mod tests {
         let session_id = AgentSessionId(uuid::Uuid::from_u128(31));
         let server = tokio::spawn(async move {
             let mut requests = Vec::new();
-            for model in ["claude-opus-4-6", "kimi-k3"] {
+            for (model, provider) in [
+                ("claude-opus-4-6", "anthropic"),
+                ("kimi-k3", "kimi"),
+                ("gpt-6-astra", "openai"),
+            ] {
                 let (mut socket, _) = listener.accept().await.expect("accept config request");
                 let mut request = vec![0u8; 8192];
                 let read = socket
@@ -1189,7 +1311,7 @@ mod tests {
                 let body = serde_json::json!({
                     "session_id": session_id,
                     "model": model,
-                    "provider": if model == "kimi-k3" { "kimi" } else { "anthropic" },
+                    "provider": provider,
                     "model_source": "session"
                 })
                 .to_string();
@@ -1211,13 +1333,18 @@ mod tests {
             .await
             .expect("load config");
         assert_eq!(loaded.session_id, session_id);
-        assert_eq!(loaded.model, "claude-opus-4-6");
+        assert_eq!(loaded.model, "anthropic/claude-opus-4-6");
         let saved = client
             .set_session_model(session_id, "kimi-k3")
             .await
             .expect("save config");
         assert_eq!(saved.session_id, session_id);
-        assert_eq!(saved.model, "kimi-k3");
+        assert_eq!(saved.model, "kimi/kimi-k3");
+        let api = client
+            .set_session_model(session_id, "openai/gpt-6-astra")
+            .await
+            .expect("pin API route");
+        assert_eq!(api.model, "openai/gpt-6-astra");
 
         let requests = server.await.expect("mock server completed");
         assert!(requests[0].starts_with(&format!(
@@ -1227,6 +1354,7 @@ mod tests {
             "PATCH /v1/agent/sessions/{session_id}/config HTTP/1.1"
         )));
         assert!(requests[1].contains(r#"{"model":"kimi-k3"}"#));
+        assert!(requests[2].contains(r#"{"model":"openai/gpt-6-astra"}"#));
     }
 
     #[tokio::test]
@@ -1285,7 +1413,7 @@ mod tests {
             .await
             .expect("model persists after turn settles");
 
-        assert_eq!(saved.model, "gpt-5.6-sol");
+        assert_eq!(saved.model, "openai-codex/gpt-5.6-sol");
         assert_eq!(wait_notices, 1, "waiting is announced once, not per poll");
         let requests = server.await.expect("mock server completed");
         assert_eq!(requests.len(), 3);
