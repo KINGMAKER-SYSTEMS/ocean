@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import http.client
 import json
 import os
 import secrets
@@ -33,13 +34,19 @@ WATCHDOG_ATTEMPTS = 6
 WATCHDOG_RETRY_SECONDS = 10
 WORKER_AGENT = "ocean-subagent-worker"
 SUBAGENT_TOOL_PREFIX = "plugin__ocean-subagents__"
-THINKING_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh")
+# Built-in tools every daemon build registers. The daemon keeps the full
+# toolset when an allowlist matches nothing, so the worker's allowlist must
+# name at least one of these for narrowing to be certain.
+ALWAYS_PRESENT_TOOLS = frozenset(
+    {"read", "ls", "grep", "glob", "bash", "edit", "write", "web_fetch"}
+)
+THINKING_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
 ACTIVE_STATES = {"queued", "running", "waiting_for_permission", "cancelling"}
 TERMINAL_STATES = {"completed", "failed", "cancelled", "lost"}
 LOST_ERROR = (
     "the daemon no longer tracks this turn (it restarted, or the finished turn aged out of "
-    "its request registry); output is the child session's last assistant message and may be "
-    "incomplete. Use send to continue the child session."
+    "its request registry); output is what the child wrote in this turn, if anything, and "
+    "may be incomplete. Use send to continue the child session."
 )
 REQUEST_STATE_MAP = {
     "queued": "queued",
@@ -62,7 +69,7 @@ TOOLS = [
                 "role": {"type": "string", "description": "Short specialist role, for example reviewer or researcher."},
                 "cwd": {"type": "string", "description": "Absolute working directory. Defaults to the configured subagent working directory."},
                 "model": {"type": "string", "description": "Optional Ocean model id or alias for this child turn. Omit to use the daemon's current model; a name the daemon cannot route fails the child turn."},
-                "thinking_level": {"type": "string", "enum": ["off", "minimal", "low", "medium", "high", "xhigh"], "description": "Optional reasoning effort for this child. Omit to use the model's default."},
+                "thinking_level": {"type": "string", "enum": ["off", "minimal", "low", "medium", "high", "xhigh", "max"], "description": "Optional reasoning effort for this child. Omit to use the model's default."},
                 "timeout_seconds": {"type": "integer", "minimum": 30, "maximum": 1800, "description": "Elapsed-time ceiling; default 600 seconds."},
             },
             "required": ["task"],
@@ -70,7 +77,7 @@ TOOLS = [
     },
     {
         "name": "status",
-        "description": "Refresh one Ocean subagent from daemon request/session truth and return its status and result when complete. Status lost means the daemon no longer tracks the turn; output is then the child session's last assistant message.",
+        "description": "Refresh one Ocean subagent from daemon request/session truth and return its status and result when complete. Status lost means the daemon no longer tracks the turn; output is then whatever the child wrote in that turn.",
         "inputSchema": {
             "type": "object",
             "properties": {"run_id": {"type": "string"}},
@@ -79,7 +86,7 @@ TOOLS = [
     },
     {
         "name": "wait",
-        "description": "Wait up to 20 seconds for one Ocean subagent, then return its current status and result. Returns early when the run finishes or starts waiting for permission. Call again when still running.",
+        "description": "Wait up to 20 seconds for one Ocean subagent, then return its current status and result. Returns early when the run finishes or raises a permission prompt not yet reported. Call again when still running.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -221,9 +228,19 @@ def validate_thinking_level(value: Any) -> str | None:
 
 
 def last_assistant_text(session: dict[str, Any]) -> str | None:
+    """The newest assistant text of the latest turn.
+
+    The scan stops at the newest user row. The daemon saves a turn's prompt
+    before any provider call, so anything older belongs to an earlier turn and
+    must not be reported as this one's result.
+    """
     transcript = session.get("transcript", [])
     for row in reversed(transcript if isinstance(transcript, list) else []):
-        if isinstance(row, dict) and row.get("role") == "assistant":
+        if not isinstance(row, dict):
+            continue
+        if row.get("role") == "user":
+            return None
+        if row.get("role") == "assistant":
             text = row.get("text")
             if isinstance(text, str) and text.strip():
                 encoded = text.strip().encode()
@@ -262,6 +279,11 @@ class JsonStore:
             if run is None:
                 raise PluginError(f"unknown run_id: {run_id}")
             return json.loads(json.dumps(run))
+
+    def find(self, run_id: str) -> dict[str, Any] | None:
+        with self.lock:
+            run = self.data["runs"].get(run_id)
+            return None if run is None else json.loads(json.dumps(run))
 
     def all(self) -> list[dict[str, Any]]:
         with self.lock:
@@ -350,7 +372,12 @@ class DaemonClient:
         except urllib.error.HTTPError as error:
             detail = error.read().decode(errors="replace")[:1000]
             raise PluginError(f"Ocean daemon HTTP {error.code}: {detail}") from error
-        except (urllib.error.URLError, TimeoutError, OSError) as error:
+        except (
+            urllib.error.URLError,
+            http.client.HTTPException,
+            TimeoutError,
+            OSError,
+        ) as error:
             raise PluginError(f"Ocean daemon unavailable: {error}") from error
         try:
             value = json.loads(raw)
@@ -394,8 +421,11 @@ class DaemonClient:
         return response
 
     def request_status(self, request_id: str) -> dict[str, Any] | None:
-        response = self.request("GET", "/v1/requests")
-        for item in response.get("requests", []):
+        requests = self.request("GET", "/v1/requests").get("requests")
+        if not isinstance(requests, list):
+            # Reading this as "no requests" would settle every active run as lost.
+            raise PluginError("Ocean daemon returned no request list")
+        for item in requests:
             if isinstance(item, dict) and item.get("request_id") == request_id:
                 return item
         return None
@@ -421,9 +451,12 @@ class DaemonClient:
         ]
 
     def pending_permissions(self) -> list[dict[str, Any]]:
-        response = self.request("GET", "/v1/permissions")
-        permissions = response.get("permissions", [])
-        return [item for item in permissions if isinstance(item, dict)]
+        permissions = self.request("GET", "/v1/permissions").get("permissions")
+        return [
+            item
+            for item in (permissions if isinstance(permissions, list) else [])
+            if isinstance(item, dict)
+        ]
 
     def decide_permission(
         self,
@@ -462,10 +495,12 @@ class Subagents:
     def _require_worker_profile(self) -> None:
         """Refuse to start a child unless the fixed worker profile resolves.
 
-        The daemon runs a turn whose named agent does not resolve under the
-        ordinary surface profile with every tool, including this plugin, and it
-        treats an empty allowlist as no narrowing. Either would let a child
-        delegate recursively, so the recursion guard has to fail closed here.
+        The daemon keeps every tool, including this plugin, in three cases: the
+        named agent does not resolve, its allowlist is empty, or its allowlist
+        matches no tool that exists (names are exact, so `Read` or a typo
+        matches nothing). Tools from an agent's subprocess capabilities are
+        added after narrowing. Any of these would let a child delegate
+        recursively, so the guard has to fail closed here.
         """
         response = self.client.worker_agent()
         if not response.get("ok"):
@@ -495,6 +530,35 @@ class Subagents:
                 f"subagent worker profile `{WORKER_AGENT}` allows subagent tools; refusing to "
                 "start a child that could delegate."
             )
+        if not ALWAYS_PRESENT_TOOLS.intersection(allowlist):
+            raise PluginError(
+                f"subagent worker profile `{WORKER_AGENT}` names no built-in tool the daemon "
+                "always has, and the daemon keeps every tool when an allowlist matches "
+                "nothing; refusing to start a child that could delegate."
+            )
+        if config.get("subprocess_capability"):
+            raise PluginError(
+                f"subagent worker profile `{WORKER_AGENT}` binds subprocess capabilities, "
+                "whose tools bypass the allowlist; refusing to start a child."
+            )
+
+    def _require_free_slot(self, starting: str | None = None) -> None:
+        """Refuse a new child turn at the concurrency cap. Active runs are
+        refreshed first so ones the daemon already finished or lost free their
+        slot. `starting` is the run about to begin a new turn, if any."""
+        for existing in self.store.all():
+            if existing.get("status") in ACTIVE_STATES:
+                try:
+                    self.refresh(existing["run_id"])
+                except PluginError:
+                    pass
+        active = [
+            run
+            for run in self.store.all()
+            if run.get("status") in ACTIVE_STATES and run["run_id"] != starting
+        ]
+        if len(active) >= MAX_ACTIVE:
+            raise PluginError(f"subagent concurrency limit reached ({MAX_ACTIVE})")
 
     def _prompt(self, task: str, role: str) -> str:
         return (
@@ -514,15 +578,7 @@ class Subagents:
         thinking_level = validate_thinking_level(args.get("thinking_level"))
         cwd = validate_cwd(args.get("cwd"))
         timeout_seconds = validate_timeout(args.get("timeout_seconds"))
-        for existing in self.store.all():
-            if existing.get("status") in ACTIVE_STATES:
-                try:
-                    self.refresh(existing["run_id"])
-                except PluginError:
-                    pass
-        active = [run for run in self.store.all() if run.get("status") in ACTIVE_STATES]
-        if len(active) >= MAX_ACTIVE:
-            raise PluginError(f"subagent concurrency limit reached ({MAX_ACTIVE})")
+        self._require_free_slot()
         assert task is not None and role is not None
         self._require_worker_profile()
         decision_token = secrets.token_urlsafe(48)
@@ -541,6 +597,8 @@ class Subagents:
             "cwd": cwd,
             "model": model,
             "thinking_level": thinking_level,
+            "permission_id": None,
+            "reported_permission_id": None,
             "status": "running",
             "turn_id": response["turn_id"],
             "request_id": response["turn_id"],
@@ -569,27 +627,47 @@ class Subagents:
         run_id = bounded_text(run_id, "run_id", 100)
         assert run_id is not None
         run = self.store.get(run_id)
-        # A finished turn cannot change again; `send` starts a new one. Only a
-        # completed run still missing its output is worth another look.
-        if run["status"] in TERMINAL_STATES and not (
-            run["status"] == "completed" and run.get("output") is None
-        ):
+        if run["status"] in TERMINAL_STATES:
+            # A finished turn cannot change again; `send` starts a new one. A
+            # run settled while its session could not be read may still have
+            # output to collect.
+            if run["status"] in ("completed", "lost") and run.get("output") is None:
+                output = self._read_output(run)
+                if output is not None:
+                    run = self.store.update(
+                        run_id, expect_request=run["request_id"], output=output
+                    )
             return self._public(run)
+        # Re-arm the elapsed-time ceiling if an earlier watchdog gave up.
+        self._start_watchdog(run_id)
         request = self.client.request_status(run["request_id"])
         if request is None:
             return self._settle_untracked(run)
         status = REQUEST_STATE_MAP.get(str(request.get("state")), run["status"])
-        fields: dict[str, Any] = {"status": status}
+        fields: dict[str, Any] = {
+            "status": status,
+            "permission_id": request.get("permission_id")
+            if status == "waiting_for_permission"
+            else None,
+        }
         message = request.get("message")
         if status == "failed":
             fields["error"] = self._failure_detail(str(message or "subagent turn failed"))
-        if status in TERMINAL_STATES and run["status"] not in TERMINAL_STATES:
+        if status in TERMINAL_STATES:
             fields["finished_at"] = request.get("finished_at") or now_iso()
         if status == "completed":
-            fields["output"] = self.client.output(run["session_id"])
+            # A failed read settles the run anyway, releasing its slot; the
+            # output is collected by a later refresh.
+            fields["output"] = self._read_output(run)
             fields["error"] = None
         run = self.store.update(run_id, expect_request=run["request_id"], **fields)
         return self._public(run)
+
+    def _read_output(self, run: dict[str, Any]) -> str | None:
+        try:
+            return self.client.output(run["session_id"])
+        except PluginError:
+            return None
 
     def _settle_untracked(self, run: dict[str, Any], grace: bool = True) -> dict[str, Any]:
         """Settle an active run whose request the daemon no longer lists.
@@ -607,16 +685,22 @@ class Subagents:
         try:
             session = self.client.session_detail(run["session_id"])
         except PluginError:
+            # Settle regardless: the slot must be released. A later refresh
+            # collects the output once the session can be read.
             session = {}
         active_requests = session.get("active_requests")
         if isinstance(active_requests, list) and run["request_id"] in active_requests:
             return self._public(run)
+        # Keep what was already recorded, such as the elapsed-time ceiling.
+        earlier = run.get("error")
+        error = LOST_ERROR if not earlier else f"{LOST_ERROR} Earlier: {earlier}"
         run = self.store.update(
             run["run_id"],
             expect_request=run["request_id"],
             status="lost",
+            permission_id=None,
             output=last_assistant_text(session),
-            error=LOST_ERROR,
+            error=error[:2000],
             finished_at=now_iso(),
         )
         return self._public(run)
@@ -624,13 +708,14 @@ class Subagents:
     def _failure_detail(self, message: str) -> str:
         if "failed to resolve model" not in message:
             return message[:2000]
-        hint = " Omit `model` to use the daemon's current model"
+        # `send` reuses this run's model, so the way out is a new spawn.
+        hint = " Spawn again without `model` to use the daemon's current model"
         try:
             ready = self.client.ready_model_ids()
         except PluginError:
             ready = []
         if ready:
-            hint += "; ready catalog ids: " + ", ".join(ready[:40])
+            hint += ", or with a ready catalog id: " + ", ".join(ready[:40])
         return (message.rstrip(". ") + "." + hint + ".")[:2000]
 
     def wait(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -641,21 +726,30 @@ class Subagents:
         timeout = max(0.0, min(float(raw_timeout), 20.0))
         deadline = time.monotonic() + timeout
         assert run_id is not None
-        # A permission prompt that appears during this wait needs the parent's
-        # attention now. One that was already pending when the wait began does
-        # not return early, so repeated waits cannot spin.
-        already_waiting: bool | None = None
         while True:
             result = self.refresh(run_id)
-            waiting = result["status"] == "waiting_for_permission"
-            if already_waiting is None:
-                already_waiting = waiting
             if result["status"] in TERMINAL_STATES or time.monotonic() >= deadline:
                 return result
-            if waiting and not already_waiting:
+            # A permission prompt needs the parent's attention now, so the
+            # first wait to see it returns at once. A prompt already reported
+            # does not, so repeated waits cannot spin.
+            if result["status"] == "waiting_for_permission" and self._report_permission(run_id):
                 return result
-            already_waiting = already_waiting and waiting
             time.sleep(min(0.5, max(0.0, deadline - time.monotonic())))
+
+    def _report_permission(self, run_id: str) -> bool:
+        """Mark the run's pending permission prompt as reported to the parent.
+        True when it had not been reported before."""
+        run = self.store.get(run_id)
+        pending = run.get("permission_id") or "pending"
+        if run.get("status") != "waiting_for_permission" or pending == run.get(
+            "reported_permission_id"
+        ):
+            return False
+        self.store.update(
+            run_id, expect_request=run["request_id"], reported_permission_id=pending
+        )
+        return True
 
     def send(self, args: dict[str, Any]) -> dict[str, Any]:
         run_id = bounded_text(args.get("run_id"), "run_id", 100)
@@ -665,6 +759,7 @@ class Subagents:
         if current["status"] not in TERMINAL_STATES:
             raise PluginError("subagent still has an active turn")
         run = self.store.get(run_id)
+        self._require_free_slot(starting=run_id)
         self._require_worker_profile()
         decision_token = secrets.token_urlsafe(48)
         response = self.client.start_turn(
@@ -695,6 +790,7 @@ class Subagents:
             started_at=now,
             finished_at=None,
             decision_token=decision_token,
+            permission_id=None,
             turns=turns,
         )
         self._start_watchdog(run_id)
@@ -710,9 +806,11 @@ class Subagents:
             if permission.get("request_id") == run["request_id"]
             and permission.get("session_id") == run["session_id"]
         ]
+        status = self.refresh(run_id)["status"]
+        self._report_permission(run_id)
         return {
             "run_id": run_id,
-            "status": self.refresh(run_id)["status"],
+            "status": status,
             "permissions": pending,
         }
 
@@ -814,6 +912,10 @@ class Subagents:
 
     def _start_watchdog(self, run_id: str) -> None:
         run = self.store.get(run_id)
+        # A cancellation is already in flight; asking again on every poll
+        # would only repeat it.
+        if run.get("status") == "cancelling":
+            return
         request_id = run["request_id"]
         key = (run_id, request_id)
         with self.watchdog_lock:
@@ -831,18 +933,21 @@ class Subagents:
                 # The daemon launches plugins before its listener binds, and a
                 # restart can outlast one attempt, so a single failed call must
                 # not leave an overdue run active for good.
+                # If every attempt fails the thread ends; `refresh` re-arms it.
                 for attempt in range(self.watchdog_attempts):
-                    current_run = self.store.get(run_id)
-                    if (
-                        current_run.get("request_id") != request_id
-                        or current_run.get("status") not in ACTIVE_STATES
-                    ):
-                        return
                     try:
+                        current_run = self.store.find(run_id)
+                        if (
+                            current_run is None
+                            or current_run.get("request_id") != request_id
+                            or current_run.get("status") not in ACTIVE_STATES
+                        ):
+                            return
                         current = self.refresh(run_id)
                         latest = self.store.get(run_id)
                         if (
                             current["status"] in ACTIVE_STATES
+                            and current["status"] != "cancelling"
                             and latest.get("request_id") == request_id
                             and self._request_cancel(latest)
                         ):
@@ -854,8 +959,16 @@ class Subagents:
                             )
                         return
                     except PluginError as error:
+                        if self.store.find(run_id) is None:
+                            return
                         self.store.update(
                             run_id, expect_request=request_id, error=str(error)[:2000]
+                        )
+                    except Exception as error:  # one bad response must not end the watchdog
+                        print(
+                            f"ocean-subagents watchdog error: {error}",
+                            file=sys.stderr,
+                            flush=True,
                         )
                     if attempt + 1 < self.watchdog_attempts:
                         time.sleep(self.watchdog_retry_seconds)

@@ -276,3 +276,15 @@ Repaired ocean-subagents lifecycle recovery. The daemon's request registry is in
 
 Validation: 20 unit tests against a test daemon corrected to the real control contract (volatile registry, HTTP 200 ok:false cancel refusals, cancelling before cancelled, 404 for an unknown session); four of the new tests fail against the previous plugin with the reported symptoms. Wire test passes on Python 3.13 and on system Python 3.9 under a cleared environment; py_compile on both; sh -n; docs-check. The new read-only preflight and catalog reads were exercised against the operated daemon with a temporary state directory; no child was spawned and no live state or installation changed. The installed plugin copy is unchanged until install.sh is rerun and the daemon restarted. Plugin devlog and README updated; parent indexes unchanged.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [17:40] [05-10-26]
+agent: [claude] [claude code]
+worktree: [claude/subagent-lost-run-recovery] [/Users/risingtidesdev/dev/ocean-claude-audit]
+type: [review]
+area: [backend] [testing]
+
+Applied the independent review of the ocean-subagents repair. The recursion guard still passed an allowlist that matched no existing tool (the daemon then keeps every tool) and ignored subprocess capabilities, whose tools are added after narrowing; it now requires an always-present built-in tool and no subprocess capability. thinking_level accepts max. Output is the latest turn's text only, so a lost run no longer reports an earlier turn's answer. A run settles even when its session cannot be read, and a settled run with no output re-reads it later; a completed run whose session read failed used to stay active. A request list that is not a list is an error instead of settling every run as lost. wait reports each permission prompt once by id, including one raised between waits. send counts against the concurrency cap. The watchdog survives malformed responses, is re-armed by refresh if it gave up, does not re-cancel a run already cancelling, and the elapsed-time reason survives a later lost settlement. The unroutable-model hint now points at a new spawn because send reuses the model.
+
+Validation: 27 unit tests pass; ten mutations of the new logic are each killed by a test, including the three the review found surviving. The prune test now uses distinct finish times out of insertion order, and the retry test no longer races. Wire test on Python 3.13 and system 3.9 under a cleared environment, py_compile, sh -n and docs-check pass. The revised preflight passes against the operated daemon read-only. Plugin devlog and README updated.
+_________________________________________________________________________________

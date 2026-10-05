@@ -38,6 +38,9 @@ class FakeDaemon:
         self.payloads = []
         self.cancel_calls = []
         self.unavailable = False
+        self.sessions_unreadable = False
+        self.requests_malformed = False
+        self.session_claims_active = {}
         self.worker = {"config": {"tools": list(WORKER_TOOLS)}, "tools": []}
         self.models = [
             {"id": "deepseek-v4-pro", "ready": True},
@@ -75,7 +78,11 @@ class FakeDaemon:
                             "state": "running",
                             "message": "agent turn running",
                         }
-                        owner.sessions.setdefault(session_id, [])
+                        # The daemon saves the accepted prompt before any
+                        # provider call.
+                        owner.sessions.setdefault(session_id, []).append(
+                            {"role": "user", "text": payload["prompt"]}
+                        )
                     self.reply(
                         202,
                         {
@@ -126,6 +133,8 @@ class FakeDaemon:
                             return
                         owner.decisions.append(payload)
                         del owner.permissions[permission_id]
+                        request["state"] = "running"
+                        request.pop("permission_id", None)
                     self.reply(200, {"ok": True, "message": "permission resolved"})
                     return
                 self.reply(404, {"ok": False})
@@ -137,6 +146,8 @@ class FakeDaemon:
                 if self.path == "/v1/requests":
                     with owner.lock:
                         requests = [dict(item) for item in owner.requests.values()]
+                    if owner.requests_malformed:
+                        requests = None
                     self.reply(200, {"ok": True, "requests": requests})
                     return
                 if self.path == "/v1/permissions":
@@ -155,6 +166,9 @@ class FakeDaemon:
                     return
                 if self.path.startswith("/v1/sessions/"):
                     session_id = self.path.rsplit("/", 1)[1]
+                    if owner.sessions_unreadable:
+                        self.reply(500, {"ok": False, "error": "session could not be read"})
+                        return
                     with owner.lock:
                         if session_id not in owner.sessions:
                             self.reply(404, {"ok": False, "error": "session not found"})
@@ -165,7 +179,7 @@ class FakeDaemon:
                             for item in owner.requests.values()
                             if item["session_id"] == session_id
                             and item["state"] not in TERMINAL_REQUEST_STATES
-                        ]
+                        ] + owner.session_claims_active.get(session_id, [])
                     self.reply(
                         200,
                         {
@@ -205,15 +219,16 @@ class FakeDaemon:
                 "created_at": "2026-07-29T12:00:00Z",
             }
             request["state"] = "waiting_for_permission"
+            request["permission_id"] = permission_id
         return permission_id
 
-    def complete(self, request_id, output="worker result"):
+    def complete(self, request_id, output="worker result", finished_at="2026-07-29T12:00:00Z"):
         with self.lock:
             request = self.requests[request_id]
             request.update(
                 state="completed",
                 message="prompt completed",
-                finished_at="2026-07-29T12:00:00Z",
+                finished_at=finished_at,
             )
             self.sessions[request["session_id"]].append(
                 {"role": "assistant", "text": output}
@@ -313,15 +328,15 @@ class OceanSubagentTests(unittest.TestCase):
     def test_follow_up_reuses_session_and_cancel_uses_turn_id(self):
         with tempfile.TemporaryDirectory() as root, FakeDaemon() as daemon:
             manager = self.manager(root, daemon)
-            run = manager.spawn({"task": "first", "cwd": root, "thinking_level": "low"})
-            self.assertEqual(daemon.payloads[-1]["thinking_level"], "low")
+            run = manager.spawn({"task": "first", "cwd": root, "thinking_level": "max"})
+            self.assertEqual(daemon.payloads[-1]["thinking_level"], "max")
             daemon.complete(run["turn_id"])
             manager.refresh(run["run_id"])
 
             followed = manager.send({"run_id": run["run_id"], "message": "second"})
             self.assertEqual(followed["session_id"], run["session_id"])
             self.assertEqual(daemon.payloads[-1]["session_id"], run["session_id"])
-            self.assertEqual(daemon.payloads[-1]["thinking_level"], "low")
+            self.assertEqual(daemon.payloads[-1]["thinking_level"], "max")
             cancelling = manager.cancel({"run_id": run["run_id"]})
             self.assertEqual(cancelling["status"], "cancelling")
             self.assertEqual(daemon.cancel_calls, [followed["turn_id"]])
@@ -376,7 +391,7 @@ class OceanSubagentTests(unittest.TestCase):
             self.assertEqual(result["status"], "completed")
             self.assertEqual(result["output"], "done")
 
-    def test_wait_returns_when_a_permission_prompt_appears_but_does_not_spin_on_it(self):
+    def test_wait_reports_each_permission_prompt_once(self):
         with tempfile.TemporaryDirectory() as root, FakeDaemon() as daemon:
             manager = self.manager(root, daemon)
             run = manager.spawn({"task": "needs approval", "cwd": root})
@@ -386,11 +401,45 @@ class OceanSubagentTests(unittest.TestCase):
             self.assertEqual(result["status"], "waiting_for_permission")
             self.assertLess(time.monotonic() - started, 5)
 
-            # The prompt is still pending: a second wait keeps its full budget
+            # Still the same prompt: a second wait keeps its full budget
             # instead of returning at once and burning the parent's rounds.
             started = time.monotonic()
             result = manager.wait({"run_id": run["run_id"], "timeout_seconds": 0.6})
             self.assertEqual(result["status"], "waiting_for_permission")
+            self.assertGreaterEqual(time.monotonic() - started, 0.5)
+
+            # The parent decides, and the child raises another prompt before
+            # the next wait begins. That one is new, so it is reported at once
+            # even though the wait starts with the run already blocked.
+            first = manager.permissions({"run_id": run["run_id"]})["permissions"][0]
+            manager.decide(
+                {
+                    "run_id": run["run_id"],
+                    "permission_id": first["permission_id"],
+                    "expected_tool": "bash",
+                    "decision": "allow",
+                }
+            )
+            daemon.add_permission(run["turn_id"], "write")
+            started = time.monotonic()
+            result = manager.wait({"run_id": run["run_id"], "timeout_seconds": 10})
+            self.assertEqual(result["status"], "waiting_for_permission")
+            self.assertLess(time.monotonic() - started, 5)
+
+            # Listing prompts reports them too.
+            pending = manager.permissions({"run_id": run["run_id"]})["permissions"][0]
+            manager.decide(
+                {
+                    "run_id": run["run_id"],
+                    "permission_id": pending["permission_id"],
+                    "expected_tool": "write",
+                    "decision": "allow",
+                }
+            )
+            daemon.add_permission(run["turn_id"], "edit")
+            manager.permissions({"run_id": run["run_id"]})
+            started = time.monotonic()
+            manager.wait({"run_id": run["run_id"], "timeout_seconds": 0.6})
             self.assertGreaterEqual(time.monotonic() - started, 0.5)
 
     def test_concurrency_is_bounded(self):
@@ -466,6 +515,21 @@ class OceanSubagentTests(unittest.TestCase):
                     {"config": {"tools": ["read", "plugin__ocean-subagents__spawn"]}, "tools": []},
                     "allows subagent tools",
                 ),
+                # Names are exact. An allowlist that matches no tool that
+                # exists is no allowlist: the daemon keeps every tool.
+                ({"config": {"tools": ["Read", "Bash"]}, "tools": []}, "names no built-in tool"),
+                ({"config": {"tools": ["lsp"]}, "tools": ["README"]}, "names no built-in tool"),
+                # Subprocess capability tools are added after narrowing.
+                (
+                    {
+                        "config": {
+                            "tools": ["read"],
+                            "subprocess_capability": [{"command": "./tools/x"}],
+                        },
+                        "tools": [],
+                    },
+                    "binds subprocess capabilities",
+                ),
             ]
             for worker, expected in cases:
                 daemon.worker = worker
@@ -475,7 +539,16 @@ class OceanSubagentTests(unittest.TestCase):
 
             # Allowlist entries from the agent's tools/ folder count too.
             daemon.worker = {"config": {"tools": []}, "tools": ["read"]}
-            self.assertEqual(manager.spawn({"task": "ok", "cwd": root})["status"], "running")
+            run = manager.spawn({"task": "ok", "cwd": root})
+            self.assertEqual(run["status"], "running")
+
+            # `send` starts a child turn as well, so it is guarded the same way.
+            daemon.complete(run["turn_id"])
+            manager.refresh(run["run_id"])
+            daemon.worker = None
+            with self.assertRaisesRegex(module.PluginError, "does not resolve"):
+                manager.send({"run_id": run["run_id"], "message": "must not start"})
+            self.assertEqual(len(daemon.payloads), 1)
 
     def test_unroutable_model_failure_lists_what_the_daemon_can_route(self):
         with tempfile.TemporaryDirectory() as root, FakeDaemon() as daemon:
@@ -485,7 +558,9 @@ class OceanSubagentTests(unittest.TestCase):
             result = manager.refresh(run["run_id"])
             self.assertEqual(result["status"], "failed")
             self.assertIn("failed to resolve model `gpt-5.6-mini`", result["error"])
-            self.assertIn("ready catalog ids: deepseek-v4-pro, gpt-5.5.", result["error"])
+            # `send` would reuse the bad model, so the hint points at a new spawn.
+            self.assertIn("Spawn again without `model`", result["error"])
+            self.assertIn("ready catalog id: deepseek-v4-pro, gpt-5.5.", result["error"])
             self.assertNotIn("glm-5.3", result["error"])
 
             other = manager.spawn({"task": "other failure", "cwd": root})
@@ -515,16 +590,23 @@ class OceanSubagentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root, FakeDaemon() as daemon:
             manager = self.manager(root, daemon)
             with mock.patch.object(module, "MAX_RETAINED_RUNS", 2):
+                # Finish times deliberately out of insertion order: the two
+                # most recently FINISHED runs survive, not the last two added.
+                finish_times = [
+                    "2026-07-29T12:00:03Z",
+                    "2026-07-29T12:00:01Z",
+                    "2026-07-29T12:00:04Z",
+                    "2026-07-29T12:00:02Z",
+                ]
                 finished = []
-                for number in range(4):
+                for number, finished_at in enumerate(finish_times):
                     run = manager.spawn({"task": f"done {number}", "cwd": root})
-                    daemon.complete(run["turn_id"], f"output {number}")
+                    daemon.complete(run["turn_id"], f"output {number}", finished_at)
                     manager.refresh(run["run_id"])
                     finished.append(run["run_id"])
-                    time.sleep(1.05)  # finished_at has one-second resolution
                 active = manager.spawn({"task": "still running", "cwd": root})
             kept = set(json.loads((Path(root) / "state/runs.json").read_text())["runs"])
-            self.assertEqual(kept, {finished[2], finished[3], active["run_id"]})
+            self.assertEqual(kept, {finished[0], finished[2], active["run_id"]})
 
     def test_state_read_for_an_older_turn_cannot_overwrite_the_next_turn(self):
         with tempfile.TemporaryDirectory() as root, FakeDaemon() as daemon:
@@ -541,6 +623,73 @@ class OceanSubagentTests(unittest.TestCase):
             current = manager.store.get(run["run_id"])
             self.assertEqual(current["status"], "running")
             self.assertEqual(current["request_id"], followed["turn_id"])
+
+    def test_lost_output_is_never_an_earlier_turns_answer(self):
+        with tempfile.TemporaryDirectory() as root, FakeDaemon() as daemon:
+            manager = self.manager(root, daemon)
+            run = manager.spawn({"task": "first", "cwd": root})
+            daemon.complete(run["turn_id"], "ANSWER TO FIRST TASK")
+            manager.refresh(run["run_id"])
+            manager.send({"run_id": run["run_id"], "message": "second"})
+
+            # The daemon restarts before the second turn writes anything.
+            daemon.forget_requests()
+            lost = manager.refresh(run["run_id"])
+            self.assertEqual(lost["status"], "lost")
+            self.assertIsNone(lost["output"])
+
+    def test_a_run_settled_while_its_session_was_unreadable_collects_output_later(self):
+        with tempfile.TemporaryDirectory() as root, FakeDaemon() as daemon:
+            manager = self.manager(root, daemon)
+
+            lost = manager.spawn({"task": "lost", "cwd": root})
+            daemon.say(lost["turn_id"], "partial findings")
+            done = manager.spawn({"task": "done", "cwd": root})
+            daemon.complete(done["turn_id"], "finished answer")
+            daemon.requests.pop(lost["turn_id"])
+            daemon.sessions_unreadable = True
+
+            # Both settle at once and release their slots even though neither
+            # session can be read. The completed one used to stay active.
+            self.assertEqual(manager.refresh(lost["run_id"])["status"], "lost")
+            settled = manager.refresh(done["run_id"])
+            self.assertEqual(settled["status"], "completed")
+            self.assertIsNone(settled["output"])
+            self.assertEqual(manager.list_runs({"active_only": True})["runs"], [])
+
+            daemon.sessions_unreadable = False
+            self.assertEqual(manager.refresh(lost["run_id"])["output"], "partial findings")
+            self.assertEqual(manager.refresh(done["run_id"])["output"], "finished answer")
+
+    def test_a_malformed_request_list_never_settles_runs_as_lost(self):
+        with tempfile.TemporaryDirectory() as root, FakeDaemon() as daemon:
+            manager = self.manager(root, daemon)
+            run = manager.spawn({"task": "alive", "cwd": root})
+            daemon.requests_malformed = True
+            with self.assertRaisesRegex(module.PluginError, "no request list"):
+                manager.refresh(run["run_id"])
+            self.assertEqual(manager.store.get(run["run_id"])["status"], "running")
+
+    def test_a_request_the_session_still_claims_is_not_declared_lost(self):
+        with tempfile.TemporaryDirectory() as root, FakeDaemon() as daemon:
+            manager = self.manager(root, daemon)
+            run = manager.spawn({"task": "still claimed", "cwd": root})
+            daemon.requests.pop(run["turn_id"])
+            daemon.session_claims_active[run["session_id"]] = [run["turn_id"]]
+            self.assertEqual(manager.refresh(run["run_id"])["status"], "running")
+            daemon.session_claims_active.clear()
+            self.assertEqual(manager.refresh(run["run_id"])["status"], "lost")
+
+    def test_send_respects_the_concurrency_cap(self):
+        with tempfile.TemporaryDirectory() as root, FakeDaemon() as daemon:
+            manager = self.manager(root, daemon)
+            finished = manager.spawn({"task": "finished", "cwd": root})
+            daemon.complete(finished["turn_id"])
+            manager.refresh(finished["run_id"])
+            for number in range(module.MAX_ACTIVE):
+                manager.spawn({"task": f"task {number}", "cwd": root})
+            with self.assertRaisesRegex(module.PluginError, "concurrency limit"):
+                manager.send({"run_id": finished["run_id"], "message": "a fifth child"})
 
     def overdue_run(self, root, request_id, session_id):
         state = Path(root) / "state"
@@ -578,7 +727,11 @@ class OceanSubagentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root, FakeDaemon() as daemon:
             run_id = self.overdue_run(root, str(uuid.uuid4()), str(uuid.uuid4()))
             daemon.unavailable = True
-            with mock.patch.object(module, "WATCHDOG_RETRY_SECONDS", 0.05):
+            # Enough attempts that the retry window cannot close before the
+            # test brings the daemon back, however loaded the machine is.
+            with mock.patch.object(module, "WATCHDOG_RETRY_SECONDS", 0.05), mock.patch.object(
+                module, "WATCHDOG_ATTEMPTS", 2_000
+            ):
                 manager = self.manager(root, daemon)
                 self.assertTrue(
                     wait_until(lambda: manager.store.get(run_id)["error"] is not None)
@@ -606,6 +759,70 @@ class OceanSubagentTests(unittest.TestCase):
             )
             self.assertEqual(daemon.cancel_calls, [request_id])
             self.assertIn("elapsed-time ceiling", manager.store.get(run_id)["error"])
+
+            # Polling a run that is already cancelling neither asks again nor
+            # starts another watchdog thread per poll.
+            self.assertTrue(wait_until(lambda: not manager.watchdogs))
+            real_thread, started = threading.Thread, []
+
+            def recording_thread(*args, **kwargs):
+                started.append(kwargs.get("name"))
+                return real_thread(*args, **kwargs)
+
+            with mock.patch.object(module.threading, "Thread", side_effect=recording_thread):
+                for _ in range(3):
+                    manager.refresh(run_id)
+            self.assertEqual([name for name in started if name], [])
+            self.assertEqual(daemon.cancel_calls, [request_id])
+
+            # If the daemon then forgets the request, the reason for the
+            # cancellation survives beside the lost explanation.
+            daemon.forget_requests()
+            lost = manager.refresh(run_id)
+            self.assertEqual(lost["status"], "lost")
+            self.assertIn("no longer tracks this turn", lost["error"])
+            self.assertIn("elapsed-time ceiling", lost["error"])
+
+    def test_refresh_rearms_a_watchdog_that_gave_up(self):
+        with tempfile.TemporaryDirectory() as root, FakeDaemon() as daemon:
+            request_id, session_id = str(uuid.uuid4()), str(uuid.uuid4())
+            daemon.requests[request_id] = {
+                "request_id": request_id,
+                "session_id": session_id,
+                "state": "running",
+                "message": "agent turn running",
+            }
+            daemon.sessions[session_id] = []
+            run_id = self.overdue_run(root, request_id, session_id)
+            daemon.unavailable = True
+            with mock.patch.object(module, "WATCHDOG_ATTEMPTS", 1):
+                manager = self.manager(root, daemon)
+                self.assertTrue(wait_until(lambda: not manager.watchdogs))
+            self.assertEqual(manager.store.get(run_id)["status"], "running")
+            self.assertEqual(daemon.cancel_calls, [])
+
+            # The ceiling must still be enforced once the daemon is back.
+            daemon.unavailable = False
+            manager.refresh(run_id)
+            self.assertTrue(
+                wait_until(lambda: manager.store.get(run_id)["status"] == "cancelling")
+            )
+            self.assertEqual(daemon.cancel_calls, [request_id])
+
+    def test_watchdog_for_a_pruned_run_exits_quietly(self):
+        with tempfile.TemporaryDirectory() as root, FakeDaemon() as daemon:
+            run_id = self.overdue_run(root, str(uuid.uuid4()), str(uuid.uuid4()))
+            daemon.unavailable = True
+            with mock.patch.object(module, "WATCHDOG_RETRY_SECONDS", 0.05), mock.patch.object(
+                module, "WATCHDOG_ATTEMPTS", 2_000
+            ):
+                manager = self.manager(root, daemon)
+                self.assertTrue(
+                    wait_until(lambda: manager.store.get(run_id)["error"] is not None)
+                )
+                with manager.store.lock:
+                    del manager.store.data["runs"][run_id]
+                self.assertTrue(wait_until(lambda: not manager.watchdogs))
 
     def test_check_reads_state_without_starting_watchdogs(self):
         with tempfile.TemporaryDirectory() as root, FakeDaemon() as daemon:
