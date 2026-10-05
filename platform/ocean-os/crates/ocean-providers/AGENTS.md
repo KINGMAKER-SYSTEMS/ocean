@@ -14,6 +14,11 @@ auth-file write custody. Provider wire encoding remains in `ocean-protocol`.
 ## Local Contracts
 
 - Preserve forward model/catalog routes and feature credential isolation.
+- Public Codex routes include GPT-6.1 Sol, GPT-6 Sol, GPT-6 Luna and GPT-6
+  Astra. Claude Opus aliases track 5.5 (1M/128K); explicit 5/4.x ids remain
+  routable for pinned sessions. Fable aliases retain Fable 5.1.
+- Every public catalog id resolves back to the same wire id and provider.
+  Credential readiness remains separate from account entitlement and live inference.
 - OAuth login/API-key storage and Agent refresh acquire `lock_auth_file` before
   fresh read/merge/publication. Never hold custody across network I/O or await.
 - The process mutex and exclusive sibling file lock share a five-second

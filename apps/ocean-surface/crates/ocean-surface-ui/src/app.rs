@@ -1508,7 +1508,6 @@ pub fn App() -> impl IntoView {
     // `daemon.model` (the live global model signal) is no longer bound here —
     // its only consumer, the header model picker, was removed in OCEAN-202. The
     // composer's per-turn `model_override` is the surface's model control now.
-    let models = daemon.models;
     // Browser-control indicator (OCEAN-92): lit while the agent is driving the
     // browser (set from the daemon's `browser_activity` SSE event), with the
     // most recent `browser_*` action shown alongside.
@@ -1523,8 +1522,6 @@ pub fn App() -> impl IntoView {
     let canvas_patches = daemon.canvas_patches;
     // Per-turn overrides (OCEAN-79): reasoning effort + model. Both ride on the
     // next turn's request; `None` leaves the daemon defaults untouched.
-    let thinking_level = daemon.thinking_level;
-    let model_override = daemon.model_override;
     // Predicates pulled out of the view! macro: a bare `>` inside an attribute
     // expression would be parsed as the element's closing bracket.
     let has_tokens = move || session_tokens.get().total() > 0;
@@ -2353,12 +2350,9 @@ pub fn App() -> impl IntoView {
         });
     });
 
-    // Clones for the composer's per-turn override controls (OCEAN-79). These
-    // controls live INSIDE the chat-branch <Show> fallback, which must be `Fn`,
-    // so they go through StoredValue (Copy) — a plain clone would be moved out of
-    // the fallback environment and make it `FnOnce`.
-    let daemon_thinking = StoredValue::new(daemon.clone());
-    let daemon_model_override = StoredValue::new(daemon.clone());
+    // ModelControl clones its daemon at mount inside the chat-branch fallback;
+    // the component owns persistence for both per-turn choices.
+    let daemon_model_control = daemon.clone();
     // StoredValue is Copy, so the halt button's closure (inside the chat-branch
     // <Show> fallback, which must be Fn) can grab the daemon without the
     // fallback moving a plain clone out of its environment.
@@ -2847,112 +2841,8 @@ pub fn App() -> impl IntoView {
                             >
                                 <VoiceOrb on_transcript=on_transcript on_status=on_voice_status muted=muted on_dictate=on_dictate on_plan=on_plan />
                             </Show>
-                            // Per-turn overrides (OCEAN-79): reasoning effort +
-                            // model. Compact pills next to the composer. Both
-                            // default to "daemon default" so an untouched control
-                            // sends no override and preserves prior behavior.
                             <div class="ocean-turn-controls">
-                                <select
-                                    class="ocean-thinking"
-                                    aria-label="reasoning effort"
-                                    title="Reasoning effort (this turn onward)"
-                                    prop:value=move || thinking_level.get().unwrap_or_default()
-                                    on:change=move |ev| {
-                                        let v = event_target_value(&ev);
-                                        daemon_thinking.with_value(|d| {
-                                            d.set_thinking_level((!v.is_empty()).then_some(v))
-                                        });
-                                    }
-                                >
-                                    // Values map 1:1 to ocean_protocol::ThinkingLevel
-                                    // (serde lowercase): off | minimal | low | medium
-                                    // | high | xhigh. Empty = no override (daemon
-                                    // default). These are the exact levels the daemon
-                                    // accepts — anything else round-trips to a serde
-                                    // error. (OCEAN-202)
-                                    <option value="" prop:selected=move || thinking_level.get().is_none()>
-                                        "think: default"
-                                    </option>
-                                    <option value="off" prop:selected=move || thinking_level.get().as_deref() == Some("off")>
-                                        "think: off"
-                                    </option>
-                                    <option value="minimal" prop:selected=move || thinking_level.get().as_deref() == Some("minimal")>
-                                        "think: minimal"
-                                    </option>
-                                    <option value="low" prop:selected=move || thinking_level.get().as_deref() == Some("low")>
-                                        "think: low"
-                                    </option>
-                                    <option value="medium" prop:selected=move || thinking_level.get().as_deref() == Some("medium")>
-                                        "think: medium"
-                                    </option>
-                                    <option value="high" prop:selected=move || thinking_level.get().as_deref() == Some("high")>
-                                        "think: high"
-                                    </option>
-                                    <option value="xhigh" prop:selected=move || thinking_level.get().as_deref() == Some("xhigh")>
-                                        "think: xhigh"
-                                    </option>
-                                    // Unknown persisted value (stale pref, daemon
-                                    // drift): still render it selected — the same
-                                    // guard the model select has. Without this the
-                                    // controlled select desyncs and renders BLANK.
-                                    <Show when=move || {
-                                        matches!(
-                                            thinking_level.get().as_deref(),
-                                            Some(v) if !matches!(v, "off" | "minimal" | "low" | "medium" | "high" | "xhigh")
-                                        )
-                                    }>
-                                        <option prop:value=move || thinking_level.get().unwrap_or_default() prop:selected=true>
-                                            {move || format!("think: {}", thinking_level.get().unwrap_or_default())}
-                                        </option>
-                                    </Show>
-                                </select>
-                                // Per-turn model override (distinct from the
-                                // header picker's global swap). Drawn from the
-                                // same /v1/models catalogue.
-                                <select
-                                    class="ocean-model-override"
-                                    aria-label="model override"
-                                    title="Model for this turn (overrides daemon default)"
-                                    prop:value=move || model_override.get().unwrap_or_default()
-                                    on:change=move |ev| {
-                                        let id = event_target_value(&ev);
-                                        daemon_model_override.with_value(|d| {
-                                            d.set_model_override((!id.is_empty()).then_some(id))
-                                        });
-                                    }
-                                >
-                                    <option prop:value="" prop:selected=move || model_override.get().is_none()>
-                                        "model: default"
-                                    </option>
-                                    // If a persisted override isn't in the
-                                    // catalogue yet, still show it selected.
-                                    <Show when=move || {
-                                        let cur = model_override.get();
-                                        cur.is_some()
-                                            && !models.get().iter().any(|m| Some(&m.id) == cur.as_ref())
-                                    }>
-                                        <option prop:value=move || model_override.get().unwrap_or_default() prop:selected=true>
-                                            {move || model_override.get().unwrap_or_default()}
-                                        </option>
-                                    </Show>
-                                    <For
-                                        each=move || models.get()
-                                        key=|m| m.id.clone()
-                                        children=move |m| {
-                                            let id = m.id.clone();
-                                            let id_sel = m.id.clone();
-                                            let label = if m.label.is_empty() { m.id.clone() } else { m.label.clone() };
-                                            view! {
-                                                <option
-                                                    prop:value=id.clone()
-                                                    prop:selected=move || model_override.get().as_deref() == Some(id_sel.as_str())
-                                                >
-                                                    {label}
-                                                </option>
-                                            }
-                                        }
-                                    />
-                                </select>
+                                <crate::model_control::ModelControl daemon=daemon_model_control.clone() />
                             </div>
                             {move || {
                                 // Reactive (not `<Show>`) so the plain Vec<usize

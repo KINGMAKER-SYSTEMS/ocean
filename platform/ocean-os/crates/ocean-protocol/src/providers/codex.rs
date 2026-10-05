@@ -236,7 +236,17 @@ fn convert_input(messages: &[Message]) -> Vec<Value> {
     out
 }
 
-fn reasoning_effort(level: ThinkingLevel) -> Option<&'static str> {
+fn reasoning_effort(model: &str, level: ThinkingLevel) -> Option<&'static str> {
+    if model.starts_with("gpt-6") || model.starts_with("gpt-5.6") {
+        return Some(match level {
+            ThinkingLevel::Off if matches!(model, "gpt-6-astra" | "gpt-6.1-sol") => "low",
+            ThinkingLevel::Off => "none",
+            ThinkingLevel::Minimal | ThinkingLevel::Low => "low",
+            ThinkingLevel::Medium => "medium",
+            ThinkingLevel::High => "high",
+            ThinkingLevel::Xhigh => "xhigh",
+        });
+    }
     match level {
         ThinkingLevel::Off => None,
         ThinkingLevel::Minimal => Some("minimal"),
@@ -323,7 +333,7 @@ fn build_body(model: &Model, context: &Context, options: &StreamOptions) -> Valu
     // coherent (see REASONING_ITEM_MARKER).
     body["include"] = json!(["reasoning.encrypted_content"]);
     if let Some(level) = options.reasoning {
-        if let Some(effort) = reasoning_effort(level) {
+        if let Some(effort) = reasoning_effort(&model.id, level) {
             body["reasoning"] = json!({"effort": effort, "summary": "auto"});
         }
     }
@@ -1747,18 +1757,39 @@ mod tests {
         );
     }
 
-    // OCEAN-198: the reasoning-effort mapper covers every ThinkingLevel — Off →
-    // None (omit the param), and Xhigh folds into "high" since the Responses API
-    // has no distinct level above it.
+    // Older model mappings retain their existing wire vocabulary; modern
+    // GPT-6/5.6 mappings are covered separately above.
+    #[test]
+    fn modern_codex_effort_preserves_xhigh_and_normalizes_retired_levels() {
+        for id in ["gpt-6-astra", "gpt-6.1-sol"] {
+            assert_eq!(reasoning_effort(id, ThinkingLevel::Off), Some("low"));
+            assert_eq!(reasoning_effort(id, ThinkingLevel::Minimal), Some("low"));
+            assert_eq!(reasoning_effort(id, ThinkingLevel::Xhigh), Some("xhigh"));
+        }
+        assert_eq!(
+            reasoning_effort("gpt-6-luna", ThinkingLevel::Off),
+            Some("none")
+        );
+    }
+
     #[test]
     fn reasoning_effort_maps_every_level() {
-        assert_eq!(reasoning_effort(ThinkingLevel::Off), None);
-        assert_eq!(reasoning_effort(ThinkingLevel::Minimal), Some("minimal"));
-        assert_eq!(reasoning_effort(ThinkingLevel::Low), Some("low"));
-        assert_eq!(reasoning_effort(ThinkingLevel::Medium), Some("medium"));
-        assert_eq!(reasoning_effort(ThinkingLevel::High), Some("high"));
+        assert_eq!(reasoning_effort("gpt-4o", ThinkingLevel::Off), None);
         assert_eq!(
-            reasoning_effort(ThinkingLevel::Xhigh),
+            reasoning_effort("gpt-4o", ThinkingLevel::Minimal),
+            Some("minimal")
+        );
+        assert_eq!(reasoning_effort("gpt-4o", ThinkingLevel::Low), Some("low"));
+        assert_eq!(
+            reasoning_effort("gpt-4o", ThinkingLevel::Medium),
+            Some("medium")
+        );
+        assert_eq!(
+            reasoning_effort("gpt-4o", ThinkingLevel::High),
+            Some("high")
+        );
+        assert_eq!(
+            reasoning_effort("gpt-4o", ThinkingLevel::Xhigh),
             Some("high"),
             "Xhigh has no distinct Responses level; it folds into high"
         );

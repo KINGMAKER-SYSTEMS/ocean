@@ -25,6 +25,7 @@ mod loader;
 mod markdown;
 mod markdown_stream;
 mod model;
+mod model_control;
 mod observatory;
 mod palette;
 mod place_call;

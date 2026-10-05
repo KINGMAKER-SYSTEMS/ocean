@@ -115,6 +115,20 @@ The web proxy reads the daemon-minted mode-0600 observer token immediately
 before each upstream request and injects it server-side. Never expose that
 token to browser code, bundle it, or cache it in client storage.
 
+## Model and Effort Control
+
+- `crates/ocean-surface-ui/src/model_control.rs` owns the composer's single model/effort disclosure.
+  It consumes the daemon's shared model catalog and current selection; choices
+  remain per-turn overrides rather than global model mutations.
+- Honor additive `ready` metadata: disable explicitly disconnected provider
+  entries, retain compatibility when an older daemon omits readiness, and
+  preserve pinned ids while the catalog loads. Readiness proves credentials,
+  not provider entitlement or successful inference.
+- New always-thinking models expose low through xhigh; model changes clear an
+  incompatible effort override. Escape closes the disclosure and restores focus.
+- Product intent lives in `PRODUCT.md`; existing web design and token files
+  remain the visual authority.
+
 ## Session Contract
 
 The ecosystem invariant is:

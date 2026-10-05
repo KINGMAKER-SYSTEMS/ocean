@@ -693,6 +693,9 @@ pub fn known_models() -> Vec<KnownModel> {
         // are about to stop existing.
         m("deepseek-v4-pro", "deepseek", "DeepSeek V4 Pro"),
         m("deepseek-v4-flash", "deepseek", "DeepSeek V4 Flash"),
+        m("gpt-6.1-sol", "openai-codex", "GPT-6.1 Sol (Codex)"),
+        m("gpt-6-sol", "openai-codex", "GPT-6 Sol (Codex)"),
+        m("gpt-6-luna", "openai-codex", "GPT-6 Luna (Codex)"),
         m("gpt-6-astra", "openai-codex", "GPT-6 Astra (Codex)"),
         m("gpt-5.6-sol", "openai-codex", "GPT-5.6 Sol (Codex)"),
         m("gpt-5.6-terra", "openai-codex", "GPT-5.6 Terra (Codex)"),
@@ -714,7 +717,7 @@ pub fn known_models() -> Vec<KnownModel> {
         // current Claude models. Legacy Fable 5 ids stay resolver-only so
         // persisted sessions continue to replay.
         m("claude-fable-5-1", "claude-code", "Claude Fable 5.1"),
-        m("claude-opus-5", "claude-code", "Claude Opus 5"),
+        m("claude-opus-5-5", "claude-code", "Claude Opus 5.5"),
         m("claude-sonnet-5", "claude-code", "Claude Sonnet 5"),
         m("claude-haiku-4-5", "claude-code", "Claude Haiku 4.5"),
         // MiniMax ids use the API casing the resolver returns as current.model
@@ -855,6 +858,13 @@ pub fn resolve_model_selection(env: &ProviderEnv) -> Result<ModelSelection, Prov
             128_000,
             16_384,
         )),
+        "gpt-6.1-sol" | "gpt-6-sol" | "gpt-6-luna" => Ok(model_selection(
+            ProviderId::OpenAiCodex,
+            &model,
+            CODEX_BASE_URL,
+            272_000,
+            128_000,
+        )),
         "gpt-6-astra" => Ok(model_selection(
             ProviderId::OpenAiCodex,
             "gpt-6-astra",
@@ -926,7 +936,19 @@ pub fn resolve_model_selection(env: &ProviderEnv) -> Result<ModelSelection, Prov
             200_000,
             16_384,
         )),
-        "claude-opus-5" | "claude-opus" | "opus" => Ok(model_selection(
+        "claude-opus-5-5"
+        | "claude-code-opus-5-5"
+        | "claude-opus"
+        | "opus"
+        | "claude-code-opus"
+        | "cc-opus" => Ok(model_selection(
+            ProviderId::ClaudeCode,
+            "claude-opus-5-5",
+            ANTHROPIC_BASE_URL,
+            1_000_000,
+            128_000,
+        )),
+        "claude-opus-5" => Ok(model_selection(
             ProviderId::ClaudeCode,
             "claude-opus-5",
             ANTHROPIC_BASE_URL,
@@ -986,7 +1008,7 @@ pub fn resolve_model_selection(env: &ProviderEnv) -> Result<ModelSelection, Prov
             200_000,
             16_384,
         )),
-        "claude-code-opus-5" | "claude-code-opus" | "cc-opus" => Ok(model_selection(
+        "claude-code-opus-5" => Ok(model_selection(
             ProviderId::ClaudeCode,
             "claude-code-opus-5",
             ANTHROPIC_BASE_URL,
@@ -1833,16 +1855,16 @@ mod tests {
     }
 
     #[test]
-    fn opus_aliases_track_opus_5_and_legacy_4_8_stays_routable() {
+    fn opus_aliases_track_5_5_and_pinned_ids_stay_routable() {
         // The convenience aliases follow the newest Opus generation.
-        for alias in ["opus", "claude-opus", "claude-opus-5"] {
+        for alias in ["opus", "claude-opus", "claude-opus-5-5"] {
             let s = resolve_model_selection(&env(&[("OCEAN_MODEL", alias)])).unwrap();
             assert_eq!(s.provider, ProviderId::ClaudeCode, "{alias}");
-            assert_eq!(s.model, "claude-opus-5", "{alias}");
+            assert_eq!(s.model, "claude-opus-5-5", "{alias}");
         }
         for alias in ["claude-code-opus", "cc-opus"] {
             let s = resolve_model_selection(&env(&[("OCEAN_MODEL", alias)])).unwrap();
-            assert_eq!(s.model, "claude-code-opus-5", "{alias}");
+            assert_eq!(s.model, "claude-opus-5-5", "{alias}");
         }
         // Pinned sessions on the retired ids keep resolving (off the menu).
         let legacy = resolve_model_selection(&env(&[("OCEAN_MODEL", "claude-opus-4-8")])).unwrap();
@@ -2066,6 +2088,9 @@ mod tests {
             "gpt-4o",
             "gpt-4o-mini",
             "gpt-6-astra",
+            "gpt-6.1-sol",
+            "gpt-6-sol",
+            "gpt-6-luna",
             "gpt-5.6-sol",
             "gpt-5.6-terra",
             "gpt-5.6-luna",
@@ -2078,7 +2103,7 @@ mod tests {
             // sessions) but are deliberately NOT in the menu, so they're
             // absent here too.
             "claude-fable-5-1",
-            "claude-opus-5",
+            "claude-opus-5-5",
             "claude-sonnet-5",
             "claude-haiku-4-5",
             // API-cased ids: `resolve_model_selection` returns these as
@@ -2450,7 +2475,7 @@ mod tests {
             known_models().into_iter().map(|m| m.id).collect();
         assert!(listed.contains("claude-fable-5-1"));
         assert!(listed.contains("claude-sonnet-5"));
-        assert!(listed.contains("claude-opus-5"));
+        assert!(listed.contains("claude-opus-5-5"));
         assert!(listed.contains("claude-haiku-4-5"));
 
         let _ = fs::remove_dir_all(&dir);

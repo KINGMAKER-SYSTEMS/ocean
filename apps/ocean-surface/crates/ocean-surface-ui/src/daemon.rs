@@ -2232,6 +2232,9 @@ pub struct ModelInfo {
     pub provider: String,
     #[serde(default)]
     pub label: String,
+    /// Credential readiness from the daemon; absent on older daemons.
+    #[serde(default)]
+    pub ready: Option<bool>,
 }
 
 /// Token usage for a turn (or summed for a session), mirrored from the daemon's
