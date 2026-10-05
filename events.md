@@ -471,3 +471,15 @@ Canonical main advanced through PR #10 to `10368594` after the earlier PR #16 va
 
 Validation on the rebased content: release workflow contract test, Ruby YAML parse, append-only ledger check, and `git diff --check` pass. `actionlint` is unavailable locally.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [19:11] [2026-10-05]
+agent: [codex desktop] [gpt-6.1-sol]
+worktree: [codex/release-workflow-closeout] [/Users/smathdaddy-macbook/.codex/worktrees/ocean-release-workflow-closeout]
+type: [gh actions] [workflow]
+area: [release] [testing]
+
+PR #16 merged to canonical `main` as `21c29eda42774218ea8043809433684ee012d48b` (PR head `75aa902c06027906fada084adca59aeaab913a0c`). Exact-head hosted checks passed, including `validate package (macos-arm64)`; post-merge run `37386313285` passed Build scope, Build Ocean, and Build Surface. Read back active immutable version-tag ruleset `24536535` and the configured `OCEAN_RELEASE_TAG_RULESET_ID`. Closed issue #14 with this evidence. No version tag, package publication, GitHub Release, or deployment was created; a stable release remains a separate action.
+
+Validation: authoritative GitHub PR/commit/check state, ruleset and variable readback, and release/deployment API readback (zero releases and zero deployments); `git diff --check`.
+_________________________________________________________________________________
