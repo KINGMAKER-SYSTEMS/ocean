@@ -21,7 +21,7 @@ use async_trait::async_trait;
 use futures::stream;
 use ocean_protocol::{
     AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream, Content, Context, Error,
-    Message, Model, Provider, StopReason, StreamOptions, Usage,
+    Message, Model, Provider, StopReason, StreamOptions, ThinkingLevel, Usage,
 };
 use ocean_runtime::types::{
     AgentConfig, AgentEvent, AgentTool, AgentToolResult, PermissionDecision, PermissionPolicy,
@@ -46,6 +46,7 @@ type Turn = Vec<AssistantMessageEvent>;
 struct MockProvider {
     turns: std::sync::Mutex<std::collections::VecDeque<Turn>>,
     contexts: std::sync::Mutex<Vec<Context>>,
+    reasoning: std::sync::Mutex<Vec<Option<ThinkingLevel>>>,
     calls: AtomicUsize,
     saw_bound_session_id: AtomicBool,
 }
@@ -55,6 +56,7 @@ impl MockProvider {
         Self {
             turns: std::sync::Mutex::new(turns.into()),
             contexts: std::sync::Mutex::new(Vec::new()),
+            reasoning: std::sync::Mutex::new(Vec::new()),
             calls: AtomicUsize::new(0),
             saw_bound_session_id: AtomicBool::new(false),
         }
@@ -70,6 +72,11 @@ impl MockProvider {
 
     fn contexts(&self) -> Vec<Context> {
         self.contexts.lock().unwrap().clone()
+    }
+
+    /// The reasoning level each provider round was asked for.
+    fn reasoning(&self) -> Vec<Option<ThinkingLevel>> {
+        self.reasoning.lock().unwrap().clone()
     }
 }
 
@@ -87,6 +94,7 @@ impl Provider for MockProvider {
         );
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.contexts.lock().unwrap().push(context.clone());
+        self.reasoning.lock().unwrap().push(options.reasoning);
         let turn = self.turns.lock().unwrap().pop_front().expect(
             "MockProvider ran out of scripted turns — loop requested more rounds than scripted",
         );
@@ -355,6 +363,52 @@ async fn session_identity_reaches_every_provider_round() {
         provider.saw_bound_session_id(),
         "AgentConfig.session_id must reach StreamOptions for provider cache identity"
     );
+}
+
+/// An explicit `Off` is an instruction, not the absence of one. Several models
+/// think by default and bill for it (DeepSeek, current Claude, GPT-6), and each
+/// encoder has a distinct wire shape for "off". The loop used to drop `Off`
+/// before the encoder saw it, so picking "off" silently ran at the default.
+#[tokio::test]
+async fn explicit_thinking_off_reaches_the_provider_and_unset_stays_unset() {
+    for (configured, expected) in [
+        (None, None),
+        (Some(ThinkingLevel::Off), Some(ThinkingLevel::Off)),
+        (Some(ThinkingLevel::High), Some(ThinkingLevel::High)),
+    ] {
+        let provider = Arc::new(MockProvider::new(vec![vec![done(
+            vec![Content::text("done")],
+            StopReason::Stop,
+        )]]));
+        let mut cfg = base_config(provider.clone());
+        if let Some(level) = configured {
+            cfg = cfg.with_thinking(level);
+        }
+
+        ocean_runtime::run_agent(&cfg, user("finish"), None)
+            .await
+            .expect("agent run succeeds");
+
+        assert_eq!(provider.reasoning(), vec![expected], "{configured:?}");
+    }
+}
+
+/// A level already present on the caller's `StreamOptions` wins over the
+/// config's level, as before.
+#[tokio::test]
+async fn stream_option_reasoning_takes_precedence_over_the_configured_level() {
+    let provider = Arc::new(MockProvider::new(vec![vec![done(
+        vec![Content::text("done")],
+        StopReason::Stop,
+    )]]));
+    let mut cfg = base_config(provider.clone()).with_thinking(ThinkingLevel::Off);
+    cfg.stream_options.reasoning = Some(ThinkingLevel::Low);
+
+    ocean_runtime::run_agent(&cfg, user("finish"), None)
+        .await
+        .expect("agent run succeeds");
+
+    assert_eq!(provider.reasoning(), vec![Some(ThinkingLevel::Low)]);
 }
 
 // ===========================================================================
