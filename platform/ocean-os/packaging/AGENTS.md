@@ -8,7 +8,10 @@ Distribution artifacts for shipping prebuilt Ocean binaries to teammates.
 
 - `npm/` — the `@risingtides-dev/ocean` npm wrapper package: prebuilt
   `ocean` (TUI) + `ocean-daemon` binaries for macOS arm64, published to
-  GitHub Packages by `.github/workflows/release.yml` on `v*` tag push.
+  GitHub Packages by the active monorepo workflow at
+  `../../.github/workflows/release.yml` on `v*` tag push. The nested
+  `.github/workflows/release.yml` remains for the original-repository
+  migration and is not discovered by the monorepo's GitHub Actions runner.
 - `about.toml`, `about.hbs`, and `generate-license-inventory.sh` — pinned,
   fail-closed generation of the full-text dependency-license inventory shipped
   in both release formats.
@@ -57,15 +60,18 @@ Distribution artifacts for shipping prebuilt Ocean binaries to teammates.
   release/package write permissions exist only in the no-checkout publish job.
   That job downloads the artifact ZIP by immutable id and compares it to the
   upload SHA-256 before extraction. Publication also requires the active,
-  no-bypass `Ocean immutable release tags` repository ruleset (pinned id
-  `19331797`) for `refs/tags/v*` with update, deletion, and non-fast-forward
-  protection; the workflow verifies the policy and re-peels the live tag to
-  the event commit before both GitHub Release and npm mutations.
+  no-bypass `Ocean immutable release tags` repository ruleset (repository
+  variable `OCEAN_RELEASE_TAG_RULESET_ID`) for `refs/tags/v*` with update,
+  deletion, and non-fast-forward protection; the workflow verifies the policy
+  and re-peels the live tag to the event commit before both GitHub Release and
+  npm mutations.
 - Publication is retry-safe: an existing npm version is accepted only when its
   integrity equals the validated artifact. Every completing publish converges
   npm `latest` to the greatest stable registry version with two observations;
   GitHub Releases stay tag-addressed and must not mutate the repository-wide
   Latest Release pointer based on completion order.
+  The GitHub Release remains a draft until npm integrity and latest-tag
+  reconciliation have succeeded.
 - Teammate setup and update flow is documented in `npm/README.md`; keep it
   accurate when the workflow or package layout changes, including package
   access settings and the non-hot-swapped unsupervised daemon caveat.

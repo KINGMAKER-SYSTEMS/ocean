@@ -432,3 +432,18 @@ Fixed the ocean-tui test that failed intermittently during this work, shell::her
 
 Validation: ocean-tui passes 511 tests (4 ignored) eight times in a row on the branch merged with current main, where the same suite had failed five of nine runs before the fix; workspace test compilation and rustfmt check pass. The failing runs' own output showed both reports present with the session report complete, which is what identified the race.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [5:53 pm] [10-05-26]
+agent: [codex desktop] [gpt-6.1-sol]
+worktree: [codex/activate-ocean-release-workflow]
+type: [workflow]
+area: [gh actions] [release]
+
+Activated Ocean OS release automation at the discoverable monorepo workflow path under `.github/workflows/`, adapting component-root commands, artifact paths, and package smoke-test source paths for `platform/ocean-os/`. Relevant pull requests validate the package; only stable version-tag pushes can enter the publish job. The active workflow checks a repository-configured immutable tag ruleset and verifies the exact validated artifact and live tag before publication. Added offline root/path/security contract coverage and updated the GitHub Actions and Ocean OS packaging devlog ownership references.
+
+Provisioned and read back GitHub tag ruleset 24536535 (`Ocean immutable release tags`) covering `refs/tags/v*` with update, deletion, and non-fast-forward protection and no bypass actors; set and read back `OCEAN_RELEASE_TAG_RULESET_ID=24536535`. Issue #14 records the release-path gap. Validation: offline workflow contract PASS; Ruby YAML syntax PASS; `git diff --check` PASS. Hosted release-package validation, any version tag, release, and deployment remain outstanding; no release was published.
+_________________________________________________________________________________
+
+Independent adversarial review of draft PR #16 found that a failed npm publish or latest-tag reconciliation could leave a public GitHub Release for an incomplete cross-registry release. The workflow now creates the tag-addressed GitHub Release as a draft and publishes it only after package integrity and registry-latest convergence succeed; the offline contract check asserts this ordering. Cross-registry publication remains retry-based rather than atomic.
+_________________________________________________________________________________
