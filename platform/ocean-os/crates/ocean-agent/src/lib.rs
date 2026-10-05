@@ -455,6 +455,10 @@ pub struct AgentRuntime {
     /// always dispatches through `ocean_protocol::stream_simple`.
     #[cfg(test)]
     test_compact_provider: Option<TestCompactProvider>,
+    /// Test-only scripted provider for ordinary turns, so a turn that completes
+    /// some rounds and then fails can be driven through `prompt`.
+    #[cfg(test)]
+    test_turn_provider: Option<TestCompactProvider>,
     /// Injected after the accepted-user checkpoint, before any provider/tool work.
     #[cfg(test)]
     test_dispatch_status: HashMap<&'static str, u16>,
@@ -522,6 +526,8 @@ impl AgentRuntime {
             test_env: None,
             #[cfg(test)]
             test_compact_provider: None,
+            #[cfg(test)]
+            test_turn_provider: None,
             #[cfg(test)]
             test_dispatch_status: HashMap::new(),
             #[cfg(test)]
@@ -1019,8 +1025,16 @@ impl AgentRuntime {
         // the next ready alternate (bounded — see `run_turn_with_failover`). This
         // never fails over mid-stream: the moment any output streamed, the attempt
         // is final.
+        let mut failed_usage = TokenUsage::default();
         let result = self
-            .run_turn_with_failover(req.clone(), control, effective, &env, lease)
+            .run_turn_with_failover(
+                req.clone(),
+                control,
+                effective,
+                &env,
+                lease,
+                &mut failed_usage,
+            )
             .await;
 
         match result {
@@ -1054,7 +1068,7 @@ impl AgentRuntime {
                     stdout: String::new(),
                     stderr: e.to_string(),
                     cwd,
-                    usage: TokenUsage::default(),
+                    usage: failed_usage,
                 }
             }
         }
@@ -1148,6 +1162,10 @@ impl AgentRuntime {
     /// `env` is the same per-turn environment snapshot used for selection-time
     /// failover, so the connect-failure fallback draws from the identical
     /// candidate list.
+    ///
+    /// On `Err`, `failed_usage` holds what the failed attempt was already
+    /// billed for (the rounds it completed and checkpointed); it stays zero
+    /// when the attempt failed before any round finished.
     async fn run_turn_with_failover(
         &self,
         mut req: PromptRequest,
@@ -1155,6 +1173,7 @@ impl AgentRuntime {
         state: RuntimeState,
         env: &ProviderEnv,
         admitted_lease: Option<&SessionOperationLease>,
+        failed_usage: &mut TokenUsage,
     ) -> anyhow::Result<(SessionId, String, String, TokenUsage)> {
         // Pin an implicit new session once for the whole primary+fallback
         // attempt. Otherwise each dispatch mints independently, orphaning the
@@ -1199,7 +1218,7 @@ impl AgentRuntime {
                 if !failover_eligible(&e) {
                     // Mid-stream, user-error, or non-availability — final. Unwrap
                     // any TurnFailure wrapper so the caller sees the bare error.
-                    return Err(unwrap_turn_failure(e));
+                    return Err(take_turn_failure(e, failed_usage));
                 }
                 // Pre-stream availability failure: try ONE ready alternate.
                 let alternate = self
@@ -1210,7 +1229,7 @@ impl AgentRuntime {
                     .and_then(|cfg| state_from_provider_config(cfg).ok());
                 let Some(alt_state) = alternate else {
                     // No alternate to try — return the original failure as-is.
-                    return Err(unwrap_turn_failure(e));
+                    return Err(take_turn_failure(e, failed_usage));
                 };
                 tracing::warn!(
                     primary_provider = attempted_provider.as_str(),
@@ -1251,7 +1270,7 @@ impl AgentRuntime {
                     }
                     Err(error) => {
                         self.note_auth_rejection(&error, &alt_provider);
-                        return Err(unwrap_turn_failure(error));
+                        return Err(take_turn_failure(error, failed_usage));
                     }
                 };
                 (ok, alt_state)
@@ -1351,15 +1370,16 @@ impl AgentRuntime {
                     }
                     stdout.push_str(&cont_stdout);
                     stderr.push_str(&cont_stderr);
-                    usage.input += cont_usage.input;
-                    usage.output += cont_usage.output;
-                    usage.cache_read += cont_usage.cache_read;
-                    usage.cache_write += cont_usage.cache_write;
-                    usage.total_tokens += cont_usage.total_tokens;
+                    add_continuation_usage(&mut usage, &cont_usage);
                 }
                 Err(e) => {
                     // Fail-open: the operator's turn already completed and
                     // persisted; a failed continuation is reported, not fatal.
+                    // The rounds it completed before failing were billed and
+                    // checkpointed, so they count like any other.
+                    let mut billed = TokenUsage::default();
+                    let e = take_turn_failure(e, &mut billed);
+                    add_continuation_usage(&mut usage, &billed);
                     tracing::warn!(%session_id, error = %e, "stop-hook continuation turn failed");
                     stderr.push_str(&format!("stop-hook continuation failed: {e}\n"));
                     break;
@@ -2306,6 +2326,7 @@ impl AgentRuntime {
         {
             return Err(TurnFailure {
                 streamed_output: false,
+                usage: TokenUsage::default(),
                 error: anyhow::Error::new(AgentError::Provider(
                     ocean_protocol::Error::ProviderError {
                         status,
@@ -2482,12 +2503,18 @@ impl AgentRuntime {
                 ocean_runtime::FakeToolProvider::surface(),
             ));
         }
+        #[cfg(test)]
+        if let Some(provider) = self.test_turn_provider.as_ref() {
+            cfg = cfg.with_provider(provider.0.clone());
+        }
 
         let (tx, mut rx) = mpsc::unbounded_channel();
         // Parent-side durable transcript. The runtime sends only completed-round
         // deltas; keeping the valid prefix here avoids cloning the full history
         // on every browser/tool round.
         let mut checkpoint_messages = history.clone();
+        // Everything past this index was produced by this turn.
+        let turn_start = checkpoint_messages.len();
         let cfg_cloned = cfg.clone();
         // The agent loop runs on its own task, so the turn's span context does NOT
         // propagate automatically — a freshly spawned task starts with no parent
@@ -2592,6 +2619,10 @@ impl AgentRuntime {
                     // Box as anyhow so the failover classifier can downcast back
                     // to the concrete `AgentError`/protocol cause.
                     error: anyhow::Error::new(e),
+                    usage: usage_of_completed_rounds(
+                        &checkpoint_messages[turn_start..],
+                        snapshot.model.context_window,
+                    ),
                 }
                 .into());
             }
@@ -2632,6 +2663,9 @@ impl AgentRuntime {
             total_tokens: run.usage.total_tokens,
             context_tokens: run.context_tokens,
             context_window: u64::from(snapshot.model.context_window),
+            // A turn stopped at its limit ends on a tool round: the results
+            // and the stand-in reply were saved after the measured request.
+            context_is_floor: run.stopped_at_turn_limit,
         };
 
         Ok((session.id, stdout, stderr, usage))
@@ -2684,6 +2718,54 @@ impl<T> Drop for AbortOnDropJoinHandle<T> {
 struct TurnFailure {
     streamed_output: bool,
     error: anyhow::Error,
+    /// What the provider reported for the rounds that completed before the
+    /// failure. Those rounds were billed and checkpointed, so a failed,
+    /// cancelled or timed-out turn must not report zero.
+    usage: TokenUsage,
+}
+
+/// Fold a stop-hook continuation's usage into the turn it extends. Counters
+/// sum; context occupancy is a measurement of the latest provider request, and
+/// the continuation ran last, so its measurement replaces the earlier one.
+fn add_continuation_usage(usage: &mut TokenUsage, continuation: &TokenUsage) {
+    usage.input += continuation.input;
+    usage.output += continuation.output;
+    usage.cache_read += continuation.cache_read;
+    usage.cache_write += continuation.cache_write;
+    usage.total_tokens += continuation.total_tokens;
+    if continuation.context_tokens > 0 {
+        usage.context_tokens = continuation.context_tokens;
+        usage.context_window = continuation.context_window;
+        usage.context_is_floor = continuation.context_is_floor;
+    }
+}
+
+/// Usage for the provider rounds recorded in `messages`, read from the usage
+/// each checkpointed assistant message carries. `context_tokens` is the last
+/// request a provider measured. Tool results checkpointed after that request
+/// are not in it, so on a failed turn it is a floor for the saved transcript,
+/// not its size.
+fn usage_of_completed_rounds(messages: &[Message], context_window: u32) -> TokenUsage {
+    let mut usage = TokenUsage::default();
+    for message in messages {
+        let Message::Assistant(assistant) = message else {
+            continue;
+        };
+        usage.input += assistant.usage.input;
+        usage.output += assistant.usage.output;
+        usage.cache_read += assistant.usage.cache_read;
+        usage.cache_write += assistant.usage.cache_write;
+        usage.total_tokens += assistant.usage.total_tokens;
+        if assistant.usage.total_tokens > 0 {
+            usage.context_tokens = assistant.usage.total_tokens;
+        }
+    }
+    if usage.context_tokens > 0 {
+        usage.context_window = u64::from(context_window);
+        // These rounds belong to a turn that went on to fail.
+        usage.context_is_floor = true;
+    }
+    usage
 }
 
 impl std::fmt::Display for TurnFailure {
@@ -2762,9 +2844,19 @@ fn auth_rejection_status(error: &anyhow::Error) -> Option<u16> {
 /// `prompt`'s error handling — the 408 timeout `downcast_ref::<AgentError>()` and
 /// the `Display` shown to the caller — expects the original error, not the
 /// failover-bookkeeping wrapper. A non-`TurnFailure` error passes through.
+#[cfg(test)]
 fn unwrap_turn_failure(err: anyhow::Error) -> anyhow::Error {
+    take_turn_failure(err, &mut TokenUsage::default())
+}
+
+/// [`unwrap_turn_failure`], also handing back the usage the failed attempt had
+/// already been billed for. A non-`TurnFailure` error leaves `usage` untouched.
+fn take_turn_failure(err: anyhow::Error, usage: &mut TokenUsage) -> anyhow::Error {
     match err.downcast::<TurnFailure>() {
-        Ok(turn) => turn.error,
+        Ok(turn) => {
+            *usage = turn.usage;
+            turn.error
+        }
         Err(other) => other,
     }
 }
@@ -4733,6 +4825,464 @@ mod tests {
         [call, result]
     }
 
+    fn assistant_with_usage(usage: ocean_protocol::Usage) -> Message {
+        Message::Assistant(ocean_protocol::AssistantMessage {
+            content: vec![Content::text("round")],
+            api: "test".into(),
+            provider: "test".into(),
+            model: "test".into(),
+            usage,
+            stop_reason: ocean_protocol::StopReason::ToolUse,
+            error_message: None,
+            timestamp: 0,
+        })
+    }
+
+    #[test]
+    fn usage_of_completed_rounds_sums_counters_and_measures_the_last_request() {
+        let round = |input, output, cache_read, total_tokens| {
+            assistant_with_usage(ocean_protocol::Usage {
+                input,
+                output,
+                cache_read,
+                total_tokens,
+                ..Default::default()
+            })
+        };
+        let messages = vec![
+            round(1_000, 300, 50_000, 51_300),
+            Message::user_text("a tool result stands between rounds"),
+            round(1_200, 250, 52_000, 53_450),
+            // A synthetic assistant row with no provider measurement must not
+            // reset the context reading.
+            assistant_with_usage(Default::default()),
+        ];
+        let usage = usage_of_completed_rounds(&messages, 200_000);
+        assert_eq!(usage.input, 2_200);
+        assert_eq!(usage.output, 550);
+        assert_eq!(usage.cache_read, 102_000);
+        assert_eq!(usage.total_tokens, 104_750);
+        assert_eq!(usage.context_tokens, 53_450, "the last measured request");
+        assert_eq!(usage.context_window, 200_000);
+        assert!(usage.context_is_floor);
+
+        // Nothing completed: no usage and no context claim.
+        assert_eq!(
+            usage_of_completed_rounds(&[Message::user_text("hi")], 200_000),
+            TokenUsage::default()
+        );
+    }
+
+    #[test]
+    fn continuation_usage_adds_counters_and_replaces_the_context_measurement() {
+        let mut usage = TokenUsage {
+            input: 100,
+            output: 20,
+            cache_read: 60_000,
+            cache_write: 5,
+            total_tokens: 60_125,
+            context_tokens: 60_000,
+            context_window: 200_000,
+            context_is_floor: false,
+        };
+        add_continuation_usage(
+            &mut usage,
+            &TokenUsage {
+                input: 50,
+                output: 10,
+                cache_read: 95_000,
+                cache_write: 0,
+                total_tokens: 95_060,
+                context_tokens: 95_000,
+                context_window: 200_000,
+                // A continuation that failed after this round.
+                context_is_floor: true,
+            },
+        );
+        assert_eq!(usage.input, 150);
+        assert_eq!(usage.output, 30);
+        assert_eq!(usage.cache_read, 155_000);
+        assert_eq!(usage.total_tokens, 155_185);
+        // The stale 60K reading used to survive the continuation.
+        assert_eq!(usage.context_tokens, 95_000);
+        assert!(
+            usage.context_is_floor,
+            "the reading's provenance travels with the reading"
+        );
+
+        // A continuation with no measurement keeps the earlier reading.
+        add_continuation_usage(&mut usage, &TokenUsage::default());
+        assert_eq!(usage.context_tokens, 95_000);
+        assert_eq!(usage.context_window, 200_000);
+    }
+
+    /// Replays one scripted provider round per call; the last script repeats.
+    struct ScriptedTurnProvider {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        rounds: Vec<Vec<ocean_protocol::AssistantMessageEvent>>,
+    }
+    #[async_trait]
+    impl ocean_protocol::Provider for ScriptedTurnProvider {
+        async fn stream(
+            &self,
+            _model: &ocean_protocol::Model,
+            _ctx: &ocean_protocol::Context,
+            _options: &ocean_protocol::StreamOptions,
+        ) -> ocean_protocol::Result<ocean_protocol::AssistantMessageEventStream> {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let round = self.rounds[call.min(self.rounds.len() - 1)].clone();
+            let events: Vec<ocean_protocol::Result<ocean_protocol::AssistantMessageEvent>> =
+                round.into_iter().map(Ok).collect();
+            Ok(Box::pin(futures::stream::iter(events)))
+        }
+    }
+
+    /// A turn that runs out of rounds on a tool call succeeds, but its tool
+    /// results were saved after the last measured request, so that reading is
+    /// a floor exactly as it is for a turn that failed there.
+    #[tokio::test]
+    async fn a_turn_stopped_at_its_limit_marks_its_context_reading_a_floor() {
+        let config_dir = temp_config_dir("turn-limit-context-floor");
+        let mut runtime = runtime(
+            config_dir.clone(),
+            provider_config(ProviderId::Fake, ocean_runtime::FAKE_TOOL_MODEL, false),
+        );
+        let mut tool_round = scripted_assistant("");
+        tool_round.content = vec![Content::ToolCall {
+            id: "call-1".into(),
+            name: "ls".into(),
+            arguments: serde_json::json!({ "path": "." }),
+        }];
+        tool_round.stop_reason = ocean_protocol::StopReason::ToolUse;
+        tool_round.usage = ocean_protocol::Usage {
+            input: 39_000,
+            output: 1_000,
+            total_tokens: 40_000,
+            ..Default::default()
+        };
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        runtime.test_turn_provider = Some(TestCompactProvider(Arc::new(ScriptedTurnProvider {
+            calls: calls.clone(),
+            rounds: vec![vec![ocean_protocol::AssistantMessageEvent::Done {
+                reason: ocean_protocol::StopReason::ToolUse,
+                message: tool_round,
+            }]],
+        })));
+
+        let res = runtime
+            .prompt(
+                PromptRequest {
+                    prompt: "list the directory".into(),
+                    images: None,
+                    request_id: None,
+                    session_id: Some(SessionId::new_v4()),
+                    create_if_missing: true,
+                    max_turns: Some(1),
+                    yolo: true,
+                    cwd: config_dir.display().to_string(),
+                    project_id: None,
+                    client_type: None,
+                    decision_token: None,
+                },
+                PromptControl::yolo(true),
+            )
+            .await;
+
+        assert!(res.ok, "{}", res.stderr);
+        assert!(
+            res.stderr.contains("stopped at max turns"),
+            "{}",
+            res.stderr
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(res.usage.context_tokens, 40_000);
+        assert!(res.usage.context_is_floor);
+        let _ = std::fs::remove_dir_all(config_dir);
+    }
+
+    /// A turn that completes a tool round and then fails was billed for that
+    /// round and its checkpoint is saved. It used to report zero tokens and no
+    /// context reading at every layer.
+    #[tokio::test]
+    async fn failed_turn_reports_usage_for_the_rounds_that_completed() {
+        let config_dir = temp_config_dir("failed-turn-usage");
+        // `fake-tool` is the keyless model that drives the real agent loop;
+        // `fake-ok` short-circuits before it.
+        let mut runtime = runtime(
+            config_dir.clone(),
+            provider_config(ProviderId::Fake, ocean_runtime::FAKE_TOOL_MODEL, false),
+        );
+        let tool_round = ocean_protocol::AssistantMessage {
+            content: vec![Content::ToolCall {
+                id: "call-1".into(),
+                name: "ls".into(),
+                arguments: serde_json::json!({ "path": "." }),
+            }],
+            api: "test".into(),
+            provider: "test".into(),
+            model: "scripted".into(),
+            usage: ocean_protocol::Usage {
+                input: 1_000,
+                output: 300,
+                cache_read: 50_000,
+                cache_write: 2_000,
+                total_tokens: 53_300,
+                ..Default::default()
+            },
+            stop_reason: ocean_protocol::StopReason::ToolUse,
+            error_message: None,
+            timestamp: 0,
+        };
+        let mut failure = scripted_assistant("");
+        failure.content.clear();
+        failure.stop_reason = ocean_protocol::StopReason::Error;
+        failure.error_message = Some("overloaded_error: scripted outage".into());
+        // The failed round reports usage too. It was not completed, so none of
+        // it may appear in the turn's figures.
+        failure.usage = ocean_protocol::Usage {
+            input: 7_777,
+            output: 99,
+            total_tokens: 7_876,
+            ..Default::default()
+        };
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        runtime.test_turn_provider = Some(TestCompactProvider(Arc::new(ScriptedTurnProvider {
+            calls: calls.clone(),
+            rounds: vec![
+                vec![ocean_protocol::AssistantMessageEvent::Done {
+                    reason: ocean_protocol::StopReason::ToolUse,
+                    message: tool_round,
+                }],
+                vec![ocean_protocol::AssistantMessageEvent::Error {
+                    reason: ocean_protocol::StopReason::Error,
+                    error: failure,
+                }],
+            ],
+        })));
+
+        // A failed turn echoes the caller's session id, so name the session.
+        let session_id = SessionId::new_v4();
+        let res = runtime
+            .prompt(
+                PromptRequest {
+                    prompt: "list the directory".into(),
+                    images: None,
+                    request_id: None,
+                    session_id: Some(session_id),
+                    create_if_missing: true,
+                    max_turns: None,
+                    yolo: true,
+                    cwd: config_dir.display().to_string(),
+                    project_id: None,
+                    client_type: None,
+                    decision_token: None,
+                },
+                PromptControl::yolo(true),
+            )
+            .await;
+
+        assert!(!res.ok, "the second round fails the turn");
+        assert!(res.stderr.contains("scripted outage"), "{}", res.stderr);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(res.usage.input, 1_000);
+        assert_eq!(res.usage.output, 300);
+        assert_eq!(res.usage.cache_read, 50_000);
+        assert_eq!(res.usage.cache_write, 2_000);
+        assert_eq!(res.usage.total_tokens, 53_300);
+        assert_eq!(res.usage.context_tokens, 53_300);
+        assert_eq!(
+            res.usage.context_window,
+            u64::from(runtime.snapshot().model.context_window)
+        );
+        assert!(
+            res.usage.context_is_floor,
+            "the tool result saved after that request is not in the reading"
+        );
+
+        // The reported round is the one that was checkpointed.
+        let session = session::load_resumable(&config_dir, session_id)
+            .unwrap()
+            .expect("session persisted");
+        assert_eq!(
+            session
+                .messages
+                .iter()
+                .filter(|message| matches!(message, Message::ToolResult(_)))
+                .count(),
+            1
+        );
+        let _ = std::fs::remove_dir_all(config_dir);
+    }
+
+    /// A stop-hook continuation that completes rounds and then fails was billed
+    /// for those rounds. The turn it extends succeeded, so the response is ok,
+    /// but its usage used to stop at the main turn and keep that turn's
+    /// context reading.
+    #[tokio::test]
+    async fn failed_stop_hook_continuation_still_reports_the_rounds_it_completed() {
+        let config_dir = temp_config_dir("stop-hook-continuation-failure");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let hook_path = config_dir.join("stop-hook-test.sh");
+        std::fs::write(
+            &hook_path,
+            "#!/bin/sh\ninput=$(cat)\ncase \"$input\" in\n  *'\"stop_hook_active\":true'*) exit 0 ;;\nesac\nprintf '{\"decision\":\"block\",\"reason\":\"hook continuation ping\"}\\n'\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut runtime = runtime(
+            config_dir.clone(),
+            provider_config(ProviderId::Fake, ocean_runtime::FAKE_TOOL_MODEL, false),
+        );
+        runtime.hooks = ocean_hooks::HooksConfig {
+            stop: vec![ocean_hooks::HookCommand {
+                command: hook_path.display().to_string(),
+                args: vec![],
+                timeout_secs: 10,
+                enabled: true,
+            }],
+        };
+
+        let round = |content: Vec<Content>, stop_reason, total_tokens: u64| {
+            ocean_protocol::AssistantMessage {
+                content,
+                api: "test".into(),
+                provider: "test".into(),
+                model: "scripted".into(),
+                usage: ocean_protocol::Usage {
+                    input: 1_000,
+                    output: 100,
+                    total_tokens,
+                    ..Default::default()
+                },
+                stop_reason,
+                error_message: None,
+                timestamp: 0,
+            }
+        };
+        let mut failure = scripted_assistant("");
+        failure.content.clear();
+        failure.stop_reason = ocean_protocol::StopReason::Error;
+        failure.error_message = Some("overloaded_error: scripted outage".into());
+        runtime.test_turn_provider = Some(TestCompactProvider(Arc::new(ScriptedTurnProvider {
+            calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            rounds: vec![
+                // The operator's turn: one round, done.
+                vec![ocean_protocol::AssistantMessageEvent::Done {
+                    reason: ocean_protocol::StopReason::Stop,
+                    message: round(
+                        vec![Content::text("done")],
+                        ocean_protocol::StopReason::Stop,
+                        60_000,
+                    ),
+                }],
+                // The continuation: a tool round completes, then the provider fails.
+                vec![ocean_protocol::AssistantMessageEvent::Done {
+                    reason: ocean_protocol::StopReason::ToolUse,
+                    message: round(
+                        vec![Content::ToolCall {
+                            id: "call-1".into(),
+                            name: "ls".into(),
+                            arguments: serde_json::json!({ "path": "." }),
+                        }],
+                        ocean_protocol::StopReason::ToolUse,
+                        95_000,
+                    ),
+                }],
+                vec![ocean_protocol::AssistantMessageEvent::Error {
+                    reason: ocean_protocol::StopReason::Error,
+                    error: failure,
+                }],
+            ],
+        })));
+
+        let res = runtime
+            .prompt(
+                PromptRequest {
+                    prompt: "hello".into(),
+                    images: None,
+                    request_id: None,
+                    session_id: None,
+                    create_if_missing: true,
+                    max_turns: None,
+                    yolo: true,
+                    cwd: config_dir.display().to_string(),
+                    project_id: None,
+                    client_type: None,
+                    decision_token: None,
+                },
+                PromptControl::yolo(true),
+            )
+            .await;
+
+        assert!(res.ok, "the operator's turn succeeded: {}", res.stderr);
+        assert!(
+            res.stderr.contains("stop-hook continuation failed"),
+            "{}",
+            res.stderr
+        );
+        assert_eq!(res.usage.input, 2_000, "both completed rounds are counted");
+        assert_eq!(res.usage.output, 200);
+        assert_eq!(res.usage.total_tokens, 155_000);
+        assert_eq!(
+            res.usage.context_tokens, 95_000,
+            "the continuation's round is the latest measured request"
+        );
+        // The response is ok, but this reading is from a continuation that
+        // failed after it, so it must not be presented as a final round.
+        assert!(res.usage.context_is_floor);
+        let _ = std::fs::remove_dir_all(config_dir);
+    }
+
+    /// A turn that fails before any round completes still reports nothing.
+    #[tokio::test]
+    async fn turn_that_fails_before_any_round_reports_no_usage() {
+        let config_dir = temp_config_dir("failed-turn-no-usage");
+        // `fake-tool` is the keyless model that drives the real agent loop;
+        // `fake-ok` short-circuits before it.
+        let mut runtime = runtime(
+            config_dir.clone(),
+            provider_config(ProviderId::Fake, ocean_runtime::FAKE_TOOL_MODEL, false),
+        );
+        let mut failure = scripted_assistant("");
+        failure.content.clear();
+        failure.stop_reason = ocean_protocol::StopReason::Error;
+        failure.error_message = Some("invalid_request_error: scripted".into());
+        runtime.test_turn_provider = Some(TestCompactProvider(Arc::new(ScriptedTurnProvider {
+            calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            rounds: vec![vec![ocean_protocol::AssistantMessageEvent::Error {
+                reason: ocean_protocol::StopReason::Error,
+                error: failure,
+            }]],
+        })));
+
+        let res = runtime
+            .prompt(
+                PromptRequest {
+                    prompt: "hello".into(),
+                    images: None,
+                    request_id: None,
+                    session_id: None,
+                    create_if_missing: true,
+                    max_turns: None,
+                    yolo: true,
+                    cwd: config_dir.display().to_string(),
+                    project_id: None,
+                    client_type: None,
+                    decision_token: None,
+                },
+                PromptControl::yolo(true),
+            )
+            .await;
+
+        assert!(!res.ok);
+        assert_eq!(res.usage, TokenUsage::default());
+        let _ = std::fs::remove_dir_all(config_dir);
+    }
+
     #[test]
     fn compact_history_is_noop_under_trigger() {
         let mut msgs: Vec<Message> = tool_round("a", 4).into_iter().collect();
@@ -5663,6 +6213,7 @@ done
             provider_quarantine: Arc::new(ProviderRefusalQuarantine::default()),
             test_env,
             test_compact_provider: None,
+            test_turn_provider: None,
             test_dispatch_status: HashMap::new(),
             test_dispatch_attempts: Arc::new(std::sync::Mutex::new(Vec::new())),
             test_provider_now: None,
@@ -7163,6 +7714,7 @@ done
     fn provider_refusal_error(status: u16) -> anyhow::Error {
         TurnFailure {
             streamed_output: false,
+            usage: TokenUsage::default(),
             error: anyhow::Error::new(AgentError::Provider(ocean_protocol::Error::ProviderError {
                 status,
                 body: "synthetic refusal".into(),
@@ -7568,6 +8120,7 @@ done
     fn failover_eligible_for_prestream_availability_error() {
         let err: anyhow::Error = TurnFailure {
             streamed_output: false,
+            usage: TokenUsage::default(),
             error: anyhow::Error::new(AgentError::Provider(ocean_protocol::Error::ProviderError {
                 status: 503,
                 body: "overloaded".into(),
@@ -7584,6 +8137,7 @@ done
     fn no_failover_after_output_streamed_even_on_availability_error() {
         let err: anyhow::Error = TurnFailure {
             streamed_output: true,
+            usage: TokenUsage::default(),
             error: anyhow::Error::new(AgentError::Provider(ocean_protocol::Error::ProviderError {
                 status: 503,
                 body: "overloaded".into(),
@@ -7602,6 +8156,7 @@ done
     fn no_failover_on_user_error() {
         let err: anyhow::Error = TurnFailure {
             streamed_output: false,
+            usage: TokenUsage::default(),
             error: anyhow::Error::new(AgentError::Provider(ocean_protocol::Error::ProviderError {
                 status: 400,
                 body: "bad request".into(),
@@ -7625,6 +8180,7 @@ done
     fn unwrap_turn_failure_recovers_the_inner_agent_error() {
         let wrapped: anyhow::Error = TurnFailure {
             streamed_output: false,
+            usage: TokenUsage::default(),
             error: anyhow::Error::new(AgentError::Timeout { secs: 300 }),
         }
         .into();

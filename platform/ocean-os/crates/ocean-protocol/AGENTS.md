@@ -53,6 +53,14 @@ This crate owns the multi-provider LLM wire protocol layer for Anthropic, OpenAI
   existing bounded highest-effort fallback.
 - Codex GPT-6/5.6 preserves xhigh and max. Astra/Sol 6.1 normalize unsupported
   Off/Minimal to low; other GPT-6 models encode Off as none.
+- Usage is what the provider reported, mapped onto one shape. Anthropic
+  `message_delta` usage is cumulative for the message: replace the running
+  counts, never add, and never let a report that omits the input side erase
+  what `message_start` said. Every Anthropic usage count tolerates `null`; a
+  `message_delta` frame that fails to parse loses the turn's `stop_reason`. A
+  Responses round reports usage on `response.completed` and on a length-capped
+  `response.incomplete` alike. Gemini output includes thinking tokens, so
+  `Usage.reasoning` is a subset of `output` on every provider.
 - Anthropic extended-thinking requests must keep `budget_tokens` at least 1024
   and strictly below `max_tokens`; preserve explicit output caps by clamping the
   thinking budget rather than raising the cap.

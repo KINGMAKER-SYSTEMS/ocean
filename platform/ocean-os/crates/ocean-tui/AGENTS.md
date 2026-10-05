@@ -107,7 +107,9 @@ This crate owns the full-screen terminal steering cockpit (`ocean` binary) for i
 - Metrics are truthful or absent: tok/s and context occupancy render only from
   daemon-reported values for the LAST finished turn (both clear on
   `TurnStarted`; context also clears on stream gaps or adoption after a missing
-  start). Context occupancy uses the provider-reported final request,
+  start). Context occupancy uses the provider-reported final request (or the
+  last completed request of a turn or continuation that failed or ran out of
+  rounds, which the daemon labels `provider_reported_last_completed_round`),
   never cumulative multi-round usage; unknown values remain absent. The model
   row falls back to the startup `/v1/models` fetch only before a session is bound.
   A bound session's model is daemon-owned config: `/model` and the picker must
@@ -162,7 +164,10 @@ This crate owns the full-screen terminal steering cockpit (`ocean` binary) for i
   they never replace a visible operator selection. Explicit Files navigation
   restores `FileTreeComponent`.
 - The `USAGE` representation records a bounded history of only daemon-reported
-  final-request context measurements from correlated finished turns. It never
+  context measurements from correlated finished turns: the final request, or
+  the last completed request when the daemon labels the reading
+  `provider_reported_last_completed_round`, captioned
+  `last completed request` instead of `final request`. It never
   substitutes cumulative input tokens or local estimates, follows model reroutes,
   clears on session switch, and labels retained history partial after an SSE gap.
   A todo may reveal an honestly empty Usage surface while awaiting the first

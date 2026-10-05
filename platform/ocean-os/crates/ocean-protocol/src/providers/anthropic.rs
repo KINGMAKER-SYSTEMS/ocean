@@ -112,16 +112,44 @@ struct MessageDeltaPayload {
     stop_reason: Option<String>,
 }
 
+/// Usage as it appears on `message_start` and `message_delta`. The API types
+/// the input-side and cache fields as nullable, and Anthropic-compatible
+/// endpoints do send `null`. `#[serde(default)]` covers only a missing key, so
+/// an explicit `null` used to fail the whole frame, and a dropped
+/// `message_delta` frame takes the turn's `stop_reason` with it.
 #[derive(Deserialize, Debug, Default)]
 struct UsageDelta {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_zero")]
     input_tokens: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_zero")]
     output_tokens: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_zero")]
     cache_read_input_tokens: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_zero")]
     cache_creation_input_tokens: u64,
+}
+
+fn null_as_zero<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<u64, D::Error> {
+    Ok(Option::<u64>::deserialize(deserializer)?.unwrap_or(0))
+}
+
+/// Fold a `message_delta` usage report into the running usage. The report is
+/// cumulative for the whole message, so it replaces rather than adds; the
+/// input-side fields are absent or zero on older API versions and must not
+/// erase what `message_start` reported.
+fn apply_message_delta_usage(usage: &mut Usage, delta: &UsageDelta) {
+    usage.output = usage.output.max(delta.output_tokens);
+    if delta.input_tokens > 0 {
+        usage.input = delta.input_tokens;
+    }
+    if delta.cache_read_input_tokens > 0 {
+        usage.cache_read = delta.cache_read_input_tokens;
+    }
+    if delta.cache_creation_input_tokens > 0 {
+        usage.cache_write = delta.cache_creation_input_tokens;
+    }
 }
 
 #[derive(Deserialize, Debug)]
@@ -775,7 +803,7 @@ impl Provider for AnthropicProvider {
                     }
                     SseEvent::MessageDelta { delta, usage: maybe_usage } => {
                         if let Some(u) = maybe_usage {
-                            usage.output += u.output_tokens;
+                            apply_message_delta_usage(&mut usage, &u);
                         }
                         if let Some(reason) = delta.stop_reason {
                             stop = map_stop_reason(reason.as_str());
@@ -784,6 +812,7 @@ impl Provider for AnthropicProvider {
                     SseEvent::MessageStop => {}
                     SseEvent::Error { error } => {
                         let err_msg = format!("{}: {}", error.kind, error.message);
+                        usage.total_tokens = total_tokens(&usage);
                         let am = AssistantMessage {
                             content: vec![],
                             api: api.clone(),
@@ -1293,6 +1322,99 @@ mod tests {
             total_tokens(&usage),
             862,
             "total must be input + output + cache_write + cache_read"
+        );
+    }
+
+    // The API types these counts as nullable and compatible endpoints do send
+    // `null`. A `message_delta` frame that failed to parse was skipped whole,
+    // and that frame is the only carrier of the turn's `stop_reason`.
+    #[test]
+    fn usage_frames_with_null_counts_still_parse_and_keep_the_stop_reason() {
+        let frame = r#"{
+            "type": "message_delta",
+            "delta": {"stop_reason": "tool_use", "stop_sequence": null},
+            "usage": {
+                "input_tokens": null,
+                "output_tokens": 12,
+                "cache_creation_input_tokens": null,
+                "cache_read_input_tokens": null
+            }
+        }"#;
+        let SseEvent::MessageDelta { delta, usage } =
+            serde_json::from_str(frame).expect("a null count must not fail the frame")
+        else {
+            panic!("expected message_delta");
+        };
+        assert_eq!(delta.stop_reason.as_deref(), Some("tool_use"));
+        let usage = usage.expect("usage present");
+        assert_eq!(usage.output_tokens, 12);
+        assert_eq!(usage.input_tokens, 0);
+
+        let start = r#"{
+            "type": "message_start",
+            "message": {
+                "model": "claude-opus-5-5",
+                "usage": {
+                    "input_tokens": 9,
+                    "output_tokens": 1,
+                    "cache_creation_input_tokens": null,
+                    "cache_read_input_tokens": null
+                }
+            }
+        }"#;
+        let SseEvent::MessageStart { message } =
+            serde_json::from_str(start).expect("a null cache count must not fail message_start")
+        else {
+            panic!("expected message_start");
+        };
+        assert_eq!(message.usage.expect("usage present").input_tokens, 9);
+    }
+
+    // `message_delta` usage is cumulative for the whole message. Adding each
+    // report double-counted output on any stream with more than one, and a
+    // report that omits the input side must not erase what `message_start` said.
+    #[test]
+    fn message_delta_usage_replaces_cumulative_counts_and_keeps_reported_input() {
+        let mut usage = Usage {
+            input: 1_000,
+            cache_read: 50_000,
+            cache_write: 2_000,
+            ..Default::default()
+        };
+        for output_tokens in [150, 300] {
+            apply_message_delta_usage(
+                &mut usage,
+                &UsageDelta {
+                    output_tokens,
+                    ..Default::default()
+                },
+            );
+        }
+        assert_eq!(usage.output, 300, "cumulative reports must not be summed");
+        assert_eq!(
+            (usage.input, usage.cache_read, usage.cache_write),
+            (1_000, 50_000, 2_000)
+        );
+        assert_eq!(total_tokens(&usage), 53_300);
+
+        // A newer API version restates the input side cumulatively.
+        apply_message_delta_usage(
+            &mut usage,
+            &UsageDelta {
+                input_tokens: 1_200,
+                output_tokens: 320,
+                cache_read_input_tokens: 51_000,
+                cache_creation_input_tokens: 2_000,
+            },
+        );
+        assert_eq!(
+            (
+                usage.input,
+                usage.output,
+                usage.cache_read,
+                usage.cache_write
+            ),
+            (1_200, 320, 51_000, 2_000)
         );
     }
 
