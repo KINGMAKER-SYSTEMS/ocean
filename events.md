@@ -266,6 +266,18 @@ Validation: all 899 Surface tests, strict WASM Clippy and docs-check pass. New r
 _________________________________________________________________________________
 
 _________________________________________________________________________________
+time: [16:59] [05-10-26]
+agent: [claude] [claude code]
+worktree: [claude/subagent-lost-run-recovery] [/Users/risingtidesdev/dev/ocean-claude-audit]
+type: [bug report]
+area: [backend] [testing]
+
+Repaired ocean-subagents lifecycle recovery. The daemon's request registry is in memory, so a run whose request disappeared (daemon restart, or a finished turn evicted after an hour) stayed active forever; four such runs exhausted the concurrency cap and blocked spawn for every session. An untracked active run now settles as terminal lost from session truth after a short grace, a cancel the daemon answers ok:false settles from daemon truth instead of parking in cancelling, and the elapsed-time watchdog retries because plugins start before the listener binds. The recursion guard now fails closed: spawn and send first confirm the worker profile resolves with a non-empty allowlist that omits subagent tools, since an unresolved named agent or empty allowlist runs with every tool. Also: optional per-child thinking_level, catalog guidance on an unroutable model, wait returns when a permission prompt appears, unchanged polls no longer rewrite and fsync state, finished runs are retained to 200, state updates are bound to the turn they were read for, and --check no longer starts watchdogs. README now states that the daemon launches plugins with a cleared environment, so the documented environment variables apply only to hand-started plugins.
+
+Validation: 20 unit tests against a test daemon corrected to the real control contract (volatile registry, HTTP 200 ok:false cancel refusals, cancelling before cancelled, 404 for an unknown session); four of the new tests fail against the previous plugin with the reported symptoms. Wire test passes on Python 3.13 and on system Python 3.9 under a cleared environment; py_compile on both; sh -n; docs-check. The new read-only preflight and catalog reads were exercised against the operated daemon with a temporary state directory; no child was spawned and no live state or installation changed. The installed plugin copy is unchanged until install.sh is rerun and the daemon restarted. Plugin devlog and README updated; parent indexes unchanged.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
 time: [17:11] [05-10-26]
 agent: [claude] [claude code]
 worktree: [claude/thinking-levels-truthful] [/Users/risingtidesdev/dev/ocean-claude-audit]
@@ -278,6 +290,18 @@ Validation: full suites for ocean-protocol (173 plus 5), ocean-providers (65), o
 _________________________________________________________________________________
 
 _________________________________________________________________________________
+time: [17:40] [05-10-26]
+agent: [claude] [claude code]
+worktree: [claude/subagent-lost-run-recovery] [/Users/risingtidesdev/dev/ocean-claude-audit]
+type: [review]
+area: [backend] [testing]
+
+Applied the independent review of the ocean-subagents repair. The recursion guard still passed an allowlist that matched no existing tool (the daemon then keeps every tool) and ignored subprocess capabilities, whose tools are added after narrowing; it now requires an always-present built-in tool and no subprocess capability. thinking_level accepts max. Output is the latest turn's text only, so a lost run no longer reports an earlier turn's answer. A run settles even when its session cannot be read, and a settled run with no output re-reads it later; a completed run whose session read failed used to stay active. A request list that is not a list is an error instead of settling every run as lost. wait reports each permission prompt once by id, including one raised between waits. send counts against the concurrency cap. The watchdog survives malformed responses, is re-armed by refresh if it gave up, does not re-cancel a run already cancelling, and the elapsed-time reason survives a later lost settlement. The unroutable-model hint now points at a new spawn because send reuses the model.
+
+Validation: 27 unit tests pass; ten mutations of the new logic are each killed by a test, including the three the review found surviving. The prune test now uses distinct finish times out of insertion order, and the retry test no longer races. Wire test on Python 3.13 and system 3.9 under a cleared environment, py_compile, sh -n and docs-check pass. The revised preflight passes against the operated daemon read-only. Plugin devlog and README updated.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
 time: [17:44] [05-10-26]
 agent: [claude] [claude code]
 worktree: [claude/thinking-levels-truthful] [/Users/risingtidesdev/dev/ocean-claude-audit]
@@ -287,4 +311,28 @@ area: [backend] [testing]
 Applied the independent review of the thinking-level change. Opus 4.8 and 4.7 do not think unless asked, so with no level chosen they again get no thinking field; the first version switched adaptive thinking on for them, which broke "unset means provider default" and would have spent their small output caps on thinking. Off on Opus 5 is now low effort rather than disabled: with thinking disabled that model can write a tool call into its visible text, so the tool never runs. OpenAI Chat Completions sends reasoning_effort only to reasoning families (o-series, GPT-5 and later) instead of blocking only GPT-4. Gemini 2.0 Flash, whose descriptor says it does not reason, never receives thinkingConfig and advertises no effort levels. Three tests that passed vacuously behind the new gate now use a reasoning model, and a test no longer pins a temperature beside enabled thinking.
 
 Validation: full suites pass for ocean-protocol (174 plus 5), ocean-providers (66), ocean-runtime, ocean-agent (260, live probe ignored), ocean-daemon (878) and ocean-acp on current main; workspace test compilation, rustfmt check and docs-check pass. Still no provider call. Known trade-off recorded in the PR: thinking summaries arrive as stream output, so a stream that drops mid-thinking now fails the turn instead of being retried as a clean round. Protocol and providers devlogs updated.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [18:00] [05-10-26]
+agent: [claude] [claude code]
+worktree: [claude/subagent-lost-run-recovery] [/Users/risingtidesdev/dev/ocean-claude-audit]
+type: [review]
+area: [backend] [testing]
+
+The reviewer acknowledged the ocean-subagents repair with nothing blocking; this applies its three remaining low-severity points before landing. The daemon reuses one permission id for an identical tool call, so a child that re-ran the same command raised a prompt wait had already marked reported; the mark is now cleared once the prompt is answered or gone. permissions refreshes before it lists, so it never marks a prompt its response did not show. A run persisted as cancelling gets its startup watchdog again and settles on its own after a daemon restart; only the per-poll re-arm skips cancelling runs.
+
+Validation: 29 unit tests pass, with new cases for the reused permission id and the persisted cancelling run; wire test on Python 3.13 and system 3.9, py_compile and sh -n pass. Merged current main, keeping every ledger entry in time order.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [18:16] [05-10-26]
+agent: [claude] [claude code]
+worktree: [claude/subagent-lost-run-recovery] [/Users/risingtidesdev/dev/ocean-claude-audit-c]
+type: [review]
+area: [backend] [testing]
+
+Fixed a regression the delta review found in the previous subagent commit. A run cancelled by the elapsed-time ceiling keeps its reason in the run record, but the startup watchdog's first call always fails because the daemon launches plugins before its listener binds, and the failure handler overwrote that reason with the connection error; after a restart the lost settlement read "Earlier: Ocean daemon unavailable" instead of saying the ceiling had been reached. A failed attempt now records its error only when the run has none. Status, slot release and output were never affected. The same review listed three fixes with no test behind them, and they now have one each: forgetting a reported prompt once the run is seen to move on, `permissions` marking only what it listed (both the empty-list case and a prompt raised between its two reads), and not asking twice for a cancellation still in flight after a restart.
+
+Validation: 33 plugin tests pass on Python 3.13 and `--check` passes. The new restart test fails on the previous commit; each of the three coverage tests fails when its fix is removed. No daemon was contacted, installed or restarted, and the installed plugin copy is unchanged.
 _________________________________________________________________________________
