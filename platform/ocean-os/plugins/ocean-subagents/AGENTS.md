@@ -17,14 +17,18 @@ Provide working, permission-gated subagent tools inside ordinary Ocean turns by 
 - Spawn returns immediately with durable run, turn, and session identifiers.
 - Child execution remains an ordinary Ocean session with normal tool permissions; every child turn carries a private decision token, and the plugin accepts permission decisions only for the exact run/request/session/tool tuple.
 - Enforce fixed worker-profile binding, maximum four active runs, bounded output, and an elapsed-time watchdog.
-- Persist metadata atomically under `~/.local/state/ocean/subagents` by default.
+- The recursion guard fails closed: before every child turn, confirm the worker profile resolves in the daemon with a non-empty allowlist (`config.tools` plus `tools/`) that names no subagent tool. An unresolved named agent or an empty allowlist runs with every tool.
+- Persist metadata atomically under `~/.local/state/ocean/subagents` by default. Refreshing an unchanged run writes nothing; finished runs are settled and only the newest 200 are retained.
 - Do not claim exactly-once execution; daemon request/session truth wins during refresh.
+- No path may leave a run active once the daemon cannot finish it. The request registry is volatile, so an active run whose request is absent settles as `lost` from session truth after a short grace, and a cancel answered `ok:false` settles from daemon truth. The watchdog retries a failed attempt because plugins start before the daemon's listener binds.
+- `--check` reads state only; it must never start watchdogs or call the daemon.
 
 ## Work Guidance
 
 - Keep the implementation Python-standard-library only.
 - Stdout is exclusively JSON-RPC; diagnostics go to stderr.
-- Keep schemas and live `list_tools` definitions identical.
+- Keep names, descriptions, and schemas identical between `plugin.toml` and live `list_tools`.
+- The test daemon mirrors the real control contract (volatile registry, HTTP 200 `ok:false` cancel refusals, `cancelling` before `cancelled`, 404 for an unknown session). Change it only alongside the daemon.
 
 ## Verification
 
