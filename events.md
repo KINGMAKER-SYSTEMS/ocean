@@ -288,3 +288,15 @@ Applied the independent review of the TUI slash fixes. The first version of /cle
 
 Validation: all 509 TUI tests pass (4 ignored), with new cases for a follow-up queued before a busy /clear running visibly, a promoted prompt with no row, a surviving approval card, Esc after /clear, the idle pause reset and the split reply; rustfmt check, the release build of ocean-tui and docs-check pass.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [17:58] [05-10-26]
+agent: [claude] [claude code]
+worktree: [claude/tui-slash-fixes] [/Users/risingtidesdev/dev/ocean-claude-audit]
+type: [review]
+area: [frontend] [testing]
+
+Second review round on the TUI slash fixes. The /copy join introduced in the previous round merged every adjacent assistant block, and a resumed or re-synced transcript lists each round's text as its own block with the tool rows gone, so /copy returned a turn's interim narration glued to its answer. The join now bridges only across one of Ocean's own notices. The turn-lifecycle line in the contract names history load (resume, switch or a fenced idle snapshot) as a way busy clears. Known and left alone: an approval card orphaned by a turn that was stopped while waiting stays undecided, as it did before this work, and a busy /clear now keeps it with the live ones.
+
+Validation: all 510 TUI tests pass (4 ignored), with a new case built in the resumed-transcript shape; rustfmt check and the release build pass.
+_________________________________________________________________________________

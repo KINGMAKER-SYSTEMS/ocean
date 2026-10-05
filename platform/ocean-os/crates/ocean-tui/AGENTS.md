@@ -35,7 +35,8 @@ This crate owns the full-screen terminal steering cockpit (`ocean` binary) for i
   unknown-command hint, a send-failure notice) is `Turn::Notice`. It renders
   like assistant text but is not a model reply: `/copy` skips it and streamed
   deltas never append to it. A notice pushed while a reply streams splits that
-  reply into two blocks; `/copy` still returns the whole reply.
+  reply into two blocks; `/copy` joins blocks only across such a notice, never
+  blocks that are merely adjacent, which a resumed transcript has per round.
 - `/web` and `/desk` hand the bound session to sibling surfaces owned by the
   `ocean-surface` repo: the web PWA consumes `?session=<id>` at boot (proxy
   default `http://127.0.0.1:8790`, override via `OCEAN_SURFACE_URL`) and the
@@ -355,8 +356,9 @@ This crate owns the full-screen terminal steering cockpit (`ocean` binary) for i
   fenced session activity probe until `TurnFinished` or an idle snapshot is
   authoritative.
 - Turn lifecycle: `busy` is cleared only by an authoritative `TurnFinished`, a
-  `TurnSendFailed`, a `TurnAccepted` whose finish had already arrived, a fenced
-  idle snapshot through history load, or an explicit new session — never by
+  `TurnSendFailed`, a `TurnAccepted` whose finish had already arrived, a
+  history load (session resume or switch, or a fenced idle snapshot), or an
+  explicit new session — never by
   generic SSE reconnect statuses, never by `TurnOutcomeUnknown` (it latches
   `busy` until the activity probe settles), and never by `/clear`. During an
   active turn `/clear` empties the view but keeps the rows the turn still acts

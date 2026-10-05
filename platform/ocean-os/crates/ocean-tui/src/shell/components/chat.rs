@@ -2794,16 +2794,25 @@ impl ChatComponent {
     }
 
     fn last_reply(&self) -> Option<String> {
-        // The newest assistant block, plus the blocks before it that only
-        // Ocean's own notices separate from it: a notice pushed while a reply
-        // streams splits that reply in two, and `/copy` wants all of it.
+        // The newest assistant block, plus an older block when one of Ocean's
+        // own notices is what split it off: a notice pushed while a reply
+        // streams cuts that reply in two, and `/copy` wants all of it. Blocks
+        // that are merely adjacent are separate messages (a resumed transcript
+        // lists each round's text as its own block) and are never merged.
         let mut parts: Vec<&str> = Vec::new();
+        let mut crossed_notice = false;
         for turn in self.turns.iter().rev() {
             match turn {
-                Turn::Assistant(text) if !parts.is_empty() || !text.trim().is_empty() => {
-                    parts.push(text)
+                Turn::Assistant(text) if parts.is_empty() => {
+                    if !text.trim().is_empty() {
+                        parts.push(text);
+                    }
                 }
-                Turn::Assistant(_) | Turn::Notice(_) => {}
+                Turn::Assistant(text) if crossed_notice => {
+                    parts.push(text);
+                    crossed_notice = false;
+                }
+                Turn::Notice(_) => crossed_notice = !parts.is_empty(),
                 _ if parts.is_empty() => {}
                 _ => break,
             }
@@ -5755,6 +5764,32 @@ mod tests {
         chat.turns.push(Turn::User("next question".into()));
         chat.push_assistant("second answer");
         assert_eq!(chat.last_reply().as_deref(), Some("second answer"));
+    }
+
+    /// A resumed or re-synced transcript lists each round's visible text as its
+    /// own assistant block, with the tool rows between them gone. Those are
+    /// separate messages: `/copy` returns the last one, not the turn's interim
+    /// narration glued to the answer.
+    #[test]
+    fn slash_copy_never_merges_adjacent_messages_from_history() {
+        let mut chat = ChatComponent::default();
+        chat.turns.push(Turn::User("fix the test".into()));
+        chat.turns
+            .push(Turn::Assistant("I'll look at the test first.".into()));
+        chat.turns.push(Turn::Assistant(
+            "Fixed: the off-by-one was in range.".into(),
+        ));
+        assert_eq!(
+            chat.last_reply().as_deref(),
+            Some("Fixed: the off-by-one was in range.")
+        );
+
+        // A notice after the answer does not reach back past it either.
+        chat.run_slash("/help", "");
+        assert_eq!(
+            chat.last_reply().as_deref(),
+            Some("Fixed: the off-by-one was in range.")
+        );
     }
 
     /// Clearing the view is not ending the turn. `/clear` used to drop `busy`,
