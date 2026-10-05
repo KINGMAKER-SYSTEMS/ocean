@@ -2663,6 +2663,7 @@ impl AgentRuntime {
             total_tokens: run.usage.total_tokens,
             context_tokens: run.context_tokens,
             context_window: u64::from(snapshot.model.context_window),
+            context_is_floor: false,
         };
 
         Ok((session.id, stdout, stderr, usage))
@@ -2733,6 +2734,7 @@ fn add_continuation_usage(usage: &mut TokenUsage, continuation: &TokenUsage) {
     if continuation.context_tokens > 0 {
         usage.context_tokens = continuation.context_tokens;
         usage.context_window = continuation.context_window;
+        usage.context_is_floor = continuation.context_is_floor;
     }
 }
 
@@ -2758,6 +2760,8 @@ fn usage_of_completed_rounds(messages: &[Message], context_window: u32) -> Token
     }
     if usage.context_tokens > 0 {
         usage.context_window = u64::from(context_window);
+        // These rounds belong to a turn that went on to fail.
+        usage.context_is_floor = true;
     }
     usage
 }
@@ -4858,6 +4862,7 @@ mod tests {
         assert_eq!(usage.total_tokens, 104_750);
         assert_eq!(usage.context_tokens, 53_450, "the last measured request");
         assert_eq!(usage.context_window, 200_000);
+        assert!(usage.context_is_floor);
 
         // Nothing completed: no usage and no context claim.
         assert_eq!(
@@ -4876,6 +4881,7 @@ mod tests {
             total_tokens: 60_125,
             context_tokens: 60_000,
             context_window: 200_000,
+            context_is_floor: false,
         };
         add_continuation_usage(
             &mut usage,
@@ -4887,6 +4893,8 @@ mod tests {
                 total_tokens: 95_060,
                 context_tokens: 95_000,
                 context_window: 200_000,
+                // A continuation that failed after this round.
+                context_is_floor: true,
             },
         );
         assert_eq!(usage.input, 150);
@@ -4895,6 +4903,10 @@ mod tests {
         assert_eq!(usage.total_tokens, 155_185);
         // The stale 60K reading used to survive the continuation.
         assert_eq!(usage.context_tokens, 95_000);
+        assert!(
+            usage.context_is_floor,
+            "the reading's provenance travels with the reading"
+        );
 
         // A continuation with no measurement keeps the earlier reading.
         add_continuation_usage(&mut usage, &TokenUsage::default());
@@ -5150,6 +5162,9 @@ mod tests {
             res.usage.context_tokens, 95_000,
             "the continuation's round is the latest measured request"
         );
+        // The response is ok, but this reading is from a continuation that
+        // failed after it, so it must not be presented as a final round.
+        assert!(res.usage.context_is_floor);
         let _ = std::fs::remove_dir_all(config_dir);
     }
 

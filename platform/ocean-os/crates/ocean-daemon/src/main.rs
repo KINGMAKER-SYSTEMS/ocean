@@ -25,7 +25,8 @@ use ocean_agent_sdk::{
     AgentOwningProject, AgentRole, AgentSessionCreateRequest, AgentSessionCreateResponse,
     AgentSessionId, AgentSessionResponse, AgentSessionSummary, AgentSessionsResponse, AgentTurn,
     AgentTurnEvent, AgentTurnId, AgentTurnRequest, AgentTurnResponse, AgentTurnStatus,
-    ContextUsage, Federation, ToolCall, ToolCallId, ToolResult,
+    ContextUsage, Federation, ToolCall, ToolCallId, ToolResult, CONTEXT_SOURCE_FINAL_ROUND,
+    CONTEXT_SOURCE_LAST_COMPLETED_ROUND,
 };
 use ocean_core::{
     CompactResponse, EventEnvelope, HealthResponse, OceanEvent, PermissionControlResponse,
@@ -6941,23 +6942,7 @@ async fn agent_turn(
         } else {
             None
         };
-        // This measurement is provider-reported for the final request/round.
-        // Never substitute the cumulative `usage.input`: multi-round turns resend
-        // prior context and summing those requests overstates current occupancy.
-        // A turn that did not complete reports its last completed round, which
-        // is a floor rather than the final request, and is labelled as such.
-        let context_usage =
-            (res.usage.context_tokens > 0 && res.usage.context_window > 0).then(|| ContextUsage {
-                used_tokens: res.usage.context_tokens,
-                context_window: res.usage.context_window,
-                source: if res.ok {
-                    "provider_reported_final_round"
-                } else {
-                    "provider_reported_last_completed_round"
-                }
-                .into(),
-                measured_at_ms: Utc::now().timestamp_millis(),
-            });
+        let context_usage = context_usage_of(&res.usage, Utc::now().timestamp_millis());
         // NOTE: assistant text already streamed delta-by-delta through the bridge,
         // so this terminal TurnFinished carries no stdout. It IS how fire-and-ack
         // clients learn the turn ended (the POST already ACKed): status + error +
@@ -8579,6 +8564,29 @@ fn estimate_visible_tokens(text: &str) -> u64 {
     text.split_whitespace().count() as u64
 }
 
+/// The context reading a finished turn publishes, or `None` when the provider
+/// measured nothing. The reading is provider-reported for one request/round.
+/// Never substitute the cumulative `usage.input`: multi-round turns resend
+/// prior context and summing those requests overstates current occupancy.
+///
+/// A reading taken before a failure is a floor rather than the final request,
+/// and is labelled as such. The agent says which it is: the turn's `ok` does
+/// not, because a turn can succeed and still carry the reading of a stop-hook
+/// continuation that failed.
+fn context_usage_of(usage: &ocean_core::TokenUsage, measured_at_ms: i64) -> Option<ContextUsage> {
+    (usage.context_tokens > 0 && usage.context_window > 0).then(|| ContextUsage {
+        used_tokens: usage.context_tokens,
+        context_window: usage.context_window,
+        source: if usage.context_is_floor {
+            CONTEXT_SOURCE_LAST_COMPLETED_ROUND
+        } else {
+            CONTEXT_SOURCE_FINAL_ROUND
+        }
+        .into(),
+        measured_at_ms,
+    })
+}
+
 fn emit_agent(
     events: &EventBus,
     agent_events: &AgentEventBus,
@@ -8708,6 +8716,46 @@ fn event_type_name(event: &OceanEvent) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_reading_is_labelled_by_the_agents_mark_not_by_turn_outcome() {
+        let measured = ocean_core::TokenUsage {
+            context_tokens: 95_000,
+            context_window: 200_000,
+            ..Default::default()
+        };
+        let reading = context_usage_of(&measured, 7).expect("a measured reading");
+        assert_eq!(reading.used_tokens, 95_000);
+        assert_eq!(reading.context_window, 200_000);
+        assert_eq!(reading.measured_at_ms, 7);
+        assert_eq!(reading.source, CONTEXT_SOURCE_FINAL_ROUND);
+        assert!(!reading.is_floor());
+
+        // A successful turn whose stop-hook continuation failed carries this
+        // mark, so the label cannot be inferred from the response's `ok`.
+        let floor = ocean_core::TokenUsage {
+            context_is_floor: true,
+            ..measured
+        };
+        let reading = context_usage_of(&floor, 7).expect("a measured reading");
+        assert_eq!(reading.source, CONTEXT_SOURCE_LAST_COMPLETED_ROUND);
+        assert!(reading.is_floor());
+
+        // No measurement is absent, never a zero reading.
+        for unmeasured in [
+            ocean_core::TokenUsage::default(),
+            ocean_core::TokenUsage {
+                context_tokens: 0,
+                ..floor
+            },
+            ocean_core::TokenUsage {
+                context_window: 0,
+                ..measured
+            },
+        ] {
+            assert_eq!(context_usage_of(&unmeasured, 7), None);
+        }
+    }
 
     // ---- TASK-30: symlink-safe skill read (#333 done right) --------------
     #[cfg(test)]

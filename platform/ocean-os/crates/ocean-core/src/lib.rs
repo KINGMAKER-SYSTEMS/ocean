@@ -330,13 +330,20 @@ pub struct TokenUsage {
     pub cache_write: u64,
     #[serde(default)]
     pub total_tokens: u64,
-    /// Provider-reported total token consumption for the final provider request/round.
-    /// This is not cumulative turn usage; zero means no authoritative measurement.
+    /// Provider-reported total token consumption for one provider request: the
+    /// final round of a completed turn, or the last completed round of one that
+    /// then failed (see `context_is_floor`). This is not cumulative turn usage;
+    /// zero means no authoritative measurement.
     #[serde(default)]
     pub context_tokens: u64,
     /// Context-window capacity of the effective model for this turn.
     #[serde(default)]
     pub context_window: u64,
+    /// True when `context_tokens` comes from a turn or continuation that failed
+    /// after that request. Tool results saved afterwards are not in it, so it
+    /// is a floor for the saved transcript rather than its measured size.
+    #[serde(default)]
+    pub context_is_floor: bool,
 }
 
 /// Summary item returned by `GET /v1/sessions`.
@@ -2717,6 +2724,31 @@ mod tests {
         assert_eq!(response.session_id, session_id);
         assert!(response.sync.is_none());
         assert!(response.fence.is_none());
+    }
+
+    #[test]
+    fn token_usage_context_floor_flag_defaults_for_older_payloads() {
+        let usage: TokenUsage = serde_json::from_value(serde_json::json!({
+            "input": 40,
+            "output": 20,
+            "total_tokens": 60,
+            "context_tokens": 50,
+            "context_window": 100
+        }))
+        .unwrap();
+        assert_eq!(usage.context_tokens, 50);
+        assert!(
+            !usage.context_is_floor,
+            "a payload from before the flag reads as a final-round measurement"
+        );
+
+        let floor = TokenUsage {
+            context_is_floor: true,
+            ..usage
+        };
+        let json = serde_json::to_value(floor).unwrap();
+        assert_eq!(json["context_is_floor"], true);
+        assert_eq!(serde_json::from_value::<TokenUsage>(json).unwrap(), floor);
     }
 
     #[test]
