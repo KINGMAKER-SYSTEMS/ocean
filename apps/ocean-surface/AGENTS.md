@@ -325,7 +325,9 @@ Web surface session UI:
 - Federated Share requires `Live` access and the daemon's `caller_member_id`
   matching a projected `User` with `Owner` role. Browser-local identity is not
   authority. Missing caller data disables federated Share; Local is unchanged.
-  Deploy the additive daemon caller projection before this Surface change.
+  Accept the operated daemon's equivalent `self_member_id` as a read alias;
+  serialize only `caller_member_id`. Duplicate caller fields fail decoding.
+  Both names come from daemon credential projection, never browser identity.
 - Rooms G1 is daemon-native text collaboration. LiveKit controls stay outside
   the room join, leave, roster, and transcript lifecycle until explicitly
   reintroduced behind a reviewed platform contract.

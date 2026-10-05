@@ -242,7 +242,11 @@ pub enum OutboxItemState {
 pub struct RoomAccessProjection {
     pub state: RoomAccessState,
     /// Daemon credential's caller identity; never inferred from browser storage.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        alias = "self_member_id",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub caller_member_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_confirmed_global_sequence: Option<u64>,

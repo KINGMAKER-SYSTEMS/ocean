@@ -3481,6 +3481,36 @@ mod tests {
         }
     }
 
+    #[test]
+    fn installed_daemon_caller_wire_retains_owner_checks() {
+        let owner = serde_json::json!({
+            "state": "live", "self_member_id": "native-owner",
+            "members": [{"member_id": "native-owner", "actor_type": "user", "role_in_room": "owner", "display_name": "Owner", "joined_at": "2026-10-05T00:00:00Z"}]
+        });
+        let access: RoomAccessProjection = serde_json::from_value(owner.clone()).unwrap();
+        assert!(access_allows_sharing(Some(&access)));
+        let mut member = owner.clone();
+        member["members"][0]["role_in_room"] = serde_json::json!("member");
+        let access: RoomAccessProjection = serde_json::from_value(member).unwrap();
+        assert!(!access_allows_sharing(Some(&access)));
+        let mut wrong_caller = owner.clone();
+        wrong_caller["self_member_id"] = serde_json::json!("someone-else");
+        let access: RoomAccessProjection = serde_json::from_value(wrong_caller).unwrap();
+        assert!(!access_allows_sharing(Some(&access)));
+        let mut duplicate = owner;
+        duplicate["caller_member_id"] = serde_json::json!("someone-else");
+        assert!(serde_json::from_value::<RoomAccessProjection>(duplicate).is_err());
+        let json = serde_json::to_value(
+            serde_json::from_str::<RoomAccessProjection>(
+                r#"{"state":"live","self_member_id":"native-owner"}"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json["caller_member_id"], "native-owner");
+        assert!(json.get("self_member_id").is_none());
+    }
+
     // ── access_allows_writes ──────────────────────────────────────────
 
     #[test]

@@ -228,3 +228,15 @@ Fixed missing native Claude Code login discovery. Explicit env and valid Ocean O
 
 Validation: 65 provider tests, strict all-target provider Clippy, six OAuth storage tests, seven Agent refresh tests, workspace test compilation and docs-check pass. Readiness-only candidate snapshot now reports 39/44 routes (Claude Code 4/4; Anthropic API 0/4 and Google 0/1). All four Claude Code choices completed bounded live no-tools prompts through production resolver/factory: Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 4.5. Existing other-account acceptance failures remain unresolved. No live installation or durable service/database changes. Provider devlog updated; parent contracts and child indexes unchanged because ownership boundaries are unchanged. Fresh review and operated-runtime compatibility remain required before release.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [13:53] [05-10-26]
+agent: [codex] [gpt-6]
+worktree: [feat/model-effort-control] [/Users/risingtidesdev/dev/ocean-ui-current]
+type: [bug report]
+area: [frontend] [testing]
+
+Restored Surface compatibility with the operated daemon caller projection. Installed revision 6912315 exposes self_member_id from its private credential row; the candidate used caller_member_id and dropped that identity, incorrectly disabling Share for otherwise eligible live owners. Surface now accepts the equivalent legacy wire field as a read alias and serializes the current field only. Conflicting duplicate fields fail decoding; live human-owner membership checks remain unchanged. The shared projection decoder covers HTTP hydration and room_access SSE.
+
+Validation: all 897 Surface tests, strict WASM Clippy and docs-check pass. Added a production-decoder-to-Share-policy regression for legacy owner, ordinary member, mismatched caller, duplicate identity and current-only serialization. Surface owning contract updated; parent/index docs unchanged because ownership boundaries did not change. No live room, service, database or installation mutation. This repairs one client compatibility issue and does not lift the daemon migration hold or establish cross-machine Rooms acceptance.
+_________________________________________________________________________________
