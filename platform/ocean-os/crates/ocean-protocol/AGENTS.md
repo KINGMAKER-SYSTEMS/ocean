@@ -25,8 +25,13 @@ This crate owns the multi-provider LLM wire protocol layer for Anthropic, OpenAI
 - Current Fable/Opus/Sonnet adaptive models use `thinking.type=adaptive` and
   `output_config.effort`, never `budget_tokens`; legacy Off/Minimal requests
   normalize to low only on always-thinking models. Opus/Sonnet 5 retain Off
-  as disabled thinking. Extended-only models retain their bounded token budgets.
-- Codex GPT-6/5.6 preserves xhigh. Astra/Sol 6.1 normalize unsupported
+  as disabled thinking. Sonnet 5.5 Off uses `between_tools` at low effort;
+  other settings use adaptive thinking and omit temperature. Extended-only
+  models retain their bounded token budgets.
+- Shared `ThinkingLevel::Max` serializes as max. Current adaptive Claude and
+  Codex GPT-6/5.6 encode max directly; older provider vocabularies retain their
+  existing bounded highest-effort fallback.
+- Codex GPT-6/5.6 preserves xhigh and max. Astra/Sol 6.1 normalize unsupported
   Off/Minimal to low; other GPT-6 models encode Off as none.
 - Anthropic extended-thinking requests must keep `budget_tokens` at least 1024
   and strictly below `max_tokens`; preserve explicit output caps by clamping the

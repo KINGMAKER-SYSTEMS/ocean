@@ -124,8 +124,10 @@ token to browser code, bundle it, or cache it in client storage.
   entries, retain compatibility when an older daemon omits readiness, and
   preserve pinned ids while the catalog loads. Readiness proves credentials,
   not provider entitlement or successful inference.
-- New always-thinking models expose low through xhigh; model changes clear an
-  incompatible effort override. Escape closes the disclosure and restores focus.
+- Use additive daemon `effort_levels` metadata for model-specific choices,
+  including max on current models. Older daemons retain the existing fallback
+  vocabulary. Model changes clear incompatible overrides; stored max survives
+  reload. Escape closes the disclosure and restores focus.
 - Product intent lives in `PRODUCT.md`; existing web design and token files
   remain the visual authority.
 

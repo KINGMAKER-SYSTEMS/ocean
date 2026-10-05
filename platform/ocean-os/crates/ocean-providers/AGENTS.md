@@ -16,7 +16,10 @@ auth-file write custody. Provider wire encoding remains in `ocean-protocol`.
 - Preserve forward model/catalog routes and feature credential isolation.
 - Public Codex routes include GPT-6.1 Sol, GPT-6 Sol, GPT-6 Luna and GPT-6
   Astra. Claude Opus aliases track 5.5 (1M/128K); explicit 5/4.x ids remain
-  routable for pinned sessions. Fable aliases retain Fable 5.1.
+  routable for pinned sessions. Fable aliases retain Fable 5.1; Sonnet aliases
+  track 5.5 (1M/128K), retaining exact older ids for pinned sessions.
+- Readiness catalog responses include additive model-specific `effort_levels`;
+  advertise max only where Ocean's encoder supports the provider vocabulary.
 - Every public catalog id resolves back to the same wire id and provider.
   Credential readiness remains separate from account entitlement and live inference.
 - OAuth login/API-key storage and Agent refresh acquire `lock_auth_file` before

@@ -3641,6 +3641,8 @@ fn model_from_provider_config(config: &ProviderConfig) -> anyhow::Result<Model> 
             selection.max_output_tokens,
         )),
         ProviderId::Anthropic => Ok(match selection.model.as_str() {
+            "claude-opus-5-5" => Model::anthropic_claude_opus_5_5(),
+            "claude-sonnet-5-5" => Model::anthropic_claude_sonnet_5_5(),
             "claude-opus-5" => Model::anthropic_claude_opus_5(),
             "claude-sonnet-5" => Model::anthropic_claude_sonnet_5(),
             "claude-haiku-4-5" => Model::anthropic_claude_haiku_4_5(),
@@ -3661,6 +3663,8 @@ fn model_from_provider_config(config: &ProviderConfig) -> anyhow::Result<Model> 
             }
         }),
         ProviderId::ClaudeCode => Ok(match selection.model.as_str() {
+            "claude-code-opus-5-5" | "claude-opus-5-5" => Model::anthropic_claude_opus_5_5(),
+            "claude-code-sonnet-5-5" | "claude-sonnet-5-5" => Model::anthropic_claude_sonnet_5_5(),
             // The claude-code alias maps to the REAL Anthropic API model id on
             // the wire — "claude-code-sonnet-5" is never sent to the API.
             "claude-code-fable-5-1" | "claude-fable-5-1" => Model::anthropic_claude_fable_5_1(),
@@ -5685,6 +5689,36 @@ done
         assert_eq!(model.id, "claude-fable-5-1");
         assert_eq!(model.context_window, 1_000_000);
         assert_eq!(model.max_tokens, 128_000);
+    }
+
+    #[test]
+    fn every_catalog_model_constructs_a_runtime_wire_model() {
+        for known in ocean_providers::known_models() {
+            // Selection-only resolution never reads auth or calls a provider.
+            let env = ProviderEnv {
+                vars: std::collections::BTreeMap::from([("OCEAN_MODEL".into(), known.id.clone())]),
+                ..Default::default()
+            };
+            let selection = ocean_providers::resolve_model_selection(&env).unwrap();
+            let config = ProviderConfig {
+                selection,
+                credential: None,
+                account_id: None,
+            };
+            let model = model_from_provider_config(&config)
+                .unwrap_or_else(|error| panic!("{}: {error}", known.id));
+            assert_eq!(model.id, known.id);
+            assert_eq!(
+                model.context_window, config.selection.context_window,
+                "{}",
+                known.id
+            );
+            assert_eq!(
+                model.max_tokens, config.selection.max_output_tokens,
+                "{}",
+                known.id
+            );
+        }
     }
 
     #[test]

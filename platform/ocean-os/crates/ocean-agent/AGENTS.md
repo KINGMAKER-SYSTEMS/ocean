@@ -30,6 +30,11 @@ transcripts by session id.
   network/await, or log provider bodies/tokens; refresh diagnostics use fixed
   class/status only. External CLI writers are not enrolled by this interface.
 - Preserve session compatibility unless a migration is documented.
+- Every advertised catalog model must construct a runtime wire model with the
+  same id and limits. Current Opus/Sonnet 5.5 constructors use 1M/128K;
+  both Claude Code OAuth and explicit Anthropic routes share those constructors.
+  Authored agent model validation checks production routing, not picker
+  membership, so older pinned ids remain valid and keyless test routes fail.
 - Session-config model pins update model/provider together under the same
   per-session lock as turn persistence and increment the persisted monotonic
   `config_revision`; explicit creation may atomically seed one already-resolved
@@ -185,6 +190,9 @@ transcripts by session id.
 - Memory guidance must not encourage unconditional recall. Call `recall` only when prior conversations, preferences, or decisions are needed and not already injected.
 
 ## Verification
+
+- `cargo test -p ocean-agent every_catalog_model_constructs --locked`
+- `cargo test -p ocean-agent production_model_validation --locked`
 
 - `cargo test -p ocean-agent provider_refusal --locked` — synthetic primary and
   alternate 401/403 sequences, later availability failures, exact expiry,

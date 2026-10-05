@@ -41,6 +41,20 @@ fn effort_levels(id: &str) -> &'static [&'static str] {
     }
 }
 
+fn available_efforts(models: &[ModelInfo], id: &str) -> Vec<String> {
+    models
+        .iter()
+        .find(|model| model.id == id)
+        .and_then(|model| model.effort_levels.clone())
+        .filter(|levels| !levels.is_empty())
+        .unwrap_or_else(|| {
+            effort_levels(id)
+                .iter()
+                .map(|level| (*level).into())
+                .collect()
+        })
+}
+
 fn model_choices(mut models: Vec<ModelInfo>) -> Vec<ModelInfo> {
     models.sort_by(|a, b| {
         (a.ready == Some(false), &a.provider).cmp(&(b.ready == Some(false), &b.provider))
@@ -87,7 +101,7 @@ pub fn ModelControl(daemon: Daemon) -> impl IntoView {
                             let id = event_target_value(&event);
                             let effective = if id.is_empty() { current.get_untracked().unwrap_or_default() } else { id.clone() };
                             daemon.with_value(|daemon| {
-                                if effort.get_untracked().is_some_and(|level| !effort_levels(&effective).contains(&level.as_str())) {
+                                if effort.get_untracked().is_some_and(|level| !available_efforts(&models.get_untracked(), &effective).contains(&level)) {
                                     daemon.set_thinking_level(None);
                                 }
                                 daemon.set_model_override((!id.is_empty()).then_some(id));
@@ -119,13 +133,15 @@ pub fn ModelControl(daemon: Daemon) -> impl IntoView {
                             daemon.with_value(|daemon| daemon.set_thinking_level((!value.is_empty()).then_some(value)));
                         }>
                         <option value="" prop:selected=move || effort.get().is_none()>"Default"</option>
-                        <Show when=move || effort.get().is_some_and(|level| !effort_levels(&effective_id()).contains(&level.as_str()))>
+                        <Show when=move || effort.get().is_some_and(|level| !available_efforts(&models.get(), &effective_id()).contains(&level))>
                             <option prop:value=move || effort.get().unwrap_or_default() prop:selected=true>
                                 {move || effort.get().unwrap_or_default()}
                             </option>
                         </Show>
-                        <For each=move || effort_levels(&effective_id()).to_vec() key=|level| *level children=move |level| view! {
-                            <option value=level prop:selected=move || effort.get().as_deref() == Some(level)>{level}</option>
+                        <For each=move || available_efforts(&models.get(), &effective_id()) key=|level| level.clone() children=move |level| {
+                            let value = level.clone();
+                            let selected_level = level.clone();
+                            view! { <option value=value prop:selected=move || effort.get().as_deref() == Some(selected_level.as_str())>{level}</option> }
                         } />
                     </select>
                 </label>
@@ -167,6 +183,18 @@ mod tests {
             .map(|model| model.id)
             .collect();
         assert_eq!(ids, ["legacy-daemon", "latest", "older", "disconnected"]);
+    }
+
+    #[test]
+    fn daemon_effort_metadata_controls_max_and_old_daemons_remain_compatible() {
+        let models: Vec<ModelInfo> = serde_json::from_value(serde_json::json!([
+            {"id":"gpt-6.1-sol", "effort_levels":["low","medium","high","xhigh","max"]},
+            {"id":"custom", "effort_levels":["low","high"]}
+        ]))
+        .unwrap();
+        assert!(available_efforts(&models, "gpt-6.1-sol").contains(&"max".into()));
+        assert_eq!(available_efforts(&models, "custom"), ["low", "high"]);
+        assert!(!available_efforts(&[], "gpt-6.1-sol").contains(&"max".into()));
     }
 
     #[test]

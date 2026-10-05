@@ -13,6 +13,9 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
 ## Local Contracts
 
 - Daemon health is `GET /health`, not `/v1/health`.
+- `/v1/models` preserves current/id/provider/label/readiness/provenance and
+  additively exposes provider-owned `effort_levels`; the route fixture verifies
+  canonical metadata and ordering without performing inference.
 - Restart the daemon only by specific PID; do not use blind `pkill` sweeps.
 - HTTP turn routes must resolve effective cwd from client cwd/project metadata and must never fall back to daemon process cwd.
 - Do not bypass runtime permission gates from daemon route code.

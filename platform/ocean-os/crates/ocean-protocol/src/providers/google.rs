@@ -273,7 +273,7 @@ fn thinking_budget(level: ThinkingLevel) -> Option<u32> {
         ThinkingLevel::Low => Some(2048),
         ThinkingLevel::Medium => Some(8192),
         ThinkingLevel::High => Some(16384),
-        ThinkingLevel::Xhigh => Some(24576),
+        ThinkingLevel::Xhigh | ThinkingLevel::Max => Some(24576),
     }
 }
 

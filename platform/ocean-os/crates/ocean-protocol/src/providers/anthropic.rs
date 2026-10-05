@@ -261,7 +261,7 @@ fn thinking_budget(level: ThinkingLevel) -> Option<u32> {
         ThinkingLevel::Low => Some(2048),
         ThinkingLevel::Medium => Some(8192),
         ThinkingLevel::High => Some(16384),
-        ThinkingLevel::Xhigh => Some(24576),
+        ThinkingLevel::Xhigh | ThinkingLevel::Max => Some(24576),
     }
 }
 
@@ -388,6 +388,8 @@ fn build_body(model: &Model, context: &Context, options: &StreamOptions) -> Valu
             | "opus-5"
             | "claude-sonnet-5"
             | "sonnet-5"
+            | "claude-sonnet-5-5"
+            | "sonnet-5-5"
     );
     if adaptive
         && options.reasoning == Some(ThinkingLevel::Off)
@@ -399,13 +401,20 @@ fn build_body(model: &Model, context: &Context, options: &StreamOptions) -> Valu
         body["thinking"] = json!({"type": "disabled"});
     } else if adaptive {
         body.as_object_mut().unwrap().remove("temperature");
-        body["thinking"] = json!({"type": "adaptive"});
+        let between_tools = options.reasoning == Some(ThinkingLevel::Off)
+            && matches!(
+                model.id.trim_start_matches("claude-code-"),
+                "claude-sonnet-5-5" | "sonnet-5-5"
+            );
+        body["thinking"] =
+            json!({"type": if between_tools { "between_tools" } else { "adaptive" }});
         if let Some(level) = options.reasoning {
             let effort = match level {
                 ThinkingLevel::Off | ThinkingLevel::Minimal | ThinkingLevel::Low => "low",
                 ThinkingLevel::Medium => "medium",
                 ThinkingLevel::High => "high",
                 ThinkingLevel::Xhigh => "xhigh",
+                ThinkingLevel::Max => "max",
             };
             body["output_config"] = json!({"effort": effort});
         }
@@ -846,6 +855,7 @@ mod tests {
                 (ThinkingLevel::Off, "low"),
                 (ThinkingLevel::Medium, "medium"),
                 (ThinkingLevel::Xhigh, "xhigh"),
+                (ThinkingLevel::Max, "max"),
             ] {
                 let options = StreamOptions {
                     reasoning: Some(level),
@@ -867,6 +877,37 @@ mod tests {
             let body = build_body(&model, &Context::default(), &StreamOptions::default());
             assert_eq!(body["thinking"]["type"], "adaptive");
             assert!(body.get("output_config").is_none());
+        }
+    }
+
+    #[test]
+    fn sonnet_5_5_off_uses_between_tools_and_other_efforts_use_adaptive() {
+        for id in ["claude-sonnet-5-5", "claude-code-sonnet-5-5"] {
+            let mut model = anthropic_model();
+            model.id = id.into();
+            for (level, thinking, effort) in [
+                (ThinkingLevel::Off, "between_tools", "low"),
+                (ThinkingLevel::Minimal, "adaptive", "low"),
+                (ThinkingLevel::Low, "adaptive", "low"),
+                (ThinkingLevel::High, "adaptive", "high"),
+                (ThinkingLevel::Xhigh, "adaptive", "xhigh"),
+                (ThinkingLevel::Max, "adaptive", "max"),
+            ] {
+                let body = build_body(
+                    &model,
+                    &Context::default(),
+                    &StreamOptions {
+                        reasoning: Some(level),
+                        temperature: Some(0.5),
+                        ..Default::default()
+                    },
+                );
+                assert_eq!(body["thinking"], json!({"type":thinking}));
+                assert_eq!(body["output_config"]["effort"], effort);
+                assert!(body.get("temperature").is_none());
+            }
+            let body = build_body(&model, &Context::default(), &StreamOptions::default());
+            assert_eq!(body["thinking"], json!({"type":"adaptive"}));
         }
     }
 

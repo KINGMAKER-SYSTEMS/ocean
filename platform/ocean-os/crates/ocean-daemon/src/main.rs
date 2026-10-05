@@ -14203,9 +14203,15 @@ mod tests {
             assert!(entry.contains_key("provider"));
             assert!(entry.contains_key("label"));
             assert!(entry.contains_key("ready"));
+            let efforts = entry
+                .get("effort_levels")
+                .and_then(serde_json::Value::as_array)
+                .expect("picker effort choices must remain an array");
+            assert!(!efforts.is_empty());
+            assert!(efforts.iter().all(serde_json::Value::is_string));
             assert!(
-                entry.len() == 4 || (entry.len() == 5 && entry.contains_key("credential_source")),
-                "picker entries may add only the optional credential_source field: {entry:?}"
+                entry.len() == 5 || (entry.len() == 6 && entry.contains_key("credential_source")),
+                "picker entries contain required catalog fields and optional credential_source: {entry:?}"
             );
         }
     }

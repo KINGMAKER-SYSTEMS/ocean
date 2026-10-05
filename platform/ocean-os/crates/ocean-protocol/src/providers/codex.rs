@@ -245,6 +245,7 @@ fn reasoning_effort(model: &str, level: ThinkingLevel) -> Option<&'static str> {
             ThinkingLevel::Medium => "medium",
             ThinkingLevel::High => "high",
             ThinkingLevel::Xhigh => "xhigh",
+            ThinkingLevel::Max => "max",
         });
     }
     match level {
@@ -252,7 +253,7 @@ fn reasoning_effort(model: &str, level: ThinkingLevel) -> Option<&'static str> {
         ThinkingLevel::Minimal => Some("minimal"),
         ThinkingLevel::Low => Some("low"),
         ThinkingLevel::Medium => Some("medium"),
-        ThinkingLevel::High | ThinkingLevel::Xhigh => Some("high"),
+        ThinkingLevel::High | ThinkingLevel::Xhigh | ThinkingLevel::Max => Some("high"),
     }
 }
 
@@ -1765,6 +1766,7 @@ mod tests {
             assert_eq!(reasoning_effort(id, ThinkingLevel::Off), Some("low"));
             assert_eq!(reasoning_effort(id, ThinkingLevel::Minimal), Some("low"));
             assert_eq!(reasoning_effort(id, ThinkingLevel::Xhigh), Some("xhigh"));
+            assert_eq!(reasoning_effort(id, ThinkingLevel::Max), Some("max"));
         }
         assert_eq!(
             reasoning_effort("gpt-6-luna", ThinkingLevel::Off),

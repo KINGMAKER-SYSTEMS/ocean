@@ -75,3 +75,27 @@ diffs were ported onto public main 0b7e20f1; no private history is published.
 Goal remains active: independent review, required builds, full auth/model live
 acceptance, max effort support, wider UI/integration pass and deployment remain.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [11:34] [05-10-26]
+agent: [Codex desktop] [GPT-6]
+worktree: [feat/model-effort-control] [/Users/risingtidesdev/dev/ocean-ui-current]
+type: [refactor] [bug report]
+area: [frontend] [backend] [testing]
+
+Extended public PR #2 with daemon-owned effort choices and additive max support,
+current Sonnet 5.5 routing/constructors and its between_tools Off wire, and missing
+Opus 5.5 runtime construction. Every catalog id now passes selection through wire
+construction with matching limits. Authored agent validation accepts production
+routes rather than current picker membership, preserving older pinned models.
+Surface persists max and honors daemon metadata while retaining older-daemon
+fallbacks; TUI explicit selection, cycling and footer carry max.
+Validation: Ocean workspace 3,330 tests passed (9 ignored), Surface 895 tests
+passed; final workspace test compilation, provider suite (57), five focused TUI
+thinking tests, strict providers/protocol/agent/TUI Clippy, Trunk bundle and TUI
+release build passed. Existing two Surface dead-code warnings remain. Devlog pass
+updated Surface and affected crate contracts; indexes/roots retain ownership.
+No live deployment or inference claimed: live daemon 6912315aff3d remains selected,
+Claude/Google readiness is false, and public runtime reconciliation plus fresh
+review are required before installation. API-auth modern-model coverage and the
+remaining broad UI integration/acceptance goal remain active.

@@ -24,6 +24,9 @@ This crate owns the full-screen terminal steering cockpit (`ocean` binary) for i
   multi-second PTY launch—`--help` exits before terminal setup and proves
   nothing.
 - Keep TUI behavior aligned with daemon API contracts; clients do not own sessions.
+- `/thinking max` carries the additive shared effort value and renders max in
+  the footer. Keyboard cycling includes max after xhigh; provider encoders
+  normalize values for older wire vocabularies.
 - `/web` and `/desk` hand the bound session to sibling surfaces owned by the
   `ocean-surface` repo: the web PWA consumes `?session=<id>` at boot (proxy
   default `http://127.0.0.1:8790`, override via `OCEAN_SURFACE_URL`) and the

@@ -11,6 +11,7 @@ pub enum ThinkingLevel {
     Medium,
     High,
     Xhigh,
+    Max,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -311,6 +312,26 @@ impl Model {
             supports_images: true,
             context_window: 200_000,
             max_tokens: 16_384,
+        }
+    }
+
+    pub fn anthropic_claude_opus_5_5() -> Self {
+        Self {
+            id: "claude-opus-5-5".into(),
+            name: "Claude Opus 5.5".into(),
+            context_window: 1_000_000,
+            max_tokens: 128_000,
+            ..Self::anthropic_claude_opus_5()
+        }
+    }
+
+    pub fn anthropic_claude_sonnet_5_5() -> Self {
+        Self {
+            id: "claude-sonnet-5-5".into(),
+            name: "Claude Sonnet 5.5".into(),
+            context_window: 1_000_000,
+            max_tokens: 128_000,
+            ..Self::anthropic_claude_sonnet_5()
         }
     }
 

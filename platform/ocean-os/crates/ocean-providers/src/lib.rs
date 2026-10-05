@@ -718,7 +718,7 @@ pub fn known_models() -> Vec<KnownModel> {
         // persisted sessions continue to replay.
         m("claude-fable-5-1", "claude-code", "Claude Fable 5.1"),
         m("claude-opus-5-5", "claude-code", "Claude Opus 5.5"),
-        m("claude-sonnet-5", "claude-code", "Claude Sonnet 5"),
+        m("claude-sonnet-5-5", "claude-code", "Claude Sonnet 5.5"),
         m("claude-haiku-4-5", "claude-code", "Claude Haiku 4.5"),
         // MiniMax ids use the API casing the resolver returns as current.model
         // (`MiniMax-M2`, not the lowercase alias), so `id == current.model`
@@ -753,8 +753,27 @@ pub struct ReadyModel {
     #[serde(flatten)]
     pub model: KnownModel,
     pub ready: bool,
+    #[serde(default)]
+    pub effort_levels: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_source: Option<CredentialSource>,
+}
+
+/// Effort choices supported by Ocean's current wire encoder for this model.
+/// This is additive catalog metadata; older clients can ignore it.
+pub fn model_effort_levels(id: &str) -> &'static [&'static str] {
+    if matches!(
+        id,
+        "gpt-6-astra" | "gpt-6.1-sol" | "claude-fable-5-1" | "claude-opus-5-5"
+    ) {
+        &["low", "medium", "high", "xhigh", "max"]
+    } else if matches!(id, "gpt-6-sol" | "gpt-6-luna" | "claude-sonnet-5-5")
+        || id.starts_with("gpt-5.6")
+    {
+        &["off", "low", "medium", "high", "xhigh", "max"]
+    } else {
+        &["off", "minimal", "low", "medium", "high", "xhigh"]
+    }
 }
 
 /// Per-model readiness for `GET /v1/models`: resolve each distinct provider's
@@ -786,6 +805,10 @@ pub fn known_models_with_readiness(env: &ProviderEnv) -> Vec<ReadyModel> {
                 })
                 .clone();
             ReadyModel {
+                effort_levels: model_effort_levels(&m.id)
+                    .iter()
+                    .map(|level| (*level).into())
+                    .collect(),
                 model: m,
                 ready,
                 credential_source,
@@ -929,7 +952,19 @@ pub fn resolve_model_selection(env: &ProviderEnv) -> Result<ModelSelection, Prov
         // x-api-key). The convenience aliases ("sonnet", "opus", "haiku") track
         // the newest ids. Direct-API-key auth for these ids is intentionally
         // not wired (provision later if a custom-model API path is needed).
-        "claude-sonnet-5" | "claude-sonnet" | "sonnet" => Ok(model_selection(
+        "claude-sonnet-5-5"
+        | "claude-code-sonnet-5-5"
+        | "claude-sonnet"
+        | "sonnet"
+        | "claude-code-sonnet"
+        | "cc-sonnet" => Ok(model_selection(
+            ProviderId::ClaudeCode,
+            "claude-sonnet-5-5",
+            ANTHROPIC_BASE_URL,
+            1_000_000,
+            128_000,
+        )),
+        "claude-sonnet-5" => Ok(model_selection(
             ProviderId::ClaudeCode,
             "claude-sonnet-5",
             ANTHROPIC_BASE_URL,
@@ -1022,7 +1057,7 @@ pub fn resolve_model_selection(env: &ProviderEnv) -> Result<ModelSelection, Prov
             200_000,
             16_384,
         )),
-        "claude-code-sonnet-5" | "claude-code-sonnet" | "cc-sonnet" => Ok(model_selection(
+        "claude-code-sonnet-5" => Ok(model_selection(
             ProviderId::ClaudeCode,
             "claude-code-sonnet-5",
             ANTHROPIC_BASE_URL,
@@ -1876,6 +1911,28 @@ mod tests {
     }
 
     #[test]
+    fn sonnet_aliases_track_5_5_and_pinned_ids_stay_routable() {
+        for alias in [
+            "sonnet",
+            "claude-sonnet",
+            "claude-sonnet-5-5",
+            "cc-sonnet",
+            "claude-code-sonnet",
+            "claude-code-sonnet-5-5",
+        ] {
+            let selection = resolve_model_selection(&env(&[("OCEAN_MODEL", alias)])).unwrap();
+            assert_eq!(selection.provider, ProviderId::ClaudeCode, "{alias}");
+            assert_eq!(selection.model, "claude-sonnet-5-5", "{alias}");
+            assert_eq!(selection.context_window, 1_000_000);
+            assert_eq!(selection.max_output_tokens, 128_000);
+        }
+        for id in ["claude-sonnet-5", "claude-code-sonnet-5"] {
+            let selection = resolve_model_selection(&env(&[("OCEAN_MODEL", id)])).unwrap();
+            assert_eq!(selection.model, id);
+        }
+    }
+
+    #[test]
     fn fable_aliases_track_5_1_and_legacy_ids_stay_routable() {
         for alias in [
             "claude-fable-5-1",
@@ -2028,6 +2085,33 @@ mod tests {
     }
 
     #[test]
+    fn current_catalog_efforts_match_model_constraints() {
+        for id in [
+            "gpt-6.1-sol",
+            "gpt-6-astra",
+            "claude-fable-5-1",
+            "claude-opus-5-5",
+        ] {
+            let levels = model_effort_levels(id);
+            assert!(levels.contains(&"max"));
+            assert!(!levels.contains(&"off"));
+            assert!(!levels.contains(&"minimal"));
+        }
+        for id in ["gpt-6-sol", "gpt-6-luna", "claude-sonnet-5-5"] {
+            assert!(model_effort_levels(id).contains(&"off"));
+            assert!(model_effort_levels(id).contains(&"max"));
+        }
+        assert!(!model_effort_levels("claude-haiku-4-5").contains(&"max"));
+        let catalog = known_models_with_readiness(&ProviderEnv::default());
+        let sol = catalog
+            .iter()
+            .find(|model| model.model.id == "gpt-6.1-sol")
+            .unwrap();
+        assert!(sol.effort_levels.iter().any(|level| level == "max"));
+        assert!(!sol.ready);
+    }
+
+    #[test]
     fn known_models_are_all_routable() {
         // Every model the public picker advertises must actually route through
         // resolve_model_selection (passed as OCEAN_MODEL, the way a client
@@ -2104,7 +2188,7 @@ mod tests {
             // absent here too.
             "claude-fable-5-1",
             "claude-opus-5-5",
-            "claude-sonnet-5",
+            "claude-sonnet-5-5",
             "claude-haiku-4-5",
             // API-cased ids: `resolve_model_selection` returns these as
             // current.model, and known_models() advertises the same string.
@@ -2474,7 +2558,7 @@ mod tests {
         let listed: std::collections::BTreeSet<String> =
             known_models().into_iter().map(|m| m.id).collect();
         assert!(listed.contains("claude-fable-5-1"));
-        assert!(listed.contains("claude-sonnet-5"));
+        assert!(listed.contains("claude-sonnet-5-5"));
         assert!(listed.contains("claude-opus-5-5"));
         assert!(listed.contains("claude-haiku-4-5"));
 

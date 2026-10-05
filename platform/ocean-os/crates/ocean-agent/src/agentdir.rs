@@ -429,6 +429,16 @@ impl std::error::Error for ResolveError {}
 // Lint / validation
 // ---------------------------------------------------------------------------
 
+// The menu lists current models; authored configs may pin older routable ids.
+fn routable_production_model(model: &str) -> bool {
+    let env = ocean_providers::ProviderEnv {
+        vars: BTreeMap::from([("OCEAN_MODEL".into(), model.into())]),
+        ..Default::default()
+    };
+    ocean_providers::resolve_model_selection(&env)
+        .is_ok_and(|selection| !matches!(selection.provider, ocean_providers::ProviderId::Fake))
+}
+
 /// Severity of a lint diagnostic produced by [`validate`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -533,13 +543,11 @@ pub fn validate(def: &AgentDef) -> Vec<Diagnostic> {
     }
 
     // --- model alias -------------------------------------------------------
-    // A model id that's not in the known-models catalogue will silently fall
-    // back to the daemon's global model at invoke time (fail-soft path in
-    // `AgentRuntime::prompt`). Surface it as an error so the operator can
-    // see the typo/outdated alias before wasting a turn.
+    // Validate routes, not menu membership: older pinned ids and convenience
+    // aliases remain valid even when the current picker no longer lists them.
     if let Some(model) = &def.config.model {
         let known = crate::known_models();
-        if !known.iter().any(|m| m.id == *model) {
+        if !routable_production_model(model) {
             let mut known_ids: Vec<&str> = known.iter().map(|m| m.id.as_str()).collect();
             known_ids.sort_unstable();
             diags.push(Diagnostic::error_at(
@@ -815,7 +823,7 @@ mod tests {
             .as_deref()
             .expect("example declares a model");
         assert!(
-            crate::known_models().iter().any(|m| m.id == model),
+            routable_production_model(model),
             "example model {model:?} must be a known Ocean alias",
         );
         assert!(def.config.description.is_some());
@@ -934,6 +942,21 @@ mod tests {
 
     /// A bad model alias in agent.toml must produce an Error diagnostic
     /// that names the bad alias.
+    #[test]
+    fn production_model_validation_keeps_pinned_ids_and_rejects_test_routes() {
+        for model in [
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "opus",
+            "claude-opus-5-5",
+        ] {
+            assert!(routable_production_model(model), "{model}");
+        }
+        for model in ["fake", "fake-ok", "not-a-model"] {
+            assert!(!routable_production_model(model), "{model}");
+        }
+    }
+
     #[test]
     fn validate_bad_model_alias_is_error() {
         let root = std::env::temp_dir().join(format!(

@@ -2235,6 +2235,8 @@ pub struct ModelInfo {
     /// Credential readiness from the daemon; absent on older daemons.
     #[serde(default)]
     pub ready: Option<bool>,
+    #[serde(default)]
+    pub effort_levels: Option<Vec<String>>,
 }
 
 /// Token usage for a turn (or summed for a session), mirrored from the daemon's
@@ -7827,7 +7829,7 @@ const MODEL_OVERRIDE_STORAGE_KEY: &str = "ocean.model_override";
 /// `ocean_protocol::ThinkingLevel` (serde lowercase) and with the composer's
 /// dropdown in `app.rs` — otherwise a level the dropdown offers gets silently
 /// dropped on reload by this restore filter. (OCEAN-202 added minimal + xhigh.)
-const THINKING_LEVELS: &[&str] = &["off", "minimal", "low", "medium", "high", "xhigh"];
+const THINKING_LEVELS: &[&str] = &["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 /// The persisted per-turn thinking level, restored on construction. Filtered to
 /// known values so only a valid `ThinkingLevel` string is ever loaded.
@@ -9763,13 +9765,13 @@ mod tests {
     #[test]
     fn thinking_level_values_match_daemon_serialization() {
         // These are the exact lowercase strings the daemon's `ThinkingLevel`
-        // serde enum deserializes (off/minimal/low/medium/high/xhigh). The
+        // serde enum deserializes (off/minimal/low/medium/high/xhigh/max). The
         // composer's selector emits these and they flow straight onto
         // `AgentTurnRequest::thinking_level`; this same list also gates which
         // persisted value survives a reload (see load_persisted_thinking_level).
         assert_eq!(
             THINKING_LEVELS,
-            &["off", "minimal", "low", "medium", "high", "xhigh"],
+            &["off", "minimal", "low", "medium", "high", "xhigh", "max"],
         );
     }
 
@@ -9781,7 +9783,7 @@ mod tests {
         // the filter is `THINKING_LEVELS.contains(&v)`, so assert each offered
         // value is contained. (The dropdown's empty "" = no override is not a
         // stored level and is intentionally absent.)
-        for level in ["off", "minimal", "low", "medium", "high", "xhigh"] {
+        for level in ["off", "minimal", "low", "medium", "high", "xhigh", "max"] {
             assert!(
                 THINKING_LEVELS.contains(&level),
                 "thinking level `{level}` is offered by the composer but would be \
