@@ -188,6 +188,21 @@ Rules:
 
 Web surface session UI:
 
+- A `?session=<id>` link names the chat to open. The TUI's `/web` and `/beam`
+  hand a session over with exactly that URL, so on boot it wins over the
+  session this browser last used; only a well-formed session id is honoured,
+  a link to a session this daemon does not have falls back to the persisted
+  one untouched, and the parameter is dropped from the address bar once
+  honoured so a reload does not jump back. The URL shape is a cross-client
+  contract with `ocean-tui`; change it only together.
+- The composer treats a `/` line as a command only when it names one
+  (`CommandRegistry::classify_slash`). The popover ranks an exact alias, then
+  prefixes, then scattered matches, because Enter runs the first row. With
+  arguments typed, only an exact alias or an unambiguous prefix runs; an
+  unknown or unavailable command keeps the draft and shows a hint; a path or
+  prose that merely starts with a slash is sent as a message. Selection resets
+  whenever the query changes. A bare `/thinking` shows the choices and never
+  changes the level.
 - The sessions panel is project-first: prefer daemon-provided `owning_project`,
   fall back to exact `workspace_root`/`cwd` matches against the project catalog,
   and put everything else in an explicit `Other` bucket.

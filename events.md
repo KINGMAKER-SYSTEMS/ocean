@@ -264,3 +264,15 @@ Corrected shared model/effort compatibility fallback. A saved provider-qualified
 
 Validation: all 899 Surface tests, strict WASM Clippy and docs-check pass. New regressions cover qualified saved API/subscription routes, missing-vs-empty metadata and legacy Max exclusion. The actual editor renderer with a synthetic host adapter also confirms Max resets to Default when switching to a model supporting only Low/High, and returns to API/Max correctly; this is renderer evidence, not native editor/account acceptance. Screenshot: /private/tmp/ocean-model-effort-verified.png. Owning Surface contract updated; root/index docs unchanged because ownership boundaries remain unchanged. No installation, live provider calls or credential mutations in this slice. Fresh review, other-account acceptance and operated-runtime compatibility remain unresolved.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [17:53] [05-10-26]
+agent: [claude] [claude code]
+worktree: [claude/surface-slash-and-session-handoff] [/Users/risingtidesdev/dev/ocean-claude-audit-b]
+type: [bug report]
+area: [frontend] [testing]
+
+Fixed Surface's composer slash handling and the TUI hand-off link. The slash popover matched by unranked subsequence and Enter ran the first row, so /h ran /thinking (which, bare, silently reset the effort level), /se opened Browser, /cl opened Council and /m toggled Rooms; matches are now ranked exact, prefix, then scattered. A / line was cleared whatever happened, so /etc/hosts followed by a question was thrown away as an unknown command and a sentence beginning /so toggled the Sessions panel; a pure classifier now runs a command only when the line names one, keeps a mistyped or unavailable command in the composer with a hint, and sends a path or prose as the message it is. Arguments are the whole remainder instead of one token, the highlight resets when the query changes, a bare /thinking shows the choices, and /thinking accepts max. The TUI's /web and /beam build a ?session=<id> URL that nothing in Surface read, so the link opened whatever session the browser last used; boot now honours a well-formed session id from the URL ahead of the persisted session, falls back untouched when the daemon does not have it, and drops the parameter once honoured.
+
+Validation: all Surface native tests pass (878 in the UI crate plus the integration suites) with new pure tests for ranking, classification, arguments, the session link and query rewriting; rustfmt check, strict wasm clippy, the wasm check, the wasm test build and the proxy check pass. The Trunk bundle, Tauri shell and extension are left to the hosted Build Surface job; no browser session was driven by hand. Surface devlog updated; the TUI contract already described this URL as consumed at boot.
+_________________________________________________________________________________

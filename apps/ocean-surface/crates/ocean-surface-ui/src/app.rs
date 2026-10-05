@@ -17,7 +17,9 @@ use crate::deck::DeckPanel;
 use crate::host::DaemonStatus;
 use crate::island_dynamic::{DynamicIsland, IslandMode};
 use crate::model::{Block, Role, Turn};
-use crate::palette::{Command, CommandRegistry, CommandScope, PaletteView};
+use crate::palette::{
+    slash_arguments, Command, CommandRegistry, CommandScope, PaletteView, SlashInput,
+};
 use crate::rooms::Rooms;
 use crate::rooms_workspace::RoomsWorkspace;
 use crate::sessions::SessionsPanel;
@@ -537,6 +539,38 @@ fn scope_label(scope: CommandScope) -> &'static str {
     }
 }
 
+/// Act on a classified `/` line. Returns `false` when the line is a message
+/// the caller should send. A line that names no usable command stays in the
+/// composer with a hint instead of being thrown away.
+fn apply_slash_input(
+    outcome: SlashInput,
+    text: &str,
+    input: RwSignal<String>,
+    daemon: &Daemon,
+    registry: &CommandRegistry,
+) -> bool {
+    match outcome {
+        SlashInput::Command { id, args } => {
+            run_slash(id, &args, daemon, registry);
+            input.set(String::new());
+        }
+        SlashInput::Disabled => {
+            daemon
+                .status
+                .set("that command is not available here".into());
+            input.set(text.to_string());
+        }
+        SlashInput::Unknown => {
+            daemon
+                .status
+                .set("unknown command \u{2014} type / to see them".into());
+            input.set(text.to_string());
+        }
+        SlashInput::Prompt => return false,
+    }
+    true
+}
+
 /// Dispatch a composer `/` command. Arg-taking commands (`/model`, `/thinking`)
 /// are handled here so the slash popover and the ⌘K palette run identical code;
 /// `/clear` + `/help` (and every other id) delegate to the registry's own `run`
@@ -555,20 +589,28 @@ fn run_slash(id: &str, args: &str, daemon: &Daemon, registry: &CommandRegistry) 
             }
             true
         }
-        "thinking" => match args {
-            "" | "default" => {
+        "thinking" => match args.to_lowercase().as_str() {
+            // A bare `/thinking` asks what the choices are. It used to reset the
+            // level silently, and `/h` + Enter landed here.
+            "" => {
+                daemon
+                    .status
+                    .set("use /thinking off|minimal|low|medium|high|xhigh|max|default".into());
+                true
+            }
+            "default" => {
                 daemon.set_thinking_level(None);
                 daemon.status.set("thinking \u{2192} default".into());
                 true
             }
-            "off" | "minimal" | "low" | "medium" | "high" | "xhigh" => {
-                daemon.set_thinking_level(Some(args.into()));
-                daemon.status.set(format!("thinking \u{2192} {args}"));
+            level @ ("off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max") => {
+                daemon.set_thinking_level(Some(level.into()));
+                daemon.status.set(format!("thinking \u{2192} {level}"));
                 true
             }
             _ => {
                 daemon.status.set(format!(
-                    "unknown level: {args} (off|minimal|low|medium|high|xhigh|default)"
+                    "unknown level: {args} (off|minimal|low|medium|high|xhigh|max|default)"
                 ));
                 true
             }
@@ -1916,7 +1958,7 @@ pub fn App() -> impl IntoView {
             run: Callback::new(move |_| {
                 daemon_thinking
                     .status
-                    .set("use /thinking off|minimal|low|medium|high|xhigh|default".into());
+                    .set("use /thinking off|minimal|low|medium|high|xhigh|max|default".into());
             }),
         });
         let daemon_help = daemon.clone();
@@ -1989,19 +2031,21 @@ pub fn App() -> impl IntoView {
     });
     let slash_open =
         Signal::derive(move || input.get().starts_with('/') && !slash_items.get().is_empty());
+    // A new query is a new list. Keeping the old index left the highlight on
+    // whatever row it last reached, so Enter could run a command the user
+    // never looked at.
+    Effect::new(move |_| {
+        slash_query.track();
+        slash_selected.set(0);
+    });
     // One stable pick callback shared by the popover click + Send-button path.
     // Args are the text after the first whitespace (empty for bare commands).
     let on_slash_pick = Callback::new({
         let daemon = daemon.clone();
         let registry = registry.clone();
         move |id: String| {
-            let args = input
-                .get_untracked()
-                .split_whitespace()
-                .nth(1)
-                .unwrap_or("")
-                .to_string();
-            run_slash(&id, &args, &daemon, &registry);
+            let text = input.get_untracked();
+            run_slash(&id, slash_arguments(&text), &daemon, &registry);
             input.set(String::new());
         }
     });
@@ -2225,24 +2269,20 @@ pub fn App() -> impl IntoView {
                 text = "Review the attached context.".into();
             }
             input.set(String::new());
-            // A `/`-prefixed input is a slash command, never a prompt. Route
-            // it through the same dispatcher the popover uses (best subseq
-            // match on the command-name token) so clicking Send on `/model
-            // gpt-5` behaves like pressing Enter in the menu; an unknown or
-            // disabled token clears with a hint. This closes the path the
-            // textarea keydown guard can't reach (the submit button).
-            if text.starts_with('/') {
-                let rest = text.strip_prefix('/').unwrap_or("");
-                let name = rest.split_whitespace().next().unwrap_or("");
-                let args = rest.split_whitespace().nth(1).unwrap_or("");
-                match registry.slash_filter(name).into_iter().next() {
-                    Some(cmd) if cmd.enabled.get_untracked() => {
-                        run_slash(cmd.id, args, &daemon, &registry);
-                    }
-                    _ => daemon
-                        .status
-                        .set("unknown command \u{2014} type / to see them".into()),
-                }
+            // A `/` line runs a command only when it names one. Clicking Send
+            // on `/model gpt-5` behaves like Enter in the menu; a mistyped
+            // name stays in the composer with a hint; a path or prose that
+            // merely starts with a slash is sent as the message it is.
+            if text.starts_with('/')
+                && apply_slash_input(
+                    registry.classify_slash(&text),
+                    &text,
+                    input,
+                    &daemon,
+                    &registry,
+                )
+            {
+                // Handled as a command, or kept as a draft with a hint.
             } else {
                 let images = attachments
                     .iter()
@@ -2942,6 +2982,13 @@ pub fn App() -> impl IntoView {
                                             // moving/clamping `slash_selected`
                                             // over it tracks the visible rows 1:1.
                                             let len = items.len();
+                                            // Once arguments follow the name,
+                                            // Enter submits the line as typed
+                                            // and the form handler classifies
+                                            // it, so the highlight cannot pick
+                                            // a different command.
+                                            let submits_typed_line = key == "Enter"
+                                                && !slash_arguments(&text).is_empty();
                                             match key.as_str() {
                                                 "ArrowDown" => {
                                                     ev.prevent_default();
@@ -2957,7 +3004,7 @@ pub fn App() -> impl IntoView {
                                                     });
                                                     return;
                                                 }
-                                                "Enter" | "Tab" => {
+                                                "Enter" | "Tab" if !submits_typed_line => {
                                                     ev.prevent_default();
                                                     let idx = clamp_selection(
                                                         slash_selected.get_untracked(),
@@ -2965,24 +3012,21 @@ pub fn App() -> impl IntoView {
                                                     );
                                                     let row = &items[idx];
                                                     if row.enabled {
-                                                        let args = text
-                                                            .split_whitespace()
-                                                            .nth(1)
-                                                            .unwrap_or("")
-                                                            .to_string();
                                                         run_slash(
                                                             &row.id,
-                                                            &args,
+                                                            slash_arguments(&text),
                                                             &daemon,
                                                             &registry,
                                                         );
+                                                        input.set(String::new());
                                                     } else {
+                                                        // Listed but greyed: say
+                                                        // so and keep the draft.
                                                         daemon.status.set(
-                                                            "unknown command \u{2014} type / to see them"
+                                                            "that command is not available here"
                                                                 .into(),
                                                         );
                                                     }
-                                                    input.set(String::new());
                                                     return;
                                                 }
                                                 "Escape" => {

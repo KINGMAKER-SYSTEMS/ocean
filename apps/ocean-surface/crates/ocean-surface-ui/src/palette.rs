@@ -141,26 +141,114 @@ impl CommandRegistry {
     }
 
     /// Filter commands that carry a slash alias by a subsequence match of
-    /// `query` against the alias (leading `/` on either side ignored). An
-    /// empty query returns every command with a slash alias in registry
-    /// order. Drives the composer `/` popover.
+    /// `query` against the alias (leading `/` on either side ignored), best
+    /// match first: an exact alias, then aliases the query is a prefix of,
+    /// then scattered subsequence matches, each in registry order. An empty
+    /// query returns every command with a slash alias in registry order.
+    /// Drives the composer `/` popover.
+    ///
+    /// The order matters because Enter runs the first row. Unranked, `/h` ran
+    /// `/thinking` (t-**h**-inking, registered earlier) instead of `/help`.
     pub fn slash_filter(&self, query: &str) -> Vec<Command> {
         let q = query.trim().trim_start_matches('/').to_lowercase();
-        self.commands
+        let mut ranked: Vec<(u8, Command)> = self
+            .commands
             .get_untracked()
             .into_iter()
-            .filter(|cmd| {
-                let Some(alias) = cmd.slash else {
-                    return false;
+            .filter_map(|cmd| {
+                let alias = cmd.slash?.trim_start_matches('/').to_lowercase();
+                let rank = if q.is_empty() || alias == q {
+                    0
+                } else if alias.starts_with(&q) {
+                    1
+                } else if slash_subseq(&alias, &q) {
+                    2
+                } else {
+                    return None;
                 };
-                let target = alias.trim_start_matches('/');
-                if q.is_empty() {
-                    return true;
-                }
-                slash_subseq(target, &q)
+                Some((rank, cmd))
             })
-            .collect()
+            .collect();
+        // Stable: registry order is kept within a rank.
+        ranked.sort_by_key(|(rank, _)| *rank);
+        ranked.into_iter().map(|(_, cmd)| cmd).collect()
     }
+
+    /// Decide what a composer line that begins with `/` means.
+    ///
+    /// The line used to be matched fuzzily and then cleared whatever happened,
+    /// so `/etc/hosts what does this do` was thrown away with "unknown
+    /// command" and `/so what do you think` toggled the Sessions panel.
+    pub fn classify_slash(&self, text: &str) -> SlashInput {
+        let Some(rest) = text.trim_start().strip_prefix('/') else {
+            return SlashInput::Prompt;
+        };
+        let (token, args) = match rest.split_once(char::is_whitespace) {
+            Some((token, args)) => (token, args.trim()),
+            None => (rest.trim_end(), ""),
+        };
+        if token.is_empty() {
+            return SlashInput::Unknown;
+        }
+        // A command name is letters, digits and hyphens. Anything else is a
+        // path or prose that happens to start with a slash.
+        if !token.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            return SlashInput::Prompt;
+        }
+        let name = token.to_lowercase();
+        let alias = |cmd: &Command| {
+            cmd.slash
+                .unwrap_or("")
+                .trim_start_matches('/')
+                .to_lowercase()
+        };
+        let ranked = self.slash_filter(&name);
+        let chosen = if let Some(exact) = ranked.iter().find(|cmd| alias(cmd) == name) {
+            Some(exact)
+        } else if args.is_empty() {
+            // Still naming the command: take the best match, as the popover shows.
+            ranked.first()
+        } else {
+            // Arguments follow, so the name is finished. Only an unambiguous
+            // prefix is close enough to act on.
+            let mut prefixed = ranked.iter().filter(|cmd| alias(cmd).starts_with(&name));
+            match (prefixed.next(), prefixed.next()) {
+                (Some(only), None) => Some(only),
+                _ => None,
+            }
+        };
+        match chosen {
+            Some(cmd) if cmd.enabled.get_untracked() => SlashInput::Command {
+                id: cmd.id,
+                args: args.to_string(),
+            },
+            Some(_) => SlashInput::Disabled,
+            None => SlashInput::Unknown,
+        }
+    }
+}
+
+/// The text after the command name on a `/` line, trimmed; empty when the
+/// line is only a name.
+pub fn slash_arguments(text: &str) -> &str {
+    text.trim_start()
+        .strip_prefix('/')
+        .and_then(|rest| rest.split_once(char::is_whitespace))
+        .map_or("", |(_, args)| args.trim())
+}
+
+/// What a composer line beginning with `/` means. See
+/// [`CommandRegistry::classify_slash`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SlashInput {
+    /// Run this command with the text that follows its name.
+    Command { id: &'static str, args: String },
+    /// The command exists but is not available on this host.
+    Disabled,
+    /// It reads as a command and matches none: keep the draft and say so.
+    Unknown,
+    /// Not a command (a path, prose): send it as a message.
+    Prompt,
 }
 
 impl Default for CommandRegistry {
@@ -172,9 +260,8 @@ impl Default for CommandRegistry {
 // ── Fuzzy matching ─────────────────────────────────────────────────────────
 
 /// Subsequence match for slash aliases. Case-insensitive; returns true when
-/// every char of `query` appears in order inside `target`. Mirrors the shape
-/// of ocean-tui's `shell::slash::subseq_score` (a boolean gate — scoring is
-/// unnecessary for the short alias set).
+/// every char of `query` appears in order inside `target`. This is only the
+/// gate; [`CommandRegistry::slash_filter`] ranks what passes it.
 fn slash_subseq(target: &str, query: &str) -> bool {
     let target = target.to_lowercase();
     let mut ti = target.chars().peekable();
@@ -682,5 +769,126 @@ mod tests {
         registry.register(slash_filter_cmd("toggle-files", Some("/files")));
         let ids: Vec<&str> = registry.slash_filter("file").iter().map(|c| c.id).collect();
         assert_eq!(ids, vec!["toggle-files"]);
+    }
+
+    /// The composer's commands in their registration order.
+    fn composer_registry() -> CommandRegistry {
+        let registry = CommandRegistry::new();
+        for (id, alias) in [
+            ("open-floor", "/floor"),
+            ("new-session", "/new"),
+            ("toggle-files", "/files"),
+            ("toggle-repo", "/repo"),
+            ("toggle-browser", "/browser"),
+            ("toggle-sessions", "/sessions"),
+            ("toggle-rooms", "/rooms"),
+            ("open-council", "/council"),
+            ("clear", "/clear"),
+            ("model", "/model"),
+            ("thinking", "/thinking"),
+            ("help", "/help"),
+        ] {
+            registry.register(slash_filter_cmd(id, Some(alias)));
+        }
+        registry
+    }
+
+    fn first_match(registry: &CommandRegistry, query: &str) -> &'static str {
+        registry.slash_filter(query)[0].id
+    }
+
+    /// Enter runs the first row, so a prefix has to outrank a scattered match
+    /// that merely comes earlier in the registry.
+    #[test]
+    fn slash_filter_ranks_prefixes_above_scattered_matches() {
+        let registry = composer_registry();
+        // Each of these used to pick the scattered match named in the comment.
+        assert_eq!(first_match(&registry, "h"), "help"); // thinking
+        assert_eq!(first_match(&registry, "se"), "toggle-sessions"); // browser
+        assert_eq!(first_match(&registry, "cl"), "clear"); // council
+        assert_eq!(first_match(&registry, "m"), "model"); // rooms
+        assert_eq!(first_match(&registry, "new"), "new-session");
+
+        // Scattered matches still appear, after the prefixes.
+        let ids: Vec<&str> = registry.slash_filter("h").iter().map(|c| c.id).collect();
+        assert_eq!(ids, vec!["help", "thinking"]);
+    }
+
+    #[test]
+    fn classify_slash_runs_commands_with_their_full_arguments() {
+        let registry = composer_registry();
+        assert_eq!(
+            registry.classify_slash("/model openai/gpt-6 sol"),
+            SlashInput::Command {
+                id: "model",
+                args: "openai/gpt-6 sol".into()
+            }
+        );
+        assert_eq!(
+            registry.classify_slash("/Thinking high"),
+            SlashInput::Command {
+                id: "thinking",
+                args: "high".into()
+            }
+        );
+        // No arguments yet: the best match, as the popover highlights it.
+        assert_eq!(
+            registry.classify_slash("/h"),
+            SlashInput::Command {
+                id: "help",
+                args: String::new()
+            }
+        );
+        // With arguments, an unambiguous prefix still counts.
+        assert_eq!(
+            registry.classify_slash("/mod gpt-5.5"),
+            SlashInput::Command {
+                id: "model",
+                args: "gpt-5.5".into()
+            }
+        );
+    }
+
+    #[test]
+    fn classify_slash_never_eats_prose_or_paths() {
+        let registry = composer_registry();
+        // A path is a message.
+        assert_eq!(
+            registry.classify_slash("/etc/hosts what does this do"),
+            SlashInput::Prompt
+        );
+        assert_eq!(registry.classify_slash("plain message"), SlashInput::Prompt);
+        // "so" is scattered inside "sessions". With words after it, that is
+        // not close enough to toggle a panel and discard the sentence.
+        assert_eq!(
+            registry.classify_slash("/so what do you think"),
+            SlashInput::Unknown
+        );
+        // Ambiguous prefix with arguments: /repo or /rooms?
+        assert_eq!(registry.classify_slash("/r now"), SlashInput::Unknown);
+        assert_eq!(registry.classify_slash("/zz"), SlashInput::Unknown);
+        assert_eq!(registry.classify_slash("/"), SlashInput::Unknown);
+    }
+
+    #[test]
+    fn slash_arguments_is_everything_after_the_name() {
+        assert_eq!(
+            slash_arguments("/model openai/gpt-6 sol"),
+            "openai/gpt-6 sol"
+        );
+        assert_eq!(slash_arguments("/model   gpt-5.5  "), "gpt-5.5");
+        assert_eq!(slash_arguments("/model"), "");
+        assert_eq!(slash_arguments("/model "), "");
+        assert_eq!(slash_arguments("plain text here"), "");
+    }
+
+    #[test]
+    fn classify_slash_reports_a_disabled_command_as_disabled() {
+        let registry = composer_registry();
+        registry.register(Command {
+            enabled: Signal::derive(|| false),
+            ..slash_filter_cmd("workspace-toggle", Some("/workspace"))
+        });
+        assert_eq!(registry.classify_slash("/workspace"), SlashInput::Disabled);
     }
 }

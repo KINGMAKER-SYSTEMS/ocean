@@ -2737,6 +2737,21 @@ impl Daemon {
                         DEFAULT_LIVEKIT_ROOM_ID,
                     ));
             }
+            // A `?session=<id>` link names the chat to open: it is how the
+            // TUI's `/web` and `/beam` hand a session to this surface. It wins
+            // over the session this browser last used. A link to a session this
+            // daemon does not have falls through to that one, untouched.
+            if let Some(id) = should_restore_session(
+                requested_session().as_deref(),
+                daemon.session_id.get_untracked().as_deref(),
+            ) {
+                if try_restore_session(&daemon, id).await {
+                    clear_requested_session();
+                    daemon.fetch_models();
+                    daemon.fetch_projects();
+                    return;
+                }
+            }
             // Restore persisted session before connecting fresh.
             if let Some(id) = should_restore_session(
                 load_persisted_session().as_deref(),
@@ -7943,6 +7958,16 @@ fn should_restore_session<'a>(persisted: Option<&'a str>, active: Option<&str>) 
 /// missing session) the persisted key is cleared and this returns `false` so
 /// the caller falls through to the normal boot path with state untouched.
 async fn restore_session_or_clear(daemon: &Daemon, id: &str) -> bool {
+    if try_restore_session(daemon, id).await {
+        return true;
+    }
+    clear_persisted_session();
+    false
+}
+
+/// Verify `id` exists on the daemon and switch to it. Returns `false`, with
+/// all state untouched, when it does not or the daemon cannot be asked.
+async fn try_restore_session(daemon: &Daemon, id: &str) -> bool {
     let url = daemon.url.get_untracked();
     let get_url = format!(
         "{}/v1/sessions/{}",
@@ -7966,8 +7991,86 @@ async fn restore_session_or_clear(daemon: &Daemon, id: &str) -> bool {
             log::error!("session restore fetch error: {err}");
         }
     }
-    clear_persisted_session();
     false
+}
+
+/// The session a `?session=<id>` query names, if it is a well-formed session
+/// id. Anything else in the query is ignored.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn session_from_query(search: &str) -> Option<String> {
+    search
+        .trim_start_matches('?')
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .find(|(key, _)| *key == "session")
+        .map(|(_, value)| value)
+        .filter(|value| is_session_id(value))
+        .map(str::to_string)
+}
+
+/// Session ids are UUIDs: 8-4-4-4-12 hex digits.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn is_session_id(value: &str) -> bool {
+    value.len() == 36
+        && value.char_indices().all(|(index, c)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                c == '-'
+            } else {
+                c.is_ascii_hexdigit()
+            }
+        })
+}
+
+/// `search` without its `session` parameter, keeping every other parameter in
+/// order. Empty when nothing else remains.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn query_without_session(search: &str) -> String {
+    let kept: Vec<&str> = search
+        .trim_start_matches('?')
+        .split('&')
+        .filter(|pair| !pair.is_empty() && pair.split('=').next() != Some("session"))
+        .collect();
+    if kept.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", kept.join("&"))
+    }
+}
+
+/// The session the page URL asks for (`?session=<id>`), if any.
+fn requested_session() -> Option<String> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        web_sys::window()
+            .and_then(|window| window.location().search().ok())
+            .and_then(|search| session_from_query(&search))
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        None
+    }
+}
+
+/// Drop `session` from the address bar once the link has been honoured, so a
+/// reload restores whatever session the user is on by then instead of jumping
+/// back to the linked one.
+fn clear_requested_session() {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let location = window.location();
+        let (Ok(path), Ok(search), Ok(hash)) =
+            (location.pathname(), location.search(), location.hash())
+        else {
+            return;
+        };
+        let url = format!("{path}{}{hash}", query_without_session(&search));
+        if let Ok(history) = window.history() {
+            let _ = history.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&url));
+        }
+    }
 }
 
 /// Resolve the daemon URL at startup from compile-time env → page origin → loopback.
@@ -11863,6 +11966,49 @@ mod tests {
     }
 
     // -- session persistence (should_restore_session pure helper) --
+
+    /// The TUI's `/web` and `/beam` build `<surface>/?session=<id>`. Nothing
+    /// read it, so the link opened whatever session the browser last used.
+    #[test]
+    fn session_link_names_the_session_to_open() {
+        let id = "3f2b8c1e-9a4d-4e7b-8f10-0123456789ab";
+        assert_eq!(
+            session_from_query(&format!("?session={id}")).as_deref(),
+            Some(id)
+        );
+        assert_eq!(
+            session_from_query(&format!("?float=1&session={id}&x=y")).as_deref(),
+            Some(id)
+        );
+        // Only a well-formed session id is honoured.
+        for junk in [
+            "",
+            "?",
+            "?session=",
+            "?session=latest",
+            "?session=../../etc/passwd",
+            "?session=3f2b8c1e-9a4d-4e7b-8f10-0123456789abXYZ",
+            "?session=3f2b8c1e9a4d4e7b8f100123456789ab0000",
+            "?sessions=3f2b8c1e-9a4d-4e7b-8f10-0123456789ab",
+        ] {
+            assert_eq!(session_from_query(junk), None, "{junk}");
+        }
+        // The link wins only when no session is active yet, like a persisted one.
+        assert_eq!(should_restore_session(Some(id), None), Some(id));
+        assert_eq!(should_restore_session(Some(id), Some("active")), None);
+    }
+
+    #[test]
+    fn honoured_session_link_leaves_the_rest_of_the_query_alone() {
+        let id = "3f2b8c1e-9a4d-4e7b-8f10-0123456789ab";
+        assert_eq!(query_without_session(&format!("?session={id}")), "");
+        assert_eq!(
+            query_without_session(&format!("?float=1&session={id}&x=y")),
+            "?float=1&x=y"
+        );
+        assert_eq!(query_without_session("?float=1"), "?float=1");
+        assert_eq!(query_without_session(""), "");
+    }
 
     #[test]
     fn should_restore_session_returns_id_when_persisted_and_no_active() {
