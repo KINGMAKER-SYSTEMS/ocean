@@ -38,9 +38,9 @@ pub const CONTEXT_SOURCE_LAST_COMPLETED_ROUND: &str = "provider_reported_last_co
 /// Truthful context-window occupancy measured at one provider request boundary.
 /// `used_tokens` is the provider-reported total token consumption for one
 /// request, not cumulative turn usage or a local estimate. For a completed
-/// turn it is the final round. For a failed, cancelled or timed-out turn it is
-/// the last round that completed, so tool results saved after that request are
-/// not in it.
+/// turn it is the final round. For a failed, cancelled or timed-out turn, or
+/// one stopped at its turn limit, it is the last round that completed, so tool
+/// results saved after that request are not in it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextUsage {
     pub used_tokens: u64,
@@ -443,7 +443,7 @@ pub struct AgentTurnResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wall_ms: Option<u64>,
     /// Provider context measurement for the effective model: the final round,
-    /// or the last completed round when the turn did not complete (see
+    /// or the last completed round when results were saved after it (see
     /// [`ContextUsage::source`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_usage: Option<ContextUsage>,
@@ -684,7 +684,7 @@ pub enum AgentTurnEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tokens_per_second: Option<f64>,
         /// Provider context measurement: the final round, or the last completed
-        /// round when the turn did not complete (see [`ContextUsage::source`]).
+        /// round when results were saved after it (see [`ContextUsage::source`]).
         /// `None` means unknown; clients must not substitute cumulative input
         /// usage or a local estimate.
         #[serde(default, skip_serializing_if = "Option::is_none")]

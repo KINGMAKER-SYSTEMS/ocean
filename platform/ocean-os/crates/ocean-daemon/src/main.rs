@@ -8569,10 +8569,11 @@ fn estimate_visible_tokens(text: &str) -> u64 {
 /// Never substitute the cumulative `usage.input`: multi-round turns resend
 /// prior context and summing those requests overstates current occupancy.
 ///
-/// A reading taken before a failure is a floor rather than the final request,
-/// and is labelled as such. The agent says which it is: the turn's `ok` does
-/// not, because a turn can succeed and still carry the reading of a stop-hook
-/// continuation that failed.
+/// A reading taken before a failure or a turn-limit stop is a floor rather
+/// than the final request, and is labelled as such. The agent says which it
+/// is: the turn's `ok` does not, because a turn can succeed and still carry
+/// the reading of a stop-hook continuation that failed, or have run out of
+/// rounds on a tool call.
 fn context_usage_of(usage: &ocean_core::TokenUsage, measured_at_ms: i64) -> Option<ContextUsage> {
     (usage.context_tokens > 0 && usage.context_window > 0).then(|| ContextUsage {
         used_tokens: usage.context_tokens,
