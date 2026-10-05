@@ -16,8 +16,14 @@ auth-file write custody. Provider wire encoding remains in `ocean-protocol`.
 - Preserve forward model/catalog routes and feature credential isolation.
 - Public Codex routes include GPT-6.1 Sol, GPT-6 Sol, GPT-6 Luna and GPT-6
   Astra. Claude Opus aliases track 5.5 (1M/128K); explicit 5/4.x ids remain
-  routable for pinned sessions. Fable aliases retain Fable 5.1; Sonnet aliases
+  routable for pinned sessions. Explicit Anthropic/Claude Code Fable 5.1,
+  Opus 5.5 and Sonnet 5.5 routes retain the same 1M/128K limits as the catalog.
+  Fable aliases retain Fable 5.1; Sonnet aliases
   track 5.5 (1M/128K), retaining exact older ids for pinned sessions.
+- Explicit OpenAI API-key GPT-6/5.6 routes retain API auth and published
+  1,050,000/128,000 limits. `openai_uses_responses` is the shared exact-model
+  selection predicate for runtime construction and history replay; bare ids
+  keep their existing Codex OAuth routing.
 - Readiness catalog responses include additive model-specific `effort_levels`;
   advertise max only where Ocean's encoder supports the provider vocabulary.
 - Every public catalog id resolves back to the same wire id and provider.

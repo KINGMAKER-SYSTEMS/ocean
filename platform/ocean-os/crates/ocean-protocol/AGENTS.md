@@ -20,6 +20,11 @@ This crate owns the multi-provider LLM wire protocol layer for Anthropic, OpenAI
   markers; preserve known-leaker gating, structured-call deduplication,
   surrounding prose, truncation recovery and string/JSON argument semantics.
   Empty or structurally broken blocks remain visible text, never tool calls.
+- Direct OpenAI API-key GPT-6/5.6 uses `openai-responses` with the shared
+  Responses request/stream collector. Bearer API-key requests omit Codex
+  originator, beta, version, session and account headers. The API-key route
+  replays encrypted reasoning only from its recorded API/provider; foreign thinking
+  remains absent. Local HTTP/SSE fixtures verify endpoint, tools and completion.
 - Codex OAuth requests using the `codex_cli_rs` originator must carry a current
   `version` header; ChatGPT version-gates newly released Codex models.
 - Current Fable/Opus/Sonnet adaptive models use `thinking.type=adaptive` and
@@ -84,6 +89,8 @@ This crate owns the multi-provider LLM wire protocol layer for Anthropic, OpenAI
 - Coordinate model-routing assumptions with `ocean-providers` when relevant.
 
 ## Verification
+
+- `cargo test -p ocean-protocol api_responses --locked`
 
 - `cargo test -p ocean-protocol dsml_salvage --locked`
 - `cargo test -p ocean-protocol merge_ --locked`

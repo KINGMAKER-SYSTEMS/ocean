@@ -3610,6 +3610,14 @@ fn model_from_provider_config(config: &ProviderConfig) -> anyhow::Result<Model> 
             selection.context_window,
             selection.max_output_tokens,
         )),
+        ProviderId::OpenAi if ocean_providers::openai_uses_responses(&selection.model) => {
+            Ok(Model::openai_responses(
+                selection.model.clone(),
+                selection.base_url.clone(),
+                selection.context_window,
+                selection.max_output_tokens,
+            ))
+        }
         ProviderId::OpenAi => Ok(match selection.model.as_str() {
             "gpt-4o" => Model::openai_gpt_4o(),
             "gpt-4o-mini" => Model::openai_gpt_4o_mini(),
@@ -3883,19 +3891,17 @@ pub fn lsp_servers(cwd: &std::path::Path) -> Vec<LspServerView> {
 }
 
 fn should_strip_assistant_thinking(provider: &ProviderId, model: &str) -> bool {
-    // OpenAiCodex is deliberately NOT in this list: the codex provider stores
-    // encrypted Responses `reasoning` items in thinking_signature and MUST get
+    // Codex and current OpenAI API routes preserve encrypted Responses items.
+    // The shared collector stores them in thinking_signature and MUST get
     // them back to replay them — stripping here is what degenerated gpt-5.x
     // into malformed tool calls across tool rounds. The codex encoder itself
     // drops any thinking block that isn't its own marked reasoning item, so the
     // cross-provider privacy drop still holds on that route.
     matches!(
         provider,
-        ProviderId::DeepSeek
-            | ProviderId::OpenAi
-            | ProviderId::OpenAiCompatible
-            | ProviderId::MiniMax
-    ) || (*provider == ProviderId::Kimi && model != "kimi-k3")
+        ProviderId::DeepSeek | ProviderId::OpenAiCompatible | ProviderId::MiniMax
+    ) || (*provider == ProviderId::OpenAi && !ocean_providers::openai_uses_responses(model))
+        || (*provider == ProviderId::Kimi && model != "kimi-k3")
 }
 
 fn strip_assistant_thinking_content(messages: &mut [Message]) {
@@ -5653,6 +5659,42 @@ done
     }
 
     #[test]
+    fn current_openai_api_models_use_responses_and_preserve_reasoning() {
+        for id in [
+            "gpt-6.1-sol",
+            "gpt-6-astra",
+            "gpt-6-sol",
+            "gpt-6-luna",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+        ] {
+            let config = provider_config(ProviderId::OpenAi, id, true);
+            let model = model_from_provider_config(&config).unwrap();
+            assert_eq!(model.api, "openai-responses");
+            assert_eq!(model.provider, "openai");
+            assert_eq!(model.id, id);
+            assert_eq!(model.base_url, config.selection.base_url);
+            assert!(model.supports_images);
+            assert!(!should_strip_assistant_thinking(&ProviderId::OpenAi, id));
+            assert!(should_strip_assistant_thinking(
+                &ProviderId::OpenAiCompatible,
+                id
+            ));
+        }
+        assert!(should_strip_assistant_thinking(
+            &ProviderId::OpenAi,
+            "gpt-4o"
+        ));
+        assert_eq!(
+            model_from_provider_config(&provider_config(ProviderId::OpenAi, "gpt-4o", true))
+                .unwrap()
+                .api,
+            "openai-completions"
+        );
+    }
+
+    #[test]
     fn glm_provider_config_maps_to_openai_compat_model() {
         // GLM (Zhipu) is an OpenAI-compatible chat-completions endpoint: the
         // resolved Model must carry provider "glm", the openai-completions api,
@@ -5736,12 +5778,55 @@ done
                 Error::Http(_) => "transport".into(),
                 Error::MissingApiKey(_) => "missing_credential".into(),
                 Error::Cancelled => "cancelled".into(),
+                Error::UnsupportedProvider(_) => "unsupported_route".into(),
+                Error::InvalidResponse(body) => {
+                    let text: String = body
+                        .chars()
+                        .take(4096)
+                        .collect::<String>()
+                        .to_ascii_lowercase();
+                    if text.contains("quota") || text.contains("billing") {
+                        "stream_quota".into()
+                    } else if text.contains("model_not_found") || text.contains("unsupported_model")
+                    {
+                        "stream_model_unavailable".into()
+                    } else if text.contains("rate_limit") || text.contains("rate limit") {
+                        "stream_rate_limit".into()
+                    } else if text.contains("api key")
+                        || text.contains("authentication")
+                        || text.contains("unauthor")
+                    {
+                        "stream_auth_refused".into()
+                    } else if [
+                        "max_output_tokens",
+                        "reasoning",
+                        "summary",
+                        "unsupported",
+                        "instructions",
+                    ]
+                    .iter()
+                    .any(|word| text.contains(word))
+                    {
+                        "stream_unsupported_parameter".into()
+                    } else if text.contains("sse:") {
+                        "invalid_sse".into()
+                    } else {
+                        "invalid_response".into()
+                    }
+                }
                 _ => "protocol".into(),
             }
         }
         let mut env = ProviderEnv::from_process();
         env.vars.remove("OCEAN_PROVIDER");
         let filter = std::env::var("OCEAN_MODEL_PROBE_IDS").ok();
+        if let Ok(provider) = std::env::var("OCEAN_MODEL_PROBE_PROVIDER") {
+            assert!(
+                filter.is_some(),
+                "explicit provider probe requires exact model ids"
+            );
+            env.vars.insert("OCEAN_PROVIDER".into(), provider);
+        }
         let mut failures = Vec::new();
         let mut passed = 0;
         let mut disconnected = 0;
@@ -5756,7 +5841,11 @@ done
             let config =
                 ocean_providers::resolve_provider_config(&env).expect("catalog route resolves");
             if !config.readiness().ok {
-                println!("MODEL_PROBE {} {} disconnected", known.provider, known.id);
+                println!(
+                    "MODEL_PROBE {} {} disconnected",
+                    config.selection.provider.as_str(),
+                    known.id
+                );
                 disconnected += 1;
                 continue;
             }
@@ -5812,7 +5901,8 @@ done
                     passed += 1;
                     println!(
                         "MODEL_PROBE {} {} passed tokens={tokens}",
-                        known.provider, known.id
+                        config.selection.provider.as_str(),
+                        known.id
                     );
                 }
                 failed => {
@@ -5820,7 +5910,11 @@ done
                         Ok(Err(status)) => status,
                         _ => "timeout".into(),
                     };
-                    println!("MODEL_PROBE {} {} {status}", known.provider, known.id);
+                    println!(
+                        "MODEL_PROBE {} {} {status}",
+                        config.selection.provider.as_str(),
+                        known.id
+                    );
                     failures.push((known.id, status));
                 }
             }

@@ -950,8 +950,8 @@ pub fn resolve_model_selection(env: &ProviderEnv) -> Result<ModelSelection, Prov
         // `claude-code` block), NOT a direct Anthropic API key. Same Anthropic
         // Messages wire + base URL; only the auth header differs (Bearer vs
         // x-api-key). The convenience aliases ("sonnet", "opus", "haiku") track
-        // the newest ids. Direct-API-key auth for these ids is intentionally
-        // not wired (provision later if a custom-model API path is needed).
+        // the newest ids. Explicit OCEAN_PROVIDER=anthropic selects API-key
+        // auth; bare ids retain the Claude Code subscription route.
         "claude-sonnet-5-5"
         | "claude-code-sonnet-5-5"
         | "claude-sonnet"
@@ -1301,6 +1301,32 @@ fn minimax_base_url(env: &ProviderEnv) -> &str {
     }
 }
 
+/// Direct API-key routes for current GPT families use Responses for tool calls.
+/// Keep this selection predicate shared with the runtime/history factory.
+pub fn openai_uses_responses(model: &str) -> bool {
+    matches!(
+        model,
+        "gpt-6.1-sol"
+            | "gpt-6-sol"
+            | "gpt-6-luna"
+            | "gpt-6-astra"
+            | "gpt-5.6"
+            | "gpt-5.6-sol"
+            | "gpt-5.6-terra"
+            | "gpt-5.6-luna"
+    )
+}
+
+fn explicit_claude_limits(model: &str) -> (u32, u32) {
+    match model
+        .strip_prefix("claude-code-")
+        .unwrap_or(model.strip_prefix("claude-").unwrap_or(model))
+    {
+        "fable-5-1" | "opus-5-5" | "sonnet-5-5" => (1_000_000, 128_000),
+        _ => (200_000, 16_384),
+    }
+}
+
 fn model_for_explicit_provider(
     provider: &str,
     model: &str,
@@ -1318,8 +1344,16 @@ fn model_for_explicit_provider(
             ProviderId::OpenAi,
             model,
             OPENAI_BASE_URL,
-            128_000,
-            16_384,
+            if openai_uses_responses(model) {
+                1_050_000
+            } else {
+                128_000
+            },
+            if openai_uses_responses(model) {
+                128_000
+            } else {
+                16_384
+            },
         )),
         "openai-codex" | "codex" => Ok(model_selection(
             ProviderId::OpenAiCodex,
@@ -1332,15 +1366,15 @@ fn model_for_explicit_provider(
             ProviderId::Anthropic,
             model,
             ANTHROPIC_BASE_URL,
-            200_000,
-            16_384,
+            explicit_claude_limits(model).0,
+            explicit_claude_limits(model).1,
         )),
         "claude-code" => Ok(model_selection(
             ProviderId::ClaudeCode,
             model,
             ANTHROPIC_BASE_URL,
-            200_000,
-            16_384,
+            explicit_claude_limits(model).0,
+            explicit_claude_limits(model).1,
         )),
         // MiniMax's API is case-sensitive on model ids (`MiniMax-M2`), but `model`
         // arrives lowercased (normalize_model_id). Restore the API casing for
@@ -1718,6 +1752,56 @@ mod tests {
         let selection = resolve_model_selection(&env(&[("OCEAN_MODEL", "gemini")])).unwrap();
         assert_eq!(selection.provider, ProviderId::Google);
         assert_eq!(selection.model, "gemini-2.0-flash");
+    }
+
+    #[test]
+    fn current_explicit_claude_auth_routes_use_current_limits() {
+        for provider in ["anthropic", "claude-code"] {
+            for id in ["claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5"] {
+                let selection = resolve_model_selection(&env(&[
+                    ("OCEAN_PROVIDER", provider),
+                    ("OCEAN_MODEL", id),
+                ]))
+                .unwrap();
+                assert_eq!(selection.model, id);
+                assert_eq!(
+                    (selection.context_window, selection.max_output_tokens),
+                    (1_000_000, 128_000)
+                );
+            }
+        }
+        assert_eq!(
+            explicit_claude_limits("claude-code-opus-5-5"),
+            (1_000_000, 128_000)
+        );
+        assert_eq!(explicit_claude_limits("claude-opus-5"), (200_000, 16_384));
+    }
+
+    #[test]
+    fn current_openai_api_routes_keep_api_auth_and_published_limits() {
+        for id in [
+            "gpt-6.1-sol",
+            "gpt-6-sol",
+            "gpt-6-luna",
+            "gpt-6-astra",
+            "gpt-5.6",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+        ] {
+            let selection =
+                resolve_model_selection(&env(&[("OCEAN_PROVIDER", "openai"), ("OCEAN_MODEL", id)]))
+                    .unwrap();
+            assert_eq!(selection.provider, ProviderId::OpenAi);
+            assert_eq!(selection.model, id);
+            assert_eq!(selection.base_url, OPENAI_BASE_URL);
+            assert_eq!(
+                (selection.context_window, selection.max_output_tokens),
+                (1_050_000, 128_000)
+            );
+        }
+        assert!(!openai_uses_responses("gpt-4o"));
+        assert!(!openai_uses_responses("custom-gpt-model"));
     }
 
     #[test]

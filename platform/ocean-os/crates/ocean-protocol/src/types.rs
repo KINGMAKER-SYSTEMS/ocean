@@ -485,6 +485,27 @@ impl Model {
         }
     }
 
+    /// Official OpenAI Responses API authenticated by an API key.
+    pub fn openai_responses(
+        id: impl Into<String>,
+        base_url: impl Into<String>,
+        context_window: u32,
+        max_tokens: u32,
+    ) -> Self {
+        let id = id.into();
+        Self {
+            name: id.clone(),
+            id,
+            api: "openai-responses".into(),
+            provider: "openai".into(),
+            base_url: base_url.into(),
+            reasoning: true,
+            supports_images: true,
+            context_window,
+            max_tokens,
+        }
+    }
+
     /// Codex (Responses API) over a ChatGPT/Codex OAuth subscription token.
     /// Used for `gpt-5.x` driven without an API key.
     pub fn codex(id: impl Into<String>, context_window: u32, max_tokens: u32) -> Self {

@@ -128,3 +128,15 @@ PR #2 review repairs separate the authoritative model default from executed turn
 
 Added an explicit bounded no-tools catalog inference probe with fixed prompts, no session/store/auth writes, and fixed error classifications. Actual account audit: 12 passed, 16 failed, five disconnected. Astra, GPT-5.6 Sol/Terra/Luna, GPT-5.5 and all seven GLM models completed inference; other configured routes returned 401/400/429. Codex version header now matches installed CLI 0.154.0; focused retry confirms GPT-6.1 Sol remains model_unavailable while Astra succeeds. Credential presence does not establish entitlement. Fresh review, current-head CI, modern direct API coverage and operated-runtime compatibility remain required; no live installation occurred.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [12:06] [05-10-26]
+agent: [codex] [gpt-6]
+worktree: [feat/model-effort-control] [/Users/risingtidesdev/dev/ocean-ui-current]
+type: [bug report]
+area: [backend] [testing]
+
+Direct OpenAI API-key GPT-6/5.6 now uses Responses for tool calling, with shared request/SSE collection, preserved same-route encrypted reasoning, and no Codex-specific originator/version/account/session headers. Explicit API routing retains 1,050,000/128,000 limits; explicit Anthropic/Claude Code Fable 5.1, Opus 5.5 and Sonnet 5.5 retain 1M/128K. Bare subscription ids and older Chat Completions routes remain unchanged. Local HTTP/SSE fixtures verify the actual endpoint, flat function tools, headers, effort and streamed completion; history tests retain own reasoning and drop foreign route items.
+
+Provider/agent/protocol final verification: 493 tests passed, opt-in live probe ignored, strict all-target Clippy passed; final workspace check includes test targets. Workspace sweep before the final Claude-limit correction: 3,334 passed, ten ignored; corrected limits passed final owner checks. Explicit-provider probe requires exact model ids and reports fixed stream-error classes. Real OpenAI API Sol/Astra attempts did not complete; focused Sol retry classifies a quota rejection. Prior pushed head 45fcbd54 Build Ocean/Build Surface passed. No billing/auth edits or live deployment occurred. Owning devlogs updated; parent ownership/indexes unchanged. Separate auth-route picker exposure, connection repair, fresh review and live compatibility/acceptance remain in the full goal.
+_________________________________________________________________________________
