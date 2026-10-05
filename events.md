@@ -206,6 +206,18 @@ Final TUI: 500 passed, four ignored; cargo check, strict all-target Clippy, docs
 _________________________________________________________________________________
 
 _________________________________________________________________________________
+time: [10:24] [05-10-26]
+agent: [Claude Code] [Claude Opus 5.5]
+worktree: [fix/gpt-5-5-served-context]
+type: [fix]
+area: [providers]
+
+Ported Risingtides-dev/ocean-os#531 (b7839a45) onto PR #2: gpt-5.5 (both
+spellings) now resolves with the Codex backend's served 272k context window
+instead of the advertised 400k, so a session cannot overfill and fail.
+Regression test gpt_5_5_resolves_with_codex_backend_served_limit added.
+Validation: cargo test -p ocean-providers --locked (see PR).
+
 time: [13:28] [05-10-26]
 agent: [codex] [gpt-6]
 worktree: [feat/model-effort-control] [/Users/risingtidesdev/dev/ocean-ui-current]

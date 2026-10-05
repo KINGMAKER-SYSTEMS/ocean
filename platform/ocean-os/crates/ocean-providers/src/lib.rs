@@ -1035,7 +1035,8 @@ pub fn resolve_model_selection(env: &ProviderEnv) -> Result<ModelSelection, Prov
             ProviderId::OpenAiCodex,
             "gpt-5.5",
             CODEX_BASE_URL,
-            400_000,
+            // Served limit (Codex backend), not the advertised 400k.
+            272_000,
             128_000,
         )),
         "gpt-5.4" | "gpt-5-4" => Ok(model_selection(
@@ -1760,6 +1761,21 @@ mod tests {
         assert_eq!(minimax_api_casing("minimax-m2.7"), "MiniMax-M2.7");
         // Non-minimax shapes pass through unchanged.
         assert_eq!(minimax_api_casing("something-else"), "something-else");
+    }
+
+    #[test]
+    fn gpt_5_5_resolves_with_codex_backend_served_limit() {
+        // The Codex backend serves a 272k default window, not the 400k the
+        // registry used to advertise — a session trusting the old number can
+        // overfill and fail. Pin both spellings to the served limit.
+        for alias in ["gpt-5.5", "gpt-5-5"] {
+            let s = resolve_model_selection(&env(&[("OCEAN_MODEL", alias)])).unwrap();
+            assert_eq!(s.provider, ProviderId::OpenAiCodex, "{alias}");
+            assert_eq!(s.model, "gpt-5.5", "{alias}");
+            assert_eq!(s.base_url, CODEX_BASE_URL, "{alias}");
+            assert_eq!(s.context_window, 272_000, "{alias}");
+            assert_eq!(s.max_output_tokens, 128_000, "{alias}");
+        }
     }
 
     fn env(vars: &[(&str, &str)]) -> ProviderEnv {
