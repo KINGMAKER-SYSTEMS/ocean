@@ -302,6 +302,18 @@ Validation: full suites pass for ocean-protocol (176 plus 5), ocean-runtime (130
 _________________________________________________________________________________
 
 _________________________________________________________________________________
+time: [17:26] [05-10-26]
+agent: [claude] [claude code]
+worktree: [claude/tui-slash-fixes] [/Users/risingtidesdev/dev/ocean-claude-audit]
+type: [bug report]
+area: [frontend] [testing]
+
+Fixed the TUI slash commands that misbehaved. /clear during a running turn dropped the busy latch, after which /stop answered "nothing is running" and Esc did nothing while the daemon kept executing tools; it now clears the view only and leaves the turn, its queue and any pause owner alone. /copy copied the /help list, a /beam block or a command hint once any of them had run, because Ocean's own transcript text was stored as assistant replies; that text is now a separate Notice turn that renders the same, is skipped by /copy and is never appended to by streamed deltas. The palette claimed Tab even when nothing matched, so /zz plus Tab did nothing instead of cycling focus. Command names are now case-insensitive, so /Model x is the command rather than a prompt sent to the model. /thinking acknowledges the new level in the status row.
+
+Validation: all 506 TUI tests pass (4 ignored), including new cases for each fix; cargo check, rustfmt check, the required release build of ocean-tui and docs-check pass. The installed operator binary is unchanged until the TUI installer is run from main after merge. TUI devlog updated; indexes unchanged.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
 time: [17:40] [05-10-26]
 agent: [claude] [claude code]
 worktree: [claude/subagent-lost-run-recovery] [/Users/risingtidesdev/dev/ocean-claude-audit]
@@ -326,6 +338,18 @@ Validation: full suites pass for ocean-protocol (174 plus 5), ocean-providers (6
 _________________________________________________________________________________
 
 _________________________________________________________________________________
+time: [17:47] [05-10-26]
+agent: [claude] [claude code]
+worktree: [claude/tui-slash-fixes] [/Users/risingtidesdev/dev/ocean-claude-audit]
+type: [review]
+area: [frontend] [testing]
+
+Applied the independent review of the TUI slash fixes. The first version of /clear during a running turn kept the queue but deleted its rows, so a queued follow-up ran later with nothing on screen, and it deleted an undecided approval card, leaving the approve keys with no target. A busy /clear now keeps queued follow-up rows and undecided approval cards, and a promoted follow-up always gets a user row. /copy returns a whole reply even when a notice split it into two blocks. The turn-lifecycle line in the TUI contract now lists what actually clears busy.
+
+Validation: all 509 TUI tests pass (4 ignored), with new cases for a follow-up queued before a busy /clear running visibly, a promoted prompt with no row, a surviving approval card, Esc after /clear, the idle pause reset and the split reply; rustfmt check, the release build of ocean-tui and docs-check pass.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
 time: [17:53] [05-10-26]
 agent: [claude] [claude code]
 worktree: [claude/token-accounting-accuracy] [/Users/risingtidesdev/dev/ocean-claude-audit]
@@ -335,6 +359,18 @@ area: [backend] [testing]
 Applied the independent review of the token-accounting change, and withdrew one part of it. The flat image price is reverted: pricing an image by its base64 length was also the only thing bounding how many images a request carried, and without it a long screenshot session can exceed a provider's image-count rule and wedge, while a flat 6,000 under-prices images on GPT-4o-mini by a factor of four. The estimator is back to the shipped behaviour; image-aware budgeting needs a count cap, a byte ceiling and a per-model price, and is left as open work. Kept and extended the accounting fixes the review confirmed. A stop-hook continuation that completes rounds and then fails now adds those rounds instead of dropping them. A failed turn's context reading is the last completed round, which is a floor for the saved transcript, so the daemon labels it provider_reported_last_completed_round instead of final. The capped-round fix is now proven through the real stream path, and the failed-turn test gives the failing round usage of its own to prove it is not counted.
 
 Validation: full suites pass for ocean-protocol (177 plus 5), ocean-runtime, ocean-agent (265, live probe ignored), ocean-agent-sdk, ocean-daemon (878), ocean-acp and ocean-cli; workspace test compilation, rustfmt check and docs-check pass. One ocean-tui test, shell::herdr::tests::resume_session_reports_agent_session_id_with_resume_source, failed once while two other builds were running and passed five times in a row alone; this change does not touch ocean-tui. No provider was called. Agent devlog updated; the runtime devlog line about the estimator is removed with the code.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [17:58] [05-10-26]
+agent: [claude] [claude code]
+worktree: [claude/tui-slash-fixes] [/Users/risingtidesdev/dev/ocean-claude-audit]
+type: [review]
+area: [frontend] [testing]
+
+Second review round on the TUI slash fixes. The /copy join introduced in the previous round merged every adjacent assistant block, and a resumed or re-synced transcript lists each round's text as its own block with the tool rows gone, so /copy returned a turn's interim narration glued to its answer. The join now bridges only across one of Ocean's own notices. The turn-lifecycle line in the contract names history load (resume, switch or a fenced idle snapshot) as a way busy clears. Known and left alone: an approval card orphaned by a turn that was stopped while waiting stays undecided, as it did before this work, and a busy /clear now keeps it with the live ones.
+
+Validation: all 510 TUI tests pass (4 ignored), with a new case built in the resumed-transcript shape; rustfmt check and the release build pass.
 _________________________________________________________________________________
 
 _________________________________________________________________________________
@@ -383,4 +419,16 @@ area: [backend] [testing]
 Applied the delta review of the context-reading provenance change. It found one success path with the same problem: a turn that runs out of rounds on a tool call is ok, but its tool results and stand-in reply are saved after the last measured request, so its reading was still published as a final round. The success path now sets context_is_floor from the runtime's stopped-at-turn-limit result, and the contract and doc lines say so. Two tests stopped a step short and now do not: the failed-turn end-to-end test asserts the mark, and the TUI test reads the caption from the drawn panel instead of the helper that produces it. Known and left alone: a tool that ends a turn early below the limit would leave the same gap, but no tool in the tree does that today.
 
 Validation: ocean-agent (266, live probe ignored), ocean-core (62), ocean-agent-sdk and ocean-tui (501, 4 ignored) pass; workspace test compilation, rustfmt check and docs-check pass. The new one-round test is ok and marked, and fails when the mark is hard-coded false. The reviewer re-ran the agent suite and the usage-panel tests independently. No provider was called.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [18:38] [05-10-26]
+agent: [claude] [claude code]
+worktree: [claude/tui-slash-fixes] [/Users/risingtidesdev/dev/ocean-claude-audit]
+type: [bug report]
+area: [testing]
+
+Fixed the ocean-tui test that failed intermittently during this work, shell::herdr::tests::resume_session_reports_agent_session_id_with_resume_source. It was recorded earlier as load-sensitive; the cause is a race in the test, not load. Binding a session launches two herdr reports, the session report and a state report, as separate processes, and the fake herdr appends each one's arguments to the same marker file in whichever order they run. The helper returned on the first non-empty read, so when the state report landed first the test asserted on a file that did not hold the session report yet. The helper now waits until the session report's final argument is present. Test-only; the reporter itself is unchanged, and its two reports are independent by design.
+
+Validation: ocean-tui passes 511 tests (4 ignored) eight times in a row on the branch merged with current main, where the same suite had failed five of nine runs before the fix; workspace test compilation and rustfmt check pass. The failing runs' own output showed both reports present with the session report complete, which is what identified the race.
 _________________________________________________________________________________
