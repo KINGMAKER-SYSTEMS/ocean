@@ -3116,6 +3116,7 @@ impl App {
             // setting is in force again.
             Action::SetThinking(level) => {
                 self.thinking_override = *level;
+                self.set_notice(format!("thinking \u{2192} {}", thinking_label(*level)));
             }
             // `/models`: open the picker and fetch the live registry (with
             // readiness) off-thread — the overlay shows "loading…" until
@@ -8750,6 +8751,17 @@ mod tests {
         assert_eq!(app.health.effective(), Some("stream reconnecting"));
         app.dispatch(Action::HealthRecovered(HealthSource::Sse));
         assert_eq!(app.health.effective(), None, "all sources healthy");
+    }
+
+    /// `/thinking high` used to change the level with no sign that it had.
+    #[test]
+    fn setting_the_thinking_level_is_acknowledged() {
+        let mut app = offline_app();
+        app.dispatch(Action::SetThinking(Some(ThinkingLevel::High)));
+        assert_eq!(app.thinking_override, Some(ThinkingLevel::High));
+        assert_eq!(app.status, "thinking \u{2192} high");
+        app.dispatch(Action::SetThinking(None));
+        assert_eq!(app.status, "thinking \u{2192} default");
     }
 
     // ── transient notices + instant model selection ──────────────────────────

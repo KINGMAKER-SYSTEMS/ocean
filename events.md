@@ -264,3 +264,15 @@ Corrected shared model/effort compatibility fallback. A saved provider-qualified
 
 Validation: all 899 Surface tests, strict WASM Clippy and docs-check pass. New regressions cover qualified saved API/subscription routes, missing-vs-empty metadata and legacy Max exclusion. The actual editor renderer with a synthetic host adapter also confirms Max resets to Default when switching to a model supporting only Low/High, and returns to API/Max correctly; this is renderer evidence, not native editor/account acceptance. Screenshot: /private/tmp/ocean-model-effort-verified.png. Owning Surface contract updated; root/index docs unchanged because ownership boundaries remain unchanged. No installation, live provider calls or credential mutations in this slice. Fresh review, other-account acceptance and operated-runtime compatibility remain unresolved.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [17:26] [05-10-26]
+agent: [claude] [claude code]
+worktree: [claude/tui-slash-fixes] [/Users/risingtidesdev/dev/ocean-claude-audit]
+type: [bug report]
+area: [frontend] [testing]
+
+Fixed the TUI slash commands that misbehaved. /clear during a running turn dropped the busy latch, after which /stop answered "nothing is running" and Esc did nothing while the daemon kept executing tools; it now clears the view only and leaves the turn, its queue and any pause owner alone. /copy copied the /help list, a /beam block or a command hint once any of them had run, because Ocean's own transcript text was stored as assistant replies; that text is now a separate Notice turn that renders the same, is skipped by /copy and is never appended to by streamed deltas. The palette claimed Tab even when nothing matched, so /zz plus Tab did nothing instead of cycling focus. Command names are now case-insensitive, so /Model x is the command rather than a prompt sent to the model. /thinking acknowledges the new level in the status row.
+
+Validation: all 506 TUI tests pass (4 ignored), including new cases for each fix; cargo check, rustfmt check, the required release build of ocean-tui and docs-check pass. The installed operator binary is unchanged until the TUI installer is run from main after merge. TUI devlog updated; indexes unchanged.
+_________________________________________________________________________________

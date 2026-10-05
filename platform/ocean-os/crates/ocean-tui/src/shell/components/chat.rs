@@ -55,6 +55,11 @@ enum Turn {
     Queued(String),
     /// Assistant visible text (accumulates deltas).
     Assistant(String),
+    /// Text Ocean itself wrote into the transcript: `/help`, `/beam`, an
+    /// unknown-command hint, a send-failure notice. It renders like assistant
+    /// text but is not a model reply, so `/copy` skips it and streamed deltas
+    /// never append to it.
+    Notice(String),
     /// Extended-thinking text (accumulates deltas).
     Thinking(String),
     /// A tool call: keyed by call id, with name + lossless raw args + streamed
@@ -2350,11 +2355,10 @@ impl ChatComponent {
     /// when the `/` palette or `@` mention picker is open (both handle Tab for
     /// completion, but app.rs swallows it for focus-cycling first).
     pub fn wants_tab(&self) -> bool {
-        // `/` palette: input starts with `/`, no whitespace in query.
-        if let Some(q) = self.input.strip_prefix('/') {
-            if !q.contains(char::is_whitespace) {
-                return true;
-            }
+        // `/` palette: open only while something matches. With no match there
+        // is nothing to complete, and claiming Tab would just swallow it.
+        if !self.slash_matches().is_empty() {
+            return true;
         }
         // `@` mention picker: the cursor-relative token starts with `@`.
         self.mention_query().is_some()
@@ -2632,12 +2636,16 @@ impl ChatComponent {
                 self.turns.clear();
                 self.md.clear();
                 self.clear_tool_ui_state();
-                self.queued_prompts.clear();
-                self.clear_queue_pause();
                 self.last_wrapped_rows = None;
                 self.last_viewport_rows = None;
                 self.scroll_back = 0;
-                self.busy = false;
+                // Clearing the view does not end a running turn. Dropping
+                // `busy` here disarmed `/stop` and Esc while the daemon kept
+                // executing tools, and released the queue behind the turn.
+                if !self.busy {
+                    self.queued_prompts.clear();
+                    self.clear_queue_pause();
+                }
                 None
             }
             "/pinned" => match args {
@@ -2794,7 +2802,7 @@ impl ChatComponent {
             }
             body.push_str(&format!("- `{}` — {}\n", c.name, c.desc));
         }
-        self.turns.push(Turn::Assistant(body));
+        self.turns.push(Turn::Notice(body));
     }
 
     /// Push the `/beam` handoff into the transcript: a scannable QR (inside a
@@ -2820,7 +2828,7 @@ impl ChatComponent {
         body.push_str("```\n\n`");
         body.push_str(url);
         body.push_str("` — copied to your clipboard\n");
-        self.turns.push(Turn::Assistant(body));
+        self.turns.push(Turn::Notice(body));
         self.scroll_back = 0;
     }
 
@@ -3490,8 +3498,10 @@ impl Component for ChatComponent {
                         Some((n, a)) => (n, a),
                         None => (text.as_str(), ""),
                     };
-                    if slash::is_command(name) {
-                        return self.run_slash(name, args);
+                    // `/Model x` is the command, not a prompt for the model.
+                    let command = name.to_ascii_lowercase();
+                    if slash::is_command(&command) {
+                        return self.run_slash(&command, args);
                     }
                     let looks_like_cmd = name
                         .strip_prefix('/')
@@ -3508,7 +3518,7 @@ impl Component for ChatComponent {
                         } else {
                             format!("unknown command {name} — /help lists commands")
                         };
-                        self.turns.push(Turn::Assistant(hint.clone()));
+                        self.turns.push(Turn::Notice(hint.clone()));
                         return Some(Action::Status(hint));
                     }
                 }
@@ -3797,7 +3807,7 @@ impl Component for ChatComponent {
             } else {
                 "Your prompt is back in the composer."
             };
-            self.turns.push(Turn::Assistant(format!(
+            self.turns.push(Turn::Notice(format!(
                 "{} {prefix} — {msg}\n\n{recovery}",
                 g("⚠", "!")
             )));
@@ -3912,7 +3922,7 @@ impl Component for ChatComponent {
             // Keep the composer latched until TurnFinished or App's fenced
             // session probe proves the operation is idle.
             self.busy = true;
-            self.turns.push(Turn::Assistant(format!(
+            self.turns.push(Turn::Notice(format!(
                 "{} turn acknowledgement was interrupted — {}\n\nOcean is checking the session before allowing another submission.",
                 g("⚠", "!"),
                 errfmt::humanize(err)
@@ -4401,7 +4411,7 @@ impl Component for ChatComponent {
                         ),
                     ]));
                 }
-                Turn::Assistant(s) => {
+                Turn::Assistant(s) | Turn::Notice(s) => {
                     // Streaming markdown with prefix-freeze: frozen head blocks
                     // are served from cache, only the growing tail re-renders.
                     let rendered = md.render(s);
@@ -5500,7 +5510,7 @@ mod tests {
         let mut chat = chat_with("/help");
         chat.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(chat.turns.len(), 1);
-        assert!(matches!(&chat.turns[0], Turn::Assistant(s) if s.contains("/quit")));
+        assert!(matches!(&chat.turns[0], Turn::Notice(s) if s.contains("/quit")));
     }
 
     #[test]
@@ -5634,7 +5644,7 @@ mod tests {
             url: url.to_string(),
         });
 
-        let Some(Turn::Assistant(body)) = chat.turns.last() else {
+        let Some(Turn::Notice(body)) = chat.turns.last() else {
             panic!("beam should push an assistant turn");
         };
         // The fenced QR block (half-block glyphs) and the copyable URL both
@@ -5686,6 +5696,90 @@ mod tests {
             Some(Action::CopyToClipboard(t)) => assert_eq!(t, "the answer"),
             other => panic!("expected CopyToClipboard, got {other:?}"),
         }
+    }
+
+    /// `/help`, `/beam` and command hints land in the transcript, but they are
+    /// Ocean's own text. `/copy` used to copy the command list instead of the
+    /// model's reply once any of them had run.
+    #[test]
+    fn slash_copy_skips_text_ocean_wrote_itself() {
+        let mut chat = ChatComponent::default();
+        chat.turns.push(Turn::Assistant("the answer".into()));
+        chat.run_slash("/help", "");
+        assert!(matches!(chat.turns.last(), Some(Turn::Notice(_))));
+        match chat.run_slash("/copy", "") {
+            Some(Action::CopyToClipboard(t)) => assert_eq!(t, "the answer"),
+            other => panic!("expected CopyToClipboard, got {other:?}"),
+        }
+
+        // A reply still streaming after `/help` starts its own block instead of
+        // being glued onto the command list.
+        chat.push_assistant(" continues");
+        assert!(matches!(chat.turns.last(), Some(Turn::Assistant(s)) if s == " continues"));
+        assert!(
+            matches!(&chat.turns[1], Turn::Notice(s) if !s.contains("continues")),
+            "streamed text must not append to Ocean's own block"
+        );
+    }
+
+    /// Clearing the view is not ending the turn. `/clear` used to drop `busy`,
+    /// after which `/stop` answered "nothing is running" and Esc did nothing
+    /// while the daemon kept executing tools.
+    #[test]
+    fn clear_during_a_running_turn_keeps_it_stoppable() {
+        let mut chat = ChatComponent {
+            busy: true,
+            ..Default::default()
+        };
+        chat.turns.push(Turn::User("long task".into()));
+        chat.turns.push(Turn::Assistant("working".into()));
+        chat.input = "queued follow-up".into();
+        let _ = chat.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(chat.queued_prompts.len(), 1);
+
+        assert!(chat.run_slash("/clear", "").is_none());
+        assert!(
+            !chat
+                .turns
+                .iter()
+                .any(|turn| matches!(turn, Turn::User(_) | Turn::Assistant(_))),
+            "the visible transcript is cleared"
+        );
+        assert!(chat.busy, "the turn is still running");
+        assert_eq!(chat.queued_prompts.len(), 1, "its queue is untouched");
+        assert!(matches!(
+            chat.run_slash("/stop", ""),
+            Some(Action::InterruptTurn)
+        ));
+    }
+
+    #[test]
+    fn clear_when_idle_still_drops_the_queue() {
+        let mut chat = ChatComponent::default();
+        chat.queued_prompts.push_back("left over".to_string());
+        chat.turns.push(Turn::Assistant("done".into()));
+        assert!(chat.run_slash("/clear", "").is_none());
+        assert!(chat.turns.is_empty());
+        assert!(chat.queued_prompts.is_empty());
+        assert!(!chat.busy);
+    }
+
+    #[test]
+    fn command_names_are_case_insensitive() {
+        let mut chat = chat_with("/Model gpt-5.5");
+        let act = chat.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            matches!(&act, Some(Action::SetModel(id)) if id == "gpt-5.5"),
+            "expected SetModel, got {act:?}"
+        );
+
+        // A path is still a prompt, whatever its case.
+        let mut chat = chat_with("/Users/me/notes.md summarize this");
+        let act = chat.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            matches!(&act, Some(Action::SubmitPrompt { .. })),
+            "expected a prompt, got {act:?}"
+        );
     }
 
     #[test]
@@ -6239,9 +6333,9 @@ mod tests {
         );
         // Also surfaced in the transcript as an Assistant block.
         assert!(
-            chat.turns.iter().any(|t| {
-                matches!(t, Turn::Assistant(s) if s.contains("did you mean /providers"))
-            }),
+            chat.turns
+                .iter()
+                .any(|t| { matches!(t, Turn::Notice(s) if s.contains("did you mean /providers")) }),
             "near-match hint should appear in transcript"
         );
     }
@@ -6270,7 +6364,7 @@ mod tests {
         assert!(
             chat.turns
                 .iter()
-                .any(|t| matches!(t, Turn::Assistant(s) if s.contains("/quit"))),
+                .any(|t| matches!(t, Turn::Notice(s) if s.contains("/quit"))),
             "/help should list commands in transcript"
         );
     }
@@ -6284,6 +6378,14 @@ mod tests {
             chat.wants_tab(),
             "palette is open, Tab should route to chat"
         );
+    }
+
+    /// With nothing to complete, Tab must fall through to focus cycling
+    /// instead of being claimed and dropped.
+    #[test]
+    fn wants_tab_false_when_no_command_matches() {
+        assert!(!chat_with("/zz").wants_tab());
+        assert!(chat_with("/mo").wants_tab());
     }
 
     #[test]
@@ -7385,7 +7487,7 @@ mod tests {
             err: "tcp connect error: Connection refused (os error 61)".into(),
         });
         assert_eq!(chat.turns.len(), 1, "should push one Assistant turn");
-        let Turn::Assistant(msg) = &chat.turns[0] else {
+        let Turn::Notice(msg) = &chat.turns[0] else {
             panic!("expected Assistant turn");
         };
         assert!(
@@ -7416,7 +7518,7 @@ mod tests {
             err: "turn: HTTP 401 Unauthorized".into(),
         });
         assert_eq!(chat.turns.len(), 1, "should push one Assistant turn");
-        let Turn::Assistant(msg) = &chat.turns[0] else {
+        let Turn::Notice(msg) = &chat.turns[0] else {
             panic!("expected Assistant turn");
         };
         assert!(
