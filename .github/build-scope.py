@@ -6,6 +6,8 @@ import subprocess
 def build_scope(paths):
     ocean = surface = False
     for path in paths:
+        if not path:
+            continue
         # Only repository documentation is exempt. Embedded Markdown under
         # source/profile directories still counts as a build input.
         if path.endswith('/AGENTS.md') or path in ('AGENTS.md', 'events.md'):
