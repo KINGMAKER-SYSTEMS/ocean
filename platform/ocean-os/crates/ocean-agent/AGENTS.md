@@ -36,6 +36,12 @@ transcripts by session id.
   bounds each call to 45 seconds, and prints fixed error classes and token counts.
   It never refreshes credentials or constructs sessions/stores. Configured
   credentials alone do not prove entitlement or completed inference.
+- A failed, cancelled or timed-out turn reports the usage of the rounds it
+  completed, read from the checkpointed assistant messages, with the last
+  round's request as its context measurement. Those rounds were billed and
+  saved. Only a turn that fails before any round completes reports zero.
+  Stop-hook continuations add their counters and replace the context
+  measurement, which describes the latest provider request.
 - Preserve session compatibility unless a migration is documented.
 - Every advertised catalog model must construct a runtime wire model with the
   same id and limits. Current Opus/Sonnet 5.5 constructors use 1M/128K;

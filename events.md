@@ -264,3 +264,15 @@ Corrected shared model/effort compatibility fallback. A saved provider-qualified
 
 Validation: all 899 Surface tests, strict WASM Clippy and docs-check pass. New regressions cover qualified saved API/subscription routes, missing-vs-empty metadata and legacy Max exclusion. The actual editor renderer with a synthetic host adapter also confirms Max resets to Default when switching to a model supporting only Low/High, and returns to API/Max correctly; this is renderer evidence, not native editor/account acceptance. Screenshot: /private/tmp/ocean-model-effort-verified.png. Owning Surface contract updated; root/index docs unchanged because ownership boundaries remain unchanged. No installation, live provider calls or credential mutations in this slice. Fresh review, other-account acceptance and operated-runtime compatibility remain unresolved.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [17:21] [05-10-26]
+agent: [claude] [claude code]
+worktree: [claude/token-accounting-accuracy] [/Users/risingtidesdev/dev/ocean-claude-audit-b]
+type: [bug report]
+area: [backend] [testing]
+
+Corrected token accounting at the edges where it was wrong. A failed, cancelled or timed-out turn reported zero tokens and no context reading at every layer although its completed rounds were billed and checkpointed; it now reports those rounds from the usage the checkpointed assistant messages carry. Transcript estimates priced an image by its base64 length, about 64K tokens for one retained screenshot against roughly 1.6K billed, so three screenshots trimmed the task and every screenshot out of a 200K model's request and two tripped compaction; the runtime trim and agent compaction now share one estimator that prices an image flat at 6,000 tokens. A Responses round that hit the output cap dropped its usage. Anthropic message_delta usage was added although it is cumulative, and an explicit null in any usage count failed the frame, which for message_delta also loses the stop reason. Gemini output left thinking tokens out. A stop-hook continuation kept the earlier turn's context reading.
+
+Validation: full suites pass for ocean-protocol (176 plus 5), ocean-runtime (130 plus integration), ocean-agent (265, live probe ignored), ocean-providers (66), ocean-daemon (878), ocean-acp and ocean-cli; workspace test compilation, rustfmt check and docs-check pass on current main. New tests drive a scripted provider through prompt: one tool round then a provider error reports 1,000 input, 300 output, 50,000 cache read, 2,000 cache write and a 53,300 context reading with the round checkpointed, and a failure before any round still reports zero. No provider was called. Protocol, runtime and agent devlogs updated; indexes unchanged.
+_________________________________________________________________________________

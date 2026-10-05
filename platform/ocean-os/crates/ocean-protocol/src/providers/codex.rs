@@ -266,6 +266,31 @@ fn reasoning_effort(model: &str, level: ThinkingLevel) -> Option<&'static str> {
     }
 }
 
+/// Record the usage carried by a terminal Responses envelope
+/// (`response.completed`, or `response.incomplete` for a length cap). An
+/// envelope without usage leaves the running figures untouched.
+fn apply_terminal_usage(usage: &mut Usage, envelope: Value) {
+    let Ok(event) = serde_json::from_value::<CompletedEvent>(envelope) else {
+        return;
+    };
+    let Some(reported) = event.response.usage else {
+        return;
+    };
+    usage.input = reported.input_tokens;
+    usage.output = reported.output_tokens;
+    usage.total_tokens = if reported.total_tokens > 0 {
+        reported.total_tokens
+    } else {
+        reported.input_tokens + reported.output_tokens
+    };
+    if let Some(details) = reported.input_tokens_details {
+        usage.cache_read = details.cached_tokens;
+    }
+    if let Some(details) = reported.output_tokens_details {
+        usage.reasoning = details.reasoning_tokens;
+    }
+}
+
 /// Pull `response.incomplete_details.reason` out of a `response.incomplete` SSE
 /// frame. The Responses API nests it as
 /// `{"response": {"incomplete_details": {"reason": "..."}}}`.
@@ -1073,23 +1098,7 @@ impl Provider for CodexProvider {
                         }
                     }
                     "response.completed" => {
-                        if let Ok(c) = serde_json::from_value::<CompletedEvent>(value) {
-                            if let Some(u) = c.response.usage {
-                                usage.input = u.input_tokens;
-                                usage.output = u.output_tokens;
-                                usage.total_tokens = if u.total_tokens > 0 {
-                                    u.total_tokens
-                                } else {
-                                    u.input_tokens + u.output_tokens
-                                };
-                                if let Some(d) = u.input_tokens_details {
-                                    usage.cache_read = d.cached_tokens;
-                                }
-                                if let Some(d) = u.output_tokens_details {
-                                    usage.reasoning = d.reasoning_tokens;
-                                }
-                            }
-                        }
+                        apply_terminal_usage(&mut usage, value);
                         break;
                     }
                     // Safety refusal. The Responses API streams a decline through
@@ -1128,6 +1137,10 @@ impl Provider for CodexProvider {
                     "response.incomplete" => {
                         let reason = incomplete_reason(&value);
                         if incomplete_is_length_cap(reason.as_deref()) {
+                            // A capped round is billed like a completed one and
+                            // its envelope carries the same usage. Dropping it
+                            // reported zero tokens for the most expensive rounds.
+                            apply_terminal_usage(&mut usage, value);
                             stop = StopReason::Length;
                             break;
                         }
@@ -1711,6 +1724,61 @@ mod tests {
     // the nested reason from the real Responses-API frame shape and classify it
     // as a length cap, so it `break`s to the normal TextEnd/Done path (preserving
     // accumulated text, finishing as StopReason::Length) instead of yielding Err.
+    // A round that hit the output cap is the most expensive kind, and its
+    // envelope carries the same usage as a completed one. It used to be dropped,
+    // so the round reported zero tokens and the context meter went blank.
+    #[test]
+    fn length_capped_round_keeps_its_usage() {
+        let frame = json!({
+            "type": "response.incomplete",
+            "response": {
+                "status": "incomplete",
+                "incomplete_details": { "reason": "max_output_tokens" },
+                "usage": {
+                    "input_tokens": 250_000,
+                    "input_tokens_details": { "cached_tokens": 240_000 },
+                    "output_tokens": 128_000,
+                    "output_tokens_details": { "reasoning_tokens": 90_000 },
+                    "total_tokens": 378_000
+                }
+            }
+        });
+        assert!(incomplete_is_length_cap(
+            incomplete_reason(&frame).as_deref()
+        ));
+
+        let mut usage = Usage::default();
+        apply_terminal_usage(&mut usage, frame);
+        assert_eq!(usage.input, 250_000);
+        assert_eq!(usage.output, 128_000);
+        assert_eq!(usage.cache_read, 240_000);
+        assert_eq!(usage.reasoning, 90_000);
+        assert_eq!(usage.total_tokens, 378_000);
+    }
+
+    #[test]
+    fn terminal_envelope_without_usage_leaves_the_running_figures_alone() {
+        let mut usage = Usage {
+            input: 7,
+            output: 3,
+            total_tokens: 10,
+            ..Default::default()
+        };
+        apply_terminal_usage(
+            &mut usage,
+            json!({"type": "response.incomplete", "response": {"status": "incomplete"}}),
+        );
+        apply_terminal_usage(&mut usage, json!({"type": "response.completed"}));
+        assert_eq!((usage.input, usage.output, usage.total_tokens), (7, 3, 10));
+
+        // A total the backend omits falls back to input + output.
+        apply_terminal_usage(
+            &mut usage,
+            json!({"response": {"usage": {"input_tokens": 40, "output_tokens": 2}}}),
+        );
+        assert_eq!(usage.total_tokens, 42);
+    }
+
     #[test]
     fn incomplete_max_output_tokens_is_a_length_cap() {
         // Exact shape the Responses API emits when the output cap is reached.

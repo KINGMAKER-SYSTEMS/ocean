@@ -17,6 +17,11 @@ This crate owns the Ocean agent loop and permission-gated tool execution runtime
   and the loop's own clean-round replay — emit `AgentEvent::ProviderRetrying`
   with a `RetryScope`. Silent retrying is what makes a degraded network
   indistinguishable from a hung agent; do not add a third quiet wait.
+- `estimate_message_tokens` is the one transcript estimator: the request trim
+  and ocean-agent's compaction both call it. It prices an image at
+  `IMAGE_TOKEN_ESTIMATE`, never by base64 length; providers bill images by
+  pixel size, and a length-based price trimmed real history after three
+  screenshots.
 - Permission gates are mandatory; do not add execution paths that bypass them.
   `PermissionPolicy::should_check` owns the approval-mode boundary: manual may
   broaden checks to all known tools, automatic follows each tool's conservative

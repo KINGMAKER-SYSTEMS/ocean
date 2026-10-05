@@ -1604,6 +1604,35 @@ fn estimate_tokens_json<T: serde::Serialize>(value: &T) -> usize {
     serde_json::to_string(value).map(|s| s.len()).unwrap_or(0) / 4
 }
 
+/// Token cost assumed for one image block. Providers price an image by its
+/// pixel dimensions, not its encoded size: about 1.6K tokens for a full-size
+/// image and under 5K on the highest-resolution models. This sits above both
+/// so the estimate stays on the safe side of the window.
+pub const IMAGE_TOKEN_ESTIMATE: usize = 6_000;
+
+/// Rough token estimate for one transcript message: serialized JSON length / 4,
+/// with each image priced at [`IMAGE_TOKEN_ESTIMATE`] instead of by its base64
+/// length.
+///
+/// Counting the base64 payload priced one retained 256 KB screenshot at about
+/// 64K tokens, forty times what a provider charges, so the second screenshot
+/// tripped compaction on a 200K model and the third trimmed real history.
+pub fn estimate_message_tokens(message: &Message) -> usize {
+    let content = match message {
+        Message::User { content, .. } => content,
+        Message::Assistant(assistant) => &assistant.content,
+        Message::ToolResult(result) => &result.content,
+    };
+    let (images, image_bytes) = content
+        .iter()
+        .fold((0usize, 0usize), |(images, bytes), block| match block {
+            Content::Image { data, .. } => (images + 1, bytes + data.len()),
+            _ => (images, bytes),
+        });
+    let serialized = serde_json::to_string(message).map(|s| s.len()).unwrap_or(0);
+    serialized.saturating_sub(image_bytes) / 4 + images * IMAGE_TOKEN_ESTIMATE
+}
+
 /// Trim the message history to fit the model's context window before sending.
 ///
 /// Without this, every agent round resends the entire (growing) transcript and
@@ -1649,7 +1678,7 @@ pub fn trim_to_context_window(
     let mut used = 0usize;
     let mut keep_from = messages.len();
     for (idx, msg) in messages.iter().enumerate().rev() {
-        let cost = estimate_tokens_json(msg);
+        let cost = estimate_message_tokens(msg);
         let is_last = idx == messages.len() - 1;
         if !is_last && used + cost > budget {
             break;
@@ -2228,6 +2257,89 @@ mod tests {
             "kept history must not begin with an orphan tool result"
         );
         assert!(matches!(kept.last(), Some(Message::User { .. })));
+    }
+
+    fn screenshot_result(call_id: &str) -> Message {
+        Message::ToolResult(ToolResultMessage {
+            tool_call_id: call_id.into(),
+            tool_name: "browser_screenshot".into(),
+            // The largest image the transcript retains: 256 KB of base64.
+            content: vec![Content::Image {
+                data: "A".repeat(MAX_TOOL_RESULT_IMAGE_BYTES),
+                mime_type: "image/png".into(),
+            }],
+            is_error: false,
+            timestamp: 0,
+        })
+    }
+
+    #[test]
+    fn an_image_is_priced_flat_not_by_its_base64_length() {
+        let cost = estimate_message_tokens(&screenshot_result("call-1"));
+        assert!(
+            (IMAGE_TOKEN_ESTIMATE..IMAGE_TOKEN_ESTIMATE + 100).contains(&cost),
+            "one retained screenshot must cost about {IMAGE_TOKEN_ESTIMATE} tokens, got {cost}"
+        );
+
+        // Text is still length / 4, and a message with both adds the two.
+        let text = "x".repeat(4_000);
+        let text_cost = estimate_message_tokens(&user(&text));
+        assert!((1_000..1_100).contains(&text_cost), "got {text_cost}");
+        let mixed = Message::User {
+            content: vec![
+                Content::text(text),
+                Content::Image {
+                    data: "A".repeat(100_000),
+                    mime_type: "image/png".into(),
+                },
+            ],
+            timestamp: 0,
+        };
+        let mixed_cost = estimate_message_tokens(&mixed);
+        assert!(
+            (IMAGE_TOKEN_ESTIMATE + 1_000..IMAGE_TOKEN_ESTIMATE + 1_200).contains(&mixed_cost),
+            "got {mixed_cost}"
+        );
+    }
+
+    #[test]
+    fn trim_keeps_history_that_holds_a_few_screenshots() {
+        // Three retained screenshots are roughly 5K real tokens. Priced by
+        // base64 length they came to about 196K, past a 200K model's input
+        // budget, and the trim then dropped the task and every screenshot,
+        // leaving only the live prompt.
+        let call = |id: &str| {
+            Message::Assistant(AssistantMessage {
+                content: vec![Content::ToolCall {
+                    id: id.into(),
+                    name: "browser_screenshot".into(),
+                    arguments: serde_json::json!({}),
+                }],
+                api: "test".into(),
+                provider: "test".into(),
+                model: "test".into(),
+                usage: Usage::default(),
+                stop_reason: StopReason::ToolUse,
+                error_message: None,
+                timestamp: 0,
+            })
+        };
+        let msgs = vec![
+            user("the task"),
+            call("call-1"),
+            screenshot_result("call-1"),
+            call("call-2"),
+            screenshot_result("call-2"),
+            call("call-3"),
+            screenshot_result("call-3"),
+            user("what do you see?"),
+        ];
+        let kept = trim_to_context_window(&msgs, "sys", 200_000, 16_384);
+        assert_eq!(
+            kept.len(),
+            msgs.len(),
+            "nothing may be trimmed: the transcript is far below the window"
+        );
     }
 
     /// OCEAN-103: a model can emit a complete tool_use and still stop for a
