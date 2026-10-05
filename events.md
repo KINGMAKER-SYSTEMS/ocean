@@ -77,6 +77,23 @@ acceptance, max effort support, wider UI/integration pass and deployment remain.
 _________________________________________________________________________________
 
 _________________________________________________________________________________
+time: [11:22] [05-10-26]
+agent: [Codex desktop] [GPT-6]
+worktree: [codex/source-tip-audit]
+type: [workflow]
+area: [research] [writing]
+
+Verified merged CI selector repair and green public main Build scope, Build Ocean,
+and Build Surface. Updated all three personal public source-repository descriptions
+and homepage links to designate KINGMAKER-SYSTEMS/ocean as shared development home.
+Compared source tips: runtime b7839a45 (298 source commits after import), Surface
+1b88f862 (176), reusable packages f21d05f6 unchanged. Content-only merge preview
+found 56 conflicting paths; no preview source or ancestry was published. Recorded
+the reconciliation boundary and retained concurrent model/UI PR #2 separately.
+Devlog pass updated owning docs contract and migration guide; component contracts
+remain unchanged because no component source was edited.
+
+_________________________________________________________________________________
 time: [11:34] [05-10-26]
 agent: [Codex desktop] [GPT-6]
 worktree: [feat/model-effort-control] [/Users/risingtidesdev/dev/ocean-ui-current]

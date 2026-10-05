@@ -25,3 +25,9 @@ and notices are retained. No runtime behavior changes are bundled into the split
 
 Public builds run on standard GitHub-hosted runners. Private production workflows
 remain private and are not automatically enabled by this split.
+
+## Source currency
+
+See [source reconciliation](SOURCE_RECONCILIATION.md) for verified personal
+source tips and unresolved divergence. Canonical ownership does not by itself
+prove that all newer personal-source changes have been integrated.
