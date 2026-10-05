@@ -970,11 +970,15 @@ class Subagents:
                             )
                         return
                     except PluginError as error:
-                        if self.store.find(run_id) is None:
+                        failed_run = self.store.find(run_id)
+                        if failed_run is None:
                             return
-                        self.store.update(
-                            run_id, expect_request=request_id, error=str(error)[:2000]
-                        )
+                        # Keep an earlier reason, such as the ceiling notice a
+                        # restart inherits, over this attempt's connection error.
+                        if not failed_run.get("error"):
+                            self.store.update(
+                                run_id, expect_request=request_id, error=str(error)[:2000]
+                            )
                     except Exception as error:  # one bad response must not end the watchdog
                         print(
                             f"ocean-subagents watchdog error: {error}",

@@ -324,3 +324,15 @@ The reviewer acknowledged the ocean-subagents repair with nothing blocking; this
 
 Validation: 29 unit tests pass, with new cases for the reused permission id and the persisted cancelling run; wire test on Python 3.13 and system 3.9, py_compile and sh -n pass. Merged current main, keeping every ledger entry in time order.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [18:16] [05-10-26]
+agent: [claude] [claude code]
+worktree: [claude/subagent-lost-run-recovery] [/Users/risingtidesdev/dev/ocean-claude-audit-c]
+type: [review]
+area: [backend] [testing]
+
+Fixed a regression the delta review found in the previous subagent commit. A run cancelled by the elapsed-time ceiling keeps its reason in the run record, but the startup watchdog's first call always fails because the daemon launches plugins before its listener binds, and the failure handler overwrote that reason with the connection error; after a restart the lost settlement read "Earlier: Ocean daemon unavailable" instead of saying the ceiling had been reached. A failed attempt now records its error only when the run has none. Status, slot release and output were never affected. The same review listed three fixes with no test behind them, and they now have one each: forgetting a reported prompt once the run is seen to move on, `permissions` marking only what it listed (both the empty-list case and a prompt raised between its two reads), and not asking twice for a cancellation still in flight after a restart.
+
+Validation: 33 plugin tests pass on Python 3.13 and `--check` passes. The new restart test fails on the previous commit; each of the three coverage tests fails when its fix is removed. No daemon was contacted, installed or restarted, and the installed plugin copy is unchanged.
+_________________________________________________________________________________

@@ -480,6 +480,81 @@ class OceanSubagentTests(unittest.TestCase):
             self.assertEqual(again["status"], "waiting_for_permission")
             self.assertLess(time.monotonic() - started, 5)
 
+    def test_a_prompt_answered_elsewhere_and_raised_again_is_reported_again(self):
+        # Another client can answer a child's prompt, so `decide` never runs
+        # here. Seeing the run move on is what forgets the report.
+        with tempfile.TemporaryDirectory() as root, FakeDaemon() as daemon:
+            manager = self.manager(root, daemon)
+            run = manager.spawn({"task": "approved from the cockpit", "cwd": root})
+            reused = daemon.add_permission(run["turn_id"], "bash")
+            first = manager.wait({"run_id": run["run_id"], "timeout_seconds": 10})
+            self.assertEqual(first["status"], "waiting_for_permission")
+            with daemon.lock:
+                prompt = daemon.permissions.pop(reused)
+                request = daemon.requests[run["turn_id"]]
+                request["state"] = "running"
+                request.pop("permission_id", None)
+            self.assertEqual(manager.refresh(run["run_id"])["status"], "running")
+
+            with daemon.lock:
+                daemon.permissions[reused] = prompt
+                request["state"] = "waiting_for_permission"
+                request["permission_id"] = reused
+            started = time.monotonic()
+            again = manager.wait({"run_id": run["run_id"], "timeout_seconds": 3})
+            self.assertEqual(again["status"], "waiting_for_permission")
+            self.assertLess(time.monotonic() - started, 2)
+
+    def test_permissions_never_marks_a_prompt_it_did_not_list(self):
+        with tempfile.TemporaryDirectory() as root, FakeDaemon() as daemon:
+            manager = self.manager(root, daemon)
+
+            # The request already says it is blocked, but the prompt is not in
+            # the permission list yet. Nothing was shown, so nothing is marked.
+            run = manager.spawn({"task": "prompt not listed yet", "cwd": root})
+            with daemon.lock:
+                request = daemon.requests[run["turn_id"]]
+                request["state"] = "waiting_for_permission"
+                request["permission_id"] = "not-listed-yet"
+            listed = manager.permissions({"run_id": run["run_id"]})
+            self.assertEqual(listed["permissions"], [])
+            started = time.monotonic()
+            result = manager.wait({"run_id": run["run_id"], "timeout_seconds": 3})
+            self.assertEqual(result["status"], "waiting_for_permission")
+            self.assertLess(time.monotonic() - started, 2)
+
+            # A prompt raised between the status read and the list read is in
+            # the response, and the next wait still reports it.
+            other = manager.spawn({"task": "prompt raised mid-call", "cwd": root})
+            raised = []
+
+            def raise_after_first_read(real):
+                def read(*args, **kwargs):
+                    result = real(*args, **kwargs)
+                    if not raised:
+                        raised.append(daemon.add_permission(other["turn_id"], "write"))
+                    return result
+
+                return read
+
+            with mock.patch.object(
+                manager.client,
+                "request_status",
+                side_effect=raise_after_first_read(manager.client.request_status),
+            ), mock.patch.object(
+                manager.client,
+                "pending_permissions",
+                side_effect=raise_after_first_read(manager.client.pending_permissions),
+            ):
+                listed = manager.permissions({"run_id": other["run_id"]})
+            self.assertEqual(
+                [item["permission_id"] for item in listed["permissions"]], raised
+            )
+            started = time.monotonic()
+            result = manager.wait({"run_id": other["run_id"], "timeout_seconds": 3})
+            self.assertEqual(result["status"], "waiting_for_permission")
+            self.assertLess(time.monotonic() - started, 2)
+
     def test_concurrency_is_bounded(self):
         with tempfile.TemporaryDirectory() as root, FakeDaemon() as daemon:
             manager = self.manager(root, daemon)
@@ -832,6 +907,69 @@ class OceanSubagentTests(unittest.TestCase):
             # to call a tool for the startup watchdog to notice.
             manager = self.manager(root, daemon)
             self.assertTrue(wait_until(lambda: manager.store.get(run_id)["status"] == "lost"))
+            self.assertEqual(daemon.cancel_calls, [])
+
+    def test_the_ceiling_reason_survives_a_restart_that_starts_unreachable(self):
+        # The daemon launches plugins before its listener binds, so the
+        # startup watchdog's first call always fails. That failure must not
+        # replace the reason the run was being cancelled.
+        with tempfile.TemporaryDirectory() as root, FakeDaemon() as daemon:
+            run_id = self.overdue_run(root, str(uuid.uuid4()), str(uuid.uuid4()))
+            state = Path(root) / "state/runs.json"
+            data = json.loads(state.read_text())
+            data["runs"][run_id]["status"] = "cancelling"
+            data["runs"][run_id]["error"] = "elapsed-time ceiling reached; cancellation requested"
+            state.write_text(json.dumps(data))
+            daemon.unavailable = True
+            real_status, refused = module.DaemonClient.request_status, []
+
+            def counted_status(client, request_id):
+                try:
+                    return real_status(client, request_id)
+                except module.PluginError:
+                    refused.append(request_id)
+                    raise
+
+            with mock.patch.object(module, "WATCHDOG_RETRY_SECONDS", 0.05), mock.patch.object(
+                module, "WATCHDOG_ATTEMPTS", 2_000
+            ), mock.patch.object(module.DaemonClient, "request_status", counted_status):
+                manager = self.manager(root, daemon)
+                self.assertTrue(wait_until(lambda: len(refused) >= 2))
+                self.assertIn("elapsed-time ceiling", manager.store.get(run_id)["error"])
+                daemon.unavailable = False
+                self.assertTrue(
+                    wait_until(lambda: manager.store.get(run_id)["status"] == "lost")
+                )
+            lost = manager.store.get(run_id)
+            self.assertIn("elapsed-time ceiling", lost["error"])
+            self.assertNotIn("HTTP 503", lost["error"])
+            self.assertEqual(daemon.cancel_calls, [])
+
+    def test_a_cancellation_still_in_flight_after_a_restart_is_not_asked_for_twice(self):
+        with tempfile.TemporaryDirectory() as root, FakeDaemon() as daemon:
+            request_id, session_id = str(uuid.uuid4()), str(uuid.uuid4())
+            daemon.requests[request_id] = {
+                "request_id": request_id,
+                "session_id": session_id,
+                "state": "cancelling",
+                "message": "cancel requested; cancellation token sent",
+            }
+            daemon.sessions[session_id] = []
+            run_id = self.overdue_run(root, request_id, session_id)
+            state = Path(root) / "state/runs.json"
+            data = json.loads(state.read_text())
+            data["runs"][run_id]["status"] = "cancelling"
+            state.write_text(json.dumps(data))
+            real_status, polled = module.DaemonClient.request_status, []
+
+            def counted_status(client, polled_id):
+                polled.append(polled_id)
+                return real_status(client, polled_id)
+
+            with mock.patch.object(module.DaemonClient, "request_status", counted_status):
+                manager = self.manager(root, daemon)
+                self.assertTrue(wait_until(lambda: polled and not manager.watchdogs))
+            self.assertEqual(manager.store.get(run_id)["status"], "cancelling")
             self.assertEqual(daemon.cancel_calls, [])
 
     def test_refresh_rearms_a_watchdog_that_gave_up(self):
