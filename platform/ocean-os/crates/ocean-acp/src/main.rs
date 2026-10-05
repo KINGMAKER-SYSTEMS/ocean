@@ -1107,20 +1107,32 @@ fn spawn_permission_bridge(
     Ok(())
 }
 
-/// Build an ACP [`SessionModeState`] from the daemon's model roster, so Zed
-/// renders a model picker. Each Ocean model becomes an ACP "mode": the mode id
-/// is the model id (what we send back on swap), the display name is the label.
+/// Project daemon choices into ACP modes without stripping their auth route.
+/// ACP modes have no disabled field; disconnected alternatives stay absent.
 fn build_mode_state(roster: &daemon::ModelsResponse) -> SessionModeState {
-    let available_modes: Vec<SessionMode> = roster
-        .models
+    let current = if roster.routes.is_some() {
+        roster
+            .current
+            .route
+            .as_deref()
+            .unwrap_or(&roster.current.model)
+    } else {
+        &roster.current.model
+    };
+    let choices = roster.routes.as_deref().unwrap_or(&roster.models);
+    let mut available_modes: Vec<SessionMode> = choices
         .iter()
+        .filter(|m| m.ready != Some(false) || m.id == current)
         .map(|m| SessionMode::new(SessionModeId::new(m.id.clone()), m.display_name()))
         .collect();
-
-    SessionModeState::new(
-        SessionModeId::new(roster.current.model.clone()),
-        available_modes,
-    )
+    // Keep retired/pinned ids representable without selecting a different auth.
+    if !available_modes
+        .iter()
+        .any(|mode| mode.id.0.as_ref() == current)
+    {
+        available_modes.push(SessionMode::new(SessionModeId::new(current), current));
+    }
+    SessionModeState::new(SessionModeId::new(current), available_modes)
 }
 
 /// Concatenate the text of an ACP prompt's content blocks. Non-text blocks
@@ -1223,6 +1235,136 @@ fn event_session_id(event: &ocean_agent_sdk::AgentTurnEvent) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn model_modes(payload: Value) -> SessionModeState {
+        build_mode_state(&serde_json::from_value(payload).unwrap())
+    }
+
+    #[test]
+    fn model_modes_keep_api_and_subscription_routes_distinct() {
+        let modes = model_modes(serde_json::json!({
+            "current": {"model": "gpt-6.1-sol", "route": "openai/gpt-6.1-sol"},
+            "models": [{"id": "gpt-6.1-sol"}],
+            "routes": [
+                {"id": "openai/gpt-6.1-sol", "label": "GPT-6.1 Sol (API)", "ready": true},
+                {"id": "openai-codex/gpt-6.1-sol", "label": "GPT-6.1 Sol (Codex)", "ready": true},
+                {"id": "anthropic/claude-opus-5-5", "ready": false}
+            ]
+        }));
+        assert_eq!(modes.current_mode_id.0.as_ref(), "openai/gpt-6.1-sol");
+        assert_eq!(modes.available_modes.len(), 2);
+        let sessions = Sessions::default();
+        sessions.insert("api".into(), "/tmp/api".into());
+        sessions.insert("oauth".into(), "/tmp/oauth".into());
+        for (session, mode) in ["api", "oauth"].into_iter().zip(modes.available_modes) {
+            assert!(sessions.set_model_id(session, mode.id.0.to_string()));
+        }
+        assert_eq!(
+            sessions.model_id("api").as_deref(),
+            Some("openai/gpt-6.1-sol")
+        );
+        assert_eq!(
+            sessions.model_id("oauth").as_deref(),
+            Some("openai-codex/gpt-6.1-sol")
+        );
+    }
+
+    #[tokio::test]
+    async fn editor_api_selection_and_max_effort_reach_turn_wire() {
+        use axum::{
+            routing::{get, post},
+            Json, Router,
+        };
+        let (sent, mut received) = tokio::sync::mpsc::unbounded_channel::<Value>();
+        let app = Router::new()
+            .route(
+                "/v1/models",
+                get(|| async {
+                    Json(serde_json::json!({
+                        "current": {"model": "gpt-6.1-sol", "route": "openai/gpt-6.1-sol"},
+                        "models": [{"id": "gpt-6.1-sol"}],
+                        "routes": [{"id": "openai/gpt-6.1-sol", "ready": true}]
+                    }))
+                }),
+            )
+            .route(
+                "/v1/agent/turns",
+                post(move |Json(body): Json<Value>| {
+                    let sent = sent.clone();
+                    async move {
+                        sent.send(body).unwrap();
+                        Json(serde_json::json!({
+                            "ok": true,
+                            "turn_id": "11111111-1111-4111-8111-111111111111",
+                            "session_id": "22222222-2222-4222-8222-222222222222",
+                            "status": "completed", "event_id_prefix": "fixture"
+                        }))
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = DaemonClient::new(format!("http://{}", listener.local_addr().unwrap()));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let modes = build_mode_state(&client.list_models().await.unwrap());
+        let sessions = Sessions::default();
+        sessions.insert("editor".into(), "/tmp/editor".into());
+        assert!(sessions.set_model_id("editor", modes.available_modes[0].id.0.to_string()));
+        let req = PromptRequest::new("editor", vec!["fixture".to_string().into()]).meta(
+            serde_json::from_value::<serde_json::Map<String, Value>>(
+                serde_json::json!({"ocean": {"thinking_level": "MAX"}}),
+            )
+            .unwrap(),
+        );
+        let response = client
+            .submit_turn(
+                "fixture".into(),
+                "/tmp/editor".into(),
+                None,
+                sessions.model_id("editor"),
+                thinking_level_from_meta(&req),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(response.ok);
+        let wire = received.try_recv().unwrap();
+        assert_eq!(wire["model_id"], "openai/gpt-6.1-sol");
+        assert_eq!(wire["thinking_level"], "max");
+        assert_eq!(wire["client_type"], "acp-zed");
+        server.abort();
+    }
+
+    #[test]
+    fn model_modes_support_legacy_daemons_without_readiness() {
+        let modes = model_modes(serde_json::json!({
+            "current": {"model": "gpt-6-astra"},
+            "models": [{"id": "gpt-6-astra"}, {"id": "claude-opus-5-5"}]
+        }));
+        assert_eq!(modes.current_mode_id.0.as_ref(), "gpt-6-astra");
+        assert_eq!(modes.available_modes.len(), 2);
+    }
+
+    #[test]
+    fn model_modes_preserve_disconnected_or_retired_current_route() {
+        for routes in [
+            serde_json::json!([]),
+            serde_json::json!([{"id": "anthropic/claude-opus-5-5", "ready": false}]),
+        ] {
+            let modes = model_modes(serde_json::json!({
+                "current": {"model": "claude-opus-5-5", "route": "anthropic/claude-opus-5-5"},
+                "models": [{"id": "claude-opus-5-5"}],
+                "routes": routes
+            }));
+            assert_eq!(
+                modes.current_mode_id.0.as_ref(),
+                "anthropic/claude-opus-5-5"
+            );
+            assert_eq!(modes.available_modes.len(), 1);
+            assert_eq!(modes.available_modes[0].id, modes.current_mode_id);
+        }
+    }
 
     #[test]
     fn active_request_tracks_and_clears_per_session() {

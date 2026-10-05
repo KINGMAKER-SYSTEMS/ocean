@@ -180,3 +180,15 @@ Floating chat now uses the same model/effort control as the main composer. Draft
 
 Surface: 896 tests passed, strict WASM Clippy and Trunk build passed. Docs-check passed (30 packages, 151 active Markdown files, 170 links). Read-only browser fixtures prove Escape/focus, 390px layout with panel x=24..366 and no horizontal overflow, and Enter preserving a draft while delayed bootstrap keeps Send disabled. Fixture evidence does not establish real inference or native overlay acceptance. Owning Surface devlog updated; root and Child devlog indexes unchanged because ownership boundaries did not move. Fresh review, current-head CI, account repair and operated-runtime compatibility remain pending; no live installation occurred.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [13:06] [05-10-26]
+agent: [codex] [gpt-6]
+worktree: [feat/model-effort-control] [/Users/risingtidesdev/dev/ocean-ui-current]
+type: [bug report]
+area: [frontend] [backend] [testing]
+
+ACP editor model modes now consume additive qualified auth routes and current.route instead of collapsing API and subscription choices into legacy wire ids. Selection remains session-local and is forwarded unchanged on each turn. Older daemons retain legacy behavior. Explicitly disconnected alternatives are omitted because ACP modes have no disabled field; disconnected or retired current ids remain representable.
+
+ACP: 23 unit and three permission-ordering integration tests passed; strict all-target Clippy and docs-check passed. A local HTTP fixture drives the real models client, mode projection, session override and turn client, proving OpenAI API qualified selection plus uppercase MAX metadata reaches the request as exact route plus max. No provider inference, credential change or live installation occurred. Crates owning devlog updated; root and Child devlog indexes intentionally unchanged because no package boundary changed. Preceding head 1c946d0d has both hosted builds green. Fresh review, new-head builds, connected-account acceptance and runtime migration compatibility remain pending.
+_________________________________________________________________________________
