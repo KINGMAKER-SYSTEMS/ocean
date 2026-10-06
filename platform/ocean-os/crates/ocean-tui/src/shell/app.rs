@@ -40,7 +40,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::{
     action::{Action, HealthSource, LoginTarget, Nav, SurfaceTarget},
-    client::{DaemonClient, ModelEntry, TurnSubmitError},
+    client::{catalog_thinking_level, DaemonClient, ModelEntry, TurnSubmitError},
     component::Component,
     components::{
         chat::{sanitize_line, ChatComponent},
@@ -625,6 +625,10 @@ pub struct App {
     models_sel: usize,
     models_hit: Vec<(Rect, usize)>,
     thinking_override: Option<ThinkingLevel>,
+    /// Picker-local effort choice. `Some(None)` means the user staged the
+    /// daemon default; `None` means the picker is closed/not initialized.
+    /// Cycling must not change the active per-turn override until apply.
+    models_thinking_override: Option<Option<ThinkingLevel>>,
     /// `/advisor` picker overlay — the per-session second-opinion reviewer.
     /// Reuses `models_entries` (the same registry fetch) for its model list,
     /// with an "off" row on top. `advisor_ctl` rides every turn as the per-turn
@@ -828,6 +832,7 @@ impl App {
             models_sel: 0,
             models_hit: Vec::new(),
             thinking_override: None,
+            models_thinking_override: None,
             advisor_open: false,
             advisor_sel: 0,
             advisor_hit: Vec::new(),
@@ -3339,6 +3344,7 @@ impl App {
             Action::OpenModels => {
                 self.models_open = true;
                 self.models_loading = true;
+                self.models_thinking_override = Some(self.thinking_override);
                 self.models_hit.clear();
                 let client = self.client.clone();
                 let tx = self.actions_tx.clone();
@@ -4631,11 +4637,11 @@ impl App {
     }
 
     /// Keys for the `/models` picker overlay: ↑/↓ move, ⏎ applies the model
-    /// (+ the thinking level shown in the footer), ←/→ cycle thinking, Esc/q
-    /// close. Enter on a not-ready model explains why instead of pretending.
+    /// and staged effort, ←/→ stage a level offered for the HIGHLIGHTED model,
+    /// Esc/q discard staged effort. Enter on a not-ready model explains why.
     fn models_key(&mut self, k: crossterm::event::KeyEvent) {
         match k.code {
-            KeyCode::Esc | KeyCode::Char('q') => self.models_open = false,
+            KeyCode::Esc | KeyCode::Char('q') => self.models_close(),
             KeyCode::Up | KeyCode::Char('k') => {
                 self.models_sel = self.models_sel.saturating_sub(1);
             }
@@ -4644,12 +4650,34 @@ impl App {
                     self.models_sel = (self.models_sel + 1).min(self.models_entries.len() - 1);
                 }
             }
-            KeyCode::Left => self.thinking_override = cycle_thinking(self.thinking_override, -1),
-            KeyCode::Right => self.thinking_override = cycle_thinking(self.thinking_override, 1),
+            KeyCode::Left => {
+                let allowed = self.highlighted_effort_levels();
+                let current = self
+                    .models_thinking_override
+                    .unwrap_or(self.thinking_override);
+                self.models_thinking_override = Some(cycle_thinking(current, -1, &allowed));
+            }
+            KeyCode::Right => {
+                let allowed = self.highlighted_effort_levels();
+                let current = self
+                    .models_thinking_override
+                    .unwrap_or(self.thinking_override);
+                self.models_thinking_override = Some(cycle_thinking(current, 1, &allowed));
+            }
             KeyCode::Enter | KeyCode::Char(' ') => self.models_apply(),
             KeyCode::Char('r') => self.dispatch(Action::OpenModels),
             _ => {}
         }
+    }
+
+    /// The highlighted `/models` entry's catalog effort levels. Empty when
+    /// nothing is highlighted (still loading) or the route's encoder sends no
+    /// effort parameter — either way the cycler offers only `default`.
+    fn highlighted_effort_levels(&self) -> Vec<String> {
+        self.models_entries
+            .get(self.models_sel)
+            .map(|e| e.effort_levels.clone())
+            .unwrap_or_default()
     }
 
     /// Mouse for the `/models` picker: click a row to select it, click the
@@ -4680,7 +4708,7 @@ impl App {
                     // Outside every row: close only when outside the modal
                     // frame entirely (the hit list spans the modal body, so a
                     // click on padding keeps it open harmlessly).
-                    self.models_open = false;
+                    self.models_close();
                 }
             }
             _ => {}
@@ -4702,9 +4730,31 @@ impl App {
             ));
             return;
         }
+        // A level the applied model's encoder doesn't distinguish would be
+        // silently folded or ignored — snap to `default` so the daemon's
+        // global setting stays in force instead of a no-op pin.
+        self.thinking_override = self.staged_model_thinking();
         let id = entry.id.clone();
         self.models_open = false;
+        self.models_thinking_override = None;
         self.dispatch(Action::SetModel(id));
+    }
+
+    fn models_close(&mut self) {
+        self.models_open = false;
+        self.models_thinking_override = None;
+    }
+
+    fn staged_model_thinking(&self) -> Option<ThinkingLevel> {
+        let staged = self
+            .models_thinking_override
+            .unwrap_or(self.thinking_override);
+        match (staged, self.models_entries.get(self.models_sel)) {
+            (Some(level), Some(entry)) if entry.ready && !entry.offers_thinking_level(level) => {
+                None
+            }
+            _ => staged,
+        }
     }
 
     // ── /advisor picker ──────────────────────────────────────────────────────
@@ -5352,7 +5402,10 @@ impl App {
         // Footer: the thinking-level state — functional context only, no
         // printed key hints.
         let footer_y = inner.y + inner.height - 1;
-        let footer = format!(" thinking: {}", thinking_label(self.thinking_override));
+        let footer = format!(
+            " thinking: {}",
+            thinking_label(self.staged_model_thinking())
+        );
         frame.render_widget(
             Paragraph::new(Span::styled(footer, Style::default().fg(theme::CYAN)))
                 .style(Style::default().bg(theme::SLATE)),
@@ -6955,23 +7008,29 @@ fn thinking_label(t: Option<ThinkingLevel>) -> &'static str {
     }
 }
 
-/// Cycle the thinking level through `default → off → minimal → low → medium →
-/// high → xhigh → max` (wrapping both directions). `default` (None) sends nothing so
-/// the daemon's global setting stays in force.
-fn cycle_thinking(cur: Option<ThinkingLevel>, dir: i8) -> Option<ThinkingLevel> {
-    const ORDER: [Option<ThinkingLevel>; 8] = [
-        None,
-        Some(ThinkingLevel::Off),
-        Some(ThinkingLevel::Minimal),
-        Some(ThinkingLevel::Low),
-        Some(ThinkingLevel::Medium),
-        Some(ThinkingLevel::High),
-        Some(ThinkingLevel::Xhigh),
-        Some(ThinkingLevel::Max),
-    ];
-    let i = ORDER.iter().position(|o| *o == cur).unwrap_or(0) as i8;
-    let n = ORDER.len() as i8;
-    ORDER[(((i + dir) % n + n) % n) as usize]
+/// Cycle the thinking level through the effort levels the daemon's catalog
+/// offers for the model being picked (issue #8): `default` plus exactly the
+/// entry's `effort_levels`, in catalog order, wrapping both directions.
+/// `default` (None) always stays available and stays distinct from `off` —
+/// it sends nothing, so the daemon's global setting remains in force. An
+/// empty (or unloaded) catalog list leaves `default` as the only choice: the
+/// route's encoder sends no effort parameter, so offering one would lie.
+fn cycle_thinking(
+    cur: Option<ThinkingLevel>,
+    dir: i8,
+    allowed: &[String],
+) -> Option<ThinkingLevel> {
+    let order: Vec<Option<ThinkingLevel>> = std::iter::once(None)
+        .chain(
+            allowed
+                .iter()
+                .filter_map(|l| catalog_thinking_level(l))
+                .map(Some),
+        )
+        .collect();
+    let i = order.iter().position(|o| *o == cur).unwrap_or(0) as i8;
+    let n = order.len() as i8;
+    order[(((i + dir) % n + n) % n) as usize]
 }
 
 /// Order two selection endpoints into (start, end) reading order — by row,
@@ -8102,6 +8161,7 @@ mod tests {
             provider: provider.into(),
             label: id.into(),
             ready,
+            effort_levels: Vec::new(),
         }
     }
 
@@ -8122,24 +8182,260 @@ mod tests {
     }
 
     #[test]
-    fn thinking_cycles_through_all_levels_and_wraps() {
-        // Forward from default hits every level then wraps home.
+    fn thinking_cycles_only_catalog_levels_and_wraps() {
+        // A route offering the full vocabulary keeps the legacy cycle.
+        let full: Vec<String> = ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let mut cur = None;
         let mut seen = vec![thinking_label(cur)];
         for _ in 0..7 {
-            cur = cycle_thinking(cur, 1);
+            cur = cycle_thinking(cur, 1, &full);
             seen.push(thinking_label(cur));
         }
         assert_eq!(
             seen,
             vec!["default", "off", "minimal", "low", "medium", "high", "xhigh", "max"]
         );
-        assert_eq!(cycle_thinking(cur, 1), None, "max wraps to default");
-        // Backward from default wraps to max.
+        assert_eq!(cycle_thinking(cur, 1, &full), None, "max wraps to default");
         assert_eq!(
-            thinking_label(cycle_thinking(None, -1)),
+            thinking_label(cycle_thinking(None, -1, &full)),
             "max",
             "default wraps backward to max"
+        );
+
+        // A collapsed route (DeepSeek shape) offers only its real choices;
+        // unsupported and folded levels are absent in both directions.
+        let deepseek: Vec<String> = ["off", "high", "max"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let mut cur = None;
+        let mut walk = vec![thinking_label(cur)];
+        for _ in 0..4 {
+            cur = cycle_thinking(cur, 1, &deepseek);
+            walk.push(thinking_label(cur));
+        }
+        assert_eq!(walk, vec!["default", "off", "high", "max", "default"]);
+        for level in ["minimal", "low", "medium", "xhigh"] {
+            assert!(
+                !walk.contains(&level),
+                "{level} must never be offered for a collapsed route"
+            );
+        }
+
+        // A single-level route (Kimi K3 shape) toggles default ↔ max.
+        let k3: Vec<String> = vec!["max".into()];
+        assert_eq!(
+            thinking_label(cycle_thinking(None, 1, &k3)),
+            "max",
+            "single-level route offers its one level"
+        );
+        assert_eq!(cycle_thinking(Some(ThinkingLevel::Max), 1, &k3), None);
+        assert_eq!(
+            thinking_label(cycle_thinking(None, -1, &k3)),
+            "max",
+            "backward from default wraps within the offered set"
+        );
+    }
+
+    #[test]
+    fn thinking_cycle_without_catalog_offers_only_default() {
+        // Empty list = the route's encoder sends no effort parameter (GLM,
+        // MiniMax, Kimi K2.x, GPT-4o, Gemini 2.0 Flash) or the catalog has
+        // not loaded: `default` is the only honest choice.
+        let empty: Vec<String> = vec![];
+        assert_eq!(cycle_thinking(None, 1, &empty), None);
+        assert_eq!(cycle_thinking(None, -1, &empty), None);
+        assert_eq!(cycle_thinking(Some(ThinkingLevel::High), 1, &empty), None);
+        // Unknown catalog names (forward compatibility) are skipped, not guessed.
+        let future: Vec<String> = vec!["ultra".into(), "high".into()];
+        assert_eq!(
+            thinking_label(cycle_thinking(None, 1, &future)),
+            "high",
+            "unknown effort names are skipped"
+        );
+    }
+
+    #[test]
+    fn models_picker_cycling_uses_the_highlighted_entrys_levels() {
+        let mut app = offline_app();
+        app.models_open = true;
+        app.models_entries = vec![
+            ModelEntry {
+                id: "kimi-k3".into(),
+                provider: "kimi".into(),
+                label: "Kimi K3".into(),
+                ready: true,
+                effort_levels: vec!["max".into()],
+            },
+            ModelEntry {
+                id: "glm-4.6".into(),
+                provider: "zhipu".into(),
+                label: "GLM 4.6".into(),
+                ready: true,
+                effort_levels: vec![],
+            },
+        ];
+        app.models_sel = 0;
+        // Highlighting K3: only default ↔ max.
+        app.models_key(crossterm::event::KeyEvent::new(
+            KeyCode::Right,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert_eq!(app.staged_model_thinking(), Some(ThinkingLevel::Max));
+        assert_eq!(app.thinking_override, None, "cycling remains staged");
+        app.models_key(crossterm::event::KeyEvent::new(
+            KeyCode::Right,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert_eq!(
+            app.staged_model_thinking(),
+            None,
+            "wraps within the offered set"
+        );
+        assert_eq!(app.thinking_override, None);
+
+        // Highlighting a no-effort route: cycling offers nothing but default.
+        app.models_sel = 1;
+        app.models_key(crossterm::event::KeyEvent::new(
+            KeyCode::Right,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert_eq!(
+            app.staged_model_thinking(),
+            None,
+            "no effort control for routes without an effort parameter"
+        );
+    }
+
+    #[test]
+    fn models_picker_discards_unapplied_effort_on_escape_and_outside_click() {
+        let mut app = offline_app();
+        app.thinking_override = Some(ThinkingLevel::High); // valid for active DeepSeek
+        app.models_entries = vec![
+            ModelEntry {
+                id: "deepseek-v4-pro".into(),
+                provider: "deepseek".into(),
+                label: "DeepSeek V4 Pro".into(),
+                ready: true,
+                effort_levels: vec!["off".into(), "high".into(), "max".into()],
+            },
+            ModelEntry {
+                id: "gpt-5.6-sol".into(),
+                provider: "openai".into(),
+                label: "GPT-5.6 Sol".into(),
+                ready: true,
+                effort_levels: vec![
+                    "off".into(),
+                    "low".into(),
+                    "medium".into(),
+                    "high".into(),
+                    "xhigh".into(),
+                    "max".into(),
+                ],
+            },
+        ];
+
+        let stage_medium_for_gpt = |app: &mut App| {
+            app.models_open = true;
+            app.models_thinking_override = Some(app.thinking_override);
+            app.models_sel = 1;
+            // high → xhigh → max → default → off → low → medium
+            for _ in 0..6 {
+                app.models_key(crossterm::event::KeyEvent::new(
+                    KeyCode::Right,
+                    crossterm::event::KeyModifiers::NONE,
+                ));
+            }
+            assert_eq!(app.staged_model_thinking(), Some(ThinkingLevel::Medium));
+            assert_eq!(app.thinking_override, Some(ThinkingLevel::High));
+        };
+
+        stage_medium_for_gpt(&mut app);
+        app.models_key(crossterm::event::KeyEvent::new(
+            KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert_eq!(app.thinking_override, Some(ThinkingLevel::High));
+        assert_eq!(app.models_thinking_override, None);
+
+        stage_medium_for_gpt(&mut app);
+        app.models_mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 0,
+            row: 0,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        });
+        assert!(!app.models_open);
+        assert_eq!(app.thinking_override, Some(ThinkingLevel::High));
+        assert_eq!(app.models_thinking_override, None);
+    }
+
+    #[test]
+    fn models_picker_footer_matches_the_effective_effort_on_apply() {
+        let mut app = offline_app();
+        app.models_open = true;
+        app.models_entries = vec![ModelEntry {
+            id: "glm-4.6".into(),
+            provider: "zhipu".into(),
+            label: "GLM 4.6".into(),
+            ready: true,
+            effort_levels: vec![],
+        }];
+        app.thinking_override = Some(ThinkingLevel::High);
+        app.models_thinking_override = Some(Some(ThinkingLevel::High));
+
+        let screen = render_app_to_string(&mut app, 100, 40);
+        assert!(
+            screen.contains("thinking: default"),
+            "unsupported staged effort previews the same default that Apply commits: {screen}"
+        );
+        assert!(!screen.contains("thinking: high"));
+    }
+
+    #[test]
+    fn applying_a_model_snaps_an_unoffered_thinking_level_to_default() {
+        let mut app = offline_app();
+        app.models_entries = vec![
+            ModelEntry {
+                id: "deepseek-v4-pro".into(),
+                provider: "deepseek".into(),
+                label: "DeepSeek V4 Pro".into(),
+                ready: true,
+                effort_levels: vec!["off".into(), "high".into(), "max".into()],
+            },
+            ModelEntry {
+                id: "gpt-5.6-sol".into(),
+                provider: "openai".into(),
+                label: "GPT-5.6 Sol".into(),
+                ready: true,
+                effort_levels: vec![
+                    "off".into(),
+                    "low".into(),
+                    "medium".into(),
+                    "high".into(),
+                    "xhigh".into(),
+                    "max".into(),
+                ],
+            },
+        ];
+        app.thinking_override = Some(ThinkingLevel::Medium);
+        app.models_sel = 0; // DeepSeek: medium is folded away
+        app.models_apply();
+        assert_eq!(
+            app.thinking_override, None,
+            "a level the encoder folds must not ride the applied model"
+        );
+
+        app.thinking_override = Some(ThinkingLevel::Medium);
+        app.models_sel = 1; // GPT-5.6: medium is offered
+        app.models_apply();
+        assert_eq!(
+            app.thinking_override,
+            Some(ThinkingLevel::Medium),
+            "an offered level rides the applied model unchanged"
         );
     }
 

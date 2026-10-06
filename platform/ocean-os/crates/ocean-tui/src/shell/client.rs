@@ -16,7 +16,7 @@ use std::{path::PathBuf, time::Duration};
 use futures::StreamExt;
 use ocean_agent_sdk::{
     AgentSessionCreateRequest, AgentSessionCreateResponse, AgentSessionId, AgentTurnEvent,
-    AgentTurnRequest, AgentTurnResponse,
+    AgentTurnRequest, AgentTurnResponse, ThinkingLevel,
 };
 use ocean_core::{
     CompactResponse, EventEnvelope, HealthResponse, PermissionDecision, PermissionDecisionRequest,
@@ -811,6 +811,38 @@ pub struct ModelEntry {
     pub label: String,
     #[serde(default = "bool_true")]
     pub ready: bool,
+    /// Effort levels this model's wire encoder actually distinguishes, from
+    /// the daemon's authoritative catalog. Empty = the route sends no effort
+    /// parameter, so clients render no thinking control. Older daemons omit
+    /// the field and deserialize to empty.
+    #[serde(default)]
+    pub effort_levels: Vec<String>,
+}
+
+impl ModelEntry {
+    /// Whether the daemon catalog offers this effort level for this exact
+    /// route. Canonical names only — the catalog never emits the slash
+    /// command's aliases.
+    pub fn offers_thinking_level(&self, level: ThinkingLevel) -> bool {
+        self.effort_levels
+            .iter()
+            .any(|l| catalog_thinking_level(l) == Some(level))
+    }
+}
+
+/// Parse one canonical catalog effort name. Unknown names (forward-compat
+/// additions) map to `None` and are skipped by callers rather than guessed.
+pub fn catalog_thinking_level(s: &str) -> Option<ThinkingLevel> {
+    match s {
+        "off" => Some(ThinkingLevel::Off),
+        "minimal" => Some(ThinkingLevel::Minimal),
+        "low" => Some(ThinkingLevel::Low),
+        "medium" => Some(ThinkingLevel::Medium),
+        "high" => Some(ThinkingLevel::High),
+        "xhigh" => Some(ThinkingLevel::Xhigh),
+        "max" => Some(ThinkingLevel::Max),
+        _ => None,
+    }
 }
 
 fn bool_true() -> bool {
