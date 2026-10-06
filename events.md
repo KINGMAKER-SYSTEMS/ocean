@@ -1,6 +1,5 @@
 # Ocean events
 
-_________________________________________________________________________________
 time: [10:38] [05-10-26]
 agent: [Codex desktop] [GPT-6]
 worktree: [main] [/private/tmp/ocean-public-cutover]
@@ -855,4 +854,22 @@ with `No space left on device`; only this factory worktree's target artifacts
 were cleaned. Push is pending a fresh PR-branch OID guard; hosted checks and
 independent review remain outstanding. No merge, deployment, or live outcome
 is claimed.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [22:48] [05-10-26]
+agent: [codex] [gpt-6.1-sol]
+worktree: [codex/factory-pr25-rooms-followup] [/Users/smathdaddy-macbook/.codex/worktrees/factory-pr25-rooms-followup]
+type: [review] PR #25 follow-up
+area: [testing] retirement HTTP authorization, replay, and route parity
+
+Applied the independent review findings on candidate head `02816903`: retained
+the inspect fixture's shared state by cloning it, advanced the router/banner
+parity expectation to 119, and added the inspect endpoint to the operator
+quick reference. The same router-level fixture now checks a missing operator
+credential is refused, a valid test operator retires a new placeholder, and
+replaying that exact decision is idempotent. The daemon fixture remains
+unverified locally because its dependency build hit `No space left on device`
+before compiling `ocean-daemon`; this follow-up awaits hosted Build Ocean and
+fresh independent review. No merge, deployment, or live outcome is claimed.
 _________________________________________________________________________________

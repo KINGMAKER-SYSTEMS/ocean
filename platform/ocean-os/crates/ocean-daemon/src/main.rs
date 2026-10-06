@@ -25750,7 +25750,7 @@ mod tests {
         assert_eq!(admission_routes, expected_admission_routes);
         assert_eq!(
             banner.len(),
-            118,
+            119,
             "route baseline changed; review the manifest"
         );
 

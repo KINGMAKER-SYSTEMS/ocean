@@ -8029,6 +8029,33 @@ env = { FIXTURE = "1" }
             (status, body)
         }
 
+        async fn post_json(
+            state: AppState,
+            uri: String,
+            operator: Option<&str>,
+            body: serde_json::Value,
+        ) -> (StatusCode, serde_json::Value) {
+            use tower::ServiceExt as _;
+            let mut request = axum::http::Request::post(uri)
+                .header(axum::http::header::CONTENT_TYPE, "application/json");
+            if let Some(operator) = operator {
+                request = request.header(crate::room_operator::OPERATOR_HEADER, operator);
+            }
+            let response = room_routes()
+                .with_state(state)
+                .oneshot(request.body(Body::from(body.to_string())).unwrap())
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = serde_json::from_slice(
+                &axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            (status, body)
+        }
+
         for uri in [
             format!("/v1/rooms/persistent/{key}/inspect"),
             format!("/v1/rooms/persistent/{key}"),
@@ -8049,14 +8076,66 @@ env = { FIXTURE = "1" }
             }
         }
 
+        let route_placeholder = "web-18c11f5d551e63f8";
+        with_rooms(&state, |store| {
+            store
+                .add_participant(
+                    &key,
+                    RoomParticipant {
+                        id: route_placeholder.into(),
+                        kind: RoomParticipantKind::Human,
+                        display_name: "Route Placeholder".into(),
+                    },
+                    Utc::now(),
+                )
+                .expect("add route placeholder");
+        });
+        let retire_uri =
+            format!("/v1/rooms/persistent/{key}/participants/{route_placeholder}/retire");
+        let retire_body = json!({
+            "decision_id": "retire-route-placeholder",
+            "successor_id": "smaths"
+        });
+        let (status, unauthorized) =
+            post_json(state.clone(), retire_uri.clone(), None, retire_body.clone()).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(unauthorized["error"], "operator_credential_missing");
+
+        let (status, retired) = post_json(
+            state.clone(),
+            retire_uri.clone(),
+            Some("test-room-operator"),
+            retire_body.clone(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(retired["changed"], true);
+        assert_eq!(retired["alias"]["from"], route_placeholder);
+        assert_eq!(retired["alias"]["to"], "smaths");
+
+        let (status, replay) = post_json(
+            state.clone(),
+            retire_uri,
+            Some("test-room-operator"),
+            retire_body,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(replay["changed"], false);
+        assert_eq!(replay["alias"]["from"], route_placeholder);
+        assert_eq!(replay["alias"]["to"], "smaths");
+
         let plain = RoomKey::new("no-aliases");
         with_rooms(&state, |store| {
             store
                 .create(plain.clone(), "No Aliases", None, Utc::now())
                 .expect("create no-alias room");
         });
-        let (status, empty) =
-            get_json(state, format!("/v1/rooms/persistent/{plain}/inspect")).await;
+        let (status, empty) = get_json(
+            state.clone(),
+            format!("/v1/rooms/persistent/{plain}/inspect"),
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(empty["aliases"], json!([]));
         assert_eq!(empty["aliases_truncated"], false);
