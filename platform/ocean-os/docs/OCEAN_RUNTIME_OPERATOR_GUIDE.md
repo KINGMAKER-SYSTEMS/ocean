@@ -610,6 +610,13 @@ GET    /v1/sessions/{id}/sync             refresh-only visible snapshot + SSE re
 GET    /v1/agents                         list discoverable agent folders
 GET    /v1/agents/{name}                  resolve one agent folder
 
+# Operator-authenticated coding-plan logins
+GET    /v1/auth/providers                 OAuth status of every provider (never a token)
+POST   /v1/auth/providers/{provider}/login start a login: attempt id + authorize URL
+GET    /v1/auth/providers/{provider}/login/{attempt_id} poll login state
+DELETE /v1/auth/providers/{provider}/login/{attempt_id} cancel a pending login
+POST   /v1/auth/providers/{provider}/logout remove the provider's auth-file block
+
 # Projects (named directory-bound workspaces)
 GET    /v1/projects                       list registered projects
 POST   /v1/projects                       create a project bound to a directory

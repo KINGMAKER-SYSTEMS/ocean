@@ -150,6 +150,8 @@ mod observatory_auth;
 mod persistent_rooms;
 /// Project registry CRUD, pagination, git enrichment, and session association adapters.
 mod project_registry;
+/// Operator-authenticated coding-plan logins over HTTP (web identity program M3).
+mod provider_auth;
 /// In-memory quorum-of-recall tally storage and bounded synchronous mutations.
 mod recall_registry;
 /// In-memory request and permission control records plus bounded lifecycle mutations.
@@ -301,6 +303,9 @@ struct AppState {
     rooms: RoomStoreHandle,
     /// Captured local operator authority; cookies/roster/YOLO never substitute.
     room_operator: Arc<room_operator::OperatorIdentity>,
+    /// In-memory record of provider OAuth login attempts for the
+    /// `/v1/auth/providers*` routes; see [`provider_auth`].
+    provider_logins: Arc<provider_auth::ProviderLogins>,
     /// Bounded room-scoped wake hints for persistent transcript SSE tails. The
     /// payload is only `(room, seq)`; SQLite remains authoritative for replay,
     /// live delivery, lag recovery, ordering, and deduplication.
@@ -788,6 +793,20 @@ fn app_router(origins: BrowserOrigins, hosts: AllowedHosts) -> Router<AppState> 
         .route("/v1/browser/input", post(browser_input))
         .route("/v1/model", get(model_get).post(model_set))
         .route("/v1/models", get(models_list))
+        // Operator-authenticated coding-plan login surface (web identity M3).
+        .route("/v1/auth/providers", get(provider_auth::list))
+        .route(
+            "/v1/auth/providers/{provider}/login",
+            post(provider_auth::start),
+        )
+        .route(
+            "/v1/auth/providers/{provider}/login/{attempt_id}",
+            get(provider_auth::poll).delete(provider_auth::cancel),
+        )
+        .route(
+            "/v1/auth/providers/{provider}/logout",
+            post(provider_auth::logout),
+        )
         .route("/v1/memory", get(memory_list))
         .route("/v1/lsp", get(lsp_list))
         .route(
@@ -1116,6 +1135,7 @@ async fn main() -> anyhow::Result<()> {
         longhouse,
         rooms,
         room_operator,
+        provider_logins: Arc::default(),
         room_wakes,
         room_access_wakes,
         room_read_cursor_wakes,
@@ -1591,6 +1611,11 @@ fn banner_routes() -> &'static [&'static str] {
         "GET /v1/sessions/{id}/sync",
         "GET /v1/agents",
         "GET /v1/agents/{name}",
+        "GET /v1/auth/providers",
+        "POST /v1/auth/providers/{provider}/login",
+        "GET /v1/auth/providers/{provider}/login/{attempt_id}",
+        "DELETE /v1/auth/providers/{provider}/login/{attempt_id}",
+        "POST /v1/auth/providers/{provider}/logout",
         "GET /v1/projects",
         "POST /v1/projects",
         "GET /v1/projects/{id}",
@@ -14186,6 +14211,7 @@ mod tests {
                 Some("test-room-operator"),
                 vec!["http://127.0.0.1:8790".into()],
             )),
+            provider_logins: Arc::default(),
             room_wakes,
             room_access_wakes,
             room_read_cursor_wakes: RoomReadCursorWakeBus::default(),
@@ -16075,6 +16101,7 @@ mod tests {
                 Some("test-room-operator"),
                 vec!["http://127.0.0.1:8790".into()],
             )),
+            provider_logins: Arc::default(),
             room_wakes,
             room_access_wakes,
             room_read_cursor_wakes: RoomReadCursorWakeBus::default(),
@@ -16585,6 +16612,7 @@ mod tests {
                 Some("test-room-operator"),
                 vec!["http://127.0.0.1:8790".into()],
             )),
+            provider_logins: Arc::default(),
             room_wakes,
             room_access_wakes,
             room_read_cursor_wakes: RoomReadCursorWakeBus::default(),
@@ -18533,6 +18561,7 @@ mod tests {
                 Some("test-room-operator"),
                 vec!["http://127.0.0.1:8790".into()],
             )),
+            provider_logins: Arc::default(),
             room_wakes,
             room_access_wakes,
             room_read_cursor_wakes: RoomReadCursorWakeBus::default(),
@@ -25703,7 +25732,7 @@ mod tests {
         assert_eq!(admission_routes, expected_admission_routes);
         assert_eq!(
             banner.len(),
-            112,
+            117,
             "route baseline changed; review the manifest"
         );
 
