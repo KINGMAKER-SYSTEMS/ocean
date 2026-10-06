@@ -1088,3 +1088,34 @@ Rooms program governance chain it depends on (Phase 1 room-agent
 authorization manifest, Gate 0 decisions and threat model, distributed
 workspace architecture). All public program specs; no private material.
 docs-check PASS (157 active Markdown files).
+time: [14:12] [06-10-26]
+agent: [zcode] [glm-5.3]
+worktree: [port/rooms-summarize]
+type: [feature-request]
+area: [backend] reconciliation: room summarize
+
+Sixth bounded Track B port: POST /v1/rooms/persistent/{key}/summarize — one
+bounded model turn over the room's transcript tail, folded into the room's
+single well-known room-summary artifact (compare-and-swap versioned, amended
+in place, announced on the SSE tail post-commit). The 1019-line room_summary.rs
+lands with its closure-injected model seam (testable without provider env;
+the route supplies AgentRuntime::complete_once, the same fresh-context
+no-session seam the advisor uses), role-based alias resolution (summarize >
+fast > the bound model, so the feature works with zero config), turn-permit
+backpressure shared with agent_turn/compact, and 10 tests. The route handler
+(request struct + handler + response mapping) was extracted verbatim from the
+personal persistent_rooms rework into the monorepo's unchanged file; the only
+adaptations were a sibling-module import and widening
+read_transcript_page to pub(super). Router-contract parity moved 119 → 120.
+The fixed 502 never carries provider text; artifact authorship demands a real
+roster participant.
+
+Issue #42 flakiness update (comment posted): the room-tail test is FLAKY
+(fails ~2/3, passes ~1/3 on an unchanged tree) while the HTTP lifecycle and
+audit-asymmetry pair is deterministic (3/3 failed) — two distinct problems,
+not one.
+
+Validation: room_summary tests (10) pass; router-contract parity (120) green;
+cargo test -p ocean-daemon 926 passed / 2 deterministic failures — the
+issue-#42 pair, reproduced on clean main before any of my changes; rustfmt;
+denied-warning Clippy zero; cargo xtask docs-check PASS.
