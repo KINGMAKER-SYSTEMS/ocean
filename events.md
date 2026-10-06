@@ -362,6 +362,18 @@ Validation: full suites pass for ocean-protocol (177 plus 5), ocean-runtime, oce
 _________________________________________________________________________________
 
 _________________________________________________________________________________
+time: [17:53] [05-10-26]
+agent: [claude] [claude code]
+worktree: [claude/surface-slash-and-session-handoff] [/Users/risingtidesdev/dev/ocean-claude-audit-b]
+type: [bug report]
+area: [frontend] [testing]
+
+Fixed Surface's composer slash handling and the TUI hand-off link. The slash popover matched by unranked subsequence and Enter ran the first row, so /h ran /thinking (which, bare, silently reset the effort level), /se opened Browser, /cl opened Council and /m toggled Rooms; matches are now ranked exact, prefix, then scattered. A / line was cleared whatever happened, so /etc/hosts followed by a question was thrown away as an unknown command and a sentence beginning /so toggled the Sessions panel; a pure classifier now runs a command only when the line names one, keeps a mistyped or unavailable command in the composer with a hint, and sends a path or prose as the message it is. Arguments are the whole remainder instead of one token, the highlight resets when the query changes, a bare /thinking shows the choices, and /thinking accepts max. The TUI's /web and /beam build a ?session=<id> URL that nothing in Surface read, so the link opened whatever session the browser last used; boot now honours a well-formed session id from the URL ahead of the persisted session, falls back untouched when the daemon does not have it, and drops the parameter once honoured.
+
+Validation: all Surface native tests pass (878 in the UI crate plus the integration suites) with new pure tests for ranking, classification, arguments, the session link and query rewriting; rustfmt check, strict wasm clippy, the wasm check, the wasm test build and the proxy check pass. The Trunk bundle, Tauri shell and extension are left to the hosted Build Surface job; no browser session was driven by hand. Surface devlog updated; the TUI contract already described this URL as consumed at boot.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
 time: [17:58] [05-10-26]
 agent: [claude] [claude code]
 worktree: [claude/tui-slash-fixes] [/Users/risingtidesdev/dev/ocean-claude-audit]
@@ -431,6 +443,18 @@ area: [testing]
 Fixed the ocean-tui test that failed intermittently during this work, shell::herdr::tests::resume_session_reports_agent_session_id_with_resume_source. It was recorded earlier as load-sensitive; the cause is a race in the test, not load. Binding a session launches two herdr reports, the session report and a state report, as separate processes, and the fake herdr appends each one's arguments to the same marker file in whichever order they run. The helper returned on the first non-empty read, so when the state report landed first the test asserted on a file that did not hold the session report yet. The helper now waits until the session report's final argument is present. Test-only; the reporter itself is unchanged, and its two reports are independent by design.
 
 Validation: ocean-tui passes 511 tests (4 ignored) eight times in a row on the branch merged with current main, where the same suite had failed five of nine runs before the fix; workspace test compilation and rustfmt check pass. The failing runs' own output showed both reports present with the session report complete, which is what identified the race.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [18:43] [05-10-26]
+agent: [claude] [claude code]
+worktree: [claude/surface-slash-and-session-handoff] [/Users/risingtidesdev/dev/ocean-claude-audit-b]
+type: [review]
+area: [frontend] [testing]
+
+Applied the independent review of the Surface slash and session-link change. The review acknowledged it and showed the fix was only half made: the new rule guarded Enter with arguments, while Tab and the highlighted row still went around it, so "/so what do you think" plus Tab toggled the Sessions panel and threw the sentence away, Enter could run a different command from the highlighted row, and the popover and the dispatcher tokenised the line differently. The composer now splits a slash line once and both the popover and the dispatcher read that split, so the highlighted row is always the command that runs. Once whitespace follows the name, only the command that name spells exactly is listed or run; an abbreviation followed by words is not a command and shows no menu, so Tab moves focus as usual. A command that takes no arguments is no longer run with words after it ("/new idea for the header", "/help me fix this bug"): the draft stays with a hint. Only a first word that is a path is sent as a message; trailing punctuation no longer turns "/help?" into one, and a doubled slash or an underscore name is kept as a draft rather than sent to the model. "/model" and "/thinking" read the first word after their name again, as they did before the first commit. A kept draft keeps its height. Shift+Enter in the popover is a newline. The session link is now single-use: it is dropped from the address bar as soon as it is read, a missing linked session says so, and a boot restore stands down if the user started or opened a session while the daemon was being asked. Behaviour change to know about: an abbreviation with arguments, such as "/mod gpt-5", used to run when it was an unambiguous prefix and is now kept as a draft; type the name in full or pick it from the menu first. Not fixed here, and recorded in the Surface contract: the proxy redirects an unauthenticated navigation to its login page and then to the root, which drops the session parameter, so a link only works on a browser already signed in to that origin. That is the proxy's login flow and belongs to the sign-in work. The slash hints still go to the header status chip, which is clipped to 96 pixels on compact layouts.
+
+Validation: ocean-surface-ui native tests pass (889 plus the integration suites), with new cases for the tokenizer, the popover rows, every decision above, the rule that any listed row resolves to itself, the draft-keeping paths driven through the same function the composer calls, and the restore guard. rustfmt check, native and wasm clippy with warnings denied on all targets, the wasm check, wasm test compilation and the proxy check pass. Not run in a browser: the keydown and boot paths are covered by the pure functions they call, not by a DOM test.
 _________________________________________________________________________________
 
 _________________________________________________________________________________
@@ -780,4 +804,28 @@ baseline reconciled to 118, ocean-daemon 894 passed, force-pushed.
 
 Validation: cargo xtask docs-check PASS. Docs-only change; no owning
 contract text beyond the reconciliation doc itself changed.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [22:24] [05-10-26]
+agent: [claude] [claude code]
+worktree: [claude/surface-slash-and-session-handoff] [/Users/risingtidesdev/dev/ocean-claude-audit-b]
+type: [review]
+area: [frontend] [testing]
+
+Applied the second review of the Surface slash and session-link change, which blocked on one finding. When a boot restore stood down because the user had already opened or started a session while the daemon was being asked, boot still fell through to a fresh connect, which bumps the stream generation and retires the projection of the session the user chose: an empty transcript, or a first prompt whose stream handshake fails. Both boot paths, and the extension copy, now return after a superseded restore exactly as after a restored one. Three smaller points from the same review: a pasted comment ("// this function is broken", "/// doc", "/* note */") was kept as an unknown command and could not be sent, and is now a message when text follows the comment punctuation, while a bare "//" is still nothing; picking an argument-taking command from the menu before any argument is typed completes the name into the composer ("/th" becomes "/thinking ") instead of running it with nothing and clearing the draft, so abbreviations work again through the menu; with a single row shown the arrow keys move the caret rather than a one-row highlight, and the Send button uses the highlighted row like Enter does. The unknown-command hint now names the way to send such a line, the "/thinking" hints list the daemon's levels rather than a copy of them, and a dot no longer makes a path of a line with other punctuation in it. Withdrawn: the "linked session not found" status note, which nothing on the status chip could keep visible; the miss is logged and the contract says so. Main was merged in as well; the only overlap with the token-footprint change that landed meanwhile was a test import list.
+
+Validation: ocean-surface-ui native tests pass (893 plus the integration suites), with new cases for comment pastes, the dot rule, the completion path and the derived hint; rustfmt check, native and wasm clippy with warnings denied on all targets, wasm test compilation and the proxy check pass. The boot change is wasm-only control flow and is covered by reading, not by a test.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [22:30] [05-10-26]
+agent: [claude] [claude code]
+worktree: [claude/surface-slash-and-session-handoff] [/Users/risingtidesdev/dev/ocean-claude-audit-b]
+type: [review]
+area: [frontend] [testing]
+
+Closed the leftovers from the third review of the Surface slash and session-link change, which acknowledged it. Boot no longer connects afresh over a session the user already has on either path, which also covers a deep link replayed before the restore checks run, a case older than this change; a restore whose session is missing answers "superseded" rather than "missing" when the user moved on during the fetch, so the persisted id their own switch just wrote is not cleared. The Send button really does use the highlighted row now: the rows were read after the input had been cleared, so the pick was always empty. A colon is a path character, so "/app.rs:12 is wrong" is sent as a message like "/Users/me/app.rs:12" already was.
+
+Validation: ocean-surface-ui native tests pass (893 plus the integration suites); rustfmt check and native and wasm clippy with warnings denied on all targets pass. The Send-button order is view code and is covered by reading.
 _________________________________________________________________________________
