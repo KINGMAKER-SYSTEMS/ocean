@@ -110,7 +110,7 @@ pub(super) async fn room_inspect(
         let bindings = store.room_agent_bindings(&key)?;
         let profile = store.room_profile(&key)?;
         let grants = store.room_resource_grants(&key)?;
-        let aliases = crate::room_retirement::aliases_projection(store, &key)?;
+        let aliases = crate::room_retirement::aliases_projection(store, &key)?.aliases;
         let agent_cwds = bindings
             .iter()
             .map(|b| crate::room_resources::resolve_turn_cwd(store, &key, &b.agent_member_id))

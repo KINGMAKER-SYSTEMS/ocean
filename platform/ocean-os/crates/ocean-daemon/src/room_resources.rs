@@ -278,6 +278,27 @@ impl TurnCwd {
             Self::Unbound => None,
         }
     }
+
+    /// The projection an agent row in `inspect` carries. A grant's cwd is
+    /// never projected; the workspace root already is.
+    pub(super) fn projection(&self) -> Value {
+        match self {
+            Self::ResourceGrant {
+                resource_id,
+                generation,
+                ..
+            } => json!({
+                "cwd_source": "resource_grant",
+                "resource_id": resource_id,
+                "grant_generation": generation.to_string(),
+            }),
+            Self::RoomWorkspaceRoot { cwd } => json!({
+                "cwd_source": "room_workspace_root",
+                "cwd": cwd,
+            }),
+            Self::Unbound => json!({ "cwd_source": "unbound" }),
+        }
+    }
 }
 
 /// Manifest §5, as ruled in §11.4. A grant is usable as a cwd only if it is

@@ -163,6 +163,8 @@ mod room_agent_authority;
 mod room_attachments;
 /// Restart-safe outbound Bedrock room client and per-room supervisor (S2 P2-B).
 mod room_federation;
+/// Rooms Phase 2 Stage 2a — the one-stop authority projection.
+mod room_inspect;
 /// Retention sweeps and orphan cleanup for closed rooms.
 mod room_maintenance;
 mod room_operator;
@@ -218,10 +220,10 @@ use model_roles::resolve_effective_model_id;
 use model_roles::{load_model_roles, resolve_advisor_alias, resolve_turn_model};
 use persistent_rooms::{
     resolve_named_agent, room_create, room_create_invite, room_db_path, room_events, room_get,
-    room_get_read_cursor, room_inspect, room_join, room_leave, room_patch_read_cursor,
-    room_post_message, room_redeem_invite, room_register_agents, room_retry_outbox, room_snapshot,
-    room_transcript, rooms_list_persistent, run_federated_trigger_dispatcher, with_rooms,
-    with_rooms_handle, RoomAccessWakeBus, RoomReadCursorWakeBus, RoomStoreHandle, RoomWakeBus,
+    room_get_read_cursor, room_join, room_leave, room_patch_read_cursor, room_post_message,
+    room_redeem_invite, room_register_agents, room_retry_outbox, room_snapshot, room_transcript,
+    rooms_list_persistent, run_federated_trigger_dispatcher, with_rooms, with_rooms_handle,
+    RoomAccessWakeBus, RoomReadCursorWakeBus, RoomStoreHandle, RoomWakeBus,
 };
 use project_registry::{
     canonical_git_common_dir, discover_project_worktrees, project_create, project_delete,
@@ -2906,7 +2908,10 @@ fn room_routes() -> Router<AppState> {
             get(rooms_list_persistent).post(room_create),
         )
         .route("/v1/rooms/persistent/{key}", get(room_get))
-        .route("/v1/rooms/persistent/{key}/inspect", get(room_inspect))
+        .route(
+            "/v1/rooms/persistent/{key}/inspect",
+            get(room_inspect::room_inspect),
+        )
         .route(
             "/v1/rooms/persistent/{key}/close",
             post(persistent_rooms::room_close),

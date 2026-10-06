@@ -1419,53 +1419,6 @@ pub(super) async fn room_get(
     }
 }
 
-/// `GET /v1/rooms/persistent/{key}/inspect` — bounded read-only identity
-/// inspection for operator migration and reconnect checks. It intentionally
-/// returns only the room id/name, current local owner id, and the capped alias
-/// projection; it does not expose transcript, workspace, credentials, or store
-/// internals.
-pub(super) async fn room_inspect(
-    State(state): State<AppState>,
-    Path(key): Path<String>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    let trimmed = key.trim();
-    if trimmed.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "ok": false, "error": "invalid room key; must be non-empty" })),
-        );
-    }
-    let key = RoomKey::new(trimmed);
-    match with_rooms(&state, |store| {
-        let Some(room) = store.inspect_room_identity(&key)? else {
-            return Ok(None);
-        };
-        let owner = store.local_room_owner(&key)?.map(|owner| owner.member_id);
-        let aliases = room_retirement::aliases_projection(store, &key)?;
-        Ok(Some((room, owner, aliases)))
-    }) {
-        Ok(Some((room, owner, aliases))) => (
-            StatusCode::OK,
-            Json(json!({
-                "ok": true,
-                "closed": room.closed,
-                "room": {
-                    "id": room.room_id,
-                    "name": room.name,
-                },
-                "owner": { "member_id": owner },
-                "aliases": aliases.aliases,
-                "aliases_truncated": aliases.truncated,
-            })),
-        ),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "ok": false, "error": format!("no room with key '{key}'") })),
-        ),
-        Err(error) => room_store_error_response(error),
-    }
-}
-
 #[derive(serde::Deserialize)]
 pub(super) struct RoomJoinRequest {
     /// Stable participant id, unique within the room.

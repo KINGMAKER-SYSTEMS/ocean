@@ -1292,3 +1292,36 @@ The branch is pushed as integration/port-stack for reviewer reference only;
 it is not a merge candidate. Each constituent PR remains independently
 reviewable; whichever merge order is chosen, this branch's resolutions are
 the exact reconciles to apply.
+_________________________________________________________________________________
+time: [15:41] [06-10-26]
+agent: [zcode] [glm-5.3]
+worktree: [port/room-inspect-ready] (held branch on integration/port-stack)
+type: [bug report]
+area: [testing] integration-stack repair + room_inspect preparation
+
+Two findings this pass. First, the integration stack had silently lost the
+Stage 2b profile wiring: the #43 cherry-pick collapsed to docs-only (route,
+banner pair, guide lines, the room_profile.rs module, and the cross-PR
+check_profile_resource_refs all eaten by the marker resolution) while the
+parity test kept passing because banner and router lost the entries
+symmetrically — the published 134 baseline was therefore WRONG; the true
+combined baseline is 136. The repair commit restores every dropped piece and
+the parity oracle confirms 136. Lesson recorded: a parity test between two
+consistently-wrong sources cannot catch symmetric loss; the docs-check link
+chain and per-PR review remain the real guards. Second, PR #25 was MERGED in
+a revised form (merge head b97be41 carries an AliasProjection refactor of
+aliases_projection) — main is ahead of the port branch, and room_inspect was
+adapted to main's shape (aliases_projection(...).aliases). The incumbent
+persistent_rooms::room_inspect handler is removed as superseded.
+
+room_inspect.rs is now ported and verified on the held branch
+port/room-inspect-ready (stacked on the repaired stack): GET
+/v1/rooms/persistent/{key}/inspect swaps to the Phase 2 Stage 2a module —
+session ids + filesystem existence under one store lock, §5 cwd_source
+truth, aliases, profile + credential-slot projection, grant projections,
+TurnCwd::projection restored with it. Daemon 969 passed / 0 failed (full
+parallel suite, incl. the issue-#42 trio), parity 137 green on the branch,
+Clippy zero. Held, not PR'd: it opens the moment #43+#45 merge (one rebase).
+
+Validation: cargo test -p ocean-daemon 969/0; router_contract 5/5 (136 on
+the stack, 137 with inspect); rustfmt; denied-warning Clippy zero.
