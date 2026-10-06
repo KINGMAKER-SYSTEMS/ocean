@@ -898,7 +898,7 @@ impl AgentRuntime {
     async fn prompt_inner(
         &self,
         req: PromptRequest,
-        control: PromptControl,
+        mut control: PromptControl,
         lease: Option<&SessionOperationLease>,
     ) -> PromptResponse {
         let request_id = req.request_id.unwrap_or_else(RequestId::new_v4);
@@ -1007,15 +1007,18 @@ impl AgentRuntime {
         };
         // OCEAN-275 honesty: selection-time failover keeps the turn alive, but
         // hiding it from an operator who pinned a model is lying — announce the
-        // reroute on the event stream BEFORE any output.
+        // reroute on the event stream BEFORE any output, and record it on the
+        // session so a later `GET /v1/sessions/{id}` shows the requested model.
         if effective.provider_config.selection.model != requested_model {
+            let reason = "provider degraded at selection (missing credential or not ready)";
+            control.requested_model = Some(requested_model.clone());
+            control.reroute_reason = Some(reason.to_string());
             if let Some(sink) = control.event_sink.as_ref() {
                 let _ = sink.send(AgentEvent::ModelRerouted {
                     session_id: req.session_id.map(|s| s.to_string()),
                     requested: requested_model,
                     effective: effective.provider_config.selection.model.clone(),
-                    reason: "provider degraded at selection (missing credential or not ready)"
-                        .into(),
+                    reason: reason.into(),
                 });
             }
         }
@@ -1169,7 +1172,7 @@ impl AgentRuntime {
     async fn run_turn_with_failover(
         &self,
         mut req: PromptRequest,
-        control: PromptControl,
+        mut control: PromptControl,
         state: RuntimeState,
         env: &ProviderEnv,
         admitted_lease: Option<&SessionOperationLease>,
@@ -1243,11 +1246,15 @@ impl AgentRuntime {
                 // this is the path a 429'd/suspended provider takes, and it used
                 // to swap models with zero operator-visible signal. The reason
                 // clamps so a provider's JSON error blob can't flood the wire.
+                // Also record it on the session so a later session read shows
+                // the requested model did not run.
+                let mut reason = format!("provider call failed: {e}");
+                if reason.chars().count() > 200 {
+                    reason = reason.chars().take(199).chain(['…']).collect();
+                }
+                control.requested_model = Some(state.provider_config.selection.model.clone());
+                control.reroute_reason = Some(reason.clone());
                 if let Some(sink) = control.event_sink.as_ref() {
-                    let mut reason = format!("provider call failed: {e}");
-                    if reason.chars().count() > 200 {
-                        reason = reason.chars().take(199).chain(['…']).collect();
-                    }
                     let _ = sink.send(AgentEvent::ModelRerouted {
                         session_id: req.session_id.map(|s| s.to_string()),
                         requested: state.provider_config.selection.model.clone(),
@@ -2109,6 +2116,13 @@ impl AgentRuntime {
         };
         session.bind_workspace(Path::new(&req.cwd));
 
+        // Record any failover reroute (selection-time or pre-stream) on the
+        // session so `GET /v1/sessions/{id}` can report the requested model.
+        if let Some(requested) = control.requested_model.as_deref() {
+            session.requested_model = Some(requested.to_string());
+            session.reroute_reason = control.reroute_reason.clone();
+        }
+
         let stdout = "OCEAN_FAKE_OK\n".to_string();
 
         // OCEAN-127: emit the assistant text as a streaming delta, exactly like
@@ -2221,6 +2235,13 @@ impl AgentRuntime {
             ),
         };
         session.bind_workspace(Path::new(&req.cwd));
+
+        // Record any failover reroute (selection-time or pre-stream) on the
+        // session so `GET /v1/sessions/{id}` can report the requested model.
+        if let Some(requested) = control.requested_model.as_deref() {
+            session.requested_model = Some(requested.to_string());
+            session.reroute_reason = control.reroute_reason.clone();
+        }
 
         // Surface identity (Fixes 1–3). The session remembers the surface it
         // was last steered from. Detect a switch (for example, from the desktop
@@ -2359,6 +2380,8 @@ impl AgentRuntime {
             // Already consumed above (session label at the first durable save);
             // named here so the destructure stays exhaustive.
             display_title: _,
+            requested_model: _,
+            reroute_reason: _,
         } = control;
         // Resolve the toolset for this turn through the capability registry —
         // built-ins plus any connected MCP/skill providers, deduped first-wins.
@@ -2989,6 +3012,12 @@ pub struct PromptControl {
     /// don't set it; the read side then derives and cleans the label from the
     /// first user message. Set via [`PromptControl::with_display_title`].
     pub display_title: Option<String>,
+    /// Model the operator originally requested when failover rerouted this turn
+    /// to an alternate, plus the clamped reason. `None` for ordinary turns; set
+    /// by `prompt_inner` (selection-time) or `run_turn_with_failover`
+    /// (pre-stream) and persisted on the session.
+    pub requested_model: Option<String>,
+    pub reroute_reason: Option<String>,
 }
 
 /// Narrow a turn's toolset to `allowlist` (folder-as-agent tool restriction).
@@ -3103,6 +3132,8 @@ impl PromptControl {
             // the daemon's profile resolution turns it off (voice) — TASK-26.
             code_intelligence: true,
             display_title: None,
+            requested_model: None,
+            reroute_reason: None,
         }
     }
 
@@ -7774,6 +7805,59 @@ done
             res.stderr
         );
         assert!(res.stdout.contains("OCEAN_FAKE_OK"));
+        let _ = std::fs::remove_dir_all(config_dir);
+    }
+
+    // A selection-time reroute must be visible in the persisted session record,
+    // so a client reading `GET /v1/sessions/{id}` afterwards can see the model
+    // it asked for was not the model that actually ran.
+    #[tokio::test]
+    async fn selection_failover_reroute_is_recorded_in_session_detail() {
+        let config_dir = temp_config_dir("failover-recorded");
+        let env = provider_env(&[("OCEAN_PROVIDER_FALLBACK", "fake-ok")]);
+        let runtime = runtime_with_env(
+            config_dir.clone(),
+            // Primary deepseek with NO credential → degraded at selection.
+            provider_config(ProviderId::DeepSeek, "deepseek-v4-pro", false),
+            Some(env),
+        );
+
+        let res = runtime
+            .prompt(
+                PromptRequest {
+                    prompt: "hello".into(),
+                    images: None,
+                    request_id: None,
+                    session_id: None,
+                    create_if_missing: true,
+                    max_turns: None,
+                    yolo: false,
+                    cwd: ".".into(),
+                    project_id: None,
+                    client_type: None,
+                    decision_token: None,
+                },
+                PromptControl::yolo(false),
+            )
+            .await;
+
+        assert!(res.ok, "rerouted turn should succeed: {}", res.stderr);
+        let session_id = res.session_id.expect("session id");
+        let detail = runtime.session_detail(session_id).expect("session detail");
+
+        // The session reports the EFFECTIVE model that ran...
+        assert_eq!(detail.model, "fake-ok");
+        // ...and also the REQUESTED model it rerouted away from, plus a reason.
+        assert_eq!(detail.requested_model.as_deref(), Some("deepseek-v4-pro"));
+        assert!(
+            detail
+                .reroute_reason
+                .as_deref()
+                .is_some_and(|r| r.contains("degraded")),
+            "reroute reason must be persisted, got: {:?}",
+            detail.reroute_reason
+        );
+
         let _ = std::fs::remove_dir_all(config_dir);
     }
 

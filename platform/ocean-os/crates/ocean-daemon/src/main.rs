@@ -11983,6 +11983,8 @@ mod tests {
             updated_ms: 5_000,
             model: "test-model".into(),
             provider: "test".into(),
+            requested_model: None,
+            reroute_reason: None,
             config_revision: 0,
             turns: 2,
             title: "fix the thing".into(),

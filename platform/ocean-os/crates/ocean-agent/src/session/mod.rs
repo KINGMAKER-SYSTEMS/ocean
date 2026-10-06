@@ -44,6 +44,15 @@ pub struct Session {
     /// label from the first user message. See [`session_display_title`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// The model the operator originally requested when selection-time or
+    /// pre-stream failover rerouted the turn to an alternate. `None` when the
+    /// turn ran on the requested model; `model`/`provider` hold the effective
+    /// selection. Persisted so `GET /v1/sessions/{id}` can report the reroute.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_model: Option<String>,
+    /// Clamped reason for a recorded reroute (see [`Session::requested_model`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reroute_reason: Option<String>,
 }
 
 impl Session {
@@ -71,6 +80,8 @@ impl Session {
             git_commit: None,
             client_type: None,
             title: None,
+            requested_model: None,
+            reroute_reason: None,
         }
     }
 
@@ -1169,6 +1180,8 @@ pub(crate) fn session_detail(session: Session) -> SessionDetail {
         updated_ms: session.updated_ms,
         model: session.model,
         provider: session.provider,
+        requested_model: session.requested_model,
+        reroute_reason: session.reroute_reason,
         config_revision: session.config_revision,
         turns: session.messages.len() as u32,
         title,
@@ -1473,6 +1486,8 @@ mod history_search_tests {
             git_commit: None,
             client_type: None,
             title: None,
+            requested_model: None,
+            reroute_reason: None,
         }
     }
 
