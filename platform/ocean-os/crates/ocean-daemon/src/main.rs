@@ -1639,11 +1639,7 @@ fn banner_routes() -> &'static [&'static str] {
         "POST /v1/rooms/persistent/{key}/participants",
         "DELETE /v1/rooms/persistent/{key}/participants/{participant_id}",
         "POST /v1/rooms/persistent/{key}/participants/{participant_id}/retire",
-<<<<<<< HEAD
-<<<<<<< HEAD
-<<<<<<< HEAD
         "POST /v1/rooms/persistent/{key}/summarize",
-=======
         "GET /v1/rooms/persistent/{key}/resources",
         "POST /v1/rooms/persistent/{key}/resources",
         "GET /v1/rooms/persistent/{key}/resources/{resource_id}",
@@ -1652,16 +1648,11 @@ fn banner_routes() -> &'static [&'static str] {
         "POST /v1/rooms/persistent/{key}/resources/{resource_id}/resume",
         "POST /v1/rooms/persistent/{key}/resources/{resource_id}/list",
         "POST /v1/rooms/persistent/{key}/resources/{resource_id}/read",
->>>>>>> e83dbf2 (Add the Rooms Phase 2 Stage 2c grant-management surface)
-=======
-=======
         "POST /v1/rooms/maintenance/run",
->>>>>>> 8556291 (Add retention and orphan maintenance for closed rooms)
         "POST /v1/rooms/persistent/{key}/attachments",
         "GET /v1/rooms/persistent/{key}/attachments",
         "GET /v1/rooms/persistent/{key}/attachments/{attachment_id}",
         "DELETE /v1/rooms/persistent/{key}/attachments/{attachment_id}",
->>>>>>> 734a2d4 (Add durable room attachments)
         "POST /v1/rooms/persistent/{key}/messages",
         "POST /v1/rooms/persistent/{key}/invites",
         "POST /v1/rooms/persistent/invites/redeem",
@@ -2971,14 +2962,12 @@ fn room_routes() -> Router<AppState> {
             "/v1/rooms/persistent/{key}/participants/{participant_id}/retire",
             post(room_retirement::room_participant_retire),
         )
-<<<<<<< HEAD
-<<<<<<< HEAD
         // Room summarize: one bounded model turn folded into the room's
         // single well-known summary artifact.
         .route(
             "/v1/rooms/persistent/{key}/summarize",
             post(persistent_rooms::room_summarize),
-=======
+        )
         // Rooms Phase 2 Stage 2c: contributed-folder grants and confined
         // operator previews. Enforcement (§5 cwd rule, per-call authority)
         // already lives in resolve_turn_cwd and DurableRoomResourceAuthority.
@@ -3005,8 +2994,7 @@ fn room_routes() -> Router<AppState> {
         .route(
             "/v1/rooms/persistent/{key}/resources/{resource_id}/read",
             post(room_resources::room_resource_preview_read),
->>>>>>> e83dbf2 (Add the Rooms Phase 2 Stage 2c grant-management surface)
-=======
+        )
         // Room attachments: durable file bytes beside the DB. The sized cap
         // plus slack lets a just-over-cap body reach the handler for the typed
         // attachment_too_large JSON while huge bodies are refused by the layer.
@@ -3022,7 +3010,6 @@ fn room_routes() -> Router<AppState> {
             "/v1/rooms/persistent/{key}/attachments/{attachment_id}",
             get(room_attachments::room_download_attachment)
                 .delete(room_attachments::room_delete_attachment),
->>>>>>> 734a2d4 (Add durable room attachments)
         )
         .route(
             "/v1/rooms/persistent/{key}/messages",
@@ -25907,19 +25894,7 @@ mod tests {
         assert_eq!(admission_routes, expected_admission_routes);
         assert_eq!(
             banner.len(),
-<<<<<<< HEAD
-<<<<<<< HEAD
-<<<<<<< HEAD
-            120,
-=======
-            127,
->>>>>>> e83dbf2 (Add the Rooms Phase 2 Stage 2c grant-management surface)
-=======
-            123,
->>>>>>> 734a2d4 (Add durable room attachments)
-=======
-            124,
->>>>>>> 8556291 (Add retention and orphan maintenance for closed rooms)
+            134,
             "route baseline changed; review the manifest"
         );
 

@@ -1262,3 +1262,33 @@ characterization 11 + m2b command-minimization suites); ocean-agent 268;
 ocean-lsp 16; ocean-longhouse 169; ocean-minimizer 17; cargo check
 --workspace --tests; rustfmt; denied-warning Clippy zero on all four touched
 crates.
+_________________________________________________________________________________
+time: [15:04] [06-10-26]
+agent: [zcode] [glm-5.3]
+worktree: [integration/port-stack] (not a PR — a stack proof)
+type: [workflow]
+area: [testing] integration proof of the open port queue
+
+Cherry-picked all eight open port PRs (#41 identity, #43 profile, #44
+summarize, #45 Stage 2c grants, #46 attachments, #47 maintenance — which
+restores write_blob_for_test onto #46's head — #48 onboarding ops, #49 output
+economy) onto one branch off main as an integration proof for reviewers.
+The cherry-picks surfaced exactly the documented reconciles: the events.md
+ledger unions, additive route/banner blocks, dropped closing parens from the
+marker resolution (2), stacked parity numbers in one assert, and the final
+router-contract baseline. The parity oracle corrected my arithmetic: the
+combined baseline is 134 routes (I predicted 136; two of the per-PR deltas
+overlapped), and after trusting the oracle the full parity suite is green.
+
+Integrated verification: cargo check --workspace --tests PASS; ocean-daemon
+964 passed / 0 failed (full parallel suite); ocean-runtime 224/0; ocean-agent
+268/0. Notably the issue-#42 trio PASSES in the full parallel run on this
+stack while failing when run serially — comment posted on #42 correcting my
+earlier deterministic/flaky split: all three are timing races around the room
+SSE tail, and single-test bisecting will chase ghosts until the race is
+fixed.
+
+The branch is pushed as integration/port-stack for reviewer reference only;
+it is not a merge candidate. Each constituent PR remains independently
+reviewable; whichever merge order is chosen, this branch's resolutions are
+the exact reconciles to apply.
