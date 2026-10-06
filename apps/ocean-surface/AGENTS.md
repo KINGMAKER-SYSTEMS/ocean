@@ -188,6 +188,42 @@ Rules:
 
 Web surface session UI:
 
+- A `?session=<id>` link names the chat to open. The TUI's `/web` and `/beam`
+  hand a session over with exactly that URL, so on boot it wins over the
+  session this browser last used; only a well-formed session id is honoured,
+  and a link to a session this daemon does not have falls back to the
+  persisted one untouched (the miss is logged; the status chip is rewritten
+  by whatever loads next, so there is nowhere lasting to say so). The link is
+  single-use: the parameter is dropped from the address bar as soon as it is
+  read, so a reload never jumps back. A boot restore (linked or persisted)
+  stands down when the user starts or opens a session while the daemon is
+  being asked, and boot never connects afresh over a session the user already
+  has. The URL shape is a cross-client contract with
+  `ocean-tui`; change it only together. Known limit, owned by
+  `ocean-surface-proxy`: an unauthenticated navigation is redirected to
+  `/login` and then to `/`, which drops the parameter, so the link only works
+  once this browser is signed in to the origin it names.
+- The composer splits a `/` line once (`palette::SlashLine`) and both the
+  popover (`CommandRegistry::slash_rows`) and dispatch
+  (`CommandRegistry::resolve_slash`) read that split, so the highlighted row is
+  always the command that runs; Send uses the highlighted row too. While the
+  name is being typed the popover ranks an exact alias, then prefixes, then
+  scattered matches, and Enter, Tab or a click run the chosen row; for a
+  command that reads arguments (`/model`, `/thinking`) they complete the name
+  into the composer instead (`/th` becomes `/thinking `). Once whitespace
+  follows the name, only the command that name spells exactly is listed or
+  run: an abbreviation followed by words (`/s what do you think`) is not a
+  command and shows no menu, and with a single row shown the arrow keys move
+  the caret, not the highlight. A command that takes no arguments is not run
+  with words after it. In each of those cases, and for an unknown or
+  unavailable command, the draft stays in the composer at its height with a
+  hint. A line whose first word is a path (`/etc/hosts`, `/notes.md`) or
+  comment punctuation with text after it (`// broken`, `/// doc`, `/* note`)
+  is sent as a message; a leading space sends any other line that starts with
+  a slash. `/model` and `/thinking` read the first word after their name, and
+  the `/thinking` hints list `THINKING_LEVELS`. A bare `/thinking ` shows the
+  choices and never changes the level. Selection resets when the name
+  changes, not while arguments are typed.
 - The sessions panel is project-first: prefer daemon-provided `owning_project`,
   fall back to exact `workspace_root`/`cwd` matches against the project catalog,
   and put everything else in an explicit `Other` bucket.

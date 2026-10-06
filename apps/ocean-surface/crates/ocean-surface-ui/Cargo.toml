@@ -27,6 +27,7 @@ web-sys = { version = "0.3", features = [
   "Window",
   "Performance",
   "Location",
+  "History",
   "Document",
   "Element",
   "HtmlElement",
