@@ -7,10 +7,10 @@ Root GitHub Actions builds for the public Ocean monorepo.
 ## Ownership
 
 - `workflows/ci.yml` owns root PR, main-push and manual builds.
-- `workflows/release.yml` owns Ocean OS package validation on relevant PRs and
-  stable-tag publishing. Release validation is a component-specific release
-  gate and does not add routine CI matrix statuses. Package paths remain rooted
-  under `platform/ocean-os/`; release secrets stay confined to the publish job.
+- `workflows/release.yml` owns manually dispatched release-candidate validation
+  and stable-tag validation/publishing. Routine pull requests use the two build
+  checks; manual validation never publishes. Package paths remain rooted under
+  `platform/ocean-os/`, and release secrets stay confined to the tag-publish job.
 - `build-scope.py` selects changed components; `test-build-scope.py` checks scope decisions, including NUL-terminated Git output. Unknown or unavailable diffs build both.
 - Root CI builds Ocean OS and the active Surface deliverables. Publishing and
   deployment remain owned by their component workflows and installers.

@@ -1,25 +1,9 @@
 name: Release
 
-# Validate the distributable wrapper on relevant PRs. A stable vMAJOR.MINOR.PATCH
-# tag whose commit is already contained in main additionally publishes the exact
-# validated artifact to GitHub Packages and a GitHub Release.
+# Manual dispatch validates a release candidate without publishing. A stable
+# vMAJOR.MINOR.PATCH tag on main validates and publishes the exact artifact.
 on:
-  pull_request:
-    paths:
-      - ".github/workflows/release.yml"
-      - "platform/ocean-os/.github/workflows/release.yml"
-      - "platform/ocean-os/packaging/**"
-      - "platform/ocean-os/rust-toolchain.toml"
-      - "platform/ocean-os/Cargo.toml"
-      - "platform/ocean-os/Cargo.lock"
-      - "platform/ocean-os/deny.toml"
-      - "platform/ocean-os/build.rs"
-      - "platform/ocean-os/.cargo/**"
-      - "platform/ocean-os/LICENSE*"
-      - "platform/ocean-os/NOTICE*"
-      - "platform/ocean-os/CREDITS.md"
-      - "platform/ocean-os/TRADEMARKS.md"
-      - "platform/ocean-os/crates/**"
+  workflow_dispatch:
   push:
     tags: ["v*"]
 

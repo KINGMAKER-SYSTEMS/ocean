@@ -977,3 +977,35 @@ A new commit changes the reviewed PR head; fresh exact-head review and required
 hosted-check readback remain pending. No merge, deployment, or live outcome
 is claimed.
 _________________________________________________________________________________
+time: [00:37] [06-10-26]
+agent: [codex] [gpt-6.1-sol]
+worktree: [codex/factory-release-validation] [/Users/risingtidesdev/.codex/worktrees/factory-release-validation/ocean]
+type: [issues] #35; PR #31 post-merge and release workflow
+area: [gh actions] routine PR validation latency
+
+PR #31 merged as 8c7a1465ad33657bf64a94efaa38e4dc0d501407 after clean
+independent review of head 711b9df3908db45b719119928e343d1bc1cc454f,
+Build Ocean pass, Build Surface path-skip, and macOS arm64 package validation
+pass. Issues #33 and #34 closed automatically. The merged change is not
+deployed. The active daemon reports revision 1bd1bc37636e, which does not
+resolve to a commit in the canonical monorepo; issue #30 requires source-lineage,
+schema-compatibility, and intake-quiet-window evidence before deployment.
+No deployment record exists, so no restart or live-version claim is made.
+
+Measured merge-latency finding: the Build Ocean check took 1m10s, while the
+separate macOS arm64 release-package validation took 13m33s and kept GitHub's
+merge state UNSTABLE until it completed. Branch protection requires only Build
+Ocean and Build Surface. Issue #35 was created and read back before this
+implementation. This branch moves release-candidate validation to explicit
+workflow_dispatch and stable-tag runs; tag validation remains before publishing,
+and manual validation has no package-write authority. Updated the workflow
+contract and its offline test. Validation, final review, and hosted checks for
+this change are pending; no PR has been opened yet.
+
+At 00:37 EDT on 06-10-26, the GitHub account contribution calendar reported
+225 for 2026-10-05 (75 below the 300 target) and 13 for partial 2026-10-06.
+Merged Ocean PR counts observed at 04:37Z were 10 for 2026-10-05 UTC, 9 for
+2026-10-06 UTC so far, and 18 in the 2026-10-05 America/New_York delivery
+window (1 so far for 2026-10-06). Calendar credits, UTC merges, and local
+delivery counts are separate; no artificial activity was added.
+_________________________________________________________________________________
