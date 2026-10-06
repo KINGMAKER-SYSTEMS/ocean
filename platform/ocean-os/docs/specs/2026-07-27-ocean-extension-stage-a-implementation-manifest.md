@@ -1060,6 +1060,11 @@ Each named sub-slice is a separate commit/PR and receives fresh independent
 review with its owning security tests before the next begins; A5 does not defer
 those tests. A later slice may not be smuggled into an earlier review boundary.
 
+**Canonical monorepo status (2026-10-06):** A1–A2b are accepted here. A3a
+implementation is present in public source, but its slice remains unaccepted;
+A3a is the next acceptance gate. A3b–A5 remain unaccepted and require their
+own public implementation, review, checks, and operator acceptance.
+
 ## 19. Acceptance matrix and precise test gates
 
 ### 19.1 Protocol and lifecycle

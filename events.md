@@ -1062,3 +1062,24 @@ The output minimizer remains default-off, with no production setter.
 
 Validation: `cargo fmt --all -- --check`, focused `cargo test -p ocean-runtime artifact_lease_debug_does_not_expose_session_artifact_bodies -- --nocapture` (1 passed), `cargo xtask docs-check` (PASS; 30 packages, 153 Markdown files, 170 local links), and `git diff --check` pass.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [16:27] [06-10-26]
+agent: [codex] [gpt-6]
+worktree: [codex/issue52-public-doc-provenance-fix]
+type: [privacy fix] [issue #52] [PR #51]
+area: [docs] [release]
+
+Removed source-repository PR, reviewer, branch, and release history from the
+public extension manifests and ledger, along with the noncanonical source-side
+A5 evidence attachment. Preserved the Stage A sequencing and acceptance gates;
+clarified canonical status: A1–A2b accepted, A3a next, and later slices
+unaccepted absent public implementation, review, checks, and operator
+acceptance.
+
+Validation: canonical xtask docs-check source compiled directly with `rustc`
+and passed (30 packages, 153 active Markdown files, 170 local links);
+`git diff --check` passed. Fresh review is pending after this precision
+correction. Merge remains held pending the required-review enforcement audit
+in issue #54.
+_________________________________________________________________________________
