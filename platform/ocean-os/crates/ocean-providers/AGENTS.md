@@ -14,6 +14,11 @@ auth-file write custody. Provider wire encoding remains in `ocean-protocol`.
 
 ## Local Contracts
 
+- `resolve_credential_origin` projects only the fixed `CredentialOrigin` enum
+  from the same private resolver used by runtime credentials. Keep tokens,
+  credential blocks, file paths, and environment names out of this projection.
+  Its synchronous file/native work belongs on a blocking worker at async callers.
+
 - Preserve forward model/catalog routes and feature credential isolation.
 - Public Codex routes include GPT-6.1 Sol, GPT-6 Sol, GPT-6 Luna and GPT-6
   Astra. Claude Opus aliases track 5.5 (1M/128K); explicit 5/4.x ids remain

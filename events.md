@@ -626,3 +626,79 @@ area: [backend] [frontend] [testing]
 
 Reconciled Issue #11 / PR #22 on top of canonical `main` at `7d4c446c6ea1c92b6fd2c4d42bfc9c3efc3d62ee`, preserving the unrelated Issue #20 release ledger. After reconciliation, focused runtime mixed-total coverage passed; Ocean Agent mixed-known/unknown recovery and continuation tests plus the existing all-known round aggregation test passed; the TUI session-reset regression and release build passed. `cargo fmt --all -- --check` and `git diff --check` passed. No deployment performed; fresh independent review and hosted PR checks remain required.
 _________________________________________________________________________________
+_________________________________________________________________________________
+time: [21:07] [05-10-26]
+agent: [zcode] [glm-5.3]
+worktree: [port/oauth-custody-cluster]
+type: [feature-request]
+area: [backend] reconciliation: OAuth custody cluster
+
+First bounded Track B reconciliation port (personal source → Kingmaker main,
+per docs/SOURCE_RECONCILIATION.md): the operator-authenticated coding-plan
+login surface. Ported ocean-oauth additions — OAuthProvider::from_label/ALL,
+OAuthBlockStatus, oauth_block_status (token-free block presence/
+refreshability/expiry), logout — with store::read_block/remove_and_write built
+on Kingmaker's guard-bound custody publisher rather than the personal
+temp-path writer, and the daemon's provider_auth.rs module (745 lines, web
+identity M3): GET /v1/auth/providers status, login start/poll/cancel, and
+logout, all through the same fail-closed OperatorIdentity authorization as
+room mutations. Wired into AppState (provider_logins), the router, the GET /
+discovery banner, and the operator guide quick reference; the router-contract
+parity test baseline moved 112 → 117.
+
+Deliberately NOT ported, preserving Kingmaker fixes: the personal
+oauth_refresh.rs rewrite (Kingmaker's version is the hardened evolution —
+full-block merge comparison, structured MergeFailure taxonomy, custody-timeout
+handling, cooldowns cleared only on confirmed persistence, spawn_blocking
+merge, no response bodies logged; the personal copy adds nothing and drops
+discipline), the ocean-oauth providers.rs error hunk (surfaces provider
+response bodies into operator-visible errors, contradicting the crate's
+deliberate fixed-classification doctrine), and the personal store custody
+model (auth_file_temp_path internals; the guard publisher already provides
+private temp + rename + fsync + parent sync). Adapted for Kingmaker fixes:
+fallback_source now also maps the ClaudeCodeKeychain and ClaudeCodeCliAuthFile
+credential sources (native Claude login discovery) that postdate the personal
+tree.
+
+Validation: cargo test -p ocean-daemon (887 passed incl. 6 provider_auth
+route tests and the updated router-contract parity suite); cargo test -p
+ocean-oauth (44, incl. 3 new status/logout tests); cargo test -p ocean-agent
+(266 — unchanged file, re-verified); cargo check --workspace --tests; rustfmt
+and denied-warning Clippy on touched crates. Devlog pass: ocean-oauth
+AGENTS.md consumers updated; operator guide quick reference updated by the
+parity contract.
+
+_________________________________________________________________________________
+time: [21:31] [05-10-26]
+agent: [codex desktop] [gpt-6.1-sol]
+worktree: [codex/factory-pr23-oauth-hardening]
+type: [bug report] [review]
+area: [backend] [testing]
+
+Hardened PR #23 against issue #24: each provider now serializes start/cancel/
+logout; an attempt retains a revocable publication fence whose guard moves
+into the blocking credential writer. Cancellation waits for custody settlement,
+including after a dropped HTTP waiter, and a completed successful publication
+remains succeeded. Blocking logout retains its operation lease even after a
+disconnected request. Auth status/read/removal work runs off Tokio workers;
+status reports stored OAuth facts separately from the runtime resolver's
+fixed, token/path-free CredentialOrigin projection. Callback failures log only
+fixed classifications and provider labels.
+
+Reconciled canonical main a41f9ef3 and independently advanced PR head 91611256
+without rewriting either lineage: aa5f88d6 preserves original 60e9701b and main,
+and d70a6509 preserves the remote PR lineage. Both original ledger histories
+are retained, with the duplicate original OAuth entry represented once.
+
+Validation: locked OAuth tests (46 unit plus 2 synthetic loopback integration),
+providers tests (67), daemon provider_auth tests (14), Agent oauth_refresh tests
+(7), cargo check --workspace --locked, denied-warning all-target Clippy for
+OAuth/providers/daemon, cargo fmt --all -- --check and git diff --check passed.
+Deterministic custody tests cover blocked/queued publication, concurrent starts,
+dropped cancel/logout, effective env/native fallback and captured-log redaction;
+no real credentials or provider authentication flow was used. Devlog pass:
+updated OAuth, providers and daemon contracts; parent/index docs intentionally
+unchanged because ownership boundaries and child indexes are unchanged. Candidate
+only: exact-head hosted builds, fresh independent review, merge and deployment
+remain separate release gates.
+_________________________________________________________________________________
