@@ -667,3 +667,38 @@ ocean-oauth (44, incl. 3 new status/logout tests); cargo test -p ocean-agent
 and denied-warning Clippy on touched crates. Devlog pass: ocean-oauth
 AGENTS.md consumers updated; operator guide quick reference updated by the
 parity contract.
+
+_________________________________________________________________________________
+time: [21:31] [05-10-26]
+agent: [codex desktop] [gpt-6.1-sol]
+worktree: [codex/factory-pr23-oauth-hardening]
+type: [bug report] [review]
+area: [backend] [testing]
+
+Hardened PR #23 against issue #24: each provider now serializes start/cancel/
+logout; an attempt retains a revocable publication fence whose guard moves
+into the blocking credential writer. Cancellation waits for custody settlement,
+including after a dropped HTTP waiter, and a completed successful publication
+remains succeeded. Blocking logout retains its operation lease even after a
+disconnected request. Auth status/read/removal work runs off Tokio workers;
+status reports stored OAuth facts separately from the runtime resolver's
+fixed, token/path-free CredentialOrigin projection. Callback failures log only
+fixed classifications and provider labels.
+
+Reconciled canonical main a41f9ef3 and independently advanced PR head 91611256
+without rewriting either lineage: aa5f88d6 preserves original 60e9701b and main,
+and d70a6509 preserves the remote PR lineage. Both original ledger histories
+are retained, with the duplicate original OAuth entry represented once.
+
+Validation: locked OAuth tests (46 unit plus 2 synthetic loopback integration),
+providers tests (67), daemon provider_auth tests (14), Agent oauth_refresh tests
+(7), cargo check --workspace --locked, denied-warning all-target Clippy for
+OAuth/providers/daemon, cargo fmt --all -- --check and git diff --check passed.
+Deterministic custody tests cover blocked/queued publication, concurrent starts,
+dropped cancel/logout, effective env/native fallback and captured-log redaction;
+no real credentials or provider authentication flow was used. Devlog pass:
+updated OAuth, providers and daemon contracts; parent/index docs intentionally
+unchanged because ownership boundaries and child indexes are unchanged. Candidate
+only: exact-head hosted builds, fresh independent review, merge and deployment
+remain separate release gates.
+_________________________________________________________________________________

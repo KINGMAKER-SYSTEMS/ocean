@@ -12,6 +12,16 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
 
 ## Local Contracts
 
+- `provider_auth.rs` owns operator-only provider login/status/cancel/logout.
+  Serialize start, cancel, and logout under an independent per-provider
+  operation lease through cancel/bind/register or removal. Retain each attempt's
+  OAuth publication fence even when an HTTP future drops; revoke and settle it
+  before replacement/logout. Blocking removal retains its operation lease.
+  Status runs custody/native reads off Tokio workers and projects the shared
+  runtime resolver's token-free origin separately from stored OAuth facts.
+  Login failure logs and responses contain only fixed classifications/provider
+  identifiers; never log callback descriptions or arbitrary error chains.
+
 - Daemon health is `GET /health`, not `/v1/health`.
 - `/v1/models` preserves current/id/provider/label/readiness/provenance and
   additively exposes provider-owned `effort_levels` (an empty list is
@@ -360,6 +370,8 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   stage authority, production activation or release of migration hold #22.
 
 ## Verification
+
+- `cargo test -p ocean-daemon provider_auth:: --locked -- --test-threads=1`
 
 - `cargo test -p ocean-daemon bus::tests::`
 - `cargo test -p ocean-daemon fulfillment -- --nocapture`

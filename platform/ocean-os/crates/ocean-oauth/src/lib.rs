@@ -16,6 +16,10 @@ mod store;
 mod util;
 
 use std::path::PathBuf;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Result};
@@ -78,6 +82,60 @@ impl OAuthProvider {
             OAuthProvider::Claude => ENV_ANTHROPIC_TOKEN_URL,
             OAuthProvider::Codex => ENV_OPENAI_TOKEN_URL,
         }
+    }
+}
+
+/// Revocable custody for one login attempt. Keep a clone until cancellation has
+/// settled, even if the future awaiting publication is dropped or aborted.
+#[derive(Clone, Default)]
+pub struct PublicationFence {
+    cancelled: Arc<AtomicBool>,
+    published: Arc<AtomicBool>,
+    publication: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl PublicationFence {
+    /// Revoke future publication immediately. A writer already inside custody
+    /// may finish; call `settle` before reporting cancellation or removing auth.
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether an admitted publication completed successfully. Read after
+    /// settlement to distinguish cancellation from an already-completed login.
+    pub fn published(&self) -> bool {
+        self.published.load(Ordering::SeqCst)
+    }
+
+    /// Wait for any admitted writer, including an orphaned blocking worker.
+    /// Cancellation of this wait is safe: the fence remains revoked and a
+    /// subsequent owner can settle it again.
+    pub async fn settle(&self) {
+        let _guard = self.publication.lock().await;
+    }
+
+    /// Run credential persistence off the async executor. The blocking closure
+    /// owns the guard, so aborting its async caller cannot release custody.
+    pub async fn persist<T: Send + 'static>(
+        &self,
+        write: impl FnOnce() -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        let guard = Arc::clone(&self.publication).lock_owned().await;
+        let cancelled = Arc::clone(&self.cancelled);
+        let published = Arc::clone(&self.published);
+        tokio::task::spawn_blocking(move || {
+            let _guard = guard;
+            if cancelled.load(Ordering::SeqCst) {
+                bail!("credential publication cancelled");
+            }
+            let result = write();
+            if result.is_ok() {
+                published.store(true, Ordering::SeqCst);
+            }
+            result
+        })
+        .await
+        .map_err(|_| anyhow!("credential storage worker failed"))?
     }
 }
 
@@ -246,7 +304,17 @@ impl LoginSession {
     /// Await the browser callback (300s timeout), exchange the authorization
     /// code for tokens, and persist the credential block. Consumes the session;
     /// the callback server shuts down on return.
-    pub async fn finish(mut self) -> Result<LoginOutcome> {
+    pub async fn finish(self) -> Result<LoginOutcome> {
+        self.finish_with_publication(PublicationFence::default())
+            .await
+    }
+
+    /// Complete a login under caller-retained publication custody. Cancellation
+    /// must revoke this fence, stop the session task, and settle the fence.
+    pub async fn finish_with_publication(
+        mut self,
+        publication: PublicationFence,
+    ) -> Result<LoginOutcome> {
         let callback = match tokio::time::timeout(
             Duration::from_secs(FLOW_TIMEOUT_SECS),
             self.server.next_result(),
@@ -282,11 +350,9 @@ impl LoginSession {
         let block = build_block(self.provider, &token);
         let auth_path = self.auth_path.clone();
         let provider_key = self.provider.auth_json_key();
-        tokio::task::spawn_blocking(move || {
-            store::merge_and_write(&auth_path, provider_key, block)
-        })
-        .await
-        .map_err(|_| anyhow!("credential storage worker failed"))??;
+        publication
+            .persist(move || store::merge_and_write(&auth_path, provider_key, block))
+            .await?;
 
         Ok(LoginOutcome {
             provider: self.provider,
@@ -485,5 +551,68 @@ mod status_tests {
             assert_eq!(OAuthProvider::from_label(provider.label()), Some(provider));
         }
         assert_eq!(OAuthProvider::from_label("gemini"), None);
+    }
+}
+
+#[cfg(test)]
+mod publication_tests {
+    use super::*;
+    use std::future::Future;
+
+    #[tokio::test]
+    async fn aborting_waiter_keeps_blocking_publication_in_custody() {
+        let fence = PublicationFence::default();
+        let writer = fence.clone();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let published = Arc::new(AtomicBool::new(false));
+        let written = published.clone();
+        let task = tokio::spawn(async move {
+            writer
+                .persist(move || {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                    written.store(true, Ordering::SeqCst);
+                    Ok(())
+                })
+                .await
+        });
+        entered_rx.await.unwrap();
+        fence.cancel();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        let settle = fence.settle();
+        tokio::pin!(settle);
+        // Poll explicitly so this proves an active custody wait, not scheduling.
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(settle.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        assert!(!published.load(Ordering::SeqCst));
+        release_tx.send(()).unwrap();
+        settle.await;
+        assert!(published.load(Ordering::SeqCst));
+        assert!(fence
+            .persist(|| -> Result<()> { panic!("revoked writer must never execute") })
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn queued_publication_is_refused_after_revocation() {
+        let fence = PublicationFence::default();
+        let guard = fence.publication.lock().await;
+        let write = fence.persist(|| -> Result<()> { panic!("queued revoked writer executed") });
+        tokio::pin!(write);
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(write.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        fence.cancel();
+        drop(guard);
+        assert!(write.await.is_err());
+        fence.settle().await;
     }
 }

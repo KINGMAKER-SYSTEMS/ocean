@@ -36,8 +36,8 @@ use axum::{
     http::{HeaderMap, StatusCode},
     Json,
 };
-use ocean_oauth::OAuthProvider;
-use ocean_providers::{CredentialSource, ProviderId};
+use ocean_oauth::{OAuthProvider, PublicationFence};
+use ocean_providers::{CredentialOrigin, ProviderEnv, ProviderId};
 use serde_json::{json, Value};
 
 use crate::room_agent_authority::ApiError;
@@ -72,6 +72,7 @@ struct Attempt {
     id: String,
     state: AttemptState,
     task: Option<LoginTask>,
+    publication: PublicationFence,
 }
 
 /// The daemon's in-memory record of provider login attempts: at most one per
@@ -83,14 +84,41 @@ pub(crate) struct ProviderLogins {
     /// (`OCEAN_AUTH_FILE`, then the default config path). Tests pin a temp file.
     auth_file: Option<PathBuf>,
     attempts: Mutex<HashMap<&'static str, Attempt>>,
+    operations: [Arc<tokio::sync::Mutex<()>>; 2],
+    #[cfg(test)]
+    provider_env: ProviderEnv,
 }
 
 impl ProviderLogins {
     #[cfg(test)]
     pub(crate) fn with_auth_file(auth_file: PathBuf) -> Self {
         Self {
+            provider_env: ProviderEnv {
+                auth_file: Some(auth_file.clone()),
+                ..ProviderEnv::default()
+            },
             auth_file: Some(auth_file),
-            attempts: Mutex::default(),
+            ..Self::default()
+        }
+    }
+
+    fn operation(&self, provider: OAuthProvider) -> Arc<tokio::sync::Mutex<()>> {
+        Arc::clone(
+            &self.operations[match provider {
+                OAuthProvider::Claude => 0,
+                OAuthProvider::Codex => 1,
+            }],
+        )
+    }
+
+    fn provider_env(&self) -> ProviderEnv {
+        #[cfg(test)]
+        {
+            self.provider_env.clone()
+        }
+        #[cfg(not(test))]
+        {
+            ProviderEnv::from_process()
         }
     }
 
@@ -108,50 +136,44 @@ impl ProviderLogins {
             None => Value::Null,
         }
     }
-
-    /// Cancel whatever attempt is pending for `provider`. Returns the aborted
-    /// task so a caller about to bind the same callback port can wait for the
-    /// old listener to actually close.
-    fn cancel_pending(&self, provider: OAuthProvider) -> Option<LoginTask> {
-        let mut attempts = self.attempts();
-        let attempt = attempts.get_mut(provider.label())?;
-        if attempt.state != AttemptState::Pending {
-            return None;
-        }
-        attempt.state = AttemptState::Cancelled;
-        let task = attempt.task.take()?;
-        task.abort();
-        Some(task)
-    }
 }
 
-/// Cancel `provider`'s pending attempt and wait (bounded) for its task to
-/// actually stop. `abort` only lands at the task's next `.await`; a task past
-/// its token exchange writes the auth file synchronously and cannot be stopped,
-/// so the wait is what lets the caller report — and a logout act on — what
-/// really happened. When the task turns out to have finished its login, the
-/// attempt is recorded as `succeeded`, never as a `cancelled` that is false.
+/// Called only while the provider operation lease is held. Retain the fence
+/// in the row throughout settlement: a disconnected HTTP caller may drop this
+/// future after taking the JoinHandle, but the next operation still finds and
+/// settles the same revoked publication custody.
 async fn cancel_and_settle(logins: &ProviderLogins, provider: OAuthProvider) {
-    let Some(task) = logins.cancel_pending(provider) else {
-        return;
+    let (publication, task) = {
+        let mut attempts = logins.attempts();
+        let Some(attempt) = attempts.get_mut(provider.label()) else {
+            return;
+        };
+        attempt.publication.cancel();
+        let task = attempt.task.take();
+        if let Some(task) = &task {
+            task.abort();
+        }
+        (attempt.publication.clone(), task)
     };
-    let finished = matches!(
-        tokio::time::timeout(std::time::Duration::from_secs(2), task).await,
-        Ok(Ok(Ok(())))
-    );
-    if finished {
-        if let Some(attempt) = logins.attempts().get_mut(provider.label()) {
-            if attempt.state == AttemptState::Cancelled {
-                attempt.state = AttemptState::Succeeded;
-            }
+    if let Some(task) = task {
+        let _ = task.await;
+    }
+    publication.settle().await;
+    if let Some(attempt) = logins.attempts().get_mut(provider.label()) {
+        if attempt.state == AttemptState::Pending {
+            attempt.state = if publication.published() {
+                AttemptState::Succeeded
+            } else {
+                AttemptState::Cancelled
+            };
         }
     }
 }
 
 /// A fixed failure code for the browser. The flow's own error text can carry a
 /// provider's raw response body, an attacker-chosen `error_description` from
-/// the localhost callback, or the auth file's absolute path, so it goes to the
-/// log and never to a client.
+/// the localhost callback, or the auth file's absolute path. Only this fixed
+/// classification may reach clients or logs.
 fn failure_code(error: &anyhow::Error) -> &'static str {
     let text = format!("{error:#}");
     if text.contains("timed out") {
@@ -167,6 +189,14 @@ fn failure_code(error: &anyhow::Error) -> &'static str {
     } else {
         "login_failed"
     }
+}
+
+fn log_login_failure(provider: OAuthProvider, error: &anyhow::Error) {
+    tracing::warn!(
+        provider = provider.label(),
+        classification = failure_code(error),
+        "provider login failed"
+    );
 }
 
 fn attempt_json(provider: OAuthProvider, attempt: &Attempt) -> Value {
@@ -207,29 +237,34 @@ fn display_label(provider: OAuthProvider) -> &'static str {
     }
 }
 
-/// Status of one provider, token-free. The Ocean auth-file block is the
-/// primary answer; when it is absent the provider resolver's source label says
-/// whether an env credential or the Codex CLI's own login covers it.
+/// Stored OAuth facts and effective runtime credentials are independent. Use
+/// the runtime resolver even with an expired/present/unreadable Ocean block.
 fn provider_status(logins: &ProviderLogins, provider: OAuthProvider, now_ms: i64) -> Value {
     let block = ocean_oauth::oauth_block_status(provider, logins.auth_file.clone());
-    let (status, source, expires_ms) = match block {
-        Ok(block) if block.present => {
-            let expired = block.expires_ms.is_some_and(|ms| ms <= now_ms);
-            let status = if expired && !block.refreshable {
-                "expired"
-            } else {
-                "signed_in"
-            };
-            (status, Some("auth_file"), block.expires_ms)
+    let effective =
+        ocean_providers::resolve_credential_origin(&logins.provider_env(), &provider_id(provider));
+    let source = effective
+        .as_ref()
+        .ok()
+        .and_then(|credential| credential.as_ref())
+        .and_then(source_label);
+    let status = if source.is_some() {
+        "signed_in"
+    } else if effective.is_err() || block.is_err() {
+        "unknown"
+    } else if block
+        .as_ref()
+        .is_ok_and(|block| block.present && block.expires_ms.is_some_and(|ms| ms <= now_ms))
+    {
+        "expired"
+    } else {
+        "signed_out"
+    };
+    let stored = match &block {
+        Ok(block) => {
+            json!({ "present": block.present, "refreshable": block.refreshable, "expires_at_ms": block.expires_ms })
         }
-        Ok(_) => match fallback_source(logins, provider) {
-            Some(source) => ("signed_in", Some(source), None),
-            None => ("signed_out", None, None),
-        },
-        Err(error) => {
-            tracing::warn!(provider = provider.label(), %error, "auth file unreadable");
-            ("unknown", None, None)
-        }
+        Err(_) => json!({ "error": "auth_file_unreadable" }),
     };
     json!({
         "provider": provider.label(),
@@ -237,28 +272,21 @@ fn provider_status(logins: &ProviderLogins, provider: OAuthProvider, now_ms: i64
         "kind": "oauth",
         "status": status,
         "source": source,
-        "expires_at_ms": expires_ms,
+        // Expiry is known here only for the stored Ocean OAuth block.
+        "expires_at_ms": if source == Some("auth_file") { block.as_ref().ok().and_then(|b| b.expires_ms) } else { None },
+        "stored": stored,
         "login": logins.login_projection(provider),
     })
 }
 
-/// Non-auth-file credentials the runtime would actually use. Only consulted
-/// when the daemon resolves the auth file itself: a pinned test file must not
-/// pick up the developer's real Codex CLI login.
-fn fallback_source(logins: &ProviderLogins, provider: OAuthProvider) -> Option<&'static str> {
-    if logins.auth_file.is_some() {
-        return None;
-    }
-    match ocean_providers::resolve_credential_from_env(&provider_id(provider)) {
-        Ok(Some(credential)) => match credential.source {
-            CredentialSource::Env { .. } => Some("env"),
-            CredentialSource::CodexCliAuthFile { .. } => Some("codex_cli"),
-            CredentialSource::ClaudeCodeCliAuthFile { .. } => Some("claude_cli"),
-            CredentialSource::ClaudeCodeKeychain => Some("claude_keychain"),
-            CredentialSource::OceanAuthFile { .. } => Some("auth_file"),
-            CredentialSource::NotRequired => None,
-        },
-        _ => None,
+fn source_label(source: &CredentialOrigin) -> Option<&'static str> {
+    match source {
+        CredentialOrigin::Env => Some("env"),
+        CredentialOrigin::CodexCliAuthFile => Some("codex_cli"),
+        CredentialOrigin::ClaudeCodeCliAuthFile => Some("claude_cli"),
+        CredentialOrigin::ClaudeCodeKeychain => Some("claude_keychain"),
+        CredentialOrigin::OceanAuthFile => Some("auth_file"),
+        CredentialOrigin::NotRequired => None,
     }
 }
 
@@ -276,17 +304,22 @@ fn authorize(operator: &OperatorIdentity, headers: &HeaderMap) -> Result<(), Api
         .map_err(ApiError::from)
 }
 
-pub(crate) fn list_inner(
+pub(crate) async fn list_inner(
     operator: &OperatorIdentity,
-    logins: &ProviderLogins,
+    logins: &Arc<ProviderLogins>,
     headers: &HeaderMap,
 ) -> RouteResult {
     authorize(operator, headers).map_err(ApiError::response)?;
-    let now = now_ms();
-    let providers: Vec<Value> = OAuthProvider::ALL
-        .into_iter()
-        .map(|provider| provider_status(logins, provider, now))
-        .collect();
+    let logins = Arc::clone(logins);
+    let providers = tokio::task::spawn_blocking(move || {
+        let now = now_ms();
+        OAuthProvider::ALL
+            .into_iter()
+            .map(|provider| provider_status(&logins, provider, now))
+            .collect::<Vec<Value>>()
+    })
+    .await
+    .map_err(|_| ApiError::internal("status_unavailable").response())?;
     Ok((
         StatusCode::OK,
         Json(json!({"ok": true, "providers": providers})),
@@ -301,6 +334,7 @@ pub(crate) async fn start_inner(
 ) -> RouteResult {
     authorize(operator, headers).map_err(ApiError::response)?;
     let provider = provider_from_path(raw_provider).map_err(ApiError::response)?;
+    let _operation = logins.operation(provider).lock_owned().await;
 
     // A new login replaces a pending one: cancel it and wait for its task to
     // stop, then bind. The old listener closes a beat after its task ends
@@ -317,8 +351,12 @@ pub(crate) async fn start_inner(
             Err(_) if superseding && tokio::time::Instant::now() < deadline => {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
-            Err(error) => {
-                tracing::warn!(provider = provider.label(), %error, "provider login could not start");
+            Err(_) => {
+                tracing::warn!(
+                    provider = provider.label(),
+                    classification = "login_unavailable",
+                    "provider login could not start"
+                );
                 return Err(ApiError::conflict("login_unavailable").response());
             }
         }
@@ -331,9 +369,11 @@ pub(crate) async fn start_inner(
     // task exists without its row (a fast finish could not record itself).
     let task_logins = Arc::clone(logins);
     let task_id = id.clone();
+    let publication = PublicationFence::default();
+    let task_publication = publication.clone();
     let mut attempts = logins.attempts();
     let task = tokio::spawn(async move {
-        let outcome = session.finish().await;
+        let outcome = session.finish_with_publication(task_publication).await;
         let mut attempts = task_logins.attempts();
         let result = match &outcome {
             Ok(_) => Ok(()),
@@ -353,7 +393,7 @@ pub(crate) async fn start_inner(
                 AttemptState::Succeeded
             }
             Err(error) => {
-                tracing::warn!(provider = provider.label(), error = %format!("{error:#}"), "provider login failed");
+                log_login_failure(provider, &error);
                 AttemptState::Failed(failure_code(&error).to_string())
             }
         };
@@ -365,6 +405,7 @@ pub(crate) async fn start_inner(
             id: id.clone(),
             state: AttemptState::Pending,
             task: Some(task),
+            publication,
         },
     );
     drop(attempts);
@@ -418,6 +459,7 @@ pub(crate) async fn cancel_inner(
 ) -> RouteResult {
     authorize(operator, headers).map_err(ApiError::response)?;
     let provider = provider_from_path(raw_provider).map_err(ApiError::response)?;
+    let _operation = logins.operation(provider).lock_owned().await;
     attempt_for(logins, provider, attempt_id).map_err(ApiError::response)?;
     cancel_and_settle(logins, provider).await;
     let mut body = attempt_for(logins, provider, attempt_id).map_err(ApiError::response)?;
@@ -433,11 +475,25 @@ pub(crate) async fn logout_inner(
 ) -> RouteResult {
     authorize(operator, headers).map_err(ApiError::response)?;
     let provider = provider_from_path(raw_provider).map_err(ApiError::response)?;
+    let operation = logins.operation(provider).lock_owned().await;
     // Settle a racing login FIRST, so tokens it was about to write land before
     // the removal below rather than after it.
     cancel_and_settle(logins, provider).await;
-    let removed = ocean_oauth::logout(provider, logins.auth_file.clone()).map_err(|error| {
-        tracing::warn!(provider = provider.label(), %error, "provider logout failed");
+    let auth_file = logins.auth_file.clone();
+    let removed = tokio::task::spawn_blocking(move || {
+        // Request cancellation must not release the operation lease while the
+        // blocking removal can still race a subsequent login.
+        let _operation = operation;
+        ocean_oauth::logout(provider, auth_file)
+    })
+    .await
+    .map_err(|_| ApiError::internal("logout_failed").response())?
+    .map_err(|_| {
+        tracing::warn!(
+            provider = provider.label(),
+            classification = "logout_failed",
+            "provider logout failed"
+        );
         ApiError::internal("logout_failed").response()
     })?;
     Ok((
@@ -455,11 +511,7 @@ pub(crate) async fn list(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> (StatusCode, Json<Value>) {
-    flatten(list_inner(
-        &state.room_operator,
-        &state.provider_logins,
-        &headers,
-    ))
+    flatten(list_inner(&state.room_operator, &state.provider_logins, &headers).await)
 }
 
 /// `POST /v1/auth/providers/{provider}/login`.
@@ -568,7 +620,7 @@ mod tests {
         let (_dir, logins) = logins(None);
         let operator = operator();
 
-        let (status, value) = body(list_inner(&operator, &logins, &HeaderMap::new()));
+        let (status, value) = body(list_inner(&operator, &logins, &HeaderMap::new()).await);
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(value["error"], "operator_credential_missing");
 
@@ -583,23 +635,23 @@ mod tests {
         // A browser's ambient cookie is refused on shape, even with the key.
         let mut cookie = authed();
         cookie.insert(axum::http::header::COOKIE, HeaderValue::from_static("a=b"));
-        let (status, value) = body(list_inner(&operator, &logins, &cookie));
+        let (status, value) = body(list_inner(&operator, &logins, &cookie).await);
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(value["error"], "ambient_credential_rejected");
 
         let unconfigured = OperatorIdentity::for_test(None, Vec::new());
-        let (status, _) = body(list_inner(&unconfigured, &logins, &authed()));
+        let (status, _) = body(list_inner(&unconfigured, &logins, &authed()).await);
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     }
 
-    #[test]
-    fn status_reports_blocks_without_tokens() {
+    #[tokio::test]
+    async fn status_reports_blocks_without_tokens() {
         let far_future = now_ms() + 3_600_000;
         let (_dir, logins) = logins(Some(&format!(
             r#"{{"claude-code":{{"type":"oauth","access":"secret-access","refresh":"secret-refresh","expires":{far_future}}},
                 "openai-codex":{{"type":"oauth","access":"old","expires":1000}}}}"#
         )));
-        let (status, value) = body(list_inner(&operator(), &logins, &authed()));
+        let (status, value) = body(list_inner(&operator(), &logins, &authed()).await);
         assert_eq!(status, StatusCode::OK);
         let text = value.to_string();
         assert!(!text.contains("secret-access") && !text.contains("secret-refresh"));
@@ -620,7 +672,7 @@ mod tests {
         assert_eq!(value["removed"], true);
         let (_, value) = body(logout_inner(&operator(), &logins, &authed(), "claude").await);
         assert_eq!(value["removed"], false);
-        let (_, value) = body(list_inner(&operator(), &logins, &authed()));
+        let (_, value) = body(list_inner(&operator(), &logins, &authed()).await);
         assert_eq!(value["providers"][0]["status"], "signed_out");
         assert_eq!(value["providers"][0]["login"], Value::Null);
     }
@@ -724,7 +776,7 @@ mod tests {
             &attempt,
         ));
         assert_eq!(polled["state"], "pending");
-        let (_, listed) = body(list_inner(&operator(), &logins, &authed()));
+        let (_, listed) = body(list_inner(&operator(), &logins, &authed()).await);
         assert_eq!(listed["providers"][0]["login"]["attempt_id"], attempt);
 
         // A second start supersedes the first; the old id stops resolving.
@@ -743,5 +795,258 @@ mod tests {
         let (_, cancelled) =
             body(cancel_inner(&operator(), &logins, &authed(), "claude", &newer).await);
         assert_eq!(cancelled["state"], "cancelled");
+    }
+
+    async fn poll_once<F: std::future::Future>(
+        mut future: std::pin::Pin<&mut F>,
+    ) -> std::task::Poll<F::Output> {
+        std::future::poll_fn(|cx| std::task::Poll::Ready(future.as_mut().poll(cx))).await
+    }
+
+    /// Register a synthetic credential writer already inside publication
+    /// custody. No callback, token endpoint, or real auth path is involved.
+    async fn blocked_writer(logins: &ProviderLogins) -> std::sync::mpsc::Sender<()> {
+        let publication = PublicationFence::default();
+        let writer = publication.clone();
+        let path = logins.auth_file.clone();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let task = tokio::spawn(async move {
+            writer
+                .persist(move || {
+                    entered_tx.send(()).unwrap();
+                    release_rx
+                        .recv_timeout(std::time::Duration::from_secs(5))
+                        .unwrap();
+                    ocean_oauth::store_api_key("claude-code", "synthetic", path).map(|_| ())
+                })
+                .await
+                .map_err(|_| "write_failed")
+        });
+        logins.attempts().insert(
+            "claude",
+            Attempt {
+                id: "blocked".into(),
+                state: AttemptState::Pending,
+                task: Some(task),
+                publication,
+            },
+        );
+        entered_rx.await.unwrap();
+        release_tx
+    }
+
+    #[tokio::test]
+    async fn cancellation_waits_for_publication_and_reports_only_after_settlement() {
+        let (_dir, logins) = logins(None);
+        let release = blocked_writer(&logins).await;
+        let op = operator();
+        let headers = authed();
+        let cancel = cancel_inner(&op, &logins, &headers, "claude", "blocked");
+        tokio::pin!(cancel);
+        assert!(poll_once(cancel.as_mut()).await.is_pending());
+        assert_eq!(
+            logins.login_projection(OAuthProvider::Claude)["state"],
+            "pending"
+        );
+        assert!(!logins.auth_file.as_ref().unwrap().exists());
+        release.send(()).unwrap();
+        let (status, value) = body(cancel.await);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            value["state"], "succeeded",
+            "an already-committed login is not falsely reported as cancelled"
+        );
+        assert!(
+            logins.auth_file.as_ref().unwrap().exists(),
+            "writer settled before cancellation returned"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropped_cancel_retains_fence_and_logout_cannot_resurrect_credentials() {
+        let (_dir, logins) = logins(None);
+        let release = blocked_writer(&logins).await;
+        let op = operator();
+        let headers = authed();
+        {
+            let cancel = cancel_inner(&op, &logins, &headers, "claude", "blocked");
+            tokio::pin!(cancel);
+            assert!(poll_once(cancel.as_mut()).await.is_pending());
+        }
+        assert!(logins.attempts().get("claude").unwrap().task.is_none());
+        let logout = logout_inner(&op, &logins, &headers, "claude");
+        tokio::pin!(logout);
+        assert!(poll_once(logout.as_mut()).await.is_pending());
+        release.send(()).unwrap();
+        let (status, value) = body(logout.await);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["removed"], true);
+        let root: Value =
+            serde_json::from_slice(&std::fs::read(logins.auth_file.as_ref().unwrap()).unwrap())
+                .unwrap();
+        assert!(root.get("claude-code").is_none());
+        let publication = logins.attempts().get("claude").unwrap().publication.clone();
+        assert!(publication
+            .persist(|| -> anyhow::Result<()> { panic!("late write after logout") })
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn concurrent_starts_wait_for_old_writer_and_do_not_detach_replacements() {
+        let (_dir, logins) = logins(None);
+        let release = blocked_writer(&logins).await;
+        let op = operator();
+        let headers = authed();
+        let first = start_inner(&op, &logins, &headers, "claude");
+        let second = start_inner(&op, &logins, &headers, "claude");
+        tokio::pin!(first, second);
+        assert!(poll_once(first.as_mut()).await.is_pending());
+        assert!(poll_once(second.as_mut()).await.is_pending());
+        assert_eq!(
+            logins.login_projection(OAuthProvider::Claude)["attempt_id"],
+            "blocked"
+        );
+        release.send(()).unwrap();
+        let (status, first_result) = body(first.await);
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let old_task = logins
+            .attempts()
+            .get("claude")
+            .unwrap()
+            .task
+            .as_ref()
+            .unwrap()
+            .abort_handle();
+        let old_fence = logins.attempts().get("claude").unwrap().publication.clone();
+        let (status, second_result) = body(second.await);
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_ne!(first_result["attempt_id"], second_result["attempt_id"]);
+        assert!(
+            old_task.is_finished(),
+            "replacement must join the prior task"
+        );
+        assert!(old_fence
+            .persist(|| -> anyhow::Result<()> { panic!("superseded writer") })
+            .await
+            .is_err());
+        body(logout_inner(&op, &logins, &headers, "claude").await);
+    }
+
+    #[tokio::test]
+    async fn custody_reads_and_removals_yield_and_dropped_logout_keeps_operation_lease() {
+        let (_dir, logins) = logins(Some(
+            r#"{"claude-code":{"type":"oauth","access":"synthetic"}}"#,
+        ));
+        let path = logins.auth_file.clone().unwrap();
+        let custody = ocean_providers::lock_auth_file(&path).unwrap();
+        let op = operator();
+        let headers = authed();
+        let list = list_inner(&op, &logins, &headers);
+        tokio::pin!(list);
+        let started = std::time::Instant::now();
+        assert!(poll_once(list.as_mut()).await.is_pending());
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "status must not block the executor on custody"
+        );
+        {
+            let logout = logout_inner(&op, &logins, &headers, "claude");
+            tokio::pin!(logout);
+            assert!(poll_once(logout.as_mut()).await.is_pending());
+        }
+        assert!(
+            logins.operation(OAuthProvider::Claude).try_lock().is_err(),
+            "blocking removal owns the operation after HTTP cancellation"
+        );
+        assert!(
+            logins.operation(OAuthProvider::Codex).try_lock().is_ok(),
+            "providers use independent operation leases"
+        );
+        drop(custody);
+        assert_eq!(body(list.await).0, StatusCode::OK);
+        let _settled = logins.operation(OAuthProvider::Claude).lock_owned().await;
+        let root: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert!(root.get("claude-code").is_none());
+    }
+
+    #[tokio::test]
+    async fn status_distinguishes_stored_block_from_env_and_native_fallback() {
+        let (dir, mut logins) = logins(Some(
+            r#"{"claude-code":{"type":"oauth","access":"old","refresh":"refresh","expires":1}}"#,
+        ));
+        let (_, initial) = body(list_inner(&operator(), &logins, &authed()).await);
+        assert_eq!(initial["providers"][0]["status"], "expired");
+        assert!(initial["providers"][0]["source"].is_null());
+        assert_eq!(initial["providers"][0]["stored"]["refreshable"], true);
+        Arc::get_mut(&mut logins)
+            .unwrap()
+            .provider_env
+            .vars
+            .insert("CLAUDE_CODE_ACCESS_TOKEN".into(), "synthetic-env".into());
+        let (_, value) = body(list_inner(&operator(), &logins, &authed()).await);
+        assert_eq!(value["providers"][0]["source"], "env");
+        assert_eq!(value["providers"][0]["status"], "signed_in");
+        assert_eq!(value["providers"][0]["stored"]["refreshable"], true);
+        assert!(value["providers"][0]["expires_at_ms"].is_null());
+        let env = &mut Arc::get_mut(&mut logins).unwrap().provider_env;
+        env.vars.clear();
+        env.vars
+            .insert("CLAUDE_CONFIG_DIR".into(), dir.path().display().to_string());
+        std::fs::write(dir.path().join(".credentials.json"), json!({"claudeAiOauth":{"accessToken":"synthetic-native","expiresAt":now_ms()+3_600_000,"scopes":["user:inference"]}}).to_string()).unwrap();
+        let (_, value) = body(list_inner(&operator(), &logins, &authed()).await);
+        assert_eq!(value["providers"][0]["source"], "claude_cli");
+        assert_eq!(value["providers"][0]["status"], "signed_in");
+        assert_eq!(value["providers"][0]["stored"]["present"], true);
+        assert!(!value.to_string().contains("synthetic"));
+        std::fs::write(logins.auth_file.as_ref().unwrap(), b"invalid json").unwrap();
+        Arc::get_mut(&mut logins)
+            .unwrap()
+            .provider_env
+            .vars
+            .insert("CLAUDE_CODE_ACCESS_TOKEN".into(), "synthetic-env".into());
+        let (_, value) = body(list_inner(&operator(), &logins, &authed()).await);
+        assert_eq!(value["providers"][0]["status"], "signed_in");
+        assert_eq!(value["providers"][0]["source"], "env");
+        assert_eq!(
+            value["providers"][0]["stored"]["error"],
+            "auth_file_unreadable"
+        );
+    }
+
+    #[test]
+    fn callback_failures_log_only_fixed_classification() {
+        #[derive(Clone)]
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let output = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || Capture(output.clone()))
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            log_login_failure(
+                OAuthProvider::Claude,
+                &anyhow::anyhow!("authorization failed: callback-secret\nforged-log-entry"),
+            );
+        });
+        let text = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
+        assert!(text.contains("denied") && text.contains("claude"));
+        assert!(
+            !text.contains("callback-secret")
+                && !text.contains("forged-log-entry")
+                && !text.contains("authorization failed")
+        );
     }
 }

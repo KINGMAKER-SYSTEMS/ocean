@@ -372,6 +372,45 @@ pub fn resolve_credential_from_env(
     resolve_credential(&ProviderEnv::from_process(), provider)
 }
 
+/// Token-free, path-free origin of the credential currently selected by the
+/// runtime resolver. This projection never carries environment names or tokens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialOrigin {
+    Env,
+    OceanAuthFile,
+    CodexCliAuthFile,
+    ClaudeCodeCliAuthFile,
+    ClaudeCodeKeychain,
+    NotRequired,
+}
+
+/// Fixed failure for token-free provenance queries; no paths or parse details.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CredentialOriginUnavailable;
+
+/// Resolve only credential provenance using exactly the runtime's precedence.
+/// Call on a blocking worker: native lookup and auth-file reads are synchronous.
+/// The credential is discarded inside this crate and never returned.
+pub fn resolve_credential_origin(
+    env: &ProviderEnv,
+    provider: &ProviderId,
+) -> Result<Option<CredentialOrigin>, CredentialOriginUnavailable> {
+    resolve_credential(env, provider)
+        .map_err(|_| CredentialOriginUnavailable)
+        .map(|credential| {
+            credential.map(|credential| match credential.source {
+                CredentialSource::Env { .. } => CredentialOrigin::Env,
+                CredentialSource::OceanAuthFile { .. } => CredentialOrigin::OceanAuthFile,
+                CredentialSource::CodexCliAuthFile { .. } => CredentialOrigin::CodexCliAuthFile,
+                CredentialSource::ClaudeCodeCliAuthFile { .. } => {
+                    CredentialOrigin::ClaudeCodeCliAuthFile
+                }
+                CredentialSource::ClaudeCodeKeychain => CredentialOrigin::ClaudeCodeKeychain,
+                CredentialSource::NotRequired => CredentialOrigin::NotRequired,
+            })
+        })
+}
+
 /// Resolve the xAI API key for voice STT/TTS (voice phase 4). The daemon owns
 /// the key so the surface never holds it. Resolution order: env `XAI_API_KEY`,
 /// then the Ocean auth file `xai` block (providers/xai/api_key, xai/api_key,
@@ -3015,5 +3054,55 @@ mod tests {
         assert_eq!(config.account_id.as_deref(), Some("cli-acct-456"));
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn credential_origin_tracks_runtime_env_file_and_native_precedence() {
+        let dir = tempfile::tempdir().unwrap();
+        let auth = dir.path().join("ocean-auth.json");
+        let native = dir.path().join(".credentials.json");
+        let codex = dir.path().join("codex-auth.json");
+        let future_ms = (unix_epoch_secs() + 3600) * 1000;
+        fs::write(&auth, serde_json::json!({"claude-code":{"type":"oauth","access":"synthetic-ocean","expires":future_ms}, "openai-codex":{"type":"oauth","access":"synthetic-ocean","expires":future_ms}}).to_string()).unwrap();
+        fs::write(&native, serde_json::json!({"claudeAiOauth":{"accessToken":"synthetic-native","expiresAt":future_ms,"scopes":["user:inference"]}}).to_string()).unwrap();
+        fs::write(&codex, r#"{"tokens":{"access_token":"synthetic-codex"}}"#).unwrap();
+        let mut env = ProviderEnv {
+            auth_file: Some(auth.clone()),
+            codex_auth_file: Some(codex),
+            vars: BTreeMap::from([
+                ("CLAUDE_CONFIG_DIR".into(), dir.path().display().to_string()),
+                ("CLAUDE_CODE_ACCESS_TOKEN".into(), "synthetic-env".into()),
+            ]),
+        };
+        assert_eq!(
+            resolve_credential_origin(&env, &ProviderId::ClaudeCode).unwrap(),
+            Some(CredentialOrigin::Env)
+        );
+        env.vars.remove("CLAUDE_CODE_ACCESS_TOKEN");
+        for provider in [ProviderId::ClaudeCode, ProviderId::OpenAiCodex] {
+            assert_eq!(
+                resolve_credential_origin(&env, &provider).unwrap(),
+                Some(CredentialOrigin::OceanAuthFile)
+            );
+        }
+        // A stored refresh token does not make an expired access token the
+        // effective source before the runtime's separate refresh pass.
+        fs::write(&auth, r#"{"claude-code":{"type":"oauth","access":"expired","refresh":"synthetic","expires":1},"openai-codex":{"type":"oauth","access":"expired","expires":1}}"#).unwrap();
+        assert_eq!(
+            resolve_credential_origin(&env, &ProviderId::ClaudeCode).unwrap(),
+            Some(CredentialOrigin::ClaudeCodeCliAuthFile)
+        );
+        assert_eq!(
+            resolve_credential_origin(&env, &ProviderId::OpenAiCodex).unwrap(),
+            Some(CredentialOrigin::CodexCliAuthFile)
+        );
+        fs::write(&auth, b"invalid json").unwrap();
+        assert!(resolve_credential_origin(&env, &ProviderId::ClaudeCode).is_err());
+        env.vars
+            .insert("CLAUDE_CODE_ACCESS_TOKEN".into(), "synthetic-env".into());
+        assert_eq!(
+            resolve_credential_origin(&env, &ProviderId::ClaudeCode).unwrap(),
+            Some(CredentialOrigin::Env)
+        );
     }
 }
