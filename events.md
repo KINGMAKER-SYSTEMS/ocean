@@ -1,6 +1,7 @@
 # Ocean events
 
 _________________________________________________________________________________
+
 time: [10:38] [05-10-26]
 agent: [Codex desktop] [GPT-6]
 worktree: [main] [/private/tmp/ocean-public-cutover]
@@ -752,6 +753,41 @@ compatibility verification, which were not established in this run. Surface
 was not deployed or live-verified. Devlog pass: no component contracts or indexes
 changed; this root ledger records the release evidence.
 _________________________________________________________________________________
+time: [21:38] [05-10-26]
+agent: [zcode] [glm-5.3]
+worktree: [port/rooms-participant-retirement]
+type: [feature-request]
+area: [backend] reconciliation: Rooms S0 participant retirement
+
+Second bounded Track B port: the daemon's Rooms S0 participant-retirement
+route. The store half (ocean-store room_retirement.rs — aliases DDL,
+retire_participant, replay-safe decision ledger) and its crate contract
+already live on Kingmaker main unchanged from the publication snapshot; only
+the operator route was missing. Ported the 187-line daemon module from
+personal 1bd1bc37: POST /v1/rooms/persistent/{key}/participants/{id}/retire
+{decision_id, successor_id} — operator lane, replay-safe through the shared
+room-wide decision namespace. The daemon (not the store) decides which ids
+are retirable: exactly the two placeholder shapes the old surface minted
+(surface-operator, web-<16 lowercase hex>); anything else is
+participant_not_retirable, which is the guard against the route becoming an
+identity-takeover primitive. Also ported the governing spec
+docs/specs/2026-09-09-ocean-rooms-participant-retirement.md. Wired into the
+router, the GET / discovery banner, and the operator guide quick reference;
+the router-contract parity baseline moved 112 → 113 (will need a +1 reconcile
+rebase if the OAuth-cluster port lands first, which also bumps the baseline).
+
+Checked for parallel-agent branches/PRs before starting (lesson from #18/#21):
+only the Surface draft #15 and my OAuth #23 were open; no Rooms work in
+flight. Deliberately not ported yet: room_maintenance/room_context/
+room_attachments/room_summary/room_workspace_proxy/room_inspect — they depend
+on the diverged persistent_rooms/room_agent_authority state and belong to
+their own units after the shared-file conflicts are reconciled.
+
+Validation: cargo test -p ocean-daemon (880 passed incl. the placeholder-shape
+test and the 113-route parity suite); cargo check -p ocean-daemon; rustfmt;
+denied-warning Clippy; cargo xtask docs-check PASS (30 packages, 152 active
+Markdown files) for the ported spec. Devlog pass: the store contract already
+documented retirement; operator guide updated via the parity contract.
 _________________________________________________________________________________
 time: [21:52] [05-10-26]
 agent: [zcode] [glm-5.3]
@@ -793,4 +829,63 @@ area: [frontend] [testing]
 Closed the leftovers from the third review of the Surface slash and session-link change, which acknowledged it. Boot no longer connects afresh over a session the user already has on either path, which also covers a deep link replayed before the restore checks run, a case older than this change; a restore whose session is missing answers "superseded" rather than "missing" when the user moved on during the fetch, so the persisted id their own switch just wrote is not cleared. The Send button really does use the highlighted row now: the rows were read after the input had been cleared, so the pick was always empty. A colon is a path character, so "/app.rs:12 is wrong" is sent as a message like "/Users/me/app.rs:12" already was.
 
 Validation: ocean-surface-ui native tests pass (893 plus the integration suites); rustfmt check and native and wasm clippy with warnings denied on all targets pass. The Send-button order is view code and is covered by reading.
+_________________________________________________________________________________
+
+time: [22:42] [05-10-26]
+agent: [codex] [gpt-6.1-sol]
+worktree: [codex/factory-pr25-rooms-followup] [/Users/smathdaddy-macbook/.codex/worktrees/factory-pr25-rooms-followup]
+type: [feature] PR #25 follow-up for Issues #27 and #29
+area: [backend] persistent Rooms participant retirement and identity reads
+
+Implemented the permanent retired-id join guard inside the same IMMEDIATE
+transactions as ordinary, owned-agent, and bootstrap membership writes. Added
+coverage for active same-kind reconnect and concurrent retire/join ordering
+across separate SQLite connections. Alias reads now return the oldest 256 rows
+with an explicit `has_more`; inspect, detail, and snapshot expose the public
+`{from,to,retired_at}` list plus `aliases_truncated`. Added the narrowly scoped
+read-only inspect route and a handler fixture for absent, complete, and
+truncated alias projections. Reconciled this follow-up onto canonical main
+`3273dab4` while retaining PR #25's original `51912151` commit ancestry.
+
+Validation: `cargo test -p ocean-store --locked -- --test-threads=1` PASS
+(275/275); `cargo fmt --all -- --check`, `git diff --check`, and
+`cargo xtask docs-check` PASS (30 packages, 152 active Markdown files, 170
+local links). The exact daemon inspect/detail/snapshot fixture could not reach
+the daemon crate: dependency compilation exhausted available filesystem space
+with `No space left on device`; only this factory worktree's target artifacts
+were cleaned. Push is pending a fresh PR-branch OID guard; hosted checks and
+independent review remain outstanding. No merge, deployment, or live outcome
+is claimed.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [22:48] [05-10-26]
+agent: [codex] [gpt-6.1-sol]
+worktree: [codex/factory-pr25-rooms-followup] [/Users/smathdaddy-macbook/.codex/worktrees/factory-pr25-rooms-followup]
+type: [review] PR #25 follow-up
+area: [testing] retirement HTTP authorization, replay, and route parity
+
+Applied the independent review findings on candidate head `02816903`: retained
+the inspect fixture's shared state by cloning it, advanced the router/banner
+parity expectation to 119, and added the inspect endpoint to the operator
+quick reference. The same router-level fixture now checks a missing operator
+credential is refused, a valid test operator retires a new placeholder, and
+replaying that exact decision is idempotent. The daemon fixture remains
+unverified locally because its dependency build hit `No space left on device`
+before compiling `ocean-daemon`; this follow-up awaits hosted Build Ocean and
+fresh independent review. No merge, deployment, or live outcome is claimed.
+_________________________________________________________________________________
+time: [22:53] [05-10-26]
+agent: [codex] [gpt-6.1-sol]
+worktree: [codex/factory-pr25-rooms-followup] [/Users/smathdaddy-macbook/.codex/worktrees/factory-pr25-rooms-followup]
+type: [review] PR #25 follow-up
+area: [testing] replay fixture and ledger structure
+
+Applied the exact-head review corrections on candidate head `338f36b4`: the
+retirement route replay fixture now uses the required non-nil UUID decision ID,
+and the root event ledger's opening separator is restored without changing
+existing entries. Formatting, docs-check, and diff-check passed. The daemon
+route fixture remains locally uncompiled because prior dependency compilation
+exhausted available disk; hosted required checks and a fresh independent review
+are still required. No merge, deployment, or live outcome is claimed.
 _________________________________________________________________________________
