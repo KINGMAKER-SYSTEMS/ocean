@@ -1065,7 +1065,7 @@ actually lands.
 
 Validation: cargo xtask docs-check PASS. Docs-only.
 _________________________________________________________________________________
-time: [13:29] [06-10-26]
+time: [17:29] [06-10-26]
 agent: [codex] [gpt-6]
 worktree: [codex/factory-ledger-accuracy] (PR #40)
 type: [review] [documentation]
@@ -1079,3 +1079,18 @@ pass (30 packages, 153 active Markdown files, 170 local links). The docs check
 compiled only xtask with 1.9 GiB free; no Ocean release build was run. The PR
 needs fresh review and hosted checks at the amended head before merge; no
 deployment was made.
+_________________________________________________________________________________
+time: [17:39] [06-10-26]
+agent: [codex] [gpt-6]
+worktree: [codex/factory-ledger-accuracy] (PR #40 ledger)
+type: [review] [issues]
+area: [review] daemon identity and room-profile contracts
+
+Independent review of exact PR #41/#43 heads found malformed identity values
+accepted by `unquote`, an operator-guide liveness label attached to the wrong
+endpoint, resolver metadata beyond PR #43's stated credential-slot response,
+and whole-file auth.json parsing despite its token-isolation claim. Posted
+these findings as PR review comments; source branches remain with their
+owners. Both PRs' hosted Build Ocean checks pass and Build Surface is
+path-skipped. No code tests ran here: free disk was 821 MiB. The review is not
+approval or merge; no deployment was made.
