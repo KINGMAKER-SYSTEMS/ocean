@@ -48,6 +48,23 @@ This crate owns the multi-provider LLM wire protocol layer for Anthropic, OpenAI
   later) receive `reasoning_effort`. Every other id rejects it with a 400, so
   an unrecognized id gets nothing. A Gemini model whose descriptor says it
   does not reason never receives `thinkingConfig`.
+- Fable 5.1, Opus 5.5 and Sonnet 5.5 bind each thinking block to the
+  conversation that produced it (system prompt, tool set, earlier messages)
+  and, on Anthropic accounts created on or after 2026-08-31, reject a request
+  that replays a block whose prefix changed. Ocean changes that prefix: a
+  budget notice on the system prompt and withdrawn tools on a turn's final
+  round, a growing tool list in dynamic-tool mode, trimmed oldest messages when
+  the window fills, and re-read memories in the system prompt. Their adaptive
+  requests therefore set `thinking.block_binding.prefix_mismatch_behavior` to
+  `drop_block` and send the `thinking-binding-controls-2026-08-01` beta
+  (`beta_header` composes the one `anthropic-beta` value with the OAuth beta);
+  `between_tools` takes no extra field. A dropped or tolerated block arrives in
+  `message_start.input_transformations` and is logged at warn with its path and
+  reason. Live-verified on the subscription route for all three models; the
+  ocean-agent probe `live_edited_history_still_completes_with_replayed_thinking`
+  reproduces the drop. Making the harness append-only (freeze the system prompt
+  and tools, replay nothing after a compaction) would stop losing that
+  reasoning; until then, the drop is the documented safe setting.
 - Shared `ThinkingLevel::Max` serializes as max. Current adaptive Claude and
   Codex GPT-6/5.6 encode max directly; older provider vocabularies retain their
   existing bounded highest-effort fallback.

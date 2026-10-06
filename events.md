@@ -1009,3 +1009,15 @@ Merged Ocean PR counts observed at 04:37Z were 10 for 2026-10-05 UTC, 9 for
 window (1 so far for 2026-10-06). Calendar credits, UTC merges, and local
 delivery counts are separate; no artificial activity was added.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [10:06] [06-10-26]
+agent: [claude] [claude code]
+worktree: [claude/thinking-binding-drop-block] [/Users/risingtidesdev/dev/ocean-claude-audit]
+type: [bug report]
+area: [backend] [testing]
+
+Closed a latent failure on the newest Claude models. Fable 5.1, Opus 5.5 and Sonnet 5.5 bind each thinking block to the conversation that produced it, and on Anthropic accounts created on or after 2026-08-31 reject a request that replays a block whose prefix (system prompt, tool set, earlier messages) has changed. Ocean replays signed thinking blocks and changes that prefix in four places I read in the runtime and agent: the final round of a turn appends a budget notice to the system prompt and sends no tools, dynamic-tool mode grows the tool list as tools load, the per-send trim drops the oldest messages once the window fills, and the system prompt re-reads the ten most recent memories so a retained memory changes it for the next turn. On an enforced account each of those is a 400 rather than a reply. The Anthropic encoder now asks for a mismatched block to be dropped instead (thinking.block_binding.prefix_mismatch_behavior = drop_block) on exactly those three models, sends the thinking-binding-controls-2026-08-01 beta alongside the OAuth beta as one header value, and logs any block the API reports in message_start.input_transformations with its path and reason. between_tools takes no extra field. Other models are unchanged. The cost is that a block invalidated by one of those edits is now dropped rather than let through on accounts that were not enforced; the lasting fix is an append-only harness, recorded in the protocol contract. Also fixed two clippy errors in tests that landed with the token-footprint change.
+
+Validation: ocean-protocol (184 plus 5), ocean-agent (268, two live probes ignored) and ocean-providers (67) pass; clippy with warnings denied on both crates' tests, workspace test compilation, rustfmt check and docs-check pass. New tests: the three models carry the binding field at every level and no other model does; the beta header composes once from auth and body; message_start with and without input_transformations decodes. Live, on the subscription route with the operator's configured credential: the fixed no-tools probe passed on all three models with the new shape (71 tokens each), and a new ignored probe sent two requests to Sonnet 5.5 where the second replayed the first's signed thinking block under a changed system prompt: the API answered with input_transformations thinking_dropped / prefix_binding_mismatch at messages.1.content.0, the adapter logged it, and the request completed. No session, store or credential was touched or refreshed.
+_________________________________________________________________________________

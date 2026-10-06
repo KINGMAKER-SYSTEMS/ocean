@@ -32,6 +32,9 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// carries `anthropic-beta: oauth-2025-04-20`. API-key requests never send it
 /// (their wire shape is unchanged). Mirrors OMP's `claudeCode*BetaDefaults`.
 const ANTHROPIC_OAUTH_BETA: &str = "oauth-2025-04-20";
+/// Lets a request set `thinking.block_binding`, and adds
+/// `input_transformations` to responses.
+const ANTHROPIC_BINDING_BETA: &str = "thinking-binding-controls-2026-08-01";
 
 /// The Claude Code identity line that must OPEN the system prompt on OAuth
 /// requests — the other half of the OAuth fingerprint (Anthropic validates
@@ -76,6 +79,54 @@ struct MessageStartPayload {
     model: Option<String>,
     #[serde(default)]
     usage: Option<UsageDelta>,
+    /// What the API changed in the request before the model saw it, under the
+    /// binding-controls beta: a dropped or tolerated thinking block, with its
+    /// path and reason. Absent without the beta.
+    #[serde(default)]
+    input_transformations: Vec<Value>,
+}
+
+/// Log each thinking block the API dropped or let through after it failed a
+/// binding check, so a history edit shows up in the daemon log rather than
+/// as silently weaker reasoning. The entries are opaque beyond their `type`,
+/// `path` and `reason`; anything else is left as it is.
+fn note_input_transformations(model: &str, transformations: &[Value]) {
+    for entry in transformations {
+        let kind = entry.get("type").and_then(Value::as_str).unwrap_or("");
+        let path = entry.get("path").and_then(Value::as_str).unwrap_or("");
+        let reason = entry.get("reason").and_then(Value::as_str).unwrap_or("");
+        match kind {
+            "thinking_dropped" | "thinking_mismatch_allowed" => tracing::warn!(
+                model,
+                kind,
+                path,
+                reason,
+                "the API altered a replayed thinking block: the history before it changed since it was produced"
+            ),
+            _ => tracing::debug!(model, kind, path, reason, "input transformation"),
+        }
+    }
+}
+
+/// Models that check a replayed thinking block against the conversation that
+/// produced it and reject the request when the history before the block has
+/// changed (enforced on Anthropic accounts created on or after 2026-08-31).
+/// Ocean edits history between requests: it appends a budget notice to the
+/// system prompt and withdraws the tools on a turn's final round, grows the
+/// tool list as dynamic tools load, drops the oldest messages when the
+/// window fills, and re-reads recent memories into the system prompt. Each
+/// is a 400 on those accounts unless the request asks for the block to be
+/// dropped instead.
+fn runs_prefix_binding_check(id: &str) -> bool {
+    matches!(
+        id,
+        "claude-fable-5-1"
+            | "fable-5-1"
+            | "claude-opus-5-5"
+            | "opus-5-5"
+            | "claude-sonnet-5-5"
+            | "sonnet-5-5"
+    )
 }
 
 #[derive(Deserialize, Debug)]
@@ -450,6 +501,16 @@ fn build_body(model: &Model, context: &Context, options: &StreamOptions) -> Valu
         body["thinking"] = if between_tools {
             // `between_tools` accepts no other field.
             json!({"type": "between_tools"})
+        } else if runs_prefix_binding_check(id) {
+            // Degrade instead of fail when a replayed thinking block no longer
+            // matches the history before it (see `runs_prefix_binding_check`).
+            // The block is dropped for that request, unbilled, and reported in
+            // `input_transformations`; the request needs `ANTHROPIC_BINDING_BETA`.
+            json!({
+                "type": "adaptive",
+                "display": "summarized",
+                "block_binding": {"prefix_mismatch_behavior": "drop_block"},
+            })
         } else {
             // These models stream empty thinking text unless a summary is
             // requested, which leaves every client's reasoning view blank.
@@ -571,10 +632,24 @@ fn apply_auth(
 ) -> reqwest::RequestBuilder {
     match method {
         AuthMethod::ApiKey => req.header("x-api-key", secret),
-        AuthMethod::Bearer => req
-            .bearer_auth(secret)
-            .header("anthropic-beta", ANTHROPIC_OAUTH_BETA),
+        AuthMethod::Bearer => req.bearer_auth(secret),
     }
+}
+
+/// The one `anthropic-beta` value a request needs: the OAuth beta for a
+/// bearer token (Anthropic rejects oat01 tokens without it), and the
+/// binding-controls beta whenever the body sets `thinking.block_binding`.
+/// `None` when neither applies. Composed once so the header is never sent
+/// twice.
+fn beta_header(body: &Value, method: AuthMethod) -> Option<String> {
+    let mut betas = Vec::new();
+    if method == AuthMethod::Bearer {
+        betas.push(ANTHROPIC_OAUTH_BETA);
+    }
+    if body["thinking"].get("block_binding").is_some() {
+        betas.push(ANTHROPIC_BINDING_BETA);
+    }
+    (!betas.is_empty()).then(|| betas.join(","))
 }
 
 #[async_trait]
@@ -618,6 +693,9 @@ impl Provider for AnthropicProvider {
                         .header("accept", "text/event-stream")
                         .header("content-type", "application/json");
                     req = apply_auth(req, auth, &api_key);
+                    if let Some(beta) = beta_header(&body, auth) {
+                        req = req.header("anthropic-beta", beta);
+                    }
                     for (k, v) in extra_headers {
                         req = req.header(k, v);
                     }
@@ -707,7 +785,11 @@ impl Provider for AnthropicProvider {
                 match parsed {
                     SseEvent::Ping | SseEvent::Other => {}
                     SseEvent::MessageStart { message } => {
+                        // The envelope's non-content fields, for diagnosing
+                        // what the API did to the request (no message text).
+                        tracing::debug!(frame = %ev.data.chars().take(2048).collect::<String>(), "anthropic message_start");
                         if let Some(m) = message.model { response_model = Some(m); }
+                        note_input_transformations(&model_id, &message.input_transformations);
                         if let Some(u) = message.usage {
                             usage.input += u.input_tokens;
                             usage.cache_read += u.cache_read_input_tokens;
@@ -925,7 +1007,11 @@ mod tests {
                     assert_eq!(body["thinking"], json!({"type":"disabled"}), "{id}");
                     assert!(body.get("output_config").is_none());
                 } else {
-                    assert_eq!(body["thinking"], summarized, "{id}");
+                    // The binding control rides only on the models that run
+                    // the check; it is covered by its own test.
+                    let mut thinking = body["thinking"].clone();
+                    thinking.as_object_mut().unwrap().remove("block_binding");
+                    assert_eq!(thinking, summarized, "{id}");
                     assert_eq!(body["output_config"]["effort"], expected, "{id}");
                 }
                 // Sampling parameters are a 400 on every one of these models,
@@ -944,7 +1030,9 @@ mod tests {
             if matches!(id, "claude-opus-4-8" | "claude-code-opus-4-7") {
                 assert!(body.get("thinking").is_none(), "{id}");
             } else {
-                assert_eq!(body["thinking"], summarized, "{id}");
+                let mut thinking = body["thinking"].clone();
+                thinking.as_object_mut().unwrap().remove("block_binding");
+                assert_eq!(thinking, summarized, "{id}");
             }
             assert!(body.get("output_config").is_none(), "{id}");
             assert!(body.get("temperature").is_none(), "{id}");
@@ -1009,7 +1097,11 @@ mod tests {
                     // Any field beside `type` is a 400 with `between_tools`.
                     json!({"type":"between_tools"})
                 } else {
-                    json!({"type":"adaptive","display":"summarized"})
+                    json!({
+                        "type":"adaptive",
+                        "display":"summarized",
+                        "block_binding":{"prefix_mismatch_behavior":"drop_block"},
+                    })
                 };
                 assert_eq!(body["thinking"], expected);
                 assert_eq!(body["output_config"]["effort"], effort);
@@ -1018,7 +1110,11 @@ mod tests {
             let body = build_body(&model, &Context::default(), &StreamOptions::default());
             assert_eq!(
                 body["thinking"],
-                json!({"type":"adaptive","display":"summarized"})
+                json!({
+                    "type":"adaptive",
+                    "display":"summarized",
+                    "block_binding":{"prefix_mismatch_behavior":"drop_block"},
+                })
             );
         }
     }
@@ -1316,7 +1412,6 @@ mod tests {
             output_tokens: 50,
             cache_read_input_tokens: 200,
             cache_creation_input_tokens: 512,
-            ..Default::default()
         };
         let mut usage = Usage::default();
         apply_message_delta_usage(&mut usage, &reported);
@@ -1808,9 +1903,129 @@ mod tests {
         );
         assert_eq!(
             header_str(headers, "anthropic-beta"),
-            Some(ANTHROPIC_OAUTH_BETA),
-            "Bearer must send the oauth beta — Anthropic rejects oat01 tokens without it",
+            None,
+            "the beta header is composed once by beta_header, not here",
         );
+    }
+
+    // One `anthropic-beta` header per request: the OAuth beta rides with a
+    // bearer token (Anthropic rejects oat01 tokens without it), the binding
+    // beta rides with a body that sets `thinking.block_binding`, and a request
+    // that needs both sends both in one value.
+    #[test]
+    fn beta_header_is_composed_once_from_auth_and_body() {
+        let plain = json!({"thinking": {"type": "adaptive"}});
+        let bound = json!({"thinking": {
+            "type": "adaptive",
+            "block_binding": {"prefix_mismatch_behavior": "drop_block"},
+        }});
+        assert_eq!(beta_header(&plain, AuthMethod::ApiKey), None);
+        assert_eq!(
+            beta_header(&plain, AuthMethod::Bearer).as_deref(),
+            Some(ANTHROPIC_OAUTH_BETA)
+        );
+        assert_eq!(
+            beta_header(&bound, AuthMethod::ApiKey).as_deref(),
+            Some(ANTHROPIC_BINDING_BETA)
+        );
+        assert_eq!(
+            beta_header(&bound, AuthMethod::Bearer).as_deref(),
+            Some("oauth-2025-04-20,thinking-binding-controls-2026-08-01")
+        );
+        // A body without a thinking object at all (Opus 4.8 at its default).
+        assert_eq!(beta_header(&json!({}), AuthMethod::ApiKey), None);
+    }
+
+    // The three models that reject a replayed thinking block whose history
+    // changed ask for the block to be dropped instead; every other model keeps
+    // its known shape, and `between_tools` takes no extra field.
+    #[test]
+    fn models_that_check_thinking_bindings_ask_for_drop_block() {
+        let binding = json!({"prefix_mismatch_behavior": "drop_block"});
+        for id in ["claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5"] {
+            let model = Model {
+                id: id.into(),
+                ..anthropic_model()
+            };
+            for options in [
+                StreamOptions::default(),
+                StreamOptions {
+                    reasoning: Some(ThinkingLevel::High),
+                    ..Default::default()
+                },
+            ] {
+                let body = build_body(&model, &ctx_with_history(), &options);
+                assert_eq!(body["thinking"]["type"], "adaptive", "{id}");
+                assert_eq!(body["thinking"]["display"], "summarized", "{id}");
+                assert_eq!(body["thinking"]["block_binding"], binding, "{id}");
+            }
+        }
+        let sonnet_5_5_off = build_body(
+            &Model {
+                id: "claude-sonnet-5-5".into(),
+                ..anthropic_model()
+            },
+            &ctx_with_history(),
+            &StreamOptions {
+                reasoning: Some(ThinkingLevel::Off),
+                ..Default::default()
+            },
+        );
+        assert_eq!(sonnet_5_5_off["thinking"], json!({"type": "between_tools"}));
+        for id in [
+            "claude-fable-5",
+            "claude-opus-5",
+            "claude-opus-4-8",
+            "claude-sonnet-5",
+            "claude-sonnet-4-6",
+        ] {
+            let body = build_body(
+                &Model {
+                    id: id.into(),
+                    ..anthropic_model()
+                },
+                &ctx_with_history(),
+                &StreamOptions {
+                    reasoning: Some(ThinkingLevel::High),
+                    ..Default::default()
+                },
+            );
+            assert!(
+                body["thinking"].get("block_binding").is_none(),
+                "{id}: {}",
+                body["thinking"]
+            );
+        }
+    }
+
+    // A `message_start` that carries `input_transformations` decodes, so a
+    // dropped block is logged rather than failing the frame; one without it
+    // decodes as before.
+    #[test]
+    fn message_start_decodes_input_transformations() {
+        let with: SseEvent = serde_json::from_str(
+            r#"{"type":"message_start","message":{"model":"claude-fable-5-1","usage":{"input_tokens":5},"input_transformations":[{"type":"thinking_dropped","path":"messages.1.content.0","reason":"prefix_binding_mismatch"}]}}"#,
+        )
+        .expect("decodes");
+        match with {
+            SseEvent::MessageStart { message } => {
+                assert_eq!(message.input_transformations.len(), 1);
+                assert_eq!(
+                    message.input_transformations[0]["reason"],
+                    "prefix_binding_mismatch"
+                );
+                note_input_transformations("claude-fable-5-1", &message.input_transformations);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        let without: SseEvent = serde_json::from_str(
+            r#"{"type":"message_start","message":{"model":"claude-fable-5-1","usage":{"input_tokens":5}}}"#,
+        )
+        .expect("decodes");
+        match without {
+            SseEvent::MessageStart { message } => assert!(message.input_transformations.is_empty()),
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 
     // OAuth-bearer bodies must OPEN the system array with the Claude Code

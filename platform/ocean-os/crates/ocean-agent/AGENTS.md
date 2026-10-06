@@ -219,6 +219,7 @@ transcripts by session id.
 ## Verification
 
 - Explicit live diagnostic: `OCEAN_LIVE_MODEL_PROBE=1 cargo test -p ocean-agent live_catalog_models_complete_tool_free_prompt --locked -- --ignored --nocapture` (contacts configured providers).
+- Explicit live diagnostic for the Anthropic thinking-binding check: `OCEAN_LIVE_MODEL_PROBE=1 OCEAN_MODEL_PROBE_IDS=<one id> cargo test -p ocean-agent live_edited_history_still_completes_with_replayed_thinking --locked -- --ignored --nocapture` (two requests to one model; the second replays a thinking block under a changed system prompt and must complete; the adapter's warn line shows the dropped block).
 
 - `cargo test -p ocean-agent every_catalog_model_constructs --locked`
 - `cargo test -p ocean-agent every_auth_route_constructs --locked`
