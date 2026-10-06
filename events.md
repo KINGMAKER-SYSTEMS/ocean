@@ -558,3 +558,42 @@ preview. Validation: TUI suite (528 passed, 4 ignored), `cargo check -p
 ocean-tui`, `cargo build -p ocean-tui --release`, `cargo fmt --all -- --check`,
 and `git diff --check` passed. Final exact-head review and hosted checks remain
 pending; no merge or deployment has occurred.
+
+time: [00:15:20 UTC] [06-10-26]
+agent: [codex desktop] [gpt-6.1-sol]
+worktree: [codex/issue11-cached-tokens]
+type: [gh actions] [deployment]
+area: [release] [testing]
+
+Issue #13 / PR #19 deployment record: installed merged commit
+`683ad9a270be9b17fa9a05c98b059890e402f945` as immutable artifact
+`~/.local/libexec/ocean-tui/ocean-683ad9a270be`. Code signing verified; the
+artifact rendered and remained alive in a four-second PTY with
+`OCEAN_TUI_AUTOSTART=0`. Daemon health remained true at revision
+`0abb558179af`; the previous artifact was retained.
+_________________________________________________________________________________
+time: [20:39 EDT] [05-10-26]
+agent: [codex desktop] [gpt-6.1-sol]
+worktree: [codex/issue11-cached-tokens] [/Users/smathdaddy-macbook/.codex/worktrees/issue11-cached-tokens]
+type: [feature-request] [testing]
+area: [backend] [frontend] [testing]
+
+Implemented Issue #11's provider-neutral token footprint. Added authoritative
+`total_tokens` and separate cache-write buckets to the additive Ocean
+`TurnFinished` event; daemon populates them from provider usage. Surface and
+TUI show clearly labeled processed-token totals, keep cache buckets as
+breakdowns (never additive), and preserve unknown totals. Surface's accumulated
+number is labeled as observed since the current session binding because this
+client does not hydrate historical usage. Added Anthropic and Gemini-shaped
+accounting tests plus SDK compatibility/roundtrip, Surface reducer/label, and
+TUI status/reducer tests. Updated provider, Surface, and TUI contracts.
+
+Validation: `cargo test -p ocean-protocol` (181 unit + 5 integration passed);
+`cargo test -p ocean-agent-sdk` (55 unit + 12 integration passed);
+`CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test -p ocean-tui`
+(524 passed, 4 ignored), plus two focused TUI label/reducer tests;
+`cargo check --workspace --tests`; `cargo check -p ocean-tui`;
+`cargo build -p ocean-tui --release`; Surface focused token-usage tests and
+`cargo check -p ocean-surface-ui --target wasm32-unknown-unknown`;
+component formatting and `git diff --check`. No deployment performed.
+_________________________________________________________________________________

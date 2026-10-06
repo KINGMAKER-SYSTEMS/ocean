@@ -61,6 +61,13 @@ This crate owns the multi-provider LLM wire protocol layer for Anthropic, OpenAI
   Responses round reports usage on `response.completed` and on a length-capped
   `response.incomplete` alike. Gemini output includes thinking tokens, so
   `Usage.reasoning` is a subset of `output` on every provider.
+- `Usage.total_tokens` is the provider-authoritative token footprint; never
+  reconstruct it by adding cache breakdowns. Anthropic `input` excludes its
+  separately reported cache-read and cache-write tokens, so both cache buckets
+  are included in its total. Gemini's effective `promptTokenCount` and
+  `totalTokenCount` already include cached content; `cachedContentTokenCount`
+  is a subset, not an additional count. OpenAI/Codex cached input details are
+  likewise breakdowns of provider input/total.
 - Anthropic extended-thinking requests must keep `budget_tokens` at least 1024
   and strictly below `max_tokens`; preserve explicit output caps by clamping the
   thinking budget rather than raising the cap.

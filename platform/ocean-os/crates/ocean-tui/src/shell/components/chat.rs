@@ -384,6 +384,9 @@ pub struct ChatComponent {
     /// it (provider usage when available, its estimate otherwise). Cleared on
     /// `TurnStarted` — never a stale rate dressed up as current.
     last_tok_per_s: Option<f64>,
+    /// Authoritative provider total for the last finished turn. Unknown stays
+    /// absent; cache breakdowns are not added to the total.
+    last_provider_footprint: Option<u64>,
     turns: Vec<Turn>,
     input: String,
     model: Option<String>,
@@ -2449,6 +2452,11 @@ impl ChatComponent {
         self.last_tok_per_s
     }
 
+    /// Last finished turn's authoritative provider-reported token total.
+    pub fn provider_footprint(&self) -> Option<u64> {
+        self.last_provider_footprint
+    }
+
     /// The model driving turns (the header pill), for the status bar. `None`
     /// until the first `TurnStarted` names it.
     pub fn model(&self) -> Option<&str> {
@@ -4013,6 +4021,7 @@ impl Component for ChatComponent {
                 AgentTurnEvent::TurnStarted { model, .. } => {
                     // A fresh turn invalidates the previous throughput reading.
                     self.last_tok_per_s = None;
+                    self.last_provider_footprint = None;
                     // …and any reconnect notice from the turn before it.
                     self.retry_status = None;
                     if let Some(m) = model {
@@ -4148,6 +4157,7 @@ impl Component for ChatComponent {
                     status,
                     error,
                     tokens_per_second,
+                    total_tokens,
                     ..
                 } => {
                     // The turn is over either way — a reconnect notice must not
@@ -4170,6 +4180,7 @@ impl Component for ChatComponent {
                         self.busy = false;
                     }
                     self.last_tok_per_s = *tokens_per_second;
+                    self.last_provider_footprint = *total_tokens;
                     let cancelled = matches!(status, ocean_agent_sdk::AgentTurnStatus::Cancelled);
                     let failed = matches!(status, ocean_agent_sdk::AgentTurnStatus::Failed)
                         || error.is_some();
@@ -6883,6 +6894,20 @@ mod tests {
         chat.update(&turn_finished(AgentTurnStatus::Completed, None));
         assert_eq!(chat.activity(), None, "turn completion clears activity");
     }
+
+    #[test]
+    fn finished_turn_exposes_only_the_authoritative_provider_footprint() {
+        let mut chat = ChatComponent::default();
+        let mut action = turn_finished(AgentTurnStatus::Completed, None);
+        if let Action::AgentEvent(event) = &mut action {
+            if let AgentTurnEvent::TurnFinished { total_tokens, .. } = event.as_mut() {
+                *total_tokens = Some(862);
+            }
+        }
+        chat.update(&action);
+        assert_eq!(chat.provider_footprint(), Some(862));
+    }
+
     // ── turn-terminal paths ──────────────────────────────────────────────────
 
     fn turn_finished(status: AgentTurnStatus, error: Option<&str>) -> Action {
@@ -6903,6 +6928,8 @@ mod tests {
             output_tokens: None,
             input_tokens: None,
             cache_read_tokens: None,
+            cache_write_tokens: None,
+            total_tokens: None,
             tokens_per_second: None,
             context_usage: None,
         }))

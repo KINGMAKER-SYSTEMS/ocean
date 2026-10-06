@@ -252,6 +252,13 @@ Web surface session UI:
   daemon-owned running/Stop projection and continuing the scoped SSE tail.
   Never quarantine a live session behind client-side detail polling,
   `detail syncing…`, or a manual refresh control.
+- Token telemetry consumes the daemon's additive `TurnFinished` provider
+  footprint and cache-read/cache-write breakdowns. The provider total is
+  authoritative; cache buckets may already be included in input and total, so
+  never add them to reconstruct the footprint. Keep unknown totals unavailable.
+  The session subtotal counts observed terminal events since the current
+  session binding only; label it accordingly because transcript hydration does
+  not reconstruct historical token usage.
 - Every complete session-list request—thin daemon spawner or A1 panel
   poll—claims the same daemon-owned generation ticket. Only the latest claimant
   may replace `session_list`; panel-local generation/open guards still protect

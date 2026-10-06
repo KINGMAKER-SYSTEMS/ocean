@@ -107,6 +107,9 @@ pub struct StatusData<'a> {
     /// Last finished turn's tokens/sec, as the daemon reported it (provider
     /// usage when available, daemon estimate otherwise). `None` = no reading.
     pub tok_per_s: Option<f64>,
+    /// Authoritative provider-reported total for the last finished turn.
+    /// Unknown totals stay absent; cache breakdowns are never added here.
+    pub provider_footprint: Option<u64>,
 }
 
 /// Width of the two-space separator between rendered segments (plain ASCII —
@@ -114,9 +117,9 @@ pub struct StatusData<'a> {
 const SEP_W: usize = 2;
 
 /// Build the ordered segment list, clipping to `max_width` display columns.
-/// LAYOUT order: model · branch · health · error · activity · tok/s.
-/// SURVIVAL is separate: on overflow whole segments drop by rank — tok/s
-/// first, then activity, then branch, then health/error; the model (identity,
+/// LAYOUT order: model · branch · health · error · activity · processed tokens/rate.
+/// SURVIVAL is separate: on overflow whole segments drop by rank — processed
+/// tokens/rate first, then activity, then branch, then health/error; the model (identity,
 /// rank 0) never drops. Whatever survives alone is width-clamped so a single
 /// long name can't overflow the row.
 pub fn segments(d: &StatusData, max_width: usize) -> Vec<Segment> {
@@ -139,8 +142,15 @@ pub fn segments(d: &StatusData, max_width: usize) -> Vec<Segment> {
     if let Some(a) = d.activity {
         ranked.push((Segment::new(a.to_string(), Tone::Muted), 3));
     }
-    if let Some(t) = d.tok_per_s {
-        ranked.push((Segment::new(format!("{t:.0} tok/s"), Tone::Muted), 4));
+    if d.provider_footprint.is_some() || d.tok_per_s.is_some() {
+        let mut metrics = Vec::new();
+        if let Some(total) = d.provider_footprint {
+            metrics.push(format!("{} tokens processed", compact_token_count(total)));
+        }
+        if let Some(rate) = d.tok_per_s {
+            metrics.push(format!("{rate:.0} tok/s"));
+        }
+        ranked.push((Segment::new(metrics.join(", "), Tone::Muted), 4));
     }
     while ranked.len() > 1 && ranked_row_width(&ranked) > max_width {
         let idx = ranked
@@ -159,6 +169,18 @@ pub fn segments(d: &StatusData, max_width: usize) -> Vec<Segment> {
         }
     }
     out
+}
+
+fn compact_token_count(tokens: u64) -> String {
+    const THOUSAND: u64 = 1_000;
+    const MILLION: u64 = 1_000_000;
+    if tokens >= MILLION {
+        format!("{:.1}m", tokens as f64 / MILLION as f64)
+    } else if tokens >= THOUSAND {
+        format!("{}k", tokens / THOUSAND)
+    } else {
+        tokens.to_string()
+    }
 }
 
 /// [`row_width`] over the ranked working list.
@@ -217,6 +239,7 @@ mod tests {
             error: None,
             activity: None,
             tok_per_s: None,
+            provider_footprint: None,
             git: None,
         }
     }
@@ -234,6 +257,17 @@ mod tests {
     #[test]
     fn empty_state_renders_nothing() {
         assert!(segments(&base(), 120).is_empty());
+    }
+
+    #[test]
+    fn authoritative_footprint_has_a_clear_processed_label() {
+        let mut d = base();
+        d.provider_footprint = Some(862);
+        assert_eq!(segments(&d, 120)[0].text, "862 tokens processed");
+
+        d.provider_footprint = Some(128_000);
+        d.tok_per_s = Some(42.0);
+        assert_eq!(segments(&d, 120)[0].text, "128k tokens processed, 42 tok/s");
     }
 
     #[test]

@@ -1157,6 +1157,34 @@ mod tests {
         );
     }
 
+    // OCEAN-11: Gemini's prompt count is the effective prompt and therefore
+    // already includes cached content. Keep the cache-read bucket as a
+    // breakdown, but use the provider total as the footprint so the cache hit
+    // is never added a second time.
+    #[test]
+    fn cached_content_is_a_subset_of_gemini_prompt_and_total_counts() {
+        let wire = r#"{
+            "promptTokenCount": 1500,
+            "candidatesTokenCount": 30,
+            "totalTokenCount": 1530,
+            "cachedContentTokenCount": 1280
+        }"#;
+        let reported: UsageMetadata = serde_json::from_str(wire).unwrap();
+        let mut usage = Usage::default();
+        apply_usage_metadata(&mut usage, &reported);
+
+        assert_eq!(usage.input, 1500, "Gemini input includes cached tokens");
+        assert_eq!(usage.cache_read, 1280, "cache read is a breakdown");
+        assert_eq!(usage.output, 30);
+        assert_eq!(usage.total_tokens, 1530);
+        assert_eq!(usage.total_tokens, usage.input + usage.output);
+        assert_ne!(
+            usage.total_tokens,
+            usage.input + usage.output + usage.cache_read,
+            "adding the cache breakdown would double-count it"
+        );
+    }
+
     // OCEAN-164: Gemini reports reasoning ("thoughts") tokens under
     // `thoughtsTokenCount` in usageMetadata. The decode struct must capture it
     // (camelCase wire shape) so it can populate usage.reasoning. It is already
