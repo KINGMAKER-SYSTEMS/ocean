@@ -2399,6 +2399,13 @@ impl ChatComponent {
         self.busy = true;
     }
 
+    /// App-level regression tests assert the `/new` wipe without reaching
+    /// into chat internals.
+    #[cfg(test)]
+    pub fn turns_empty_for_test(&self) -> bool {
+        self.turns.is_empty()
+    }
+
     #[cfg(test)]
     pub fn seed_queued_prompt_for_test(&mut self, prompt: &str) {
         self.queued_prompts.push_back(prompt.to_string());
@@ -2608,6 +2615,24 @@ impl ChatComponent {
         }
     }
 
+    /// Wipe the transcript for a fresh session (`/new`). Runs when the app
+    /// confirms the rebind — immediately when idle, or after the running
+    /// turn's terminal when `/new` had to cancel it first — so a turn still
+    /// executing daemon-side is never hidden from the operator.
+    fn reset_for_new_session(&mut self) {
+        self.turns.clear();
+        self.md.clear();
+        self.clear_tool_ui_state();
+        self.pinned = None;
+        self.pinned_visible = true;
+        self.queued_prompts.clear();
+        self.clear_queue_pause();
+        self.last_wrapped_rows = None;
+        self.last_viewport_rows = None;
+        self.scroll_back = 0;
+        self.busy = false;
+    }
+
     /// Execute a slash command by name, with any trailing `args` (empty for a
     /// palette pick; the tail of a typed `/name args` line otherwise). Clears
     /// the composer, then either mutates the transcript locally (`/clear`,
@@ -2692,20 +2717,21 @@ impl ChatComponent {
                 None
             }
             "/new" => {
-                // Fresh session: wipe the transcript locally, then let the app
-                // unbind so the next turn mints a new session id.
-                self.turns.clear();
-                self.md.clear();
-                self.clear_tool_ui_state();
-                self.pinned = None;
-                self.pinned_visible = true;
-                self.queued_prompts.clear();
-                self.clear_queue_pause();
-                self.last_wrapped_rows = None;
-                self.last_viewport_rows = None;
-                self.scroll_back = 0;
-                self.busy = false;
-                Some(Action::NewSession)
+                if self.busy {
+                    // A running turn must be cancelled and reach its terminal
+                    // before the client unbinds — wiping now would hide the
+                    // turn the daemon still executes (and disarm /stop). The
+                    // queued prompts are abandoned either way; drop them here
+                    // so the terminal cannot auto-submit one into the session
+                    // being left. The wipe happens when the deferred
+                    // [`Action::NewSession`] lands after the terminal.
+                    self.queued_prompts.clear();
+                    self.clear_queue_pause();
+                    Some(Action::NewSessionAfterCancel)
+                } else {
+                    // Idle: the wipe rides the action itself in `update`.
+                    Some(Action::NewSession)
+                }
             }
             "/model" => {
                 if args.is_empty() {
@@ -3714,6 +3740,14 @@ impl Component for ChatComponent {
                 self.reset_history_nav();
                 self.menu_sel = 0;
                 self.mention_sel = 0;
+                return None;
+            }
+            // The app unbound (or is about to unbind) the session; the chat's
+            // half of `/new` is wiping its transcript. Riding the action (not
+            // run_slash) keeps one wipe point for both the idle path and the
+            // cancel-first path whose rebind is deferred to the terminal.
+            Action::NewSession => {
+                self.reset_for_new_session();
                 return None;
             }
             Action::DictationStart { id, toggle } => {
@@ -5313,6 +5347,7 @@ mod tests {
             ..Default::default()
         };
         chat.run_slash("/new", "");
+        chat.update(&Action::NewSession);
         assert!(chat.pinned.is_none());
 
         chat.pinned = Some(Turn::Component {
@@ -5568,8 +5603,58 @@ mod tests {
         let mut chat = ChatComponent::default();
         chat.turns.push(Turn::User("hi".into()));
         let act = chat.run_slash("/new", "");
-        assert!(chat.turns.is_empty(), "/new wipes the transcript");
         assert!(matches!(act, Some(Action::NewSession)));
+        assert!(
+            !chat.turns.is_empty(),
+            "the wipe rides the action, not the slash dispatch"
+        );
+        chat.update(&Action::NewSession);
+        assert!(chat.turns.is_empty(), "/new wipes the transcript on rebind");
+    }
+
+    #[test]
+    fn slash_new_during_running_turn_defers_wipe_and_abandons_queue() {
+        let turn_id = AgentTurnId(Uuid::from_u128(9101));
+        let mut chat = ChatComponent::default();
+        chat.update(&Action::AgentEvent(Box::new(AgentTurnEvent::TurnStarted {
+            turn_id,
+            session_id: AgentSessionId(Uuid::from_u128(9100)),
+            model: Some("test-model".into()),
+        })));
+        chat.update(&Action::AgentEvent(Box::new(
+            AgentTurnEvent::AssistantTextDelta {
+                session_id: AgentSessionId(Uuid::from_u128(9100)),
+                turn_id,
+                delta: "partial".into(),
+            },
+        )));
+        chat.queued_prompts.push_back("follow-up".into());
+
+        let act = chat.run_slash("/new", "");
+        match act {
+            Some(Action::NewSessionAfterCancel) => {}
+            other => panic!("expected NewSessionAfterCancel, got {other:?}"),
+        }
+        assert!(chat.busy, "the running turn stays live until its terminal");
+        assert!(
+            chat.queued_prompts.is_empty(),
+            "/new abandons queued prompts immediately"
+        );
+        assert!(
+            !chat.turns.is_empty(),
+            "transcript must survive until the terminal is observed"
+        );
+
+        // Daemon-side cancel resolves as a cancelled terminal; only then may
+        // the rebind wipe.
+        chat.update(&turn_finished_for(
+            turn_id,
+            AgentTurnStatus::Cancelled,
+            None,
+        ));
+        assert!(!chat.busy, "cancelled terminal settles the turn");
+        chat.update(&Action::NewSession);
+        assert!(chat.turns.is_empty(), "rebind wipes the old transcript");
     }
 
     #[test]

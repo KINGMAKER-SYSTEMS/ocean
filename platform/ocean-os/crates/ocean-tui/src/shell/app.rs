@@ -472,6 +472,16 @@ pub struct App {
     /// Esc may land before either acknowledgement path exposes the request id.
     /// Keep that stop intent armed and fire it the instant the id arrives.
     interrupt_pending: bool,
+    /// `/new` during a running turn: the rebind is deferred until the turn's
+    /// terminal is observed (or reconciled after a failed cancel). Set when the
+    /// cancel is requested; cleared by the deferred [`Action::NewSession`].
+    pending_new_session: bool,
+    /// Session left by the last `/new` rebind. While no session is bound, its
+    /// late events (an in-flight terminal envelope from the aborted stream)
+    /// must not pollute the fresh chat — the bound-session filter cannot catch
+    /// them because binding is `None`. Cleared on the next bind, including a
+    /// deliberate resume of the same id.
+    abandoned_session: Option<AgentSessionId>,
     /// Monotonic identity for the current session binding. A→B→A rebinding
     /// cannot make an old completion current merely because the UUID matches.
     session_binding_generation: u64,
@@ -743,6 +753,8 @@ impl App {
             session_id: None,
             active_request_id: None,
             interrupt_pending: false,
+            pending_new_session: false,
+            abandoned_session: None,
             session_binding_generation: 0,
             stream_generation: 0,
             session_activity_probe_generation: 0,
@@ -2417,8 +2429,32 @@ impl App {
                 }
             }
             Action::InterruptFinished(result) => match result {
-                Ok(_) => self.set_notice("interrupt sent · waiting for cancellation".into()),
-                Err(error) => self.set_notice(errfmt::humanize(error)),
+                Ok(_) => {
+                    if self.pending_new_session {
+                        self.set_notice("turn cancelled · starting fresh session".into());
+                    } else {
+                        self.set_notice("interrupt sent · waiting for cancellation".into());
+                    }
+                }
+                Err(error) => {
+                    if self.pending_new_session {
+                        // The daemon never accepted the cancel, so the turn's
+                        // terminal may be unobservable. Reconcile: complete the
+                        // fresh-session transition without claiming the turn
+                        // was stopped — the abandoned-session filter keeps its
+                        // late events out of the new chat either way.
+                        self.pending_new_session = false;
+                        self.active_request_id = None;
+                        self.interrupt_pending = false;
+                        self.set_notice(format!(
+                            "{} · new session; the previous turn may still be running",
+                            errfmt::humanize(error)
+                        ));
+                        follow_up = Some(Action::NewSession);
+                    } else {
+                        self.set_notice(errfmt::humanize(error));
+                    }
+                }
             },
             Action::SessionBound(id) => self.bind_session(*id),
             // Session hygiene: only fold in agent events for the BOUND session.
@@ -2427,6 +2463,15 @@ impl App {
             Action::AgentEvent(evt) => {
                 if let (Some(bound), Some(evt_sid)) = (self.session_id, evt.session_id()) {
                     if bound != evt_sid {
+                        return;
+                    }
+                } else if let (None, Some(evt_sid)) = (self.session_id, evt.session_id()) {
+                    // Unbound after `/new`: an in-flight envelope from the
+                    // abandoned session's aborted stream can still arrive,
+                    // and the fresh session's first-turn adoption needs the
+                    // `None`-bound window open — so filter by the exact id
+                    // we left behind, not by blanket rejection.
+                    if self.abandoned_session == Some(evt_sid) {
                         return;
                     }
                 }
@@ -2780,9 +2825,31 @@ impl App {
                     self.focus_to(Focus::Term);
                 }
             },
+            // `/new` with a turn running (issue #13): cancel it through the
+            // same discipline as `/stop` — an admitted request is cancelled
+            // now, a pre-ACK turn arms the interrupt for `TurnStarted` — and
+            // rebind only once chat proves the turn is over. The chat keeps
+            // rendering (and /stop keeps working on) the running turn until
+            // then; its wipe rides the deferred `Action::NewSession`.
+            Action::NewSessionAfterCancel => {
+                if !self.chat.is_busy() && self.active_request_id.is_none() {
+                    // The turn went terminal between the slash command and
+                    // this dispatch — nothing to cancel.
+                    follow_up = Some(Action::NewSession);
+                } else {
+                    self.pending_new_session = true;
+                    self.set_notice("cancelling the running turn…".into());
+                    follow_up = Some(Action::InterruptTurn);
+                }
+            }
             // `/new`: drop the bound session (and its stream) so the next turn
-            // mints a fresh one; the chat cleared its own transcript already.
+            // mints a fresh one; the chat wipes its transcript when the same
+            // action reaches it in `update`.
             Action::NewSession => {
+                // Remember the session being left so its late events cannot
+                // land in the unbound window or the fresh session (see the
+                // AgentEvent filter below).
+                self.abandoned_session = self.session_id;
                 if let Some(task) = self.stream_task.take() {
                     task.abort();
                 }
@@ -3541,6 +3608,14 @@ impl App {
         if self.interrupt_pending && !self.chat.is_busy() {
             self.interrupt_pending = false;
         }
+        // `/new` waiting on a cancelled turn: once chat proves no turn is
+        // running and no request is admitted, the terminal was observed (or
+        // reconciled) — perform the deferred rebind. Placed after
+        // `chat.update` so a terminal envelope settles the chat first.
+        if self.pending_new_session && self.active_request_id.is_none() && !self.chat.is_busy() {
+            self.pending_new_session = false;
+            self.dispatch(Action::NewSession);
+        }
         if let Some(next) = chat_follow_up {
             self.dispatch(next);
         }
@@ -3858,6 +3933,10 @@ impl App {
     /// self-healing one. Idempotent for the already-bound session.
     fn bind_session_with(&mut self, id: AgentSessionId, replay_first: bool) {
         let replaces_loaded_history = !replay_first;
+        // Binding (including resuming the id a `/new` just left) re-admits
+        // that session's events; the abandoned filter is only for the
+        // unbound window between `/new` and the next bind.
+        self.abandoned_session = None;
         if self.session_id != Some(id) || replaces_loaded_history {
             // Switching/resuming replaces visible history. Increment even for
             // A→B→A or an explicit A→A resume so queued old envelopes cannot
@@ -8626,6 +8705,129 @@ mod tests {
         assert_eq!(app.active_request_id, Some(new_turn.0));
         assert!(!app.interrupt_pending);
         assert!(app.status.contains("interrupt requested"));
+    }
+
+    #[tokio::test]
+    async fn new_during_running_turn_cancels_before_unbinding() {
+        let mut app = offline_app();
+        let session_id = AgentSessionId(uuid::Uuid::from_u128(7201));
+        let turn_id = ocean_agent_sdk::AgentTurnId(uuid::Uuid::from_u128(7202));
+        app.session_id = Some(session_id);
+        app.dispatch(Action::AgentEvent(Box::new(AgentTurnEvent::TurnStarted {
+            turn_id,
+            session_id,
+            model: Some("test-model".into()),
+        })));
+        assert_eq!(app.active_request_id, Some(turn_id.0));
+        assert!(app.chat.is_busy());
+
+        // `/new` while the turn runs: the cancel is requested and the rebind
+        // deferred — the binding must survive until the terminal is observed.
+        app.dispatch(Action::NewSessionAfterCancel);
+
+        assert!(app.pending_new_session, "rebind waits on the turn terminal");
+        assert_eq!(
+            app.session_id,
+            Some(session_id),
+            "the session must stay bound while the daemon cancel is in flight"
+        );
+        assert!(app.chat.is_busy(), "the running turn stays visible");
+
+        app.dispatch(Action::AgentEvent(Box::new(AgentTurnEvent::TurnFinished {
+            session_id,
+            turn_id,
+            status: ocean_agent_sdk::AgentTurnStatus::Cancelled,
+            error: None,
+            wall_ms: Some(1),
+            output_tokens: None,
+            input_tokens: None,
+            cache_read_tokens: None,
+            tokens_per_second: None,
+            context_usage: None,
+        })));
+
+        assert_eq!(app.session_id, None, "terminal observed → rebind completes");
+        assert!(!app.pending_new_session);
+        assert_eq!(app.abandoned_session, Some(session_id));
+        assert!(!app.chat.is_busy());
+        assert!(
+            app.chat.turns_empty_for_test(),
+            "the old transcript is wiped on rebind"
+        );
+
+        // A late envelope from the abandoned session's aborted stream must
+        // not land in the fresh, unbound chat.
+        app.dispatch(Action::AgentEvent(Box::new(AgentTurnEvent::TurnFinished {
+            session_id,
+            turn_id,
+            status: ocean_agent_sdk::AgentTurnStatus::Failed,
+            error: Some("late".into()),
+            wall_ms: None,
+            output_tokens: None,
+            input_tokens: None,
+            cache_read_tokens: None,
+            tokens_per_second: None,
+            context_usage: None,
+        })));
+        app.dispatch(Action::AgentEvent(Box::new(AgentTurnEvent::TurnStarted {
+            turn_id,
+            session_id,
+            model: None,
+        })));
+        assert!(
+            app.chat.turns_empty_for_test(),
+            "late events from the abandoned session must not pollute the fresh chat"
+        );
+        assert_eq!(app.active_request_id, None);
+        assert!(!app.chat.is_busy());
+
+        // Rebinding (even the abandoned id, via /resume) re-admits its events.
+        app.bind_session(session_id);
+        assert_eq!(app.abandoned_session, None);
+    }
+
+    #[tokio::test]
+    async fn new_during_pre_ack_turn_arms_cancel_and_rebinds_after_terminal() {
+        let mut app = offline_app();
+        let session_id = AgentSessionId(uuid::Uuid::from_u128(7203));
+        let turn_id = ocean_agent_sdk::AgentTurnId(uuid::Uuid::from_u128(7204));
+        app.session_id = Some(session_id);
+        app.chat.seed_pending_submission_for_test(95);
+        app.chat.adopt_active_turn();
+
+        app.dispatch(Action::NewSessionAfterCancel);
+
+        assert!(app.pending_new_session);
+        assert!(app.interrupt_pending, "pre-ACK /new arms the stop");
+        assert_eq!(app.session_id, Some(session_id));
+
+        app.dispatch(Action::TurnAccepted {
+            submission_id: 95,
+            turn_id,
+        });
+
+        assert_eq!(app.active_request_id, Some(turn_id.0));
+        assert_eq!(
+            app.session_id,
+            Some(session_id),
+            "acknowledgement fires the cancel, not the rebind"
+        );
+
+        app.dispatch(Action::AgentEvent(Box::new(AgentTurnEvent::TurnFinished {
+            session_id,
+            turn_id,
+            status: ocean_agent_sdk::AgentTurnStatus::Cancelled,
+            error: None,
+            wall_ms: None,
+            output_tokens: None,
+            input_tokens: None,
+            cache_read_tokens: None,
+            tokens_per_second: None,
+            context_usage: None,
+        })));
+
+        assert_eq!(app.session_id, None, "terminal observed → rebind completes");
+        assert!(!app.chat.is_busy());
     }
 
     #[test]

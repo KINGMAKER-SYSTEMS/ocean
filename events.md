@@ -483,3 +483,34 @@ PR #16 merged to canonical `main` as `21c29eda42774218ea8043809433684ee012d48b` 
 
 Validation: authoritative GitHub PR/commit/check state, ruleset and variable readback, and release/deployment API readback (zero releases and zero deployments); `git diff --check`.
 _________________________________________________________________________________
+_________________________________________________________________________________
+time: [20:01] [05-10-26]
+agent: [zcode] [glm-5.3]
+worktree: [fix/tui-new-session-cancels-turn]
+type: [bug report]
+area: [frontend] [ocean-tui]
+
+Implemented issue #13: `/new` during a running turn now cancels the exact
+active daemon request before unbinding instead of abandoning it. The chat
+emits `Action::NewSessionAfterCancel`, the app requests the cancel through the
+established `/stop` discipline (admitted request cancelled now; pre-ACK turn
+arms the interrupt for TurnStarted) and defers the rebind until chat proves
+the turn is over; the transcript wipe moved from `run_slash` to
+`chat.update(Action::NewSession)` so one wipe point serves both the idle and
+cancel-first paths and the running turn stays visible and stoppable until its
+terminal. A failed cancel reconciles by completing the fresh-session
+transition with an honest notice rather than claiming the turn was stopped.
+The rebind now records the abandoned session id and the unbound AgentEvent
+filter drops its late envelopes, closing the None-bound window where a stale
+terminal could push rows into the fresh chat; binding (including resuming the
+same id) re-admits events. Queued prompts are abandoned when `/new` is
+invoked so a clean-completing terminal cannot auto-submit one into the
+session being left. Regression tests cover chat-level deferral, cancel before
+unbinding (admitted and pre-ACK), wipe-on-terminal, and late-envelope
+rejection.
+
+Validation: cargo check -p ocean-tui; focused slash_new/new_during tests;
+full cargo test -p ocean-tui (514 passed, 0 failed, 4 ignored); rustfmt
+applied; cargo clippy -p ocean-tui --all-targets clean; cargo build -p
+ocean-tui --release. Devlog pass: no owning contract text describes `/new`
+behavior, so AGENTS.md files are intentionally unchanged.

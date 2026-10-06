@@ -204,6 +204,12 @@ pub enum Action {
     /// `/new` — drop the bound session so the next turn mints a fresh one
     /// (stays in the current active project).
     NewSession,
+    /// `/new` while a turn is running — cancel the active daemon turn first
+    /// and rebind only after its terminal outcome is observed (or reconciled,
+    /// when the cancel itself fails). The chat defers its wipe to the
+    /// [`Action::NewSession`] that follows the terminal so the running turn
+    /// stays visible and stoppable until then.
+    NewSessionAfterCancel,
     /// `/web` / `/desk` — open the bound session's chat in a sibling surface.
     /// The app owns the session id and the OS handoff; chat emits the intent.
     OpenInSurface(SurfaceTarget),
