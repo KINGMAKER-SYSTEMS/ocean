@@ -1062,3 +1062,18 @@ The output minimizer remains default-off, with no production setter.
 
 Validation: `cargo fmt --all -- --check`, focused `cargo test -p ocean-runtime artifact_lease_debug_does_not_expose_session_artifact_bodies -- --nocapture` (1 passed), `cargo xtask docs-check` (PASS; 30 packages, 153 Markdown files, 170 local links), and `git diff --check` pass.
 _________________________________________________________________________________
+time: [07:25] [06-10-26]
+agent: [Claude Code] [Claude Opus 5.5]
+worktree: [fix/codex-version-gpt-6-1-sol-v2]
+type: [fix]
+area: [protocol]
+
+The ChatGPT Codex backend version-gates newly released models. main sent
+CODEX_VERSION 0.154.0, and the backend refused gpt-6.1-sol ("unsupported for
+the ChatGPT account") while the personal-repo build at 0.159.2 served it with
+the same credential. Raised CODEX_VERSION to 0.159.2 (as Risingtides-dev/ocean-os
+#529). Validation: main + this change, prebuilt, on a spare port with a working
+ChatGPT sign-in: gpt-6.1-sol, glm-5.3 and deepseek-v4-pro each ran a bash tool
+call and answered; session model = requested, no reroute. ocean-protocol codex
+tests 36/36, ocean-providers 67/67.
+_________________________________________________________________________________
