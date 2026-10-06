@@ -162,6 +162,8 @@ mod room_federation;
 mod room_operator;
 mod room_profile;
 mod room_resources;
+/// Rooms S0 — retire a placeholder human into a real member (operator lane).
+mod room_retirement;
 /// Host fulfillment lifecycle retained for the external `ocean-slack` extension.
 mod slack_canvas_fulfillment;
 /// Ephemeral OpenAI Realtime client-secret mint (voice phases 2/3) — the
@@ -1591,6 +1593,7 @@ fn banner_routes() -> &'static [&'static str] {
         "POST /v1/rooms/persistent/{key}/agents/{agent_member_id}/invoke",
         "POST /v1/rooms/persistent/{key}/participants",
         "DELETE /v1/rooms/persistent/{key}/participants/{participant_id}",
+        "POST /v1/rooms/persistent/{key}/participants/{participant_id}/retire",
         "POST /v1/rooms/persistent/{key}/messages",
         "POST /v1/rooms/persistent/{key}/invites",
         "POST /v1/rooms/persistent/invites/redeem",
@@ -2877,6 +2880,10 @@ fn room_routes() -> Router<AppState> {
         .route(
             "/v1/rooms/persistent/{key}/participants/{participant_id}",
             axum::routing::delete(room_leave),
+        )
+        .route(
+            "/v1/rooms/persistent/{key}/participants/{participant_id}/retire",
+            post(room_retirement::room_participant_retire),
         )
         .route(
             "/v1/rooms/persistent/{key}/messages",
@@ -25732,7 +25739,7 @@ mod tests {
         assert_eq!(admission_routes, expected_admission_routes);
         assert_eq!(
             banner.len(),
-            117,
+            118,
             "route baseline changed; review the manifest"
         );
 

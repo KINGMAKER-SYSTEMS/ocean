@@ -728,3 +728,38 @@ compatibility verification, which were not established in this run. Surface
 was not deployed or live-verified. Devlog pass: no component contracts or indexes
 changed; this root ledger records the release evidence.
 _________________________________________________________________________________
+time: [21:38] [05-10-26]
+agent: [zcode] [glm-5.3]
+worktree: [port/rooms-participant-retirement]
+type: [feature-request]
+area: [backend] reconciliation: Rooms S0 participant retirement
+
+Second bounded Track B port: the daemon's Rooms S0 participant-retirement
+route. The store half (ocean-store room_retirement.rs — aliases DDL,
+retire_participant, replay-safe decision ledger) and its crate contract
+already live on Kingmaker main unchanged from the publication snapshot; only
+the operator route was missing. Ported the 187-line daemon module from
+personal 1bd1bc37: POST /v1/rooms/persistent/{key}/participants/{id}/retire
+{decision_id, successor_id} — operator lane, replay-safe through the shared
+room-wide decision namespace. The daemon (not the store) decides which ids
+are retirable: exactly the two placeholder shapes the old surface minted
+(surface-operator, web-<16 lowercase hex>); anything else is
+participant_not_retirable, which is the guard against the route becoming an
+identity-takeover primitive. Also ported the governing spec
+docs/specs/2026-09-09-ocean-rooms-participant-retirement.md. Wired into the
+router, the GET / discovery banner, and the operator guide quick reference;
+the router-contract parity baseline moved 112 → 113 (will need a +1 reconcile
+rebase if the OAuth-cluster port lands first, which also bumps the baseline).
+
+Checked for parallel-agent branches/PRs before starting (lesson from #18/#21):
+only the Surface draft #15 and my OAuth #23 were open; no Rooms work in
+flight. Deliberately not ported yet: room_maintenance/room_context/
+room_attachments/room_summary/room_workspace_proxy/room_inspect — they depend
+on the diverged persistent_rooms/room_agent_authority state and belong to
+their own units after the shared-file conflicts are reconciled.
+
+Validation: cargo test -p ocean-daemon (880 passed incl. the placeholder-shape
+test and the 113-route parity suite); cargo check -p ocean-daemon; rustfmt;
+denied-warning Clippy; cargo xtask docs-check PASS (30 packages, 152 active
+Markdown files) for the ported spec. Devlog pass: the store contract already
+documented retirement; operator guide updated via the parity contract.
