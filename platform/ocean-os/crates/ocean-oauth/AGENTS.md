@@ -34,7 +34,12 @@ This crate owns browser OAuth 2.0 + PKCE login for provider subscriptions: bind 
 
 ## Work Guidance
 
-- Consumer today: `ocean-tui` `/login` (`Action::Login` → `begin`/`finish`).
+- Consumers: `ocean-tui` `/login` (`Action::Login` → `begin`/`finish`) and
+  the daemon's operator-only `/v1/auth/providers*` routes
+  (`ocean-daemon/src/provider_auth.rs`), which also use `oauth_block_status`
+  (token-free block presence/refreshability/expiry) and `logout` (atomic block
+  removal under the same custody lease that never creates a missing auth
+  file).
 - Keep `begin()` non-blocking beyond the port bind; everything slow belongs in `finish()`.
 
 ## Verification

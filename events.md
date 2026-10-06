@@ -558,3 +558,44 @@ preview. Validation: TUI suite (528 passed, 4 ignored), `cargo check -p
 ocean-tui`, `cargo build -p ocean-tui --release`, `cargo fmt --all -- --check`,
 and `git diff --check` passed. Final exact-head review and hosted checks remain
 pending; no merge or deployment has occurred.
+_________________________________________________________________________________
+time: [21:07] [05-10-26]
+agent: [zcode] [glm-5.3]
+worktree: [port/oauth-custody-cluster]
+type: [feature-request]
+area: [backend] reconciliation: OAuth custody cluster
+
+First bounded Track B reconciliation port (personal source → Kingmaker main,
+per docs/SOURCE_RECONCILIATION.md): the operator-authenticated coding-plan
+login surface. Ported ocean-oauth additions — OAuthProvider::from_label/ALL,
+OAuthBlockStatus, oauth_block_status (token-free block presence/
+refreshability/expiry), logout — with store::read_block/remove_and_write built
+on Kingmaker's guard-bound custody publisher rather than the personal
+temp-path writer, and the daemon's provider_auth.rs module (745 lines, web
+identity M3): GET /v1/auth/providers status, login start/poll/cancel, and
+logout, all through the same fail-closed OperatorIdentity authorization as
+room mutations. Wired into AppState (provider_logins), the router, the GET /
+discovery banner, and the operator guide quick reference; the router-contract
+parity test baseline moved 112 → 117.
+
+Deliberately NOT ported, preserving Kingmaker fixes: the personal
+oauth_refresh.rs rewrite (Kingmaker's version is the hardened evolution —
+full-block merge comparison, structured MergeFailure taxonomy, custody-timeout
+handling, cooldowns cleared only on confirmed persistence, spawn_blocking
+merge, no response bodies logged; the personal copy adds nothing and drops
+discipline), the ocean-oauth providers.rs error hunk (surfaces provider
+response bodies into operator-visible errors, contradicting the crate's
+deliberate fixed-classification doctrine), and the personal store custody
+model (auth_file_temp_path internals; the guard publisher already provides
+private temp + rename + fsync + parent sync). Adapted for Kingmaker fixes:
+fallback_source now also maps the ClaudeCodeKeychain and ClaudeCodeCliAuthFile
+credential sources (native Claude login discovery) that postdate the personal
+tree.
+
+Validation: cargo test -p ocean-daemon (887 passed incl. 6 provider_auth
+route tests and the updated router-contract parity suite); cargo test -p
+ocean-oauth (44, incl. 3 new status/logout tests); cargo test -p ocean-agent
+(266 — unchanged file, re-verified); cargo check --workspace --tests; rustfmt
+and denied-warning Clippy on touched crates. Devlog pass: ocean-oauth
+AGENTS.md consumers updated; operator guide quick reference updated by the
+parity contract.
