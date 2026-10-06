@@ -1062,3 +1062,14 @@ The output minimizer remains default-off, with no production setter.
 
 Validation: `cargo fmt --all -- --check`, focused `cargo test -p ocean-runtime artifact_lease_debug_does_not_expose_session_artifact_bodies -- --nocapture` (1 passed), `cargo xtask docs-check` (PASS; 30 packages, 153 Markdown files, 170 local links), and `git diff --check` pass.
 _________________________________________________________________________________
+
+time: [14:16] [10-06-26]
+agent: [codex]
+worktree: [fix/report-model-reroute-in-session] [/Users/seenorising/dev/ocean-org-sub]
+type: [bug fix]
+area: [backend] [sessions] [testing]
+
+Persisted provider-failover reroutes on the session record so `GET /v1/sessions/{id}` reports that the model the operator asked for did not run. Added optional `requested_model` + `reroute_reason` fields to `Session` (ocean-agent) and `SessionDetail` (ocean-core), both serde-default + skip-if-none so legacy session files deserialize as `None`. `prompt_inner` (selection-time) and `run_turn_with_failover` (pre-stream) populate them, and `run_prompt`/`run_fake_prompt` persist them; `model`/`provider` remain the effective selection. Failover behavior is unchanged. New regression test: `selection_failover_reroute_is_recorded_in_session_detail`.
+
+Validation: focused test RED (assertion `None != Some("deepseek-v4-pro")`) then GREEN; `cargo test -p ocean-agent` 269 passed / 2 ignored; `cargo fmt --check` pass. `cargo test -p ocean-daemon` 905 passed / 5 failed, all pre-existing and unrelated to this change (three extension_service timing tests and two persistent-room envelope-key assertions for the already-present aliases fields).
+_________________________________________________________________________________
