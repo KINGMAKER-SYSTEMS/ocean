@@ -582,6 +582,8 @@ POST   /v1/rooms/persistent/{key}/agents/{agent_member_id}/invoke  invoke from a
 POST   /v1/rooms/persistent/{key}/participants            join { id, display_name, kind? }
 DELETE /v1/rooms/persistent/{key}/participants/{participant_id}  leave
 POST   /v1/rooms/persistent/{key}/participants/{participant_id}/retire  merge a placeholder human into a real member (operator lane, replay-safe)
+GET    /v1/rooms/persistent/{key}/profile        room profile and credential-slot status (never a value)
+PUT    /v1/rooms/persistent/{key}/profile        replace the room profile (operator decision, replay-safe)
 POST   /v1/rooms/persistent/{key}/summarize      one bounded model turn folded into the room's summary artifact (amends in place)
 GET    /v1/rooms/persistent/{key}/resources   list contributed-folder grants (safe projection)
 POST   /v1/rooms/persistent/{key}/resources   grant a canonical local folder to room agents (operator decision)

@@ -198,6 +198,29 @@ pub(super) fn canonical_grant_root(submitted: &str) -> Result<PathBuf, RootRefus
 /// Path confinement lives in `ocean-agent` beside the tools that use it
 /// (Stage 2d); re-exported so the daemon's tests pin the same rule the tools
 /// enforce.
+/// Rooms Phase 2 Stage 2b: the profile PUT names repo/tool references that
+pub(super) fn check_profile_resource_refs(
+    store: &mut ocean_store::SqliteRoomStore,
+    room: &RoomKey,
+    refs: impl IntoIterator<Item = String>,
+) -> Result<(), crate::room_agent_authority::ApiError> {
+    let now = Utc::now();
+    for resource_id in refs {
+        let grant = store
+            .room_resource_grant(room, &resource_id)
+            .map_err(crate::room_agent_authority::ApiError::from)?;
+        match grant {
+            Some(grant) if grant.effective_status(now) != ResourceStatus::Revoked => {}
+            _ => {
+                return Err(crate::room_agent_authority::ApiError::bad_request(
+                    "resource_not_found",
+                ))
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 pub(super) use ocean_agent::{confine_room_resource_path as confine, ConfineRefusal};
 
