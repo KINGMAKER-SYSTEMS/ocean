@@ -1045,3 +1045,15 @@ Closed the leftovers from the review that acknowledged the thinking-binding reco
 
 Validation: ocean-protocol (187 plus 5) passes; clippy with warnings denied on ocean-protocol and ocean-agent tests, rustfmt check pass. The strip test covers the thinking-only assistant turn. No provider was called.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [12:20pm] [06-10-26]
+agent: [claude] [claude-opus-5-5]
+worktree: [worktree-fix-installer-launchd-enabled] [.claude/worktrees/fix-installer-launchd-enabled]
+type: [bug report]
+area: [backend] [automations]
+
+Every Ocean turn was failing with "turn failed". The supervised daemon was still the Oct 2 build (0abb558179af) while the TUI had been updated on Oct 5 to send provider-qualified picker ids (glm/glm-5.3, openai-codex/gpt-5.6-sol, from a5ac9279). The old resolver only knows bare ids, so each pinned session failed with "unknown model". Current main already resolves qualified ids; the fix is reinstalling the daemon from main. That reinstall failed: on macOS 26 `launchctl print-disabled` prints `=> enabled` / `=> disabled`, and the installer's override parser accepted only true/false, so it refused with "cannot establish the prior supervision override" before promoting anything. The parser now accepts both vocabularies and treats `disabled` like `true`. The data volume was also at 100% (ENOSPC in daemon logs); about 9 GB of uv and Codex updater caches were cleared.
+
+Validation: `bash -n` and ops/test_install_ocean_daemon.py pass (14 tests, 2 new for the modern vocabulary, both enabled and disabled). The daemon still has to be reinstalled from main after this merges.
+_________________________________________________________________________________
