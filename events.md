@@ -1146,5 +1146,30 @@ warning-free. Router-contract parity moved 119 → 127.
 
 Validation: room_resources tests (3) pass; router-contract parity (127)
 green; cargo test -p ocean-daemon 909 passed / 2 deterministic issue-#42
+time: [14:38] [06-10-26]
+agent: [zcode] [glm-5.3]
+worktree: [port/rooms-attachments]
+type: [feature-request]
+area: [backend] reconciliation: room attachments
+
+Eighth bounded Track B port: durable room attachments. Attachment BYTES live
+beside the DB that indexes them (per-room subdirectories under the resolved
+root, carried on AppState), so a moved OCEAN_DB_PATH carries a room's files
+with its metadata. Four route methods land: upload (typed attachment_too_large
+via sized cap + slack on the body-limit layer; uploader must be a roster
+human — a forged agent author is 403 and leaves no bytes), list, download
+(verified reads: bytes must match the recorded digest; served content type is
+proven by the bytes, never the declared one), and delete (row + bytes + a
+transcript marker in one store transaction). Traversal defence: one blob-path
+derivation with the id validator in one place; hostile room keys never become
+paths. Adaptations: room_not_open ported into persistent_rooms and
+invalid_request_response widened; AppState gained room_attachments_root with a
+unique-per-call test root after cross-test contamination showed up in the
+first run (17/17 after). Trimmed for sibling PRs: attachment_bytes and
+write_blob_for_test ride the room_context port (their consumer).
+Router-contract parity moved 119 → 123.
+
+Validation: room_attachments tests (17) pass; router-contract parity (123)
+green; cargo test -p ocean-daemon 925 passed / 2 deterministic issue-#42
 failures reproduced on clean main; rustfmt; denied-warning Clippy zero;
 cargo check --workspace --tests; cargo xtask docs-check PASS.

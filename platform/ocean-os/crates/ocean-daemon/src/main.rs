@@ -159,6 +159,8 @@ mod recall_registry;
 /// In-memory request and permission control records plus bounded lifecycle mutations.
 mod request_control;
 mod room_agent_authority;
+/// Room attachments: durable file bytes beside the DB that indexes them.
+mod room_attachments;
 /// Restart-safe outbound Bedrock room client and per-room supervisor (S2 P2-B).
 mod room_federation;
 mod room_operator;
@@ -312,6 +314,10 @@ struct AppState {
     /// In-memory record of provider OAuth login attempts for the
     /// `/v1/auth/providers*` routes; see [`provider_auth`].
     provider_logins: Arc<provider_auth::ProviderLogins>,
+    /// Attachment BYTES live beside `rooms.db` so a moved OCEAN_DB_PATH
+    /// carries a room's files with its metadata. Per-room subdirectories are
+    /// created lazily on first upload.
+    room_attachments_root: Arc<std::path::PathBuf>,
     /// Bounded room-scoped wake hints for persistent transcript SSE tails. The
     /// payload is only `(room, seq)`; SQLite remains authoritative for replay,
     /// live delivery, lag recovery, ordering, and deduplication.
@@ -1080,6 +1086,13 @@ async fn main() -> anyhow::Result<()> {
         ));
     }
 
+    // Room attachment BYTES live beside the DB that indexes them, so a moved
+    // `OCEAN_DB_PATH` carries a room's files with its metadata instead of
+    // splitting the two. Resolved once here and carried on `AppState`; the
+    // per-room subdirectories are created lazily on first upload.
+    let room_attachments_root = room_attachments::room_attachments_root();
+    tracing::info!(path = %room_attachments_root.display(), "room attachment store ready");
+
     let rooms = Arc::new(Mutex::new(room_store));
     let room_wakes = RoomWakeBus::default();
     let room_access_wakes = RoomAccessWakeBus::default();
@@ -1145,6 +1158,7 @@ async fn main() -> anyhow::Result<()> {
         longhouse,
         rooms,
         room_operator,
+        room_attachments_root: Arc::new(room_attachments_root),
         provider_logins: Arc::default(),
         room_wakes,
         room_access_wakes,
@@ -1605,6 +1619,7 @@ fn banner_routes() -> &'static [&'static str] {
         "DELETE /v1/rooms/persistent/{key}/participants/{participant_id}",
         "POST /v1/rooms/persistent/{key}/participants/{participant_id}/retire",
 <<<<<<< HEAD
+<<<<<<< HEAD
         "POST /v1/rooms/persistent/{key}/summarize",
 =======
         "GET /v1/rooms/persistent/{key}/resources",
@@ -1616,6 +1631,12 @@ fn banner_routes() -> &'static [&'static str] {
         "POST /v1/rooms/persistent/{key}/resources/{resource_id}/list",
         "POST /v1/rooms/persistent/{key}/resources/{resource_id}/read",
 >>>>>>> e83dbf2 (Add the Rooms Phase 2 Stage 2c grant-management surface)
+=======
+        "POST /v1/rooms/persistent/{key}/attachments",
+        "GET /v1/rooms/persistent/{key}/attachments",
+        "GET /v1/rooms/persistent/{key}/attachments/{attachment_id}",
+        "DELETE /v1/rooms/persistent/{key}/attachments/{attachment_id}",
+>>>>>>> 734a2d4 (Add durable room attachments)
         "POST /v1/rooms/persistent/{key}/messages",
         "POST /v1/rooms/persistent/{key}/invites",
         "POST /v1/rooms/persistent/invites/redeem",
@@ -2909,6 +2930,7 @@ fn room_routes() -> Router<AppState> {
             post(room_retirement::room_participant_retire),
         )
 <<<<<<< HEAD
+<<<<<<< HEAD
         // Room summarize: one bounded model turn folded into the room's
         // single well-known summary artifact.
         .route(
@@ -2942,6 +2964,23 @@ fn room_routes() -> Router<AppState> {
             "/v1/rooms/persistent/{key}/resources/{resource_id}/read",
             post(room_resources::room_resource_preview_read),
 >>>>>>> e83dbf2 (Add the Rooms Phase 2 Stage 2c grant-management surface)
+=======
+        // Room attachments: durable file bytes beside the DB. The sized cap
+        // plus slack lets a just-over-cap body reach the handler for the typed
+        // attachment_too_large JSON while huge bodies are refused by the layer.
+        .route(
+            "/v1/rooms/persistent/{key}/attachments",
+            post(room_attachments::room_upload_attachment)
+                .get(room_attachments::room_list_attachments)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    room_attachments::MAX_ATTACHMENT_BYTES + room_attachments::BODY_LIMIT_SLACK,
+                )),
+        )
+        .route(
+            "/v1/rooms/persistent/{key}/attachments/{attachment_id}",
+            get(room_attachments::room_download_attachment)
+                .delete(room_attachments::room_delete_attachment),
+>>>>>>> 734a2d4 (Add durable room attachments)
         )
         .route(
             "/v1/rooms/persistent/{key}/messages",
@@ -14285,6 +14324,7 @@ mod tests {
                 vec!["http://127.0.0.1:8790".into()],
             )),
             provider_logins: Arc::default(),
+            room_attachments_root: Arc::new(crate::room_attachments::test_root()),
             room_wakes,
             room_access_wakes,
             room_read_cursor_wakes: RoomReadCursorWakeBus::default(),
@@ -16175,6 +16215,7 @@ mod tests {
                 vec!["http://127.0.0.1:8790".into()],
             )),
             provider_logins: Arc::default(),
+            room_attachments_root: Arc::new(crate::room_attachments::test_root()),
             room_wakes,
             room_access_wakes,
             room_read_cursor_wakes: RoomReadCursorWakeBus::default(),
@@ -16686,6 +16727,7 @@ mod tests {
                 vec!["http://127.0.0.1:8790".into()],
             )),
             provider_logins: Arc::default(),
+            room_attachments_root: Arc::new(crate::room_attachments::test_root()),
             room_wakes,
             room_access_wakes,
             room_read_cursor_wakes: RoomReadCursorWakeBus::default(),
@@ -18635,6 +18677,7 @@ mod tests {
                 vec!["http://127.0.0.1:8790".into()],
             )),
             provider_logins: Arc::default(),
+            room_attachments_root: Arc::new(crate::room_attachments::test_root()),
             room_wakes,
             room_access_wakes,
             room_read_cursor_wakes: RoomReadCursorWakeBus::default(),
@@ -25807,10 +25850,14 @@ mod tests {
         assert_eq!(
             banner.len(),
 <<<<<<< HEAD
+<<<<<<< HEAD
             120,
 =======
             127,
 >>>>>>> e83dbf2 (Add the Rooms Phase 2 Stage 2c grant-management surface)
+=======
+            123,
+>>>>>>> 734a2d4 (Add durable room attachments)
             "route baseline changed; review the manifest"
         );
 
