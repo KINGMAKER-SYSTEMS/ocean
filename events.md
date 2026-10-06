@@ -1227,3 +1227,38 @@ fixes vs personal +219/−31 — needs a careful hunk-level merge, not a port).
 
 Validation: bash -n on both scripts; cargo xtask docs-check PASS (154 active
 Markdown files). Docs/ops-only; no code paths changed.
+time: [15:52] [06-10-26]
+agent: [zcode] [glm-5.3]
+worktree: [port/output-economy]
+type: [feature-request]
+area: [backend] reconciliation: minimizer M2 output economy (conflict-class merge)
+
+Eleventh bounded Track B port — the first CONFLICT-CLASS reconciliation
+(both sides changed the same files, exactly the case
+docs/SOURCE_RECONCILIATION.md warns "is not resolved by selecting the newest
+whole tree"): the minimizer M2 output economy. agent_loop.rs was three-way
+merged (base snapshot / Kingmaker HEAD with its token-aggregation and
+thinking-level fixes / personal 1bd1bc37 with the M2 tool-result projection
+seams); the single textual conflict was the thinking-level assignment, where
+Kingmaker had evolved AgentConfig.thinking_level to Option<ThinkingLevel>
+(merged PR #7's honor-off work) — resolved to Kingmaker's types, which the
+clean types.rs merge confirmed (personal's +192 lines touched disjoint
+regions). Ported alongside: output_economy.rs (501 lines, provider-only
+tool-result projection bounded by PinBudget, bound to exact provider-request
+ordinals, sealed from emission), capability.rs's execute_for_run + argv-mode
+seam and artifacts.rs's ArtifactLease/PinBudget (both Kingmaker-untouched,
+clean takes), tools/bash.rs argv mode, the SessionContext default-off
+command_output_minimization gate with its production literal updates in
+ocean-agent/ocean-lsp/ocean-longhouse (longhouse identical to personal but
+for the field), the m2a/m2b characterization suites with the protocol-side
+argv fixture, the test-support feature declaration, and the ocean-minimizer
+workspace dependency (the crate itself was already identical on both sides —
+only its AGENTS.md contract text differs and is included). M2 stays strictly
+default-off: no production path sets the gate; M2c profile enablement remains
+a separately reviewed checkpoint per the minimizer contract.
+
+Validation: cargo test -p ocean-runtime (224 passed, 0 failed, incl. m2a
+characterization 11 + m2b command-minimization suites); ocean-agent 268;
+ocean-lsp 16; ocean-longhouse 169; ocean-minimizer 17; cargo check
+--workspace --tests; rustfmt; denied-warning Clippy zero on all four touched
+crates.
