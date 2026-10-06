@@ -266,7 +266,9 @@ mod tests {
         // The malformed line poisons itself, not the file.
         // A display name without a valid member id is nothing (the file
         // answers no one), so the whole file is treated as absent.
-        assert!(parse_member_text("member_id = \"jay\" garbage\ndisplay_name = \"Jay\"\n").is_none());
+        assert!(
+            parse_member_text("member_id = \"jay\" garbage\ndisplay_name = \"Jay\"\n").is_none()
+        );
     }
 
     #[test]

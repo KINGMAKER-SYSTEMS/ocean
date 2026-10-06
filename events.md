@@ -1078,3 +1078,36 @@ Validation: identity module tests (4) pass; cargo test -p ocean-daemon 912
 passed / 3 failed — all three pre-existing on main; router-contract parity 120
 green; cargo check --workspace --tests; rustfmt; denied-warning Clippy zero;
 cargo xtask docs-check for the guide edit.
+_________________________________________________________________________________
+time: [15:42] [06-10-26]
+agent: [codex] [gpt-6]
+worktree: [port/output-economy] [/Users/risingtidesdev/.codex/worktrees/factory-pr49-artifact-debug/ocean]
+type: [bug fix] [issues #50, #53]
+area: [backend] [testing] [privacy]
+
+While preparing the output-economy lease change for release, review found that
+its derived Debug output recursively formatted the shared artifact store,
+including unrelated session output bodies. Replaced that formatter with a
+redacted view containing only the lease id and byte count, and added a sentinel
+regression test. Kept the public release record limited to this repository's
+change; source-side commit and review history remain outside the public ledger.
+The output minimizer remains default-off, with no production setter.
+
+Validation: `cargo fmt --all -- --check`, focused `cargo test -p ocean-runtime artifact_lease_debug_does_not_expose_session_artifact_bodies -- --nocapture` (1 passed), `cargo xtask docs-check` (PASS; 30 packages, 153 Markdown files, 170 local links), and `git diff --check` pass.
+_________________________________________________________________________________
+time: [17:10] [06-10-26]
+agent: [codex] [gpt-6]
+worktree: [codex/rooms-identity-reconcile]
+type: [review] [reconciliation]: PR #41 current main
+area: [backend] [testing]
+
+Reconciled the Rooms S0 identity route branch with current `origin/main`
+(`1e3655e4946c428a50871bcccdb4a0cde1854343`) after confirming the remote PR
+head remained `76a20aa662219b89842786f5ce00f92585379d3d`. The only merge conflict
+was the append-only root ledger; preserved PR #41's 13:22 entry, then the
+canonical PR #49 15:42 entry. Source changes merged without conflict. Current
+head review and hosted Build Ocean/Build Surface remain pending; local builds
+and behavioral tests are not verified in this run. `cargo fmt --all` corrected
+one formatting-only line in the existing identity test; formatting and diff checks
+are rerun before publishing the reconciled head.
+_________________________________________________________________________________
