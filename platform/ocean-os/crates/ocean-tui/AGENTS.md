@@ -104,8 +104,9 @@ This crate owns the full-screen terminal steering cockpit (`ocean` binary) for i
   `◨` files; toggle semantics via `App::press`, hit rects filled by
   `draw_status` using DISPLAY width, never `chars().count()`), then the status
   segments from `shell/status.rs`: model · branch · health · error · activity
-  · tok/s. Layout order and survival are SEPARATE: on overflow, segments drop
-  by rank (tok/s, then activity, then branch; health/error outlive extras; the
+  · processed tokens/rate. Layout order and survival are SEPARATE: on overflow,
+  segments drop by rank (processed tokens/rate, then activity, then branch;
+  health/error outlive extras; the
   model never drops). Do not resurrect key legends, counters, or branding.
 - Mouse text selection is pane-scoped (2026-07-11, owner-directed): Down arms
   only inside a content pane (sessions/tree/center/terminal — never title,
@@ -113,7 +114,8 @@ This crate owns the full-screen terminal steering cockpit (`ocean` binary) for i
   reverse-video highlight and the copied text share one bounded-span geometry
   (`bounded_span`, app.rs) so highlight == copy and a selection never crosses
   into a sibling lane.
-- Metrics are truthful or absent: tok/s and context occupancy render only from
+- Metrics are truthful or absent: the last-turn processed token footprint,
+  tok/s, and context occupancy render only from
   daemon-reported values for the LAST finished turn (both clear on
   `TurnStarted`; context also clears on stream gaps or adoption after a missing
   start). Context occupancy uses the provider-reported final request (or the

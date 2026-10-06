@@ -5697,6 +5697,8 @@ async fn terminate_orphaned_turn_with_lifecycle(
                     output_tokens: None,
                     input_tokens: None,
                     cache_read_tokens: None,
+                    cache_write_tokens: None,
+                    total_tokens: None,
                     tokens_per_second: None,
                     context_usage: None,
                 },
@@ -6962,6 +6964,8 @@ async fn agent_turn(
         };
         let input_tokens = (res.usage.input > 0).then_some(res.usage.input);
         let cache_read_tokens = (res.usage.cache_read > 0).then_some(res.usage.cache_read);
+        let cache_write_tokens = (res.usage.cache_write > 0).then_some(res.usage.cache_write);
+        let total_tokens = (res.usage.total_tokens > 0).then_some(res.usage.total_tokens);
         let tokens_per_second = if res.wall_ms > 0 {
             Some((output_tokens as f64) / (res.wall_ms as f64 / 1000.0))
         } else {
@@ -6990,6 +6994,8 @@ async fn agent_turn(
                 output_tokens: Some(output_tokens),
                 input_tokens,
                 cache_read_tokens,
+                cache_write_tokens,
+                total_tokens,
                 tokens_per_second,
                 context_usage: context_usage.clone(),
             }
@@ -7003,6 +7009,8 @@ async fn agent_turn(
                 output_tokens: Some(output_tokens),
                 input_tokens,
                 cache_read_tokens,
+                cache_write_tokens,
+                total_tokens,
                 tokens_per_second,
                 context_usage: context_usage.clone(),
             }
@@ -10917,6 +10925,8 @@ mod tests {
                     output_tokens: Some(1),
                     input_tokens: None,
                     cache_read_tokens: None,
+                    cache_write_tokens: None,
+                    total_tokens: None,
                     tokens_per_second: None,
                     context_usage: None,
                 },
@@ -11025,6 +11035,8 @@ mod tests {
             output_tokens: Some(1),
             input_tokens: None,
             cache_read_tokens: None,
+            cache_write_tokens: None,
+            total_tokens: None,
             tokens_per_second: None,
             context_usage: None,
         }
@@ -11043,6 +11055,8 @@ mod tests {
             output_tokens: Some(3),
             input_tokens: Some(5),
             cache_read_tokens: Some(2),
+            cache_write_tokens: None,
+            total_tokens: None,
             tokens_per_second: Some(1.5),
             context_usage: None,
         };

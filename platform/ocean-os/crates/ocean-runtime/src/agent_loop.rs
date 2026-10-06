@@ -476,6 +476,10 @@ pub async fn run_agent_with_history(
     let mut turn: u32 = 0;
     let mut stopped_at_turn_limit = false;
     let mut total_usage = ocean_protocol::Usage::default();
+    // Zero is the protocol's unavailable-total sentinel. Once any completed
+    // round lacks an authoritative provider total, the aggregate stays unknown
+    // instead of presenting a misleading partial sum.
+    let mut total_tokens_complete = true;
     let mut latest_context_tokens = 0;
     // Completed-round durability cursor. Checkpoints carry only the transcript
     // delta since the previous valid boundary, avoiding a full-history clone on
@@ -692,7 +696,14 @@ pub async fn run_agent_with_history(
                             total_usage.output += message.usage.output;
                             total_usage.cache_read += message.usage.cache_read;
                             total_usage.cache_write += message.usage.cache_write;
-                            total_usage.total_tokens += message.usage.total_tokens;
+                            if message.usage.total_tokens == 0 {
+                                total_tokens_complete = false;
+                            }
+                            if total_tokens_complete {
+                                total_usage.total_tokens += message.usage.total_tokens;
+                            } else {
+                                total_usage.total_tokens = 0;
+                            }
                             latest_context_tokens = message.usage.total_tokens;
                             final_message = Some(message);
                             break;
@@ -2078,9 +2089,10 @@ mod tests {
         );
     }
 
-    #[derive(Default)]
     struct TerminalDoneProvider {
         calls: AtomicUsize,
+        first_total_tokens: u64,
+        second_total_tokens: u64,
     }
 
     #[async_trait]
@@ -2117,7 +2129,7 @@ mod tests {
                             arguments: serde_json::json!({}),
                         }],
                         StopReason::ToolUse,
-                        100,
+                        self.first_total_tokens,
                     ),
                 }]
             } else {
@@ -2126,7 +2138,7 @@ mod tests {
                     message: message(
                         vec![Content::text("final answer after tool result")],
                         StopReason::Stop,
-                        140,
+                        self.second_total_tokens,
                     ),
                 }]
             };
@@ -2138,7 +2150,11 @@ mod tests {
     async fn terminal_done_text_after_tool_result_is_emitted_as_text_delta() {
         let cfg = AgentConfig::new(Model::anthropic_claude_sonnet_4_6(), "test")
             .with_session_id("sess-terminal-done")
-            .with_provider(Arc::new(TerminalDoneProvider::default()))
+            .with_provider(Arc::new(TerminalDoneProvider {
+                calls: AtomicUsize::default(),
+                first_total_tokens: 100,
+                second_total_tokens: 140,
+            }))
             .with_max_turns(4);
         let (tx, mut rx) = mpsc::unbounded_channel();
 
@@ -2183,6 +2199,29 @@ mod tests {
             1,
             "final text round is one assistant checkpoint"
         );
+    }
+
+    #[tokio::test]
+    async fn mixed_known_and_unknown_round_totals_stay_unknown() {
+        for (first, second) in [(100, 0), (0, 140)] {
+            let cfg = AgentConfig::new(Model::anthropic_claude_sonnet_4_6(), "test")
+                .with_session_id("sess-mixed-usage")
+                .with_provider(Arc::new(TerminalDoneProvider {
+                    calls: AtomicUsize::default(),
+                    first_total_tokens: first,
+                    second_total_tokens: second,
+                }))
+                .with_max_turns(4);
+
+            let run = run_agent(&cfg, user("use a tool then answer"), None)
+                .await
+                .expect("run should finish");
+            assert_eq!(run.usage.total_tokens, 0, "round totals {first}, {second}");
+            assert_eq!(
+                run.context_tokens, second,
+                "context remains the final round"
+            );
+        }
     }
 
     #[test]

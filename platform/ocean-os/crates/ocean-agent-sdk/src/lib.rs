@@ -674,12 +674,29 @@ pub enum AgentTurnEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output_tokens: Option<u64>,
         /// Input (prompt) token count for the turn, summed across rounds, from
-        /// real provider usage. `None`/0 when the provider reported none.
+        /// real provider usage. Cached tokens are included by some providers;
+        /// see `cache_read_tokens` for the breakdown and `total_tokens` for
+        /// the authoritative provider footprint. `None`/0 when unreported.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         input_tokens: Option<u64>,
         /// Cache-read (prompt-cache hit) tokens for the turn, when reported.
+        /// This is a provider-reported breakdown and may already be included in
+        /// `input_tokens` and `total_tokens`; clients must not add it to either.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_read_tokens: Option<u64>,
+        /// Cache-write tokens when reported separately by the provider (for
+        /// example Anthropic cache creation). The authoritative provider
+        /// footprint is `total_tokens`; clients must not reconstruct it by
+        /// summing this field with input/output/cache-read.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_write_tokens: Option<u64>,
+        /// Provider-reported token footprint summed across the turn's rounds.
+        /// It already follows each provider's accounting semantics: cached
+        /// tokens are additional for Anthropic and included in input for
+        /// providers such as Gemini. `None` means no provider total was
+        /// reported; clients must not infer one from the breakdown fields.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        total_tokens: Option<u64>,
         /// Output tokens per second (output_tokens / wall time).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tokens_per_second: Option<f64>,
@@ -1162,6 +1179,59 @@ mod tests {
     }
 
     #[test]
+    fn legacy_turn_finished_without_footprint_fields_remains_readable() {
+        let event: AgentTurnEvent = serde_json::from_value(serde_json::json!({
+            "type": "turn_finished",
+            "session_id": AgentSessionId::new_v4(),
+            "turn_id": AgentTurnId::new_v4(),
+            "status": "completed",
+            "error": null,
+            "input_tokens": 1500,
+            "output_tokens": 30,
+            "cache_read_tokens": 1280
+        }))
+        .expect("legacy turn-finished event remains readable");
+        assert!(matches!(
+            event,
+            AgentTurnEvent::TurnFinished {
+                cache_write_tokens: None,
+                total_tokens: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn turn_finished_round_trips_authoritative_footprint_and_cache_write() {
+        let event = AgentTurnEvent::TurnFinished {
+            session_id: AgentSessionId::new_v4(),
+            turn_id: AgentTurnId::new_v4(),
+            status: AgentTurnStatus::Completed,
+            error: None,
+            wall_ms: Some(100),
+            output_tokens: Some(50),
+            input_tokens: Some(100),
+            cache_read_tokens: Some(200),
+            cache_write_tokens: Some(512),
+            total_tokens: Some(862),
+            tokens_per_second: Some(500.0),
+            context_usage: None,
+        };
+        let wire = serde_json::to_value(&event).unwrap();
+        assert_eq!(wire["cache_write_tokens"], 512);
+        assert_eq!(wire["total_tokens"], 862);
+        let decoded: AgentTurnEvent = serde_json::from_value(wire).unwrap();
+        assert!(matches!(
+            decoded,
+            AgentTurnEvent::TurnFinished {
+                cache_write_tokens: Some(512),
+                total_tokens: Some(862),
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn session_id_accessor_extracts_session_for_filtering() {
         // The daemon's per-session SSE filter relies on this accessor. A
         // session-bearing event returns its id; a council-wide Extension (no
@@ -1365,6 +1435,8 @@ mod tests {
                 output_tokens: Some(42),
                 input_tokens: Some(100),
                 cache_read_tokens: Some(10),
+                cache_write_tokens: None,
+                total_tokens: None,
                 tokens_per_second: Some(33.5),
                 context_usage: None,
             },
