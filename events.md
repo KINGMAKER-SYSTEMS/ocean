@@ -1085,3 +1085,32 @@ Rooms program governance chain it depends on (Phase 1 room-agent
 authorization manifest, Gate 0 decisions and threat model, distributed
 workspace architecture). All public program specs; no private material.
 docs-check PASS (157 active Markdown files).
+_________________________________________________________________________________
+time: [16:30] [06-10-26]
+agent: [zcode] [glm-5.3]
+worktree: [port/rooms-phase2-profile] / [port/rooms-identity-route]
+type: [review]
+area: [review] addressing independent adversarial findings on #41/#43
+
+The independent adversarial review posted on #41/#43 found four items; all
+are addressed on their branches. #41: unquote now fails closed — a leading
+quote without its closing quote, or trailing non-comment text after it, is a
+malformed line (Option return, the poisoned line alone is skipped, malformed
+and trailing-token tests pin it), and the operator guide's liveness-check
+label — which a column shift had parked on GET /v1/identity — is restored to
+GET /health. #43: SlotStatus.resolver is now #[serde(skip)] so the wire
+projection is exactly the manifest's {name, required, status} with no
+resolver/provider/env metadata in profile, inspect, or GET responses, and
+auth_blocks deserializes into a two-field wire struct whose unknown-field
+path never materializes credential values (the least-privilege claim now
+matches the implementation; non-object entries stay absent, not
+present-without-expiry, preserving the opaque-read behavior the tests pin).
+
+Also this pass: PR #49 MERGED (first conflict-class port to land; ledger
+append prepared on the #40 branch pending its own rebase after the
+reviewer's two ledger-correction commits), and a reviewer pushed corrections
+plus the adversarial-findings log to the #40 branch itself.
+
+Validation: identity tests 15/0 (incl. new fail-closed tests); room_profile
+5/0; daemon full suite 911 passed / 0 failed on #43; rustfmt; denied-warning
+Clippy zero; docs-check PASS (guide label fix).

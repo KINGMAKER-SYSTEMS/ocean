@@ -377,8 +377,11 @@ pub(super) struct SlotStatus {
     pub(super) required: bool,
     /// `resolved` | `missing` | `expired` | `resolver_not_open`
     pub(super) status: &'static str,
-    /// The resolver that satisfied the slot, when `resolved`.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// The resolver that satisfied the slot, when `resolved`. Internal
+    /// only: the manifest pins `credential_slots[]` to exactly
+    /// `{name, required, status}` — never serialized, so no resolver,
+    /// provider, or environment-variable metadata reaches a client.
+    #[serde(skip)]
     pub(super) resolver: Option<String>,
 }
 
@@ -397,24 +400,42 @@ enum Probe {
     Resolved,
 }
 
-/// The daemon's own `auth.json`, read as an opaque map so this module never
-/// touches a token field. Only the top-level provider keys and each block's
-/// `expires` are consulted.
+/// The one field this module may consult from an `auth.json` block. Every
+/// other field (access/refresh tokens, account ids) is skipped by the
+/// deserializer's unknown-field path — its value is never materialized as a
+/// String in this process, honoring the module's least-privilege claim.
+#[derive(serde::Deserialize)]
+struct AuthBlockWire {
+    #[serde(default)]
+    expires: Option<i64>,
+}
+
+/// A top-level value that is not an object (the file allows free-form keys)
+/// contributes no expiry; `IgnoredAny` keeps its contents unmaterialized.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum AuthBlockEntry {
+    Block(AuthBlockWire),
+    Other(serde::de::IgnoredAny),
+}
+
+/// The daemon's own `auth.json`: only the top-level provider keys and each
+/// block's `expires` are consulted; credential values are skipped by the
+/// deserializer rather than parsed and dropped.
 fn auth_blocks(config_dir: &FsPath) -> BTreeMap<String, Option<i64>> {
     let path = config_dir.join("auth.json");
     let Ok(raw) = std::fs::read(&path) else {
         return BTreeMap::new();
     };
-    let Ok(Value::Object(root)) = serde_json::from_slice::<Value>(&raw) else {
+    let Ok(root) = serde_json::from_slice::<BTreeMap<String, AuthBlockEntry>>(&raw) else {
         return BTreeMap::new();
     };
     root.into_iter()
-        .filter_map(|(key, block)| match block {
-            Value::Object(block) => {
-                let expires = block.get("expires").and_then(Value::as_i64);
-                Some((key, expires))
-            }
-            _ => None,
+        .filter_map(|(key, entry)| match entry {
+            AuthBlockEntry::Block(block) => Some((key, block.expires)),
+            // A non-object value is not a credential block: absent, not
+            // present-without-expiry, exactly as the opaque-read behaved.
+            AuthBlockEntry::Other(_) => None,
         })
         .collect()
 }
