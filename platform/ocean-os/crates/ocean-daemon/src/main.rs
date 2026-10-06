@@ -123,6 +123,8 @@ mod github;
 mod history_search;
 /// Daemon-wide Host allowlist against DNS rebinding.
 mod host_guard;
+/// Rooms S0 — `GET /v1/identity`: who this daemon says its human is.
+mod identity;
 /// Persisted-title and read-projection mutation HTTP adapters.
 mod longhouse_governance_control;
 /// State-free Longhouse prepare, inspect, and workflow HTTP adapters.
@@ -703,6 +705,9 @@ fn app_router(origins: BrowserOrigins, hosts: AllowedHosts) -> Router<AppState> 
         .route("/ready", get(ready))
         // OCEAN-303: Prometheus-text turn metrics (latency histogram + counters).
         .route("/metrics", get(metrics))
+        // Rooms S0: who this daemon says its human is (member.toml, then
+        // OCEAN_MEMBER_ID, never the process user). Credential-free.
+        .route("/v1/identity", get(identity::identity))
         .route("/v1/agent/turns", post(agent_turn))
         .route("/v1/agent/voice", post(agent_voice))
         .route("/v1/agent/events", get(agent_events))
@@ -1549,6 +1554,7 @@ fn banner_routes() -> &'static [&'static str] {
         "GET /health",
         "GET /ready",
         "GET /metrics",
+        "GET /v1/identity",
         "POST /v1/agent/turns",
         "POST /v1/agent/voice",
         "GET /v1/agent/events",
@@ -25751,7 +25757,7 @@ mod tests {
         assert_eq!(admission_routes, expected_admission_routes);
         assert_eq!(
             banner.len(),
-            119,
+            120,
             "route baseline changed; review the manifest"
         );
 

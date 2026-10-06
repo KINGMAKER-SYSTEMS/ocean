@@ -1045,3 +1045,36 @@ Closed the leftovers from the review that acknowledged the thinking-binding reco
 
 Validation: ocean-protocol (187 plus 5) passes; clippy with warnings denied on ocean-protocol and ocean-agent tests, rustfmt check pass. The strip test covers the thinking-only assistant turn. No provider was called.
 _________________________________________________________________________________
+_________________________________________________________________________________
+time: [13:22] [06-10-26]
+agent: [zcode] [glm-5.3]
+worktree: [port/rooms-identity-route]
+type: [feature-request]
+area: [backend] reconciliation: Rooms S0 identity route
+
+Fourth bounded Track B port: `GET /v1/identity` (Rooms S0, design direction
+§3.2 — one human = one member id on every host). The 243-line module resolves
+the daemon's human from `<config_dir>/member.toml` (member_id, optional
+display_name), then `OCEAN_MEMBER_ID`; neither set answers member_id: null,
+source "unset" — never the process user. Credential-free and read at request
+time so writing member.toml takes effect without a restart. std-only imports;
+no crate-internal dependencies beyond AppState wiring. Wired into the router,
+the GET / discovery banner, and the operator guide quick reference; the
+router-contract parity baseline moved 119 → 120.
+
+Before choosing this unit I re-scoped room_inspect.rs: it is NOT bounded — it
+sits on three unported Phase 2 sub-features (room_profile::profile_with_slots,
+room_resources::resources_projection + the §5 TurnCwd rules, and
+session_detail_optional), so it stays behind the Phase 2 chain.
+
+Pre-existing main breakage, reproduced on clean 32bd82a before my changes:
+three persistent-rooms lifecycle tests fail (closing_a_room_ends_the_message_
+tail_after_the_marker at persistent_rooms.rs:6494 "room tail ended",
+closed_persistent_room_preserves_audit_http_asymmetry,
+persistent_room_http_lifecycle_preserves_envelopes_and_ordering). Reported in
+the PR; not caused by this port — the same three fail identically on main.
+
+Validation: identity module tests (4) pass; cargo test -p ocean-daemon 912
+passed / 3 failed — all three pre-existing on main; router-contract parity 120
+green; cargo check --workspace --tests; rustfmt; denied-warning Clippy zero;
+cargo xtask docs-check for the guide edit.
