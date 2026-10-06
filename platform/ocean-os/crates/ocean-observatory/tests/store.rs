@@ -372,3 +372,32 @@ fn checkpoint_truncates_the_wal() {
     assert!(!report.busy, "{report:?}");
     assert_eq!(wal_len(), 0, "TRUNCATE empties the WAL");
 }
+
+#[test]
+fn replay_rechecks_retention_after_an_intervening_prune() {
+    let d = tempdir().unwrap();
+    let s = ObservatoryStore::open(
+        &d.path().join("obs.db"),
+        RetentionPolicy {
+            max_age_days: 7,
+            max_bytes: RetentionPolicy::default().max_bytes,
+        },
+    )
+    .unwrap();
+    for id in ["old-1", "old-2"] {
+        let old = event_for(id, id, 30, true);
+        s.append_event(old).unwrap();
+    }
+    // Model the old route's first boundary read, then let retention commit in
+    // the gap before the replay page operation. The page operation must
+    // revalidate under its own lock rather than return a falsely complete page.
+    assert_eq!(s.retention_boundary().unwrap(), None);
+    assert!(s.apply_retention().unwrap() > 0);
+    match s.replay_page(Cursor::new(0), None, 10) {
+        Err(StoreError::RetentionBoundaryCrossed { after, boundary }) => {
+            assert_eq!(after, 0);
+            assert_eq!(boundary, 2);
+        }
+        other => panic!("expected the pruned range, got {other:?}"),
+    }
+}

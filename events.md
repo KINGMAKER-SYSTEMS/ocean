@@ -889,3 +889,36 @@ route fixture remains locally uncompiled because prior dependency compilation
 exhausted available disk; hosted required checks and a fresh independent review
 are still required. No merge, deployment, or live outcome is claimed.
 _________________________________________________________________________________
+time: [11:43pm] [10-05-26]
+agent: [codex] [gpt-6.1-sol]
+worktree: [codex/factory-pr31-reconcile] [/Users/risingtidesdev/.codex/worktrees/factory-pr31-reconcile/ocean]
+type: [gh actions] PR #31 reconciliation; Issues #33 and #34
+area: [testing] Observatory retention and snapshot cursor consistency
+
+Reconciled PR #31's Observatory store migration onto canonical main
+855e0c40029fb74e684fd935f9c4d419370ffc32 in this factory-owned isolated
+worktree. Exact-head review recorded in #33 found a replay retention-check /
+page-read race and a successful snapshot header/body watermark race. Replay
+now validates its retention boundary and reads the page under one store lock;
+snapshots validate requested cursors and read the retention boundary,
+watermark, and projection under one lock, and successful response headers use
+the projection watermark. Added a deterministic interleaving regression for
+retention committing between the former preflight and page read, plus an
+append/snapshot response regression. Preserved the existing 410 gap response.
+
+The first daemon compile exposed a moved-URI test compile error and, after
+repairing that, an existing stale test key assertion. Issue #34 records both;
+the test now clones the URI and asserts the established fixed error field.
+No runtime Rooms behavior changed.
+
+Validation on the local candidate: cargo test --locked -p ocean-observatory
+PASS (76 tests across package suites); cargo test --locked -p ocean-daemon
+observatory:: PASS (23/23); the focused persistent-room readback test PASS
+(1/1); cargo fmt --all -- --check, cargo xtask docs-check (30 packages, 153
+active Markdown files, 170 local links), and git diff --check PASS.
+
+The candidate has not yet been pushed. PR #31's remote head remains
+bd2db1d31766fcd0dffb7abc493cda74b5833524; exact-final-head independent review
+and hosted Build Ocean / Build Surface checks remain pending. No merge,
+deployment, or live outcome is claimed.
+_________________________________________________________________________________

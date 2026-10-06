@@ -363,35 +363,6 @@ pub(crate) async fn snapshot(
         },
         None => None,
     };
-    let boundary = match off_executor(store, |store| store.retention_boundary()).await {
-        Some(Ok(boundary)) => boundary,
-        Some(Err(error)) => {
-            tracing::error!(%error, "observatory snapshot retention-boundary read failed");
-            return store_unavailable(headers);
-        }
-        None => return store_unavailable(headers),
-    };
-    if let Some(at) = at {
-        if at > latest {
-            return error_response(
-                StatusCode::BAD_REQUEST,
-                headers,
-                "invalid_cursor",
-                "Cursor format invalid or future value",
-            );
-        }
-        // 410 only when history was actually pruned past `at`; a natural log
-        // start at cursor 1 is not a retention crossing.
-        if boundary.is_some_and(|boundary| at <= boundary) {
-            return error_response(
-                StatusCode::GONE,
-                headers,
-                "cursor_too_old",
-                "Cursor is before retention boundary; use current snapshot",
-            );
-        }
-    }
-
     let projection = match off_executor(store, move |store| store.snapshot_at(at)).await {
         None => return store_unavailable(headers),
         Some(Ok(projection)) => projection,
@@ -403,6 +374,24 @@ pub(crate) async fn snapshot(
                 headers,
                 "snapshot_not_historical",
                 "Only the current watermark can be snapshotted; omit `at` and tail from the returned watermark",
+            );
+        }
+        Some(Err(ocean_observatory::StoreError::FutureCursor { .. })) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                headers,
+                "invalid_cursor",
+                "Cursor format invalid or future value",
+            );
+        }
+        Some(Err(ocean_observatory::StoreError::RetentionBoundaryCrossed { after, boundary })) => {
+            return error_response(
+                StatusCode::GONE,
+                headers,
+                "cursor_too_old",
+                &format!(
+                    "Cursor {after} is at or before retention boundary {boundary}; use current snapshot"
+                ),
             );
         }
         Some(Err(error)) => {
@@ -453,6 +442,7 @@ pub(crate) async fn snapshot(
         // No waiting-phase derivation exists at the V1 projection layer.
         attention: Vec::<AttentionItem>::new(),
     };
+    let headers = observatory_headers(projection.watermark_cursor, &services.daemon_instance_id);
     (StatusCode::OK, headers, Json(snapshot)).into_response()
 }
 
@@ -842,19 +832,15 @@ pub(crate) async fn replay(
         None => None,
     };
 
-    let boundary = match off_executor(store, |store| store.retention_boundary()).await {
-        Some(Ok(boundary)) => boundary,
-        Some(Err(error)) => {
-            tracing::error!(%error, "observatory replay retention-boundary read failed");
-            return store_unavailable(headers);
-        }
-        None => return store_unavailable(headers),
-    };
-    // A range that starts inside pruned history is a hard 410 with the exact
-    // unavailable span, never a silent skip. `after` at the natural log start
-    // (before any pruning) is not a crossing.
-    if let Some(boundary) = boundary {
-        if after <= boundary {
+    // Retention validation and page reads are one store operation so a prune
+    // cannot turn a previously valid range into a silently incomplete page.
+    let page = match off_executor(store, move |store| store.replay_page(after, through, limit))
+        .await
+    {
+        Some(Ok(page)) => page,
+        Some(Err(ocean_observatory::StoreError::RetentionBoundaryCrossed { after, boundary })) => {
+            let after = Cursor::new(after);
+            let boundary = Cursor::new(boundary);
             let earliest_available = boundary.next();
             let body = json!({
                 "error": "retention_boundary_crossed",
@@ -870,17 +856,12 @@ pub(crate) async fn replay(
             });
             return (StatusCode::GONE, headers, Json(body)).into_response();
         }
-    }
-
-    let page =
-        match off_executor(store, move |store| store.replay_page(after, through, limit)).await {
-            Some(Ok(page)) => page,
-            Some(Err(error)) => {
-                tracing::error!(%error, "observatory replay read failed");
-                return store_unavailable(headers);
-            }
-            None => return store_unavailable(headers),
-        };
+        Some(Err(error)) => {
+            tracing::error!(%error, "observatory replay read failed");
+            return store_unavailable(headers);
+        }
+        None => return store_unavailable(headers),
+    };
 
     let events: Vec<ReplayEvent> = page
         .events
@@ -1311,6 +1292,42 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn snapshot_success_headers_match_projection_after_concurrent_append() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("obs.db");
+        let store =
+            Arc::new(ObservatoryStore::open(&path, RetentionPolicy::default()).expect("open"));
+        store
+            .append_event(envelope("e-1", EventKind::ExecutionAdmitted))
+            .expect("seed");
+        let router = app(Arc::clone(&store));
+        let wedge = StoreWedge::engage(
+            &path,
+            &store,
+            envelope("e-1", EventKind::ExecutionPhaseChanged),
+        );
+        let request = tokio::spawn(router.oneshot(authed("/v1/observatory/snapshot")));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        wedge.release();
+        let response = tokio::time::timeout(Duration::from_secs(10), request)
+            .await
+            .expect("snapshot completes")
+            .expect("task")
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let header_cursor = response
+            .headers()
+            .get("x-observatory-cursor")
+            .expect("cursor header")
+            .to_str()
+            .expect("header string")
+            .to_owned();
+        let body: Value = serde_json::from_str(&body_string(response).await).expect("json");
+        assert_eq!(header_cursor, body["watermark_cursor"].as_str().unwrap());
+        assert_eq!(header_cursor, "2");
     }
 
     #[tokio::test]

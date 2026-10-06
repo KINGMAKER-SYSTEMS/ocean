@@ -14,6 +14,10 @@ pub enum StoreError {
     /// than answered with current state under an old label.
     #[error("snapshot at cursor {requested} is historical; the current watermark is {latest}")]
     HistoricalSnapshot { requested: u64, latest: u64 },
+    #[error("cursor {after} is at or before the retention boundary {boundary}")]
+    RetentionBoundaryCrossed { after: u64, boundary: u64 },
+    #[error("snapshot cursor {requested} is after the current watermark {latest}")]
+    FutureCursor { requested: u64, latest: u64 },
     /// F2: the database was written by a newer build (its `user_version` is
     /// past [`crate::STORE_SCHEMA_VERSION`]); refused rather than guessed at.
     #[error(
@@ -241,13 +245,42 @@ impl ObservatoryStore {
         self.events_page(after, None, limit.unwrap_or(1000))
             .map(|p| p.events)
     }
+    /// Validate retention and read the replay page under the same database lock.
     pub fn replay_page(
         &self,
         after: Cursor,
         through: Option<Cursor>,
         limit: usize,
     ) -> Result<EventsPage> {
-        self.events_page(after, through, limit)
+        let db = self.db.lock();
+        let boundary: u64 = db.query_row(
+            "SELECT COALESCE((SELECT cursor FROM watermarks WHERE key='retention_boundary'),0)",
+            [],
+            |r| r.get(0),
+        )?;
+        if boundary > 0 && after.into_inner() <= boundary {
+            return Err(StoreError::RetentionBoundaryCrossed {
+                after: after.into_inner(),
+                boundary,
+            });
+        }
+        let end = through.unwrap_or_else(|| self.latest_cursor());
+        let mut s=db.prepare("SELECT envelope_json FROM observatory_events WHERE cursor>?1 AND cursor<=?2 ORDER BY cursor LIMIT ?3")?;
+        let events = s
+            .query_map(
+                params![after.into_inner(), end.into_inner(), limit.min(10000)],
+                |r| r.get::<_, String>(0),
+            )?
+            .map(|r| Ok(serde_json::from_str(&r?)?))
+            .collect::<Result<Vec<EventEnvelope>>>()?;
+        let more = events.len() == limit.min(10000);
+        let next = events.last().map(|e| e.cursor);
+        Ok(EventsPage {
+            events,
+            next_after: next,
+            has_more: more,
+            complete: !more,
+        })
     }
     pub fn events_page(
         &self,
@@ -367,16 +400,30 @@ impl ObservatoryStore {
         }
         Ok(pruned)
     }
-    /// The current projection, labelled with the watermark it actually
-    /// reflects (G1). The watermark is read INSIDE the database lock that
-    /// `append_event` holds for its whole transaction, so no append can land
-    /// between the label and the rows. `at` is accepted only when it IS that
-    /// watermark: an earlier cursor is `HistoricalSnapshot`, because the
-    /// destructive projection cannot reconstruct past state.
+    /// The watermark and retention boundary are read inside the database
+    /// lock held by append_event and apply_retention. The returned projection
+    /// is labelled with that same watermark.
     pub fn snapshot_at(&self, at: Option<Cursor>) -> Result<Snapshot> {
         let db = self.db.lock();
         let watermark = self.latest_cursor();
+        let boundary: u64 = db.query_row(
+            "SELECT COALESCE((SELECT cursor FROM watermarks WHERE key='retention_boundary'),0)",
+            [],
+            |r| r.get(0),
+        )?;
         if let Some(requested) = at {
+            if boundary > 0 && requested.into_inner() <= boundary {
+                return Err(StoreError::RetentionBoundaryCrossed {
+                    after: requested.into_inner(),
+                    boundary,
+                });
+            }
+            if requested > watermark {
+                return Err(StoreError::FutureCursor {
+                    requested: requested.into_inner(),
+                    latest: watermark.into_inner(),
+                });
+            }
             if requested != watermark {
                 return Err(StoreError::HistoricalSnapshot {
                     requested: requested.into_inner(),

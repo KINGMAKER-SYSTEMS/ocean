@@ -8010,7 +8010,7 @@ env = { FIXTURE = "1" }
         )
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
-        assert_eq!(post_error["code"], "author_not_in_roster");
+        assert_eq!(post_error["error"], "author_not_in_roster");
 
         async fn get_json(state: AppState, uri: String) -> (StatusCode, serde_json::Value) {
             use tower::ServiceExt as _;
@@ -8061,7 +8061,7 @@ env = { FIXTURE = "1" }
             format!("/v1/rooms/persistent/{key}"),
             format!("/v1/rooms/persistent/{key}/snapshot"),
         ] {
-            let (status, body) = get_json(state.clone(), uri).await;
+            let (status, body) = get_json(state.clone(), uri.clone()).await;
             assert_eq!(status, StatusCode::OK);
             assert_eq!(body["aliases"].as_array().unwrap().len(), 1);
             assert_eq!(body["aliases_truncated"], false);
