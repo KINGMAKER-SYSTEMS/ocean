@@ -540,3 +540,70 @@ locking, highlighted-entry cycling, and apply-time snap); rustfmt applied;
 cargo clippy -p ocean-tui --all-targets clean; cargo build -p ocean-tui
 --release. Devlog pass: no owning contract text describes the cycler's option
 set, so AGENTS.md files are intentionally unchanged.
+<<<<<<< HEAD
+=======
+
+_________________________________________________________________________________
+time: [20:28] [05-10-26]
+agent: [codex desktop] [gpt-6.1-sol]
+worktree: [codex/pr20-reconcile] [/Users/smathdaddy-macbook/.codex/worktrees/pr20-reconcile/ocean]
+type: [review] [gh actions]
+area: [review] [frontend]
+
+Reconciled PR #20 head `5e6aeb50` with canonical main `683ad9a2` in an isolated
+worktree. Application source merged automatically; the only conflict was the
+append-only root `events.md`. Preserved the complete current-main ledger, then
+the PR's Issue #8 implementation record. Local validation on the reconciled
+tree passed: `cargo test -p ocean-tui` (526 passed, 4 ignored), `cargo check -p
+ocean-tui`, `cargo build -p ocean-tui --release`, `cargo fmt --all -- --check`,
+and `git diff --check`. Exact-head adversarial review and fresh hosted checks
+remain pending; PR #20 has not been pushed or merged by this step.
+
+_________________________________________________________________________________
+time: [20:37] [05-10-26]
+agent: [codex desktop] [gpt-6.1-sol]
+worktree: [codex/pr20-reconcile] [/Users/smathdaddy-macbook/.codex/worktrees/pr20-reconcile/ocean]
+type: [review] [bug report]
+area: [frontend] [testing]
+
+Independent review of the reconciled Issue #8 picker found that cycling changed
+the active per-turn effort even when the operator closed without applying the
+highlighted model. The picker now stages its effort locally, commits it only
+with a ready model selection, and discards it on Escape or outside click. A
+regression test covers both close paths. Validation on this candidate: TUI
+suite (527 passed, 4 ignored), `cargo check -p ocean-tui`, release build,
+`cargo fmt --all -- --check`, and `git diff --check` passed. Exact final-head
+review and hosted checks remain pending.
+>>>>>>> 13b8d6f2 (fix(ocean-tui): stage model effort until apply)
+
+_________________________________________________________________________________
+time: [20:28] [05-10-26]
+agent: [codex desktop] [gpt-6.1-sol]
+worktree: [codex/pr20-reconcile] [/Users/smathdaddy-macbook/.codex/worktrees/pr20-reconcile/ocean]
+type: [review] [gh actions]
+area: [review] [frontend]
+
+Reconciled PR #20 head `5e6aeb50` with canonical main `683ad9a2` in an isolated
+worktree. Application source merged automatically; the only conflict was the
+append-only root `events.md`. Preserved the complete current-main ledger, then
+the PR's Issue #8 implementation record. Local validation on the reconciled
+tree passed: `cargo test -p ocean-tui` (526 passed, 4 ignored), `cargo check -p
+ocean-tui`, `cargo build -p ocean-tui --release`, `cargo fmt --all -- --check`,
+and `git diff --check`. Exact-head adversarial review and fresh hosted checks
+remain pending; PR #20 has not been pushed or merged by this step.
+
+_________________________________________________________________________________
+time: [20:37] [05-10-26]
+agent: [codex desktop] [gpt-6.1-sol]
+worktree: [codex/pr20-reconcile] [/Users/smathdaddy-macbook/.codex/worktrees/pr20-reconcile/ocean]
+type: [review] [bug report]
+area: [frontend] [testing]
+
+Independent review of the reconciled Issue #8 picker found that cycling changed
+the active per-turn effort even when the operator closed without applying the
+highlighted model. The picker now stages its effort locally, commits it only
+with a ready model selection, and discards it on Escape or outside click. A
+regression test covers both close paths. Validation on this candidate: TUI
+suite (527 passed, 4 ignored), `cargo check -p ocean-tui`, release build,
+`cargo fmt --all -- --check`, and `git diff --check` passed. Exact final-head
+review and hosted checks remain pending.
