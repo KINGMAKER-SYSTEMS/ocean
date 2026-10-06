@@ -889,3 +889,91 @@ route fixture remains locally uncompiled because prior dependency compilation
 exhausted available disk; hosted required checks and a fresh independent review
 are still required. No merge, deployment, or live outcome is claimed.
 _________________________________________________________________________________
+time: [23:43] [05-10-26]
+agent: [codex] [gpt-6.1-sol]
+worktree: [codex/factory-pr31-reconcile] [/Users/risingtidesdev/.codex/worktrees/factory-pr31-reconcile/ocean]
+type: [gh actions] PR #31 reconciliation; Issues #33 and #34
+area: [testing] Observatory retention and snapshot cursor consistency
+
+Reconciled PR #31's Observatory store migration onto canonical main
+855e0c40029fb74e684fd935f9c4d419370ffc32 in this factory-owned isolated
+worktree. Exact-head review recorded in #33 found a replay retention-check /
+page-read race and a successful snapshot header/body watermark race. Replay
+now validates its retention boundary and reads the page under one store lock;
+snapshots validate requested cursors and read the retention boundary,
+watermark, and projection under one lock, and successful response headers use
+the projection watermark. Added a deterministic interleaving regression for
+retention committing between the former preflight and page read, plus an
+append/snapshot response regression. Preserved the existing 410 gap response.
+
+The first daemon compile exposed a moved-URI test compile error and, after
+repairing that, an existing stale test key assertion. Issue #34 records both;
+the test now clones the URI and asserts the established fixed error field.
+No runtime Rooms behavior changed.
+
+Validation on the local candidate: cargo test --locked -p ocean-observatory
+PASS (76 tests across package suites); cargo test --locked -p ocean-daemon
+observatory:: PASS (23/23); the focused persistent-room readback test PASS
+(1/1); cargo fmt --all -- --check, cargo xtask docs-check (30 packages, 153
+active Markdown files, 170 local links), and git diff --check PASS.
+
+The candidate has not yet been pushed. PR #31's remote head remains
+bd2db1d31766fcd0dffb7abc493cda74b5833524; exact-final-head independent review
+and hosted Build Ocean / Build Surface checks remain pending. No merge,
+deployment, or live outcome is claimed.
+_________________________________________________________________________________
+time: [23:51] [05-10-26]
+agent: [codex] [gpt-6.1-sol]
+worktree: [codex/factory-pr31-reconcile] [/Users/risingtidesdev/.codex/worktrees/factory-pr31-reconcile/ocean]
+type: [review] PR #31 exact-head adversarial follow-up
+area: [testing] retention-boundary cursor semantics
+
+Independent review of candidate 8c55fc6399b8771c16d81565d74482520962d7db
+confirmed the two race fixes and found an exclusive-cursor edge: replay after
+the last-pruned cursor is valid because after is exclusive. Updated replay
+to return 410 only when the requested cursor is strictly below the boundary.
+Added tests for both a retained tail and an empty complete page after a full
+prune. Documented the exclusive resume contract in both owning Observatory
+AGENTS.md files.
+
+Validation after this correction: cargo test --locked -p ocean-observatory
+PASS (77 tests across package suites); cargo test --locked -p ocean-daemon
+observatory:: PASS (23/23). The targeted persistent-room test, formatting,
+docs-check, and diff-check passed on the immediately preceding code revision;
+documentation changes from this follow-up still require docs-check. These
+changes are not yet pushed; hosted checks and exact-final-head review remain
+pending. No merge, deployment, or live outcome is claimed.
+_________________________________________________________________________________
+time: [00:10] [06-10-26]
+agent: [codex] [gpt-6.1-sol]
+worktree: [codex/factory-pr31-reconcile] [/Users/risingtidesdev/.codex/worktrees/factory-pr31-reconcile/ocean]
+type: [review] PR #31 final ledger and release checkpoint
+area: [testing] exact-head consistency and delivery accounting
+
+Corrected the two PR #31 ledger timestamps to the root contract's 24-hour
+HH:MM and DD-MM-YY format and removed the duplicate separator. The independent
+exact-head review at e4a82495265c165fc5b0aafed90f69c59a4bde06 found the code
+clean and identified only the timestamp-format P3; final review is required
+after this ledger update. PR #31 remains open at e4a82495265c165fc5b0aafed90f69c59a4bde06
+before this commit. Build Ocean and package validation pass; Build Surface is
+path-skipped on this runtime-only diff. The branch protection lists Build Ocean
+and Build Surface as required. The public main tree has no committed
+org/risingtides-agents/docs/orchestrator/FACTORY_STATE.md, so no such state
+readback is claimed. GitHub's deployments endpoint returned no deployment
+revision for this candidate.
+
+At 00:10 EDT on 06-10-26, GitHub's account-wide contribution calendar reported
+221 for 2026-10-05 (79 below the 300 target) and 9 for the partial 2026-10-06
+date. Merged Ocean PR counts queried at 04:10Z were 10 for 2026-10-05 UTC,
+8 for 2026-10-06 UTC so far, and 18 in the 2026-10-05 America/New_York
+delivery window. Calendar credits, UTC merge activity, and local delivery
+counts are separate measures; no artificial work was created to close the gap.
+
+Targeted Observatory (77 tests), daemon observatory routes (23 tests), and
+the focused persistent-room readback test (1 test) passed on the code at e4.
+The current docs-check passed (30 packages, 153 active Markdown files, 170
+local links), and git diff --check passed after ledger formatting edits.
+A new commit changes the reviewed PR head; fresh exact-head review and required
+hosted-check readback remain pending. No merge, deployment, or live outcome
+is claimed.
+_________________________________________________________________________________

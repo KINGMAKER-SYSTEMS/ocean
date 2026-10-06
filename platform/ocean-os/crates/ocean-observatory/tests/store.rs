@@ -49,3 +49,385 @@ fn append_is_durable_and_monotonic() {
     assert_eq!(s.append_event(next).unwrap(), Cursor::new(2));
     assert_eq!(s.events_after(Cursor::new(0), None).unwrap().len(), 2);
 }
+
+/// An event for `execution`, recorded `days_ago` days in the past, finished
+/// (terminal) or admitted (live).
+fn event_for(id: &str, execution: &str, days_ago: i64, finished: bool) -> EventEnvelope {
+    let mut e = event();
+    e.event_id = id.into();
+    e.topology.execution_id = execution.into();
+    e.topology.root_execution_id = execution.into();
+    e.recorded_at = (chrono::Utc::now() - chrono::Duration::days(days_ago))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    if finished {
+        e.kind = EventKind::ExecutionFinished;
+        e.payload = EventPayload::ExecutionFinished {
+            phase: ExecutionPhase::Finished,
+            duration_millis: 1,
+            error_classification: None,
+        };
+    }
+    e
+}
+
+/// G3: retention actually prunes, and never crosses a live execution's first
+/// event — one stuck `running` row no longer blocks pruning of everything
+/// older than it, and never loses its own history.
+#[test]
+fn retention_prunes_old_events_but_keeps_a_live_executions_history() {
+    let d = tempdir().unwrap();
+    let s = ObservatoryStore::open(&d.path().join("obs.db"), RetentionPolicy::default()).unwrap();
+    s.append_event(event_for("old-1", "done", 30, false))
+        .unwrap(); // 1
+    s.append_event(event_for("old-2", "done", 30, true))
+        .unwrap(); // 2 (done is terminal)
+    s.append_event(event_for("live-1", "live", 30, false))
+        .unwrap(); // 3 (live starts)
+    s.append_event(event_for("old-3", "other", 30, true))
+        .unwrap(); // 4
+    s.append_event(event_for("fresh", "other2", 0, true))
+        .unwrap(); // 5
+    let pruned = s.apply_retention().unwrap();
+    assert_eq!(
+        pruned, 2,
+        "only events before the live execution's first cursor"
+    );
+    assert_eq!(s.retention_boundary().unwrap(), Some(Cursor::new(2)));
+    let left: Vec<String> = s
+        .events_after(Cursor::new(0), None)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.event_id)
+        .collect();
+    assert_eq!(left, ["live-1", "old-3", "fresh"]);
+}
+
+/// G4: a full prune followed by a restart never reissues a pruned cursor.
+#[test]
+fn reopen_after_full_prune_continues_the_cursor() {
+    let d = tempdir().unwrap();
+    let path = d.path().join("obs.db");
+    {
+        let s = ObservatoryStore::open(&path, RetentionPolicy::default()).unwrap();
+        for i in 0..3 {
+            s.append_event(event_for(&format!("e{i}"), "done", 30, true))
+                .unwrap();
+        }
+        assert_eq!(s.apply_retention().unwrap(), 3);
+        assert!(s.events_after(Cursor::new(0), None).unwrap().is_empty());
+    }
+    let s = ObservatoryStore::open(&path, RetentionPolicy::default()).unwrap();
+    assert_eq!(s.latest_cursor(), Cursor::new(3));
+    assert_eq!(
+        s.append_event(event_for("after", "next", 0, true)).unwrap(),
+        Cursor::new(4)
+    );
+}
+
+/// A finished event of ONE shared execution carrying ~4 KiB of payload, so the
+/// event log — not the never-pruned projection — dominates the database and
+/// a realistic size bound sits above the projection floor.
+fn heavy_event(id: &str) -> EventEnvelope {
+    let mut e = event_for(id, "heavy", 0, true);
+    e.payload = EventPayload::ExecutionFinished {
+        phase: ExecutionPhase::Finished,
+        duration_millis: 1,
+        error_classification: Some("x".repeat(4096)),
+    };
+    e
+}
+
+/// G3: the size bound measures the real database, so a tiny ceiling prunes
+/// old-enough-to-keep terminal history too, oldest first.
+#[test]
+fn retention_enforces_the_size_bound_from_real_db_size() {
+    let d = tempdir().unwrap();
+    let s = ObservatoryStore::open(
+        &d.path().join("obs.db"),
+        RetentionPolicy {
+            max_age_days: 365,
+            // ~420 KiB of heavy events: one 64-event batch (~256 KiB) gets
+            // under 320 KiB, so the pass must stop there.
+            max_bytes: 320 * 1024,
+        },
+    )
+    .unwrap();
+    for i in 0..100 {
+        s.append_event(heavy_event(&format!("e{i}"))).unwrap();
+    }
+    let pruned = s.apply_retention().unwrap();
+    assert!(pruned > 0, "an over-size db prunes");
+    let kept = s.events_after(Cursor::new(0), None).unwrap().len();
+    assert_eq!(kept, 100 - pruned);
+    assert!(
+        kept > 0,
+        "stops once under the bound instead of emptying the log"
+    );
+}
+
+/// G1: a snapshot is labelled with the watermark its rows reflect, an earlier
+/// `at` is refused rather than mislabelled, and snapshot + tail from its
+/// watermark replays exactly the events after it — never one it already saw.
+#[test]
+fn snapshot_is_point_in_time_and_tail_from_its_watermark_is_disjoint() {
+    let d = tempdir().unwrap();
+    let s = ObservatoryStore::open(&d.path().join("obs.db"), RetentionPolicy::default()).unwrap();
+    s.append_event(event_for("a1", "a", 0, false)).unwrap();
+    s.append_event(event_for("a2", "a", 0, true)).unwrap();
+    let snap = s.snapshot_at(None).unwrap();
+    assert_eq!(snap.watermark_cursor, Cursor::new(2));
+    assert_eq!(snap.nodes.len(), 1);
+    assert_eq!(snap.nodes[0].phase, "finished");
+
+    s.append_event(event_for("b1", "b", 0, false)).unwrap();
+    let tail: Vec<String> = s
+        .events_after(snap.watermark_cursor, None)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.event_id)
+        .collect();
+    assert_eq!(
+        tail,
+        ["b1"],
+        "the tail holds only what the snapshot did not"
+    );
+
+    assert!(matches!(
+        s.snapshot_at(Some(Cursor::new(2))),
+        Err(StoreError::HistoricalSnapshot {
+            requested: 2,
+            latest: 3
+        })
+    ));
+    assert_eq!(
+        s.snapshot_at(Some(Cursor::new(3)))
+            .unwrap()
+            .watermark_cursor,
+        Cursor::new(3)
+    );
+}
+
+/// G3: once a prune brings the live size under the bound, the next pass
+/// prunes nothing — freed pages sit on SQLite's freelist and must not keep
+/// the database reading as over the bound.
+#[test]
+fn a_pass_after_the_size_prune_does_not_prune_again() {
+    let d = tempdir().unwrap();
+    let path = d.path().join("obs.db");
+    let s = ObservatoryStore::open(&path, RetentionPolicy::default()).unwrap();
+    for i in 0..400 {
+        let mut e = event_for(&format!("e{i}"), &format!("x{i}"), 0, true);
+        e.payload = EventPayload::ExecutionFinished {
+            phase: ExecutionPhase::Finished,
+            duration_millis: i,
+            error_classification: Some("x".repeat(400)),
+        };
+        s.append_event(e).unwrap();
+    }
+    drop(s);
+    // A bound between "all rows" and "a few rows" of live data. F2's §4.1
+    // node columns and indexes put the never-pruned projection of these 400
+    // executions near 190 KiB (the whole database near 750 KiB), so the
+    // bound sits above the projection alone.
+    let s = ObservatoryStore::open(
+        &path,
+        RetentionPolicy {
+            max_age_days: 365,
+            max_bytes: 384 * 1024,
+        },
+    )
+    .unwrap();
+    let pruned = s.apply_retention().unwrap();
+    assert!(pruned > 0, "an over-size log prunes");
+    // Re-measuring after each batch stops once under the bound: an older
+    // estimate over-pruned and emptied the whole log here.
+    let kept = s.events_after(Cursor::new(0), None).unwrap().len();
+    assert!(
+        kept > 0,
+        "the size bound stops short of emptying the log (pruned {pruned})"
+    );
+    // The pruned pages now sit on the freelist; the file did not shrink.
+    // Fresh, small events after that must survive the next pass — with the
+    // file's page_count as the measure they would all be pruned again.
+    for i in 0..3 {
+        s.append_event(event_for(&format!("fresh{i}"), "fresh", 0, true))
+            .unwrap();
+    }
+    assert_eq!(
+        s.apply_retention().unwrap(),
+        0,
+        "freed pages are not live size"
+    );
+    assert_eq!(
+        s.events_after(Cursor::new(0), None).unwrap().len(),
+        kept + 3
+    );
+}
+
+/// A rejected append (duplicate event id) does not advance the watermark.
+#[test]
+fn a_failed_append_does_not_advance_the_cursor() {
+    let d = tempdir().unwrap();
+    let s = ObservatoryStore::open(&d.path().join("obs.db"), RetentionPolicy::default()).unwrap();
+    s.append_event(event()).unwrap();
+    assert!(
+        s.append_event(event()).is_err(),
+        "duplicate event_id refused"
+    );
+    assert_eq!(s.latest_cursor(), Cursor::new(1));
+    let mut next = event();
+    next.event_id = "event-2".into();
+    assert_eq!(s.append_event(next).unwrap(), Cursor::new(2));
+}
+
+/// F4 (§7.3): a `through`-bounded page that reaches `through` is complete,
+/// even while the watermark sits past it; a page cut short by `limit` is not.
+#[test]
+fn a_through_bounded_page_that_reaches_through_is_complete() {
+    let d = tempdir().unwrap();
+    let s = ObservatoryStore::open(&d.path().join("obs.db"), RetentionPolicy::default()).unwrap();
+    for i in 0..5 {
+        s.append_event(event_for(&format!("e{i}"), "x", 0, false))
+            .unwrap();
+    }
+    assert_eq!(s.latest_cursor(), Cursor::new(5));
+    let page = s
+        .replay_page(Cursor::new(0), Some(Cursor::new(3)), 10)
+        .unwrap();
+    assert_eq!(page.events.len(), 3);
+    assert!(!page.has_more);
+    assert!(page.complete, "reached through=3 below watermark 5");
+
+    let short = s
+        .replay_page(Cursor::new(0), Some(Cursor::new(3)), 2)
+        .unwrap();
+    assert!(short.has_more);
+    assert!(!short.complete, "limit stopped the page before through");
+}
+
+/// F10: each retention_archive row records the span that pass pruned — from
+/// just past the previous boundary — not a hardcoded 1.
+#[test]
+fn retention_archive_records_each_passes_real_from_cursor() {
+    let d = tempdir().unwrap();
+    let path = d.path().join("obs.db");
+    let s = ObservatoryStore::open(
+        &path,
+        RetentionPolicy {
+            max_age_days: 365,
+            max_bytes: 128 * 1024,
+        },
+    )
+    .unwrap();
+    // 100 heavy events (~400 KiB): one 64-event batch is not enough to get
+    // under 128 KiB, so the size loop prunes 1..=64 and then 65..=100.
+    for i in 0..100 {
+        s.append_event(heavy_event(&format!("e{i}"))).unwrap();
+    }
+    assert_eq!(s.apply_retention().unwrap(), 100);
+    let db = rusqlite::Connection::open(&path).unwrap();
+    let rows: Vec<(u64, u64, u64)> = db
+        .prepare("SELECT from_cursor,to_cursor,count_events FROM retention_archive ORDER BY rowid")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .collect::<std::result::Result<_, _>>()
+        .unwrap();
+    assert_eq!(rows, vec![(1, 64, 64), (65, 100, 36)]);
+}
+
+/// F10: an append that meets another connection's write lock waits for it
+/// (busy_timeout) instead of failing at once with SQLITE_BUSY.
+#[test]
+fn an_append_waits_out_a_competing_writer() {
+    let d = tempdir().unwrap();
+    let path = d.path().join("obs.db");
+    let s = ObservatoryStore::open(&path, RetentionPolicy::default()).unwrap();
+    let blocker = rusqlite::Connection::open(&path).unwrap();
+    blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        blocker.execute_batch("COMMIT").unwrap();
+    });
+    assert_eq!(s.append_event(event()).unwrap(), Cursor::new(1));
+    release.join().unwrap();
+}
+
+/// Manifest §4.3: a checkpoint truncates the WAL. (`journal_size_limit` is a
+/// per-connection pragma set in `open`; the daemon's 60 s loop keeps the file
+/// at zero between bursts.)
+#[test]
+fn checkpoint_truncates_the_wal() {
+    let d = tempdir().unwrap();
+    let path = d.path().join("obs.db");
+    let s = ObservatoryStore::open(&path, RetentionPolicy::default()).unwrap();
+    for i in 0..200 {
+        s.append_event(event_for(&format!("w{i}"), "wal", 0, true))
+            .unwrap();
+    }
+    let wal = d.path().join("obs.db-wal");
+    let wal_len = || std::fs::metadata(&wal).map(|m| m.len()).unwrap_or(0);
+    assert!(wal_len() > 0, "writes went to the WAL");
+    let report = s.checkpoint().unwrap();
+    assert!(!report.busy, "{report:?}");
+    assert_eq!(wal_len(), 0, "TRUNCATE empties the WAL");
+}
+
+#[test]
+fn replay_rechecks_retention_after_an_intervening_prune() {
+    let d = tempdir().unwrap();
+    let s = ObservatoryStore::open(
+        &d.path().join("obs.db"),
+        RetentionPolicy {
+            max_age_days: 7,
+            max_bytes: RetentionPolicy::default().max_bytes,
+        },
+    )
+    .unwrap();
+    for id in ["old-1", "old-2"] {
+        let old = event_for(id, id, 30, true);
+        s.append_event(old).unwrap();
+    }
+    // Model the old route's first boundary read, then let retention commit in
+    // the gap before the replay page operation. The page operation must
+    // revalidate under its own lock rather than return a falsely complete page.
+    assert_eq!(s.retention_boundary().unwrap(), None);
+    assert!(s.apply_retention().unwrap() > 0);
+    match s.replay_page(Cursor::new(0), None, 10) {
+        Err(StoreError::RetentionBoundaryCrossed { after, boundary }) => {
+            assert_eq!(after, 0);
+            assert_eq!(boundary, 2);
+        }
+        other => panic!("expected the pruned range, got {other:?}"),
+    }
+    let resumed = s.replay_page(Cursor::new(2), None, 10).unwrap();
+    assert!(resumed.events.is_empty());
+    assert!(
+        resumed.complete,
+        "the exclusive boundary is a valid empty tail"
+    );
+}
+
+#[test]
+fn replay_after_retention_boundary_returns_the_retained_tail() {
+    let d = tempdir().unwrap();
+    let s = ObservatoryStore::open(
+        &d.path().join("obs.db"),
+        RetentionPolicy {
+            max_age_days: 7,
+            max_bytes: RetentionPolicy::default().max_bytes,
+        },
+    )
+    .unwrap();
+    for id in ["old-1", "old-2"] {
+        s.append_event(event_for(id, id, 30, true)).unwrap();
+    }
+    s.append_event(event_for("recent", "recent", 0, true))
+        .unwrap();
+    assert!(s.apply_retention().unwrap() > 0);
+    assert_eq!(s.retention_boundary().unwrap(), Some(Cursor::new(2)));
+    let page = s.replay_page(Cursor::new(2), None, 10).unwrap();
+    assert_eq!(page.events.len(), 1);
+    assert_eq!(page.events[0].cursor, Cursor::new(3));
+    assert!(page.complete);
+}
