@@ -772,6 +772,12 @@ fn read_verified_blob(
 /// fixture that invented its own directory layout would keep passing after the
 /// real one moved.
 #[cfg(test)]
+pub(super) fn write_blob_for_test(root: &std::path::Path, key: &RoomKey, id: &str, bytes: &[u8]) {
+    let path = blob_path(root, key, id).expect("a test attachment id must be well-formed");
+    write_blob(&room_dir(root, key), &path, bytes).expect("test blob write");
+}
+
+#[cfg(test)]
 /// Unique per call: concurrent tests must not share attachment bytes.
 pub(super) fn test_root() -> std::path::PathBuf {
     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

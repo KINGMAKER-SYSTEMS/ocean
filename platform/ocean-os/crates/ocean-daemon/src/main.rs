@@ -163,6 +163,8 @@ mod room_agent_authority;
 mod room_attachments;
 /// Restart-safe outbound Bedrock room client and per-room supervisor (S2 P2-B).
 mod room_federation;
+/// Retention sweeps and orphan cleanup for closed rooms.
+mod room_maintenance;
 mod room_operator;
 mod room_profile;
 mod room_resources;
@@ -318,6 +320,11 @@ struct AppState {
     /// carries a room's files with its metadata. Per-room subdirectories are
     /// created lazily on first upload.
     room_attachments_root: Arc<std::path::PathBuf>,
+    /// Retention/interval/orphan-grace resolved once from env at startup.
+    room_maintenance_config: room_maintenance::MaintenanceConfig,
+    /// The `room_maintenance` card `GET /health` serves: what the last sweep
+    /// did and the configuration it did it under.
+    room_maintenance: room_maintenance::MaintenanceHandle,
     /// Bounded room-scoped wake hints for persistent transcript SSE tails. The
     /// payload is only `(room, seq)`; SQLite remains authoritative for replay,
     /// live delivery, lag recovery, ordering, and deduplication.
@@ -1092,6 +1099,14 @@ async fn main() -> anyhow::Result<()> {
     // per-room subdirectories are created lazily on first upload.
     let room_attachments_root = room_attachments::room_attachments_root();
     tracing::info!(path = %room_attachments_root.display(), "room attachment store ready");
+    let room_maintenance_config = room_maintenance::MaintenanceConfig::from_env();
+    let room_maintenance = room_maintenance::new_handle(&room_maintenance_config);
+    tracing::info!(
+        retention_days = room_maintenance_config.retention_days,
+        interval_secs = room_maintenance_config.interval.as_secs(),
+        orphan_grace_secs = room_maintenance_config.orphan_grace.as_secs(),
+        "room maintenance configured"
+    );
 
     let rooms = Arc::new(Mutex::new(room_store));
     let room_wakes = RoomWakeBus::default();
@@ -1159,6 +1174,8 @@ async fn main() -> anyhow::Result<()> {
         rooms,
         room_operator,
         room_attachments_root: Arc::new(room_attachments_root),
+        room_maintenance_config,
+        room_maintenance,
         provider_logins: Arc::default(),
         room_wakes,
         room_access_wakes,
@@ -1186,6 +1203,10 @@ async fn main() -> anyhow::Result<()> {
         turn_limiter: Arc::new(tokio::sync::Semaphore::new(max_concurrent_turns())),
         advisor_limiter: Arc::new(tokio::sync::Semaphore::new(ADVISOR_CONCURRENCY_LIMIT)),
     };
+
+    // Retention/orphan sweeps run on their own cadence until shutdown; the
+    // health card reports what the last sweep did.
+    room_maintenance::spawn_maintenance_loop(&state);
 
     // The sovereign trigger receiver must exist before federation startup can
     // ingest and claim a confirmed mention. It only validates and spawns; agent
@@ -1620,6 +1641,7 @@ fn banner_routes() -> &'static [&'static str] {
         "POST /v1/rooms/persistent/{key}/participants/{participant_id}/retire",
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
         "POST /v1/rooms/persistent/{key}/summarize",
 =======
         "GET /v1/rooms/persistent/{key}/resources",
@@ -1632,6 +1654,9 @@ fn banner_routes() -> &'static [&'static str] {
         "POST /v1/rooms/persistent/{key}/resources/{resource_id}/read",
 >>>>>>> e83dbf2 (Add the Rooms Phase 2 Stage 2c grant-management surface)
 =======
+=======
+        "POST /v1/rooms/maintenance/run",
+>>>>>>> 8556291 (Add retention and orphan maintenance for closed rooms)
         "POST /v1/rooms/persistent/{key}/attachments",
         "GET /v1/rooms/persistent/{key}/attachments",
         "GET /v1/rooms/persistent/{key}/attachments/{attachment_id}",
@@ -1732,6 +1757,12 @@ struct HealthEnvelope {
     #[serde(flatten)]
     health: HealthResponse,
     rev: String,
+    /// What the room maintenance loop last did, and the configuration it did
+    /// it under. It carries the CONFIGURATION and not only the counts because
+    /// the failure this card exists to catch is silent by construction: a
+    /// retention window that never got set looks exactly like a healthy
+    /// daemon with nothing to collect.
+    room_maintenance: room_maintenance::RoomMaintenanceReport,
 }
 
 async fn health(State(state): State<AppState>) -> Json<HealthEnvelope> {
@@ -1757,6 +1788,10 @@ async fn health(State(state): State<AppState>) -> Json<HealthEnvelope> {
         // build.rs (`-dirty` suffix on uncommitted worktrees; `unknown` when git
         // could not be run). Lets an operator confirm the supervised daemon is
         // actually running the main commit they expect.
+        // Read through the poison-recovering snapshot: a maintenance mutex
+        // poisoned by a panicked sweep must never be what takes `/health`
+        // down, since this card is how that panic becomes visible.
+        room_maintenance: room_maintenance::report_snapshot(&state.room_maintenance),
         rev: env!("OCEAN_BUILD_REV").into(),
     })
 }
@@ -2919,6 +2954,13 @@ fn room_routes() -> Router<AppState> {
         .route(
             "/v1/rooms/persistent/{key}/agents/{agent_member_id}/invoke",
             post(persistent_rooms::room_agent_invoke),
+        )
+        // Store-wide, so it hangs off `/v1/rooms/` rather than under a `{key}`
+        // that would have to be invented for it. Static second segment, so it
+        // cannot be shadowed by `/v1/rooms/{room_id}/livekit-token`.
+        .route(
+            "/v1/rooms/maintenance/run",
+            post(room_maintenance::room_maintenance_run),
         )
         .route("/v1/rooms/persistent/{key}/participants", post(room_join))
         .route(
@@ -14325,6 +14367,10 @@ mod tests {
             )),
             provider_logins: Arc::default(),
             room_attachments_root: Arc::new(crate::room_attachments::test_root()),
+            room_maintenance_config: room_maintenance::MaintenanceConfig::from_env(),
+            room_maintenance: room_maintenance::new_handle(
+                &room_maintenance::MaintenanceConfig::from_env(),
+            ),
             room_wakes,
             room_access_wakes,
             room_read_cursor_wakes: RoomReadCursorWakeBus::default(),
@@ -16216,6 +16262,10 @@ mod tests {
             )),
             provider_logins: Arc::default(),
             room_attachments_root: Arc::new(crate::room_attachments::test_root()),
+            room_maintenance_config: room_maintenance::MaintenanceConfig::from_env(),
+            room_maintenance: room_maintenance::new_handle(
+                &room_maintenance::MaintenanceConfig::from_env(),
+            ),
             room_wakes,
             room_access_wakes,
             room_read_cursor_wakes: RoomReadCursorWakeBus::default(),
@@ -16728,6 +16778,10 @@ mod tests {
             )),
             provider_logins: Arc::default(),
             room_attachments_root: Arc::new(crate::room_attachments::test_root()),
+            room_maintenance_config: room_maintenance::MaintenanceConfig::from_env(),
+            room_maintenance: room_maintenance::new_handle(
+                &room_maintenance::MaintenanceConfig::from_env(),
+            ),
             room_wakes,
             room_access_wakes,
             room_read_cursor_wakes: RoomReadCursorWakeBus::default(),
@@ -18678,6 +18732,10 @@ mod tests {
             )),
             provider_logins: Arc::default(),
             room_attachments_root: Arc::new(crate::room_attachments::test_root()),
+            room_maintenance_config: room_maintenance::MaintenanceConfig::from_env(),
+            room_maintenance: room_maintenance::new_handle(
+                &room_maintenance::MaintenanceConfig::from_env(),
+            ),
             room_wakes,
             room_access_wakes,
             room_read_cursor_wakes: RoomReadCursorWakeBus::default(),
@@ -25851,6 +25909,7 @@ mod tests {
             banner.len(),
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
             120,
 =======
             127,
@@ -25858,6 +25917,9 @@ mod tests {
 =======
             123,
 >>>>>>> 734a2d4 (Add durable room attachments)
+=======
+            124,
+>>>>>>> 8556291 (Add retention and orphan maintenance for closed rooms)
             "route baseline changed; review the manifest"
         );
 

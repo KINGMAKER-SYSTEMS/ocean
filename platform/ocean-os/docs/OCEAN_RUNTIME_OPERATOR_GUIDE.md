@@ -602,7 +602,11 @@ POST   /v1/rooms/persistent/{key}/attachments   upload a room attachment (bytes 
 GET    /v1/rooms/persistent/{key}/attachments   list a room's attachments
 GET    /v1/rooms/persistent/{key}/attachments/{attachment_id}  download attachment bytes
 DELETE /v1/rooms/persistent/{key}/attachments/{attachment_id}  remove an attachment
+<<<<<<< HEAD
 >>>>>>> 734a2d4 (Add durable room attachments)
+=======
+POST   /v1/rooms/maintenance/run             run a retention/orphan sweep now (operator lane)
+>>>>>>> 8556291 (Add retention and orphan maintenance for closed rooms)
 POST   /v1/rooms/persistent/{key}/messages                post message { author_id, author_kind?, body }
 GET    /v1/rooms/persistent/{key}/transcript              read transcript (?after_seq=N&limit=M)
 POST   /v1/rooms/persistent/{key}/artifacts               record what the room produced { id, kind: task|decision|note, title, body?, author_id }; 201 { artifact }. Author must be on the roster (403). Every create writes a System transcript line in the SAME transaction, so an artifact can never exist that the room's history does not explain.
