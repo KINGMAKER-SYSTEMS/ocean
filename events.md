@@ -607,3 +607,18 @@ regression test covers both close paths. Validation on this candidate: TUI
 suite (527 passed, 4 ignored), `cargo check -p ocean-tui`, release build,
 `cargo fmt --all -- --check`, and `git diff --check` passed. Exact final-head
 review and hosted checks remain pending.
+
+_________________________________________________________________________________
+time: [20:40] [05-10-26]
+agent: [codex desktop] [gpt-6.1-sol]
+worktree: [codex/pr20-final] [/Users/smathdaddy-macbook/.codex/worktrees/pr20-final/ocean]
+type: [review] [testing]
+area: [frontend] [testing]
+
+Follow-up review found the staged effort footer could show an unsupported level
+that Apply would normalize to default. The picker now uses the same effective
+level for its preview and Apply, with a rendered-footer regression test for a
+model that offers no effort levels. Validation: TUI suite (528 passed, 4
+ignored), `cargo check -p ocean-tui`, release build, `cargo fmt --all --
+--check`, and `git diff --check` passed. Exact final-head review and hosted
+checks remain pending.

@@ -4733,18 +4733,7 @@ impl App {
         // A level the applied model's encoder doesn't distinguish would be
         // silently folded or ignored — snap to `default` so the daemon's
         // global setting stays in force instead of a no-op pin.
-        let staged = self
-            .models_thinking_override
-            .unwrap_or(self.thinking_override);
-        if let Some(level) = staged {
-            if !entry.offers_thinking_level(level) {
-                self.thinking_override = None;
-            } else {
-                self.thinking_override = Some(level);
-            }
-        } else {
-            self.thinking_override = None;
-        }
+        self.thinking_override = self.staged_model_thinking();
         let id = entry.id.clone();
         self.models_open = false;
         self.models_thinking_override = None;
@@ -4757,8 +4746,15 @@ impl App {
     }
 
     fn staged_model_thinking(&self) -> Option<ThinkingLevel> {
-        self.models_thinking_override
-            .unwrap_or(self.thinking_override)
+        let staged = self
+            .models_thinking_override
+            .unwrap_or(self.thinking_override);
+        match (staged, self.models_entries.get(self.models_sel)) {
+            (Some(level), Some(entry)) if entry.ready && !entry.offers_thinking_level(level) => {
+                None
+            }
+            _ => staged,
+        }
     }
 
     // ── /advisor picker ──────────────────────────────────────────────────────
@@ -8375,6 +8371,28 @@ mod tests {
         assert!(!app.models_open);
         assert_eq!(app.thinking_override, Some(ThinkingLevel::High));
         assert_eq!(app.models_thinking_override, None);
+    }
+
+    #[test]
+    fn models_picker_footer_matches_the_effective_effort_on_apply() {
+        let mut app = offline_app();
+        app.models_open = true;
+        app.models_entries = vec![ModelEntry {
+            id: "glm-4.6".into(),
+            provider: "zhipu".into(),
+            label: "GLM 4.6".into(),
+            ready: true,
+            effort_levels: vec![],
+        }];
+        app.thinking_override = Some(ThinkingLevel::High);
+        app.models_thinking_override = Some(Some(ThinkingLevel::High));
+
+        let screen = render_app_to_string(&mut app, 100, 40);
+        assert!(
+            screen.contains("thinking: default"),
+            "unsupported staged effort previews the same default that Apply commits: {screen}"
+        );
+        assert!(!screen.contains("thinking: high"));
     }
 
     #[test]
