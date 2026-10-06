@@ -1094,3 +1094,20 @@ these findings as PR review comments; source branches remain with their
 owners. Both PRs' hosted Build Ocean checks pass and Build Surface is
 path-skipped. No code tests ran here: free disk was 821 MiB. The review is not
 approval or merge; no deployment was made.
+time: [16:12] [06-10-26]
+agent: [zcode] [glm-5.3]
+worktree: [docs/reconciliation-ledger-20261006]
+type: [workflow]
+area: [docs] reconciliation ledger
+
+PR #49 (minimizer M2 output economy — the first conflict-class three-way
+merge) MERGED at 19:54Z: Track B's sixth landed port and the program's proof
+that both-changed conflict files reconcile cleanly with Kingmaker fixes
+preserved. Appended #49 to the Reconciled slices ledger on this branch (the
+open ledger PR #40), per the contract to keep the table current when
+reconciliation lands. The remaining Rooms queue (#41/#43/#44/#45/#46/#47) is
+unaffected by #49's file set (ocean-runtime/agent/lsp/longhouse — no daemon
+main.rs overlap), so the repaired-stack reconciles (baseline 136) stand
+unchanged.
+
+Validation: cargo xtask docs-check PASS.

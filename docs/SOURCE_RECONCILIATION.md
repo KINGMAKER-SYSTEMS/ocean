@@ -35,6 +35,19 @@ Bounded personal-source slices landed on Kingmaker main, newest first. Each
 entry names the personal source tip the slice was ported from and what was
 deliberately left behind.
 
+- 2026-10-06 — Minimizer M2 output economy (PR #49, personal tip
+  `1bd1bc37636e0a4363f1f20aa1b72ee4c79b14cb`): the first CONFLICT-CLASS
+  reconciliation — `agent_loop.rs` three-way merged (Kingmaker's
+  token-aggregation and `Option<ThinkingLevel>` fixes preserved verbatim; the
+  single textual conflict resolved to Kingmaker's types), `output_economy.rs`
+  provider-only tool-result projections (PinBudget-bounded, exact provider
+  ordinals, sealed from emission) with the m2a/m2b characterization suites,
+  the `execute_for_run`/argv-mode capability seam, `ArtifactLease`/`PinBudget`,
+  the default-off `SessionContext::command_output_minimization` gate (M2c
+  profile enablement remains separately reviewed), and the ocean-minimizer
+  dependency. NOT ported: personal's +1234-line metrics expansion beyond
+  what later units need.
+
 - 2026-10-06 — Rooms S0 participant retirement (PR #25, personal tip
   `1bd1bc37636e0a4363f1f20aa1b72ee4c79b14cb`): the daemon operator route
   `POST /v1/rooms/persistent/{key}/participants/{id}/retire` plus its governing
