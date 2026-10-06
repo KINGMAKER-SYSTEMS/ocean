@@ -889,7 +889,7 @@ route fixture remains locally uncompiled because prior dependency compilation
 exhausted available disk; hosted required checks and a fresh independent review
 are still required. No merge, deployment, or live outcome is claimed.
 _________________________________________________________________________________
-time: [11:43pm] [10-05-26]
+time: [23:43] [05-10-26]
 agent: [codex] [gpt-6.1-sol]
 worktree: [codex/factory-pr31-reconcile] [/Users/risingtidesdev/.codex/worktrees/factory-pr31-reconcile/ocean]
 type: [gh actions] PR #31 reconciliation; Issues #33 and #34
@@ -922,8 +922,7 @@ bd2db1d31766fcd0dffb7abc493cda74b5833524; exact-final-head independent review
 and hosted Build Ocean / Build Surface checks remain pending. No merge,
 deployment, or live outcome is claimed.
 _________________________________________________________________________________
-_________________________________________________________________________________
-time: [11:51pm] [10-05-26]
+time: [23:51] [05-10-26]
 agent: [codex] [gpt-6.1-sol]
 worktree: [codex/factory-pr31-reconcile] [/Users/risingtidesdev/.codex/worktrees/factory-pr31-reconcile/ocean]
 type: [review] PR #31 exact-head adversarial follow-up
@@ -944,4 +943,37 @@ docs-check, and diff-check passed on the immediately preceding code revision;
 documentation changes from this follow-up still require docs-check. These
 changes are not yet pushed; hosted checks and exact-final-head review remain
 pending. No merge, deployment, or live outcome is claimed.
+_________________________________________________________________________________
+time: [00:10] [06-10-26]
+agent: [codex] [gpt-6.1-sol]
+worktree: [codex/factory-pr31-reconcile] [/Users/risingtidesdev/.codex/worktrees/factory-pr31-reconcile/ocean]
+type: [review] PR #31 final ledger and release checkpoint
+area: [testing] exact-head consistency and delivery accounting
+
+Corrected the two PR #31 ledger timestamps to the root contract's 24-hour
+HH:MM and DD-MM-YY format and removed the duplicate separator. The independent
+exact-head review at e4a82495265c165fc5b0aafed90f69c59a4bde06 found the code
+clean and identified only the timestamp-format P3; final review is required
+after this ledger update. PR #31 remains open at e4a82495265c165fc5b0aafed90f69c59a4bde06
+before this commit. Build Ocean and package validation pass; Build Surface is
+path-skipped on this runtime-only diff. The branch protection lists Build Ocean
+and Build Surface as required. The public main tree has no committed
+org/risingtides-agents/docs/orchestrator/FACTORY_STATE.md, so no such state
+readback is claimed. GitHub's deployments endpoint returned no deployment
+revision for this candidate.
+
+At 00:10 EDT on 06-10-26, GitHub's account-wide contribution calendar reported
+221 for 2026-10-05 (79 below the 300 target) and 9 for the partial 2026-10-06
+date. Merged Ocean PR counts queried at 04:10Z were 10 for 2026-10-05 UTC,
+8 for 2026-10-06 UTC so far, and 18 in the 2026-10-05 America/New_York
+delivery window. Calendar credits, UTC merge activity, and local delivery
+counts are separate measures; no artificial work was created to close the gap.
+
+Targeted Observatory (77 tests), daemon observatory routes (23 tests), and
+the focused persistent-room readback test (1 test) passed on the code at e4.
+The current docs-check passed (30 packages, 153 active Markdown files, 170
+local links), and git diff --check passed after ledger formatting edits.
+A new commit changes the reviewed PR head; fresh exact-head review and required
+hosted-check readback remain pending. No merge, deployment, or live outcome
+is claimed.
 _________________________________________________________________________________
