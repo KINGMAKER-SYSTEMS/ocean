@@ -1311,13 +1311,25 @@ mod tests {
     // cache_read=200 the total is 862, not the 150 that input+output alone gave.
     #[test]
     fn anthropic_total_tokens_includes_both_cache_buckets() {
-        let usage = Usage {
-            input: 100,
-            output: 50,
-            cache_write: 512,
-            cache_read: 200,
+        let reported = UsageDelta {
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_read_input_tokens: 200,
+            cache_creation_input_tokens: 512,
             ..Default::default()
         };
+        let mut usage = Usage::default();
+        apply_message_delta_usage(&mut usage, &reported);
+        assert_eq!(
+            (
+                usage.input,
+                usage.output,
+                usage.cache_read,
+                usage.cache_write
+            ),
+            (100, 50, 200, 512),
+            "Anthropic reports both cache buckets separately from input_tokens"
+        );
         assert_eq!(
             total_tokens(&usage),
             862,

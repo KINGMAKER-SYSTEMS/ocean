@@ -456,3 +456,317 @@ Applied the independent review of the Surface slash and session-link change. The
 
 Validation: ocean-surface-ui native tests pass (889 plus the integration suites), with new cases for the tokenizer, the popover rows, every decision above, the rule that any listed row resolves to itself, the draft-keeping paths driven through the same function the composer calls, and the restore guard. rustfmt check, native and wasm clippy with warnings denied on all targets, the wasm check, wasm test compilation and the proxy check pass. Not run in a browser: the keydown and boot paths are covered by the pure functions they call, not by a DOM test.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [5:53 pm] [10-05-26]
+agent: [codex desktop] [gpt-6.1-sol]
+worktree: [codex/activate-ocean-release-workflow]
+type: [workflow]
+area: [gh actions] [release]
+
+Activated Ocean OS release automation at the discoverable monorepo workflow path under `.github/workflows/`, adapting component-root commands, artifact paths, and package smoke-test source paths for `platform/ocean-os/`. Relevant pull requests validate the package; only stable version-tag pushes can enter the publish job. The active workflow checks a repository-configured immutable tag ruleset and verifies the exact validated artifact and live tag before publication. Added offline root/path/security contract coverage and updated the GitHub Actions and Ocean OS packaging devlog ownership references.
+
+Provisioned and read back GitHub tag ruleset 24536535 (`Ocean immutable release tags`) covering `refs/tags/v*` with update, deletion, and non-fast-forward protection and no bypass actors; set and read back `OCEAN_RELEASE_TAG_RULESET_ID=24536535`. Issue #14 records the release-path gap. Validation: offline workflow contract PASS; Ruby YAML syntax PASS; `git diff --check` PASS. Hosted release-package validation, any version tag, release, and deployment remain outstanding; no release was published.
+_________________________________________________________________________________
+
+Independent adversarial review of draft PR #16 found that a failed npm publish or latest-tag reconciliation could leave a public GitHub Release for an incomplete cross-registry release. The workflow now creates the tag-addressed GitHub Release as a draft and publishes it only after package integrity and registry-latest convergence succeed; the offline contract check asserts this ordering. Cross-registry publication remains retry-based rather than atomic.
+_________________________________________________________________________________
+
+time: [18:33] [05-10-26]
+agent: [codex desktop] [gpt-6.1-sol]
+worktree: [codex/reconcile-ocean-release-workflow]
+type: [workflow]
+area: [review] [gh actions] [release]
+
+After PRs #5 and #9 advanced canonical main, fetched `6d03dfa1` and rebased the factory-owned PR #16 changes onto it. Kept the new main ledger intact and appended the release records after its current entries. On prior PR head `a2d12566`, Build scope, Build Ocean, and Build Surface passed; release package validation remained in progress, so those hosted results do not validate the rebased commit. No package, tag, GitHub Release, or deployment was created.
+
+Validation on the rebased content: release workflow contract test, Ruby YAML parse, append-only ledger check, and `git diff --check` pass. `actionlint` is unavailable locally. Fresh hosted checks and adversarial review are required for the rebased head.
+_________________________________________________________________________________
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [18:50] [05-10-26]
+agent: [codex desktop] [gpt-6.1-sol]
+worktree: [codex/reconcile-ocean-release-workflow]
+type: [workflow]
+area: [review] [gh actions] [release]
+
+Canonical main advanced through PR #10 to `10368594` after the earlier PR #16 validation. Rebased the factory-owned release workflow branch onto that current main and retained the new main ledger entries. The prior head's hosted Build and package checks passed, but are stale after this base update; the new head must pass fresh checks and review before merge. GitHub Release/tag publication and deployment remain absent.
+
+Validation on the rebased content: release workflow contract test, Ruby YAML parse, append-only ledger check, and `git diff --check` pass. `actionlint` is unavailable locally.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [19:11] [2026-10-05]
+agent: [codex desktop] [gpt-6.1-sol]
+worktree: [codex/release-workflow-closeout] [/Users/smathdaddy-macbook/.codex/worktrees/ocean-release-workflow-closeout]
+type: [gh actions] [workflow]
+area: [release] [testing]
+
+PR #16 merged to canonical `main` as `21c29eda42774218ea8043809433684ee012d48b` (PR head `75aa902c06027906fada084adca59aeaab913a0c`). Exact-head hosted checks passed, including `validate package (macos-arm64)`; post-merge run `37386313285` passed Build scope, Build Ocean, and Build Surface. Read back active immutable version-tag ruleset `24536535` and the configured `OCEAN_RELEASE_TAG_RULESET_ID`. Closed issue #14 with this evidence. No version tag, package publication, GitHub Release, or deployment was created; a stable release remains a separate action.
+
+Validation: authoritative GitHub PR/commit/check state, ruleset and variable readback, and release/deployment API readback (zero releases and zero deployments); `git diff --check`.
+_________________________________________________________________________________
+
+time: [19:46] [2026-10-05]
+agent: [codex desktop] [gpt-6.1-sol]
+worktree: [codex/issue13-cancel-new]
+type: [bug report] [testing]
+area: [backend] [testing]
+
+Implemented the Issue #13 `/new` lifecycle repair in Ocean TUI. During an active
+turn, `/new` now retains the bound session and event stream, drops queued
+follow-ups, cancels the exact request when known, and waits for that request's
+matching terminal event or a matching fenced idle session sync before unbinding.
+Cancel acknowledgement alone does not settle the turn; stale session and
+generation events cannot settle a newer binding. If an adopted operation's
+request ID was never delivered to the TUI, it stays bound and reconciles until
+the daemon reports idle rather than guessing a cancellation target.
+
+Added focused state-machine tests for exact-ID cancellation, pre-ACK turn
+identity, finish-before-ACK, stale terminal/sync events, rejected rebinding
+and resume while settlement is pending, bounded cancellation retries, and
+project-switch refusal after sync settlement. Updated the TUI lifecycle
+contract; cancel and sync HTTP requests are bounded to 10 seconds and failed
+cancellation is attempted at most three times before explicit `/new` retry.
+Validation: `CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test -p
+ocean-tui` passed (523 passed, 4 ignored); `CARGO_INCREMENTAL=0 cargo check
+-p ocean-tui`; `CARGO_INCREMENTAL=0 cargo build -p ocean-tui --release`,
+`rustfmt --check`, and `git diff --check` passed. Hosted Build Ocean validation
+is still required before merge. No daemon was installed or restarted.
+_________________________________________________________________________________
+_________________________________________________________________________________
+time: [20:10] [05-10-26]
+agent: [zcode] [glm-5.3]
+worktree: [fix/tui-thinking-effort-levels]
+type: [feature-request]
+area: [frontend] [ocean-tui]
+
+Implemented issue #8: the /models picker's thinking cycler now derives its
+options from the highlighted model's catalog `effort_levels` instead of
+offering every shared ThinkingLevel for every model. `ModelEntry` deserializes
+the daemon's additive per-route `effort_levels` (older daemons deserialize to
+empty), `cycle_thinking` cycles `default` plus exactly the offered levels in
+catalog order, and unknown forward-compat names are skipped rather than
+guessed. `default` (unset) always stays available and distinct from `off`. An
+empty list — a route whose encoder sends no effort parameter, or a catalog
+still loading — leaves `default` as the only choice, so the TUI never offers a
+control the encoder ignores. Applying a model now snaps a pinned level that
+model does not offer back to `default` instead of riding a silently folded
+pin. No provider compatibility table was duplicated in the TUI: the options
+come from the daemon catalog strings. `/thinking <level>` arguments remain
+explicit operator text, unchanged.
+
+Validation: cargo check -p ocean-tui --all-targets; full cargo test -p
+ocean-tui (514 passed, 0 failed, 4 ignored — includes new tests for collapsed
+DeepSeek-style routes, single-level K3-style routes, empty-catalog default
+locking, highlighted-entry cycling, and apply-time snap); rustfmt applied;
+cargo clippy -p ocean-tui --all-targets clean; cargo build -p ocean-tui
+--release. Devlog pass: no owning contract text describes the cycler's option
+set, so AGENTS.md files are intentionally unchanged.
+
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [20:41] [05-10-26]
+agent: [codex desktop] [gpt-6.1-sol]
+worktree: [codex/pr20-final] [/Users/smathdaddy-macbook/.codex/worktrees/pr20-final/ocean]
+type: [review] [bug report]
+area: [frontend] [testing]
+
+Reconciled the Issue #8 picker with current main and applied two independent
+review findings. Effort changes stay staged until model apply and are discarded
+on Escape/outside click; the footer previews the same supported effort that
+Apply commits. Regression tests cover both dismissal paths and an unsupported
+preview. Validation: TUI suite (528 passed, 4 ignored), `cargo check -p
+ocean-tui`, `cargo build -p ocean-tui --release`, `cargo fmt --all -- --check`,
+and `git diff --check` passed. Final exact-head review and hosted checks remain
+pending; no merge or deployment has occurred.
+
+time: [00:15:20 UTC] [06-10-26]
+agent: [codex desktop] [gpt-6.1-sol]
+worktree: [codex/issue11-cached-tokens]
+type: [gh actions] [deployment]
+area: [release] [testing]
+
+Issue #13 / PR #19 deployment record: installed merged commit
+`683ad9a270be9b17fa9a05c98b059890e402f945` as immutable artifact
+`~/.local/libexec/ocean-tui/ocean-683ad9a270be`. Code signing verified; the
+artifact rendered and remained alive in a four-second PTY with
+`OCEAN_TUI_AUTOSTART=0`. Daemon health remained true at revision
+`0abb558179af`; the previous artifact was retained.
+_________________________________________________________________________________
+time: [20:39 EDT] [05-10-26]
+agent: [codex desktop] [gpt-6.1-sol]
+worktree: [codex/issue11-cached-tokens] [/Users/smathdaddy-macbook/.codex/worktrees/issue11-cached-tokens]
+type: [feature-request] [testing]
+area: [backend] [frontend] [testing]
+
+Implemented Issue #11's provider-neutral token footprint. Added authoritative
+`total_tokens` and separate cache-write buckets to the additive Ocean
+`TurnFinished` event; daemon populates them from provider usage. Surface and
+TUI show clearly labeled processed-token totals, keep cache buckets as
+breakdowns (never additive), and preserve unknown totals. Surface's accumulated
+number is labeled as observed since the current session binding because this
+client does not hydrate historical usage. Added Anthropic and Gemini-shaped
+accounting tests plus SDK compatibility/roundtrip, Surface reducer/label, and
+TUI status/reducer tests. Updated provider, Surface, and TUI contracts.
+
+Validation: `cargo test -p ocean-protocol` (181 unit + 5 integration passed);
+`cargo test -p ocean-agent-sdk` (55 unit + 12 integration passed);
+`CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test -p ocean-tui`
+(524 passed, 4 ignored), plus two focused TUI label/reducer tests;
+`cargo check --workspace --tests`; `cargo check -p ocean-tui`;
+`cargo build -p ocean-tui --release`; Surface focused token-usage tests and
+`cargo check -p ocean-surface-ui --target wasm32-unknown-unknown`;
+component formatting and `git diff --check`. No deployment performed.
+_________________________________________________________________________________
+
+time: [00:52 UTC] [06-10-26]
+agent: [codex desktop] [gpt-6.1-sol]
+worktree: [codex/issue11-cached-tokens] [/Users/smathdaddy-macbook/.codex/worktrees/issue11-cached-tokens]
+type: [gh actions] [deployment]
+area: [release] [testing]
+
+PR #20 merged to canonical `main` as `7d4c446c6ea1c92b6fd2c4d42bfc9c3efc3d62ee`. The parent release owner reported installing the immutable local TUI artifact `/Users/smathdaddy-macbook/.local/libexec/ocean-tui/ocean-7d4c446c6ea1`; code signing passed and a four-second PTY smoke rendered the UI. Daemon health remained true at revision `0abb558179af`; no daemon rollout was performed.
+_________________________________________________________________________________
+
+time: [00:52 UTC] [06-10-26]
+agent: [codex desktop] [gpt-6.1-sol]
+worktree: [codex/issue11-cached-tokens] [/Users/smathdaddy-macbook/.codex/worktrees/issue11-cached-tokens]
+type: [bug report] [testing]
+area: [backend] [frontend] [testing]
+
+Addressed the two adversarial review findings on Issue #11 / PR #22. Multi-round token totals now remain unknown if any completed provider round lacks an authoritative total, across live runtime aggregation, failed-turn recovery, and continuation aggregation; mixed known/unknown regressions cover both round orders. TUI usage summaries now reset when history or session binding is replaced and when a new session is cleared, with a focused regression.
+
+Validation: focused `ocean-runtime` mixed-total and existing multi-round tests passed; focused `ocean-agent` recovery, continuation, and existing all-known aggregation tests passed; focused TUI reset test and `cargo build -p ocean-tui --release` passed. Formatting and exact-`main` reconciliation remain in progress. No deployment performed.
+_________________________________________________________________________________
+
+time: [00:56 UTC] [06-10-26]
+agent: [codex desktop] [gpt-6.1-sol]
+worktree: [codex/issue11-cached-tokens] [/Users/smathdaddy-macbook/.codex/worktrees/issue11-cached-tokens]
+type: [review] [testing]
+area: [backend] [frontend] [testing]
+
+Reconciled Issue #11 / PR #22 on top of canonical `main` at `7d4c446c6ea1c92b6fd2c4d42bfc9c3efc3d62ee`, preserving the unrelated Issue #20 release ledger. After reconciliation, focused runtime mixed-total coverage passed; Ocean Agent mixed-known/unknown recovery and continuation tests plus the existing all-known round aggregation test passed; the TUI session-reset regression and release build passed. `cargo fmt --all -- --check` and `git diff --check` passed. No deployment performed; fresh independent review and hosted PR checks remain required.
+_________________________________________________________________________________
+_________________________________________________________________________________
+time: [21:07] [05-10-26]
+agent: [zcode] [glm-5.3]
+worktree: [port/oauth-custody-cluster]
+type: [feature-request]
+area: [backend] reconciliation: OAuth custody cluster
+
+First bounded Track B reconciliation port (personal source → Kingmaker main,
+per docs/SOURCE_RECONCILIATION.md): the operator-authenticated coding-plan
+login surface. Ported ocean-oauth additions — OAuthProvider::from_label/ALL,
+OAuthBlockStatus, oauth_block_status (token-free block presence/
+refreshability/expiry), logout — with store::read_block/remove_and_write built
+on Kingmaker's guard-bound custody publisher rather than the personal
+temp-path writer, and the daemon's provider_auth.rs module (745 lines, web
+identity M3): GET /v1/auth/providers status, login start/poll/cancel, and
+logout, all through the same fail-closed OperatorIdentity authorization as
+room mutations. Wired into AppState (provider_logins), the router, the GET /
+discovery banner, and the operator guide quick reference; the router-contract
+parity test baseline moved 112 → 117.
+
+Deliberately NOT ported, preserving Kingmaker fixes: the personal
+oauth_refresh.rs rewrite (Kingmaker's version is the hardened evolution —
+full-block merge comparison, structured MergeFailure taxonomy, custody-timeout
+handling, cooldowns cleared only on confirmed persistence, spawn_blocking
+merge, no response bodies logged; the personal copy adds nothing and drops
+discipline), the ocean-oauth providers.rs error hunk (surfaces provider
+response bodies into operator-visible errors, contradicting the crate's
+deliberate fixed-classification doctrine), and the personal store custody
+model (auth_file_temp_path internals; the guard publisher already provides
+private temp + rename + fsync + parent sync). Adapted for Kingmaker fixes:
+fallback_source now also maps the ClaudeCodeKeychain and ClaudeCodeCliAuthFile
+credential sources (native Claude login discovery) that postdate the personal
+tree.
+
+Validation: cargo test -p ocean-daemon (887 passed incl. 6 provider_auth
+route tests and the updated router-contract parity suite); cargo test -p
+ocean-oauth (44, incl. 3 new status/logout tests); cargo test -p ocean-agent
+(266 — unchanged file, re-verified); cargo check --workspace --tests; rustfmt
+and denied-warning Clippy on touched crates. Devlog pass: ocean-oauth
+AGENTS.md consumers updated; operator guide quick reference updated by the
+parity contract.
+
+_________________________________________________________________________________
+time: [21:31] [05-10-26]
+agent: [codex desktop] [gpt-6.1-sol]
+worktree: [codex/factory-pr23-oauth-hardening]
+type: [bug report] [review]
+area: [backend] [testing]
+
+Hardened PR #23 against issue #24: each provider now serializes start/cancel/
+logout; an attempt retains a revocable publication fence whose guard moves
+into the blocking credential writer. Cancellation waits for custody settlement,
+including after a dropped HTTP waiter, and a completed successful publication
+remains succeeded. Blocking logout retains its operation lease even after a
+disconnected request. Auth status/read/removal work runs off Tokio workers;
+status reports stored OAuth facts separately from the runtime resolver's
+fixed, token/path-free CredentialOrigin projection. Callback failures log only
+fixed classifications and provider labels.
+
+Reconciled canonical main a41f9ef3 and independently advanced PR head 91611256
+without rewriting either lineage: aa5f88d6 preserves original 60e9701b and main,
+and d70a6509 preserves the remote PR lineage. Both original ledger histories
+are retained, with the duplicate original OAuth entry represented once.
+
+Validation: locked OAuth tests (46 unit plus 2 synthetic loopback integration),
+providers tests (67), daemon provider_auth tests (14), Agent oauth_refresh tests
+(7), cargo check --workspace --locked, denied-warning all-target Clippy for
+OAuth/providers/daemon, cargo fmt --all -- --check and git diff --check passed.
+Deterministic custody tests cover blocked/queued publication, concurrent starts,
+dropped cancel/logout, effective env/native fallback and captured-log redaction;
+no real credentials or provider authentication flow was used. Devlog pass:
+updated OAuth, providers and daemon contracts; parent/index docs intentionally
+unchanged because ownership boundaries and child indexes are unchanged. Candidate
+only: exact-head hosted builds, fresh independent review, merge and deployment
+remain separate release gates.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+
+time: [09:40pm] [05-10-26]
+agent: [codex desktop] [gpt-6.1-sol]
+worktree: [codex/factory-tui-deploy-ledger] [/Users/smathdaddy-macbook/.codex/worktrees/factory-tui-deploy-ledger/ocean]
+type: [gh actions] [deployment]
+area: [release] [testing]
+
+After PR #22 merged, installed the canonical Ocean TUI from clean `origin/main`
+revision `a41f9ef3823ec214e4bd65c3e5e9ded98b1b600f` using
+`ops/install-ocean-tui.sh` with `CARGO_PROFILE_RELEASE_STRIP=none` after the
+system volume ran out of space during the default strip step. The installer
+published immutable artifact `~/.local/libexec/ocean-tui/ocean-a41f9ef3823e`,
+selected it through `~/.local/libexec/ocean-tui/current`, and refreshed
+`~/.local/bin/ocean`. Code signature verification passed. A real 120x40 PTY
+launch ran for three seconds and emitted 19,750 terminal bytes including the
+rendered shell/status row. This proves installation and startup only; a real
+provider-token usage session was not exercised.
+
+The supervised daemon remains on revision `0abb558179af`; it was not restarted.
+The root daemon release contract requires a quiet intake window and runtime
+compatibility verification, which were not established in this run. Surface
+was not deployed or live-verified. Devlog pass: no component contracts or indexes
+changed; this root ledger records the release evidence.
+_________________________________________________________________________________
+_________________________________________________________________________________
+time: [21:52] [05-10-26]
+agent: [zcode] [glm-5.3]
+worktree: [docs/reconciliation-ledger-20261005]
+type: [workflow]
+area: [docs] reconciliation ledger
+
+PR #23 (OAuth custody cluster) merged as e850c39 — the first Track B
+reconciliation port to land. Added the "Reconciled slices" section to
+docs/SOURCE_RECONCILIATION.md recording it (source tip, what landed, what was
+deliberately left behind and why), per the contract to keep the
+source-tip table current when reconciliation actually lands. PR #25
+(participant retirement) was rebased onto post-#23 main: router-contract
+baseline reconciled to 118, ocean-daemon 894 passed, force-pushed.
+
+Validation: cargo xtask docs-check PASS. Docs-only change; no owning
+contract text beyond the reconciliation doc itself changed.
+_________________________________________________________________________________

@@ -104,8 +104,9 @@ This crate owns the full-screen terminal steering cockpit (`ocean` binary) for i
   `◨` files; toggle semantics via `App::press`, hit rects filled by
   `draw_status` using DISPLAY width, never `chars().count()`), then the status
   segments from `shell/status.rs`: model · branch · health · error · activity
-  · tok/s. Layout order and survival are SEPARATE: on overflow, segments drop
-  by rank (tok/s, then activity, then branch; health/error outlive extras; the
+  · processed tokens/rate. Layout order and survival are SEPARATE: on overflow,
+  segments drop by rank (processed tokens/rate, then activity, then branch;
+  health/error outlive extras; the
   model never drops). Do not resurrect key legends, counters, or branding.
 - Mouse text selection is pane-scoped (2026-07-11, owner-directed): Down arms
   only inside a content pane (sessions/tree/center/terminal — never title,
@@ -113,7 +114,8 @@ This crate owns the full-screen terminal steering cockpit (`ocean` binary) for i
   reverse-video highlight and the copied text share one bounded-span geometry
   (`bounded_span`, app.rs) so highlight == copy and a selection never crosses
   into a sibling lane.
-- Metrics are truthful or absent: tok/s and context occupancy render only from
+- Metrics are truthful or absent: the last-turn processed token footprint,
+  tok/s, and context occupancy render only from
   daemon-reported values for the LAST finished turn (both clear on
   `TurnStarted`; context also clears on stream gaps or adoption after a missing
   start). Context occupancy uses the provider-reported final request (or the
@@ -371,6 +373,20 @@ This crate owns the full-screen terminal steering cockpit (`ocean` binary) for i
   the queue and any pause owner alone, so `/stop`, Esc and `Ctrl+Y`/`Ctrl+N`
   still reach the running turn. A promoted follow-up always has a user row.
   Failed turns render `Turn::ErrorNotice`, not advisor cards.
+- `/new` during an active turn is an intent, not an immediate session reset:
+  retain the old binding and event stream, discard queued follow-ups, cancel
+  the exact daemon request when its ID is known, and unbind only after its
+  matching terminal event or a matching fenced idle session sync. A cancel
+  response alone is not settlement. Keep new submissions blocked while
+  settlement is pending, and reject a different session bind until it settles;
+  generation and session identity guard late events. Reject both a different
+  session bind and an explicit resume while settlement is pending. If an
+  adopted active turn has no request ID delivered to the TUI, keep the old
+  binding and reconcile until the daemon reports idle rather than guessing
+  which request to cancel. Bound cancel and sync HTTP requests to 10 seconds;
+  retry failed cancellation at most three times and sync with bounded backoff.
+  Leave `/new` pending with an explicit retry affordance if authoritative idle
+  state remains unavailable.
 - Render-protocol components project into terminal-native chat cards. Component
   IDs are unique across inline and pinned slots when `replace` is set; unmount,
   history load, and new-session reset must not leak pinned state. Treat every

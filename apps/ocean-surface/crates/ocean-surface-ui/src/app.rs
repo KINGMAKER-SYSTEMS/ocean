@@ -9,7 +9,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 
 use crate::components::{PermissionPrompts, PinnedRail};
-use crate::daemon::{daemon_url_from_env, Daemon, ProjectInfo, TurnImage};
+use crate::daemon::{daemon_url_from_env, Daemon, ProjectInfo, TokenStats, TurnImage};
 use crate::deck::browser::BrowserCockpit;
 use crate::deck::files::FilesPanel;
 use crate::deck::repo::RepoPanel;
@@ -1604,7 +1604,7 @@ pub fn App() -> impl IntoView {
     // next turn's request; `None` leaves the daemon defaults untouched.
     // Predicates pulled out of the view! macro: a bare `>` inside an attribute
     // expression would be parsed as the element's closing bracket.
-    let has_tokens = move || session_tokens.get().total() > 0;
+    let has_tokens = move || session_tokens.get().has_usage();
     let has_rate = move || {
         last_turn_tokens
             .get()
@@ -2564,20 +2564,19 @@ pub fn App() -> impl IntoView {
                     // so they read as secondary telemetry, not equal-weight peers
                     // to the primary header controls.
                     <div class="ocean-runtime">
-                    // Token usage: session total, with a per-turn + cache
-                    // breakdown on hover. Hidden until the first turn finishes.
+                    // Provider footprint is authoritative when the daemon
+                    // reports it; cached buckets are breakdowns, not additions.
                     <Show when=has_tokens>
                         <div
                             class="ocean-tokens"
-                            title=move || {
-                                let s = session_tokens.get();
-                                let last = last_turn_tokens.get().unwrap_or_default();
-                                format!(
-                                    "Session — in {} · out {} · cache {} · total {}\nLast turn — in {} · out {} · {:.1} tok/s",
-                                    s.input, s.output, s.cache_read, s.total(),
-                                    last.input, last.output, last.tokens_per_second,
-                                )
-                            }
+                            title=move || token_usage_label(
+                                session_tokens.get(),
+                                last_turn_tokens.get().unwrap_or_default(),
+                            )
+                            aria-label=move || token_usage_label(
+                                session_tokens.get(),
+                                last_turn_tokens.get().unwrap_or_default(),
+                            )
                         >
                             <span class="ocean-tokens__io">
                                 {move || {
@@ -2585,6 +2584,11 @@ pub fn App() -> impl IntoView {
                                     format!("↑{} ↓{}", fmt_tokens(s.input), fmt_tokens(s.output))
                                 }}
                             </span>
+                            <Show when=move || session_tokens.get().provider_footprint().is_some()>
+                                <span class="ocean-tokens__total">
+                                    {move || session_tokens.get().provider_footprint().map(token_footprint_chip).unwrap_or_default()}
+                                </span>
+                            </Show>
                             <Show when=has_rate>
                                 <span class="ocean-tokens__rate">
                                     {move || format!("{:.0} t/s", last_turn_tokens.get().unwrap_or_default().tokens_per_second)}
@@ -3256,6 +3260,24 @@ fn fmt_tokens(n: u64) -> String {
     }
 }
 
+fn token_footprint_chip(total: u64) -> String {
+    format!("{} tokens processed", fmt_tokens(total))
+}
+
+fn token_usage_label(session: TokenStats, last: TokenStats) -> String {
+    let footprint = |total: Option<u64>| {
+        total
+            .map(|tokens| format!("{} tokens", fmt_tokens(tokens)))
+            .unwrap_or_else(|| "unavailable".into())
+    };
+    format!(
+        "Observed subtotal since this session binding — provider token footprint: {}; input {}; output {}; cache read {}; cache write {}. Last turn provider token footprint: {}; input {}; output {}; cache read {}; cache write {}; {:.1} tokens per second. Cache counts are breakdowns and may already be included in input and footprint.",
+        footprint(session.provider_footprint()), session.input, session.output, session.cache_read,
+        session.cache_write, footprint(last.provider_footprint()), last.input, last.output,
+        last.cache_read, last.cache_write, last.tokens_per_second,
+    )
+}
+
 // ── deep links (ocean://) ───────────────────────────────────────────────
 
 /// What a parsed `ocean://` deep link asks the surface to do.
@@ -3327,12 +3349,12 @@ mod tests {
         composer_overflow_y, council_open_visibility, execute_planner_workflow, first_word,
         initial_planner_context, island_open_visibility, parse_deep_link, planner_candidates,
         run_slash, selected_planner_context, should_submit_composer_key, slash_takes_arguments,
-        thinking_arg, topmost_reveal, window_escape_should_handle, DeepLinkAction, PlannerAction,
-        PlannerContext, PlannerWorkflowFailureStage, PlannerWorkflowOps, PlannerWorkflowRequest,
-        RevealSurface, RevealVisibility, ThinkingArg, COMPOSER_MAX_HEIGHT_PX,
-        COMPOSER_MIN_HEIGHT_PX,
+        thinking_arg, token_footprint_chip, token_usage_label, topmost_reveal,
+        window_escape_should_handle, DeepLinkAction, PlannerAction, PlannerContext,
+        PlannerWorkflowFailureStage, PlannerWorkflowOps, PlannerWorkflowRequest, RevealSurface,
+        RevealVisibility, ThinkingArg, COMPOSER_MAX_HEIGHT_PX, COMPOSER_MIN_HEIGHT_PX,
     };
-    use crate::daemon::{Daemon, ProjectInfo, WorktreeInfo};
+    use crate::daemon::{Daemon, ProjectInfo, TokenStats, WorktreeInfo};
     use crate::palette::{Command, CommandRegistry, CommandScope};
     use futures_util::future::LocalBoxFuture;
     use futures_util::FutureExt;
@@ -3530,6 +3552,32 @@ mod tests {
         for level in crate::daemon::THINKING_LEVELS {
             assert_eq!(thinking_arg(level), ThinkingArg::Level(level));
         }
+    }
+
+    #[test]
+    fn token_usage_label_names_provider_footprint_and_cache_breakdowns() {
+        let mut session = TokenStats::default();
+        session.input = 100;
+        session.output = 50;
+        session.cache_read = 200;
+        session.cache_write = 512;
+        session.total_tokens = Some(862);
+        let label = token_usage_label(session, session);
+        assert_eq!(token_footprint_chip(862), "862 tokens processed");
+        assert!(label.contains(
+            "Observed subtotal since this session binding — provider token footprint: 862 tokens"
+        ));
+        assert!(label.contains("cache read 200; cache write 512"));
+        assert!(label.contains("may already be included in input and footprint"));
+
+        let mut unknown_stats = TokenStats::default();
+        unknown_stats.input = 100;
+        unknown_stats.output = 20;
+        unknown_stats.cache_read = 80;
+        let unknown = token_usage_label(unknown_stats, TokenStats::default());
+        assert!(unknown.contains(
+            "Observed subtotal since this session binding — provider token footprint: unavailable"
+        ));
     }
 
     fn planner_project(id: &str, root: &str, worktrees: &[&str]) -> ProjectInfo {

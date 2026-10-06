@@ -34,7 +34,20 @@ This crate owns browser OAuth 2.0 + PKCE login for provider subscriptions: bind 
 
 ## Work Guidance
 
-- Consumer today: `ocean-tui` `/login` (`Action::Login` → `begin`/`finish`).
+- `PublicationFence` retains revocation plus publication custody for one attempt.
+  `finish_with_publication` moves the custody guard into the blocking writer;
+  aborting its async waiter cannot detach publication from settlement. Callers
+  revoke, stop the session task, and settle the retained fence before reporting
+  cancellation or removing credentials. Settled successful publication remains
+  a succeeded login even when its async waiter was aborted. A cancelled wait may be
+  retried on the same fence; revoked queued writers never publish.
+
+- Consumers: `ocean-tui` `/login` (`Action::Login` → `begin`/`finish`) and
+  the daemon's operator-only `/v1/auth/providers*` routes
+  (`ocean-daemon/src/provider_auth.rs`), which also use `oauth_block_status`
+  (token-free block presence/refreshability/expiry) and `logout` (atomic block
+  removal under the same custody lease that never creates a missing auth
+  file).
 - Keep `begin()` non-blocking beyond the port bind; everything slow belongs in `finish()`.
 
 ## Verification

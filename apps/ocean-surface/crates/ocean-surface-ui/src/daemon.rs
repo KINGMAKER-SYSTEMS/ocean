@@ -734,6 +734,10 @@ pub enum AgentEvent {
         #[serde(default)]
         cache_read_tokens: Option<u64>,
         #[serde(default)]
+        cache_write_tokens: Option<u64>,
+        #[serde(default)]
+        total_tokens: Option<u64>,
+        #[serde(default)]
         tokens_per_second: Option<f64>,
     },
     /// The agent wants to mount or update an interactive component.
@@ -2247,20 +2251,47 @@ pub struct ModelInfo {
 }
 
 /// Token usage for a turn (or summed for a session), mirrored from the daemon's
-/// TurnFinished event. All counts are real provider usage when reported.
+/// TurnFinished event. `total_tokens` is the provider's authoritative footprint;
+/// cache counts are breakdowns and may already be included in input and total.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct TokenStats {
     pub input: u64,
     pub output: u64,
     pub cache_read: u64,
+    pub cache_write: u64,
+    pub total_tokens: Option<u64>,
     /// Tokens/sec for the last turn; not meaningful when summed, so a session
     /// total leaves this at 0.
     pub tokens_per_second: f64,
+    turns_seen: u64,
 }
 
 impl TokenStats {
-    pub fn total(&self) -> u64 {
-        self.input + self.output
+    pub fn provider_footprint(&self) -> Option<u64> {
+        self.total_tokens
+    }
+
+    pub fn has_usage(&self) -> bool {
+        self.input > 0
+            || self.output > 0
+            || self.cache_read > 0
+            || self.cache_write > 0
+            || self.total_tokens.is_some_and(|total| total > 0)
+    }
+
+    fn record_turn(&mut self, turn: Self) {
+        self.input = self.input.saturating_add(turn.input);
+        self.output = self.output.saturating_add(turn.output);
+        self.cache_read = self.cache_read.saturating_add(turn.cache_read);
+        self.cache_write = self.cache_write.saturating_add(turn.cache_write);
+        self.total_tokens = if self.turns_seen == 0 {
+            turn.total_tokens
+        } else {
+            self.total_tokens
+                .zip(turn.total_tokens)
+                .map(|(session, turn)| session.saturating_add(turn))
+        };
+        self.turns_seen = self.turns_seen.saturating_add(1);
     }
 }
 
@@ -6410,6 +6441,8 @@ fn apply_event(
             output_tokens,
             input_tokens,
             cache_read_tokens,
+            cache_write_tokens,
+            total_tokens,
             tokens_per_second,
             ..
         } => {
@@ -6512,15 +6545,13 @@ fn apply_event(
                 input: input_tokens.unwrap_or(0),
                 output: output_tokens.unwrap_or(0),
                 cache_read: cache_read_tokens.unwrap_or(0),
+                cache_write: cache_write_tokens.unwrap_or(0),
+                total_tokens: *total_tokens,
                 tokens_per_second: tokens_per_second.unwrap_or(0.0),
+                turns_seen: 0,
             };
             last_turn_tokens.set(Some(turn_stats));
-            session_tokens.update(|s| {
-                s.input += turn_stats.input;
-                s.output += turn_stats.output;
-                s.cache_read += turn_stats.cache_read;
-                // Session total isn't a rate; keep tokens_per_second at 0.
-            });
+            session_tokens.update(|s| s.record_turn(turn_stats));
         }
         AgentEvent::ComponentRender {
             component_id,
@@ -8385,6 +8416,93 @@ mod tests {
     }
 
     #[test]
+    fn provider_footprint_uses_authoritative_totals_without_readding_cache_breakdowns() {
+        let daemon = daemon_with_session("provider");
+        daemon.session_id.set(Some("s1".into()));
+
+        // Anthropic reports cached input separately from its `input_tokens`;
+        // the provider footprint includes both cache buckets.
+        daemon.active_turn_id.set(Some("anthropic-turn".into()));
+        apply_test_event(
+            &daemon,
+            AgentEvent::TurnFinished {
+                session_id: "s1".into(),
+                turn_id: "anthropic-turn".into(),
+                status: "completed".into(),
+                error: None,
+                wall_ms: Some(100),
+                output_tokens: Some(50),
+                input_tokens: Some(100),
+                cache_read_tokens: Some(200),
+                cache_write_tokens: Some(512),
+                total_tokens: Some(862),
+                tokens_per_second: Some(500.0),
+            },
+        );
+        assert_eq!(
+            daemon
+                .last_turn_tokens
+                .get_untracked()
+                .unwrap()
+                .provider_footprint(),
+            Some(862)
+        );
+
+        // Gemini's effective prompt and provider total already include cached
+        // content. The separate 1,280-token cache breakdown must not be added.
+        daemon.active_turn_id.set(Some("gemini-turn".into()));
+        apply_test_event(
+            &daemon,
+            AgentEvent::TurnFinished {
+                session_id: "s1".into(),
+                turn_id: "gemini-turn".into(),
+                status: "completed".into(),
+                error: None,
+                wall_ms: Some(100),
+                output_tokens: Some(30),
+                input_tokens: Some(1_500),
+                cache_read_tokens: Some(1_280),
+                cache_write_tokens: None,
+                total_tokens: Some(1_530),
+                tokens_per_second: Some(300.0),
+            },
+        );
+
+        let session = daemon.session_tokens.get_untracked();
+        assert_eq!(session.provider_footprint(), Some(2_392));
+        assert_eq!((session.cache_read, session.cache_write), (1_480, 512));
+        assert_ne!(
+            session.provider_footprint(),
+            Some(session.input + session.output + session.cache_read + session.cache_write),
+            "re-adding provider cache breakdowns would double-count Gemini cache hits"
+        );
+
+        // A legacy daemon without the additive total field makes the aggregate
+        // unknown; do not silently fall back to input + output.
+        daemon.active_turn_id.set(Some("legacy-turn".into()));
+        apply_test_event(
+            &daemon,
+            AgentEvent::TurnFinished {
+                session_id: "s1".into(),
+                turn_id: "legacy-turn".into(),
+                status: "completed".into(),
+                error: None,
+                wall_ms: Some(100),
+                output_tokens: Some(4),
+                input_tokens: Some(6),
+                cache_read_tokens: Some(3),
+                cache_write_tokens: None,
+                total_tokens: None,
+                tokens_per_second: Some(40.0),
+            },
+        );
+        assert_eq!(
+            daemon.session_tokens.get_untracked().provider_footprint(),
+            None
+        );
+    }
+
+    #[test]
     fn turn_override_does_not_replace_the_daemon_default() {
         let daemon = daemon_with_session("model-default");
         daemon.default_model.set(Some("gpt-6-astra".into()));
@@ -8438,6 +8556,8 @@ mod tests {
                 output_tokens: None,
                 input_tokens: None,
                 cache_read_tokens: None,
+                cache_write_tokens: None,
+                total_tokens: None,
                 tokens_per_second: None,
             },
         );
@@ -8555,6 +8675,8 @@ mod tests {
                 output_tokens: None,
                 input_tokens: None,
                 cache_read_tokens: None,
+                cache_write_tokens: None,
+                total_tokens: None,
                 tokens_per_second: None,
             },
         );
@@ -12635,6 +12757,8 @@ mod tests {
                 output_tokens: None,
                 input_tokens: None,
                 cache_read_tokens: None,
+                cache_write_tokens: None,
+                total_tokens: None,
                 tokens_per_second: None,
             },
         );
@@ -12681,6 +12805,8 @@ mod tests {
                 output_tokens: None,
                 input_tokens: None,
                 cache_read_tokens: None,
+                cache_write_tokens: None,
+                total_tokens: None,
                 tokens_per_second: None,
             },
         );
@@ -12709,6 +12835,8 @@ mod tests {
                 output_tokens: None,
                 input_tokens: None,
                 cache_read_tokens: None,
+                cache_write_tokens: None,
+                total_tokens: None,
                 tokens_per_second: None,
             },
         );
@@ -12737,6 +12865,8 @@ mod tests {
                 output_tokens: None,
                 input_tokens: None,
                 cache_read_tokens: None,
+                cache_write_tokens: None,
+                total_tokens: None,
                 tokens_per_second: None,
             },
         );

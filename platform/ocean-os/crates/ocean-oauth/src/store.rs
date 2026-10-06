@@ -24,6 +24,31 @@ pub(crate) fn merge_and_write(auth_file: &Path, key: &str, block: Value) -> Resu
     Ok(())
 }
 
+/// Remove the block under `key`, preserving every other key. Returns whether a
+/// block was present. A missing file is "nothing to remove", not an error, and
+/// is left missing rather than created.
+pub(crate) fn remove_and_write(auth_file: &Path, key: &str) -> Result<bool> {
+    let guard = ocean_providers::lock_auth_file(auth_file).context("auth file custody failed")?;
+    let mut root = read_root(&guard)?;
+    let map = root
+        .as_object_mut()
+        .context("auth file root is not a JSON object")?;
+    if map.remove(key).is_none() {
+        return Ok(false);
+    }
+    let serialized = serde_json::to_string_pretty(&root)?;
+    guard.publish(serialized.as_bytes())?;
+    Ok(true)
+}
+
+/// Read one block without writing anything. `None` when the file or the key is
+/// absent. Read after acquiring custody, so a status read never observes a
+/// mid-merge snapshot.
+pub(crate) fn read_block(auth_file: &Path, key: &str) -> Result<Option<Value>> {
+    let guard = ocean_providers::lock_auth_file(auth_file).context("auth file custody failed")?;
+    Ok(read_root(&guard)?.get(key).cloned())
+}
+
 /// Read the existing root object, or an empty object when the file is missing
 /// or blank.
 fn read_root(guard: &AuthFileGuard) -> Result<Value> {

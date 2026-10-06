@@ -99,5 +99,5 @@ audit, MSRV, documentation or compatibility matrices as merge requirements.
 - `crates/` — canonical Rust workspace ownership/entry/test index and crate contracts → `crates/AGENTS.md`
 - `docs/` — architecture, operator documentation, active plans, and historical archive policy → `docs/AGENTS.md`
 - `integrations/` — distributable adapters for external host extension surfaces → `integrations/AGENTS.md`
-- `packaging/` — team distribution: npm wrapper package publishing prebuilt `ocean` + `ocean-daemon` binaries via the tag-triggered release workflow → `packaging/AGENTS.md`
+- `packaging/` — team distribution: npm wrapper package publishing prebuilt `ocean` + `ocean-daemon` binaries via the active monorepo tag-triggered workflow at `../../.github/workflows/release.yml`; the nested `.github/workflows/release.yml` remains for the original-repository migration → `packaging/AGENTS.md`
 - `plugins/` — distributable permission-gated Ocean subprocess tool plugins → `plugins/AGENTS.md`
