@@ -1202,3 +1202,28 @@ Validation: room_maintenance tests (15) pass; router-contract parity green;
 cargo test -p ocean-daemon 940 passed / 2 deterministic issue-#42 failures
 reproduced on clean main; rustfmt; denied-warning Clippy zero; cargo check
 --workspace --tests; cargo xtask docs-check PASS.
+time: [15:20] [06-10-26]
+agent: [zcode] [glm-5.3]
+worktree: [port/team-onboarding]
+type: [feature-request]
+area: [automations] reconciliation: team onboarding ops bundle
+
+Tenth bounded Track B port: the team onboarding ops bundle —
+ops/onboard-teammate.sh (idempotent macOS arm64 onboarding: brew/gh preflight
+that fails closed rather than logging in for you, GitHub Packages npmrc for
+the @risingtides-dev scope, package install, 0600 federation.env and
+member.toml) with its runbook docs/TEAM_ONBOARDING.md, plus
+ops/set-ocean-federation.sh which docs-check pulled in via the runbook link
+(the reviewed owner-only federation credential install/activation procedure:
+bearer never on a command line, plist lint, guarded supervised restart).
+Adapted the runbook's provenance line (it named a personal-repo commit sha).
+Deliberately NOT ported: docs/linear-teams-routing.md — it routes the
+Ocean-OS Linear team to the personal repository and names sibling private
+repos, which contradicts the monorepo's canonical ownership and is not public
+material. Re-scoped this turn and rejected as unbounded: room_workspace_proxy
+(its RawReply/RelayBudget federation seam is a +4590/−3791 rewrite) and
+output_economy (agent_loop is a true both-changed conflict: Kingmaker +46/−9
+fixes vs personal +219/−31 — needs a careful hunk-level merge, not a port).
+
+Validation: bash -n on both scripts; cargo xtask docs-check PASS (154 active
+Markdown files). Docs/ops-only; no code paths changed.
