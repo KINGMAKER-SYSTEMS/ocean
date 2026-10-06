@@ -696,6 +696,7 @@ impl DaemonClient {
         let response = self
             .http
             .post(format!("{}/v1/requests/{request_id}/cancel", self.base))
+            .timeout(Duration::from_secs(10))
             .send()
             .await
             .map_err(|error| error.to_string())?;
