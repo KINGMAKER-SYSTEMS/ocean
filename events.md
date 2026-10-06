@@ -1117,3 +1117,13 @@ area: [backend] [sessions]
 Round 4: closed three review findings on the round-3 reroute reporting. (F1) A rerouted turn that creates the session now pins the REQUESTED route, not the substitute that ran — `Session::new_with_route` + `PromptControl.requested_provider` carry the requested route from both failover sites (selection-time and pre-stream, preserving the original across a second-stage reroute), so the next turn re-selects the primary once it recovers and `is_session_pinned` no longer mistakes a fallback for an operator pin. (F2) `effective_provider` records the ROUTE that ran (e.g. claude-code) rather than the wire model's protocol provider (anthropic), keeping OAuth routes distinguishable in the report. (F3) AGENTS.md and field docs rewritten to the corrected semantics: a reroute is signalled by `requested_model`/`reroute_reason` presence, not by inequality with `model`. Four test expectations updated to the new pin semantics.
 
 Validation: `cargo test -p ocean-agent --lib` 276 passed / 2 ignored; `cargo check --workspace --tests` clean; `cargo clippy -p ocean-agent --lib -- -D warnings` clean.
+
+time: [17:00] [10-06-26]
+agent: [ocean]
+worktree: [fix/report-model-reroute-in-session] [/Users/seenorising/dev/ocean-org-sub]
+type: [bug fix]
+area: [backend] [sessions] [testing]
+
+Round 4b: lead-review follow-ups on the reroute creation pin. Formatting normalized (`cargo fmt --all`, check clean). `effective_provider_route` renamed `requested_provider_route` with a doc stating exactly what it returns (the REQUESTED route's provider feeding the creation pin; effective route's provider only as fallback). Two failing-first regression tests added covering BOTH reroute sites creating a session (selection-time degraded primary; pre-stream 429 on a ready primary), each asserting the next turn re-selects the recovered PRIMARY through the real daemon selection path (`session_model_config_optional` → `is_session_pinned` → `model_spec`) and runs on it in the REAL loop. RED evidence recorded with both fixes temporarily reverted: creation-pin revert fails 3 tests at the pin assertions (fallback minted as pin: fake-ok≠deepseek-v4-pro, claude-opus-4-7≠deepseek-v4-pro); effective_provider revert fails the OAuth test (anthropic≠claude-code). Restored and green.
+
+Validation: ocean-agent 278 passed / 0 failed / 2 ignored; ocean-daemon 908 passed / 2 failed (only the two known pre-existing persistent_room envelope-key assertions, identical on the c49db99 baseline); clippy -p ocean-agent --all-targets -D warnings clean; fmt --check clean; git diff --check clean.

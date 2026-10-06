@@ -1259,8 +1259,14 @@ impl AgentRuntime {
                 // overwrite it with B and lose what the operator asked for.
                 if control.requested_model.is_none() {
                     control.requested_model = Some(state.provider_config.selection.model.clone());
-                    control.requested_provider =
-                        Some(state.provider_config.selection.provider.as_str().to_string());
+                    control.requested_provider = Some(
+                        state
+                            .provider_config
+                            .selection
+                            .provider
+                            .as_str()
+                            .to_string(),
+                    );
                 }
                 control.reroute_reason = Some(reason.clone());
                 if let Some(sink) = control.event_sink.as_ref() {
@@ -2130,16 +2136,14 @@ impl AgentRuntime {
         // snapshot's route / keep the stored pin untouched.
         let mut session = match session::load_resumable(&self.config_dir, session_id)? {
             Some(existing) => existing,
-            None if !supplied || req.create_if_missing => {
-                match control.requested_model.clone() {
-                    Some(requested) => session::Session::new_with_route(
-                        session_id,
-                        requested,
-                        effective_provider_route(snapshot, &control),
-                    ),
-                    None => session::Session::new_with_id(session_id, &snapshot.model),
-                }
-            }
+            None if !supplied || req.create_if_missing => match control.requested_model.clone() {
+                Some(requested) => session::Session::new_with_route(
+                    session_id,
+                    requested,
+                    requested_provider_route(snapshot, &control),
+                ),
+                None => session::Session::new_with_id(session_id, &snapshot.model),
+            },
             None => anyhow::bail!("session not found: {session_id}"),
         };
         session.bind_workspace(Path::new(&req.cwd));
@@ -2157,8 +2161,14 @@ impl AgentRuntime {
         // being present — `requested_model` may EQUAL `model` (the pin is the
         // requested route by design), so equality is not the reroute test.
         session.effective_model = Some(snapshot.model.id.clone());
-        session.effective_provider =
-            Some(snapshot.provider_config.selection.provider.as_str().to_string());
+        session.effective_provider = Some(
+            snapshot
+                .provider_config
+                .selection
+                .provider
+                .as_str()
+                .to_string(),
+        );
         session.requested_model = control.requested_model.clone();
         session.reroute_reason = control.reroute_reason.clone();
 
@@ -2274,16 +2284,14 @@ impl AgentRuntime {
         // snapshot's route / keep the stored pin untouched.
         let mut session = match session::load_resumable(&self.config_dir, session_id)? {
             Some(existing) => existing,
-            None if !supplied || req.create_if_missing => {
-                match control.requested_model.clone() {
-                    Some(requested) => session::Session::new_with_route(
-                        session_id,
-                        requested,
-                        effective_provider_route(snapshot, &control),
-                    ),
-                    None => session::Session::new_with_id(session_id, &snapshot.model),
-                }
-            }
+            None if !supplied || req.create_if_missing => match control.requested_model.clone() {
+                Some(requested) => session::Session::new_with_route(
+                    session_id,
+                    requested,
+                    requested_provider_route(snapshot, &control),
+                ),
+                None => session::Session::new_with_id(session_id, &snapshot.model),
+            },
             None => anyhow::bail!(
                 "session not found: {session_id} (resume requires an existing session; \
                  pass create_if_missing to start a new one with this id)"
@@ -2304,8 +2312,14 @@ impl AgentRuntime {
         // being present — `requested_model` may EQUAL `model` (the pin is the
         // requested route by design), so equality is not the reroute test.
         session.effective_model = Some(snapshot.model.id.clone());
-        session.effective_provider =
-            Some(snapshot.provider_config.selection.provider.as_str().to_string());
+        session.effective_provider = Some(
+            snapshot
+                .provider_config
+                .selection
+                .provider
+                .as_str()
+                .to_string(),
+        );
         session.requested_model = control.requested_model.clone();
         session.reroute_reason = control.reroute_reason.clone();
 
@@ -3824,24 +3838,30 @@ fn build_state_from_env(config_dir: &std::path::Path) -> anyhow::Result<RuntimeS
     state_from_provider_config(provider_config)
 }
 
-/// Build a runtime state from an already-resolved provider config.
-/// The requested ROUTE's provider for a rerouted creating turn: the provider
-/// the turn's selection would have used without failover. The runtime only
-/// carries the fallback's `ProviderConfig` (the primary's config is dropped
-/// after the reroute decision), so it travels on the turn control alongside
-/// `requested_model` — falling back to the effective route's provider when
-/// absent (never breaking the turn over provenance bookkeeping).
-fn effective_provider_route(
-    effective_snapshot: &RuntimeState,
-    control: &PromptControl,
-) -> String {
+/// Returns the provider of the REQUESTED route for a turn whose failover
+/// reroute created this session — i.e. the provider the turn's selection
+/// would have used WITHOUT failover (what the creation pin records), NOT the
+/// provider that actually ran. The runtime state carries only the fallback's
+/// `ProviderConfig` (the primary's is dropped after the reroute decision), so
+/// the requested route's provider travels on the turn control as
+/// `requested_provider`; when absent (ordinary creating turn, or a reroute
+/// from before this field existed) the effective route's provider is returned
+/// so the turn never fails over provenance bookkeeping.
+fn requested_provider_route(effective_snapshot: &RuntimeState, control: &PromptControl) -> String {
     if let Some(provider) = control.requested_provider.clone() {
         return provider;
     }
-    effective_snapshot.provider_config.selection.provider.as_str().to_string()
+    effective_snapshot
+        .provider_config
+        .selection
+        .provider
+        .as_str()
+        .to_string()
 }
 
-fn state_from_provider_config(provider_config: ProviderConfig) -> anyhow::Result<RuntimeState> {    let model = model_from_provider_config(&provider_config)?;
+/// Build a runtime state from an already-resolved provider config.
+fn state_from_provider_config(provider_config: ProviderConfig) -> anyhow::Result<RuntimeState> {
+    let model = model_from_provider_config(&provider_config)?;
     let api_key = provider_config
         .credential
         .as_ref()
@@ -8261,6 +8281,183 @@ done
         );
         assert_eq!(detail2.provider, "deepseek");
         assert_eq!(detail2.effective_model.as_deref(), Some("deepseek-v4-pro"));
+        assert_eq!(detail2.effective_provider.as_deref(), Some("deepseek"));
+        assert_eq!(detail2.requested_model, None);
+        assert_eq!(detail2.reroute_reason, None);
+
+        let _ = std::fs::remove_dir_all(config_dir);
+    }
+
+    // (a2) REAL selection path: a SELECTION-TIME reroute CREATES the session
+    // (primary keyless/degraded before the turn starts). Once the primary is
+    // healthy again, the NEXT turn must re-select the PRIMARY model+provider,
+    // resolved exactly as the daemon does: `session_model_config_optional` →
+    // `is_session_pinned` filter → `model_spec()` override. If the creation
+    // pin had been minted from the fallback (fake-ok), `is_session_pinned`
+    // would be false and the daemon would run the global fake-ok forever.
+    #[tokio::test]
+    async fn selection_reroute_created_session_reselects_primary_next_turn() {
+        let config_dir = temp_config_dir("selection-reroute-creation-reselect");
+
+        // Turn 1: keyless deepseek primary is DEGRADED at selection → the turn
+        // reroutes to fake-ok and CREATES the session on the fallback.
+        let env = provider_env(&[("OCEAN_PROVIDER_FALLBACK", "fake-ok")]);
+        let runtime = runtime_with_env(
+            config_dir.clone(),
+            provider_config(ProviderId::DeepSeek, "deepseek-v4-pro", false),
+            Some(env),
+        );
+        let res = runtime
+            .prompt(prompt_req("hello", None), PromptControl::yolo(false))
+            .await;
+        assert!(res.ok, "{}", res.stderr);
+        let session_id = res.session_id.expect("session id");
+
+        // The creation pin is the REQUESTED route, not the substitute that ran.
+        let detail = runtime.session_detail(session_id).expect("detail");
+        assert_eq!(detail.model, "deepseek-v4-pro");
+        assert_eq!(detail.provider, "deepseek");
+        assert_eq!(detail.effective_model.as_deref(), Some("fake-ok"));
+        assert_eq!(detail.effective_provider.as_deref(), Some("fake"));
+
+        // Turn 2: the primary is HEALTHY again (env credential); the daemon's
+        // global selection is now fake-ok — exactly what would run forever if
+        // the pin had been minted from the fallback. Resolve the turn's model
+        // through the real daemon selection path.
+        let env2 = provider_env(&[("DEEPSEEK_API_KEY", "hermetic-test-key")]);
+        let mut runtime2 = runtime_with_env(
+            config_dir.clone(),
+            provider_config(ProviderId::Fake, "fake-ok", false),
+            Some(env2),
+        );
+        let (_global_provider, global_model) = runtime2.current_model();
+        assert_eq!(global_model, "fake-ok");
+        let config = runtime2
+            .session_model_config_optional(session_id)
+            .expect("session config read")
+            .expect("session exists");
+        assert!(
+            config.is_session_pinned(&global_model),
+            "the requested-route creation pin must read as a pin (revision-zero \
+             model-difference fallback): model={} global={}",
+            config.model,
+            global_model
+        );
+        let override_spec = config.model_spec();
+        assert_eq!(override_spec, "deepseek/deepseek-v4-pro");
+
+        // A scripted provider completes the REAL loop on the recovered primary
+        // without network.
+        let completion = scripted_assistant("done");
+        runtime2.test_turn_provider = Some(TestCompactProvider(Arc::new(ScriptedTurnProvider {
+            calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            rounds: vec![vec![ocean_protocol::AssistantMessageEvent::Done {
+                reason: ocean_protocol::StopReason::Stop,
+                message: completion,
+            }]],
+        })));
+        let res2 = runtime2
+            .prompt(
+                prompt_req("again", Some(session_id)),
+                PromptControl::yolo(false).with_model_id(Some(override_spec)),
+            )
+            .await;
+        assert!(res2.ok, "{}", res2.stderr);
+        let detail2 = runtime2.session_detail(session_id).expect("detail");
+        assert_eq!(
+            detail2.model, "deepseek-v4-pro",
+            "the next turn must keep the requested-route pin"
+        );
+        assert_eq!(detail2.provider, "deepseek");
+        assert_eq!(
+            detail2.effective_model.as_deref(),
+            Some("deepseek-v4-pro"),
+            "the next turn must RUN on the recovered primary, not the global fallback"
+        );
+        assert_eq!(detail2.effective_provider.as_deref(), Some("deepseek"));
+        assert_eq!(detail2.requested_model, None);
+        assert_eq!(detail2.reroute_reason, None);
+
+        let _ = std::fs::remove_dir_all(config_dir);
+    }
+
+    // (a3) REAL selection path, pre-stream site: a credentialed primary 429s
+    // pre-stream on the turn that CREATES the session (failover to fake-ok).
+    // The next turn must re-select the PRIMARY through the same daemon path
+    // (`is_session_pinned` → `model_spec`), proving the pre-stream reroute
+    // site's creation pin is also the requested route.
+    #[tokio::test]
+    async fn pre_stream_reroute_created_session_reselects_primary_next_turn() {
+        let config_dir = temp_config_dir("prestream-reroute-creation-reselect");
+
+        // Turn 1: credentialed deepseek primary is READY at selection, enters
+        // the real loop, then 429s pre-stream → reroutes to fake-ok.
+        let env = provider_env(&[("OCEAN_PROVIDER_FALLBACK", "fake-ok")]);
+        let mut runtime = runtime_with_env(
+            config_dir.clone(),
+            provider_config(ProviderId::DeepSeek, "deepseek-v4-pro", true),
+            Some(env),
+        );
+        runtime.test_dispatch_status.insert("deepseek", 429);
+        let res = runtime
+            .prompt(prompt_req("hello", None), PromptControl::yolo(false))
+            .await;
+        assert!(res.ok, "{}", res.stderr);
+        let session_id = res.session_id.expect("session id");
+
+        // The creation pin is the REQUESTED route even though the reroute was
+        // decided pre-stream, after the session was first persisted.
+        let detail = runtime.session_detail(session_id).expect("detail");
+        assert_eq!(detail.model, "deepseek-v4-pro");
+        assert_eq!(detail.provider, "deepseek");
+        assert_eq!(detail.effective_model.as_deref(), Some("fake-ok"));
+        assert_eq!(detail.reroute_reason.as_deref(), Some("rate limited"));
+
+        // Turn 2: primary healthy again (env credential), global selection
+        // fake-ok; resolve the override through the daemon selection path.
+        let env2 = provider_env(&[("DEEPSEEK_API_KEY", "hermetic-test-key")]);
+        let mut runtime2 = runtime_with_env(
+            config_dir.clone(),
+            provider_config(ProviderId::Fake, "fake-ok", false),
+            Some(env2),
+        );
+        let (_global_provider, global_model) = runtime2.current_model();
+        assert_eq!(global_model, "fake-ok");
+        let config = runtime2
+            .session_model_config_optional(session_id)
+            .expect("session config read")
+            .expect("session exists");
+        assert!(
+            config.is_session_pinned(&global_model),
+            "the pre-stream reroute's creation pin must read as a pin: model={} global={}",
+            config.model,
+            global_model
+        );
+        assert_eq!(config.model_spec(), "deepseek/deepseek-v4-pro");
+
+        let completion = scripted_assistant("done");
+        runtime2.test_turn_provider = Some(TestCompactProvider(Arc::new(ScriptedTurnProvider {
+            calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            rounds: vec![vec![ocean_protocol::AssistantMessageEvent::Done {
+                reason: ocean_protocol::StopReason::Stop,
+                message: completion,
+            }]],
+        })));
+        let res2 = runtime2
+            .prompt(
+                prompt_req("again", Some(session_id)),
+                PromptControl::yolo(false).with_model_id(Some(config.model_spec())),
+            )
+            .await;
+        assert!(res2.ok, "{}", res2.stderr);
+        let detail2 = runtime2.session_detail(session_id).expect("detail");
+        assert_eq!(detail2.model, "deepseek-v4-pro");
+        assert_eq!(detail2.provider, "deepseek");
+        assert_eq!(
+            detail2.effective_model.as_deref(),
+            Some("deepseek-v4-pro"),
+            "the next turn must RUN on the recovered primary, not the fallback"
+        );
         assert_eq!(detail2.effective_provider.as_deref(), Some("deepseek"));
         assert_eq!(detail2.requested_model, None);
         assert_eq!(detail2.reroute_reason, None);
