@@ -1046,38 +1046,19 @@ Closed the leftovers from the review that acknowledged the thinking-binding reco
 Validation: ocean-protocol (187 plus 5) passes; clippy with warnings denied on ocean-protocol and ocean-agent tests, rustfmt check pass. The strip test covers the thinking-only assistant turn. No provider was called.
 _________________________________________________________________________________
 _________________________________________________________________________________
-time: [15:52] [06-10-26]
-agent: [zcode] [glm-5.3]
-worktree: [port/output-economy]
-type: [feature-request]
-area: [backend] reconciliation: minimizer M2 output economy (conflict-class merge)
+time: [15:42] [06-10-26]
+agent: [codex] [gpt-6]
+worktree: [port/output-economy] [/Users/risingtidesdev/.codex/worktrees/factory-pr49-artifact-debug/ocean]
+type: [bug fix] [issues #50, #53]
+area: [backend] [testing] [privacy]
 
-Eleventh bounded Track B port — the first CONFLICT-CLASS reconciliation
-(both sides changed the same files, exactly the case
-docs/SOURCE_RECONCILIATION.md warns "is not resolved by selecting the newest
-whole tree"): the minimizer M2 output economy. agent_loop.rs was three-way
-merged (base snapshot / Kingmaker HEAD with its token-aggregation and
-thinking-level fixes / personal 1bd1bc37 with the M2 tool-result projection
-seams); the single textual conflict was the thinking-level assignment, where
-Kingmaker had evolved AgentConfig.thinking_level to Option<ThinkingLevel>
-(merged PR #7's honor-off work) — resolved to Kingmaker's types, which the
-clean types.rs merge confirmed (personal's +192 lines touched disjoint
-regions). Ported alongside: output_economy.rs (501 lines, provider-only
-tool-result projection bounded by PinBudget, bound to exact provider-request
-ordinals, sealed from emission), capability.rs's execute_for_run + argv-mode
-seam and artifacts.rs's ArtifactLease/PinBudget (both Kingmaker-untouched,
-clean takes), tools/bash.rs argv mode, the SessionContext default-off
-command_output_minimization gate with its production literal updates in
-ocean-agent/ocean-lsp/ocean-longhouse (longhouse identical to personal but
-for the field), the m2a/m2b characterization suites with the protocol-side
-argv fixture, the test-support feature declaration, and the ocean-minimizer
-workspace dependency (the crate itself was already identical on both sides —
-only its AGENTS.md contract text differs and is included). M2 stays strictly
-default-off: no production path sets the gate; M2c profile enablement remains
-a separately reviewed checkpoint per the minimizer contract.
+While preparing the output-economy lease change for release, review found that
+its derived Debug output recursively formatted the shared artifact store,
+including unrelated session output bodies. Replaced that formatter with a
+redacted view containing only the lease id and byte count, and added a sentinel
+regression test. Kept the public release record limited to this repository's
+change; source-side commit and review history remain outside the public ledger.
+The output minimizer remains default-off, with no production setter.
 
-Validation: cargo test -p ocean-runtime (224 passed, 0 failed, incl. m2a
-characterization 11 + m2b command-minimization suites); ocean-agent 268;
-ocean-lsp 16; ocean-longhouse 169; ocean-minimizer 17; cargo check
---workspace --tests; rustfmt; denied-warning Clippy zero on all four touched
-crates.
+Validation: `cargo fmt --all -- --check`, focused `cargo test -p ocean-runtime artifact_lease_debug_does_not_expose_session_artifact_bodies -- --nocapture` (1 passed), `cargo xtask docs-check` (PASS; 30 packages, 153 Markdown files, 170 local links), and `git diff --check` pass.
+_________________________________________________________________________________

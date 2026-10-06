@@ -296,12 +296,21 @@ impl PinBudget {
 
 /// Keeps one turn-pinned artifact reachable. Dropping it unpins the entry,
 /// reapplies ordinary eviction, and returns the budget share.
-#[derive(Debug)]
 pub struct ArtifactLease {
     store: SharedArtifacts,
     id: String,
     bytes: usize,
     budget: PinBudget,
+}
+
+impl std::fmt::Debug for ArtifactLease {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ArtifactLease")
+            .field("id", &self.id)
+            .field("bytes", &self.bytes)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ArtifactLease {
@@ -429,6 +438,26 @@ mod tests {
             "byte cap"
         );
         assert_eq!(store.lock().unwrap().len(), 1, "no artifact on refusal");
+    }
+
+    #[test]
+    fn artifact_lease_debug_does_not_expose_session_artifact_bodies() {
+        let store = new_shared();
+        store
+            .lock()
+            .unwrap()
+            .put("session-secret-sentinel", "private-session-body-sentinel");
+        let lease = PinBudget::default()
+            .pin(&store, "bash", "leased-output-sentinel".into())
+            .expect("lease fits default budget");
+
+        let debug = format!("{lease:?}");
+
+        assert!(debug.contains(lease.id()));
+        assert!(debug.contains("bytes: 22"));
+        assert!(!debug.contains("private-session-body-sentinel"));
+        assert!(!debug.contains("leased-output-sentinel"));
+        assert!(!debug.contains("session-secret-sentinel"));
     }
 
     #[test]
