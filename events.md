@@ -1073,3 +1073,24 @@ Persisted provider-failover reroutes on the session record so `GET /v1/sessions/
 
 Validation: focused test RED (assertion `None != Some("deepseek-v4-pro")`) then GREEN; `cargo test -p ocean-agent` 269 passed / 2 ignored; `cargo fmt --check` pass. `cargo test -p ocean-daemon` 905 passed / 5 failed, all pre-existing and unrelated to this change (three extension_service timing tests and two persistent-room envelope-key assertions for the already-present aliases fields).
 _________________________________________________________________________________
+_________________________________________________________________________________
+
+time: [14:52] [10-06-26]
+agent: [codex]
+worktree: [fix/report-model-reroute-in-session] [/Users/seenorising/dev/ocean-org-sub]
+type: [bug fix]
+area: [backend] [sessions] [testing]
+
+Round 2 hardening of the reroute session record after reviewer findings (gpt-6.1-sol, glm-5.3). Fixed four defects, each failing-first:
+
+- F1 (raw body leak): `reroute_reason` now stores a fixed typed class (`rate limited` / `server error` / `connection failed` / `timed out` / `missing credential` / `invalid response` / `cancelled` / `provider unavailable`) via a new `reroute_reason_for` classifier, never the `format!("{e}")` provider body.
+- F2 (sticky metadata): both `run_prompt` and `run_fake_prompt` now assign `requested_model`/`reroute_reason` unconditionally every turn, so an ordinary later turn clears them.
+- F3 (effective model): both paths re-sync `session.model`/`session.provider` to the effective selection on every turn (fresh and resumed), so `requested_model != model` exactly when a reroute happened.
+- F4 (second reroute): the pre-stream site preserves an already-populated `control.requested_model` instead of overwriting it with the first fallback, keeping the operator's original request A across a A→B→C chain.
+
+Failover behavior unchanged (no change to `failover_eligible` or candidate selection). New regression tests: `pre_stream_reroute_records_fixed_reason_and_effective_model`, `ordinary_turn_clears_previous_reroute_fields`, `resumed_session_resyncs_model_after_reroute`, `second_reroute_preserves_original_requested_model`.
+
+Validation: RED (4 failed / 1 passed at the predicted assertions) then GREEN. `cargo test -p ocean-agent` 273 passed / 2 ignored; `cargo fmt --all -- --check` and `cargo clippy -p ocean-agent --all-targets` clean.
+
+extension_service flake check: `cargo test -p ocean-daemon extension_service -- --test-threads=1` → this branch 57 passed / 0 failed; clean origin/main worktree 57 passed / 0 failed. The 5 extra extension_service failures reported under parallel load are timing/load flakes, NOT caused by this branch. `cargo test -p ocean-daemon` → 908 passed / 2 failed; both are the pre-existing persistent_room envelope-key assertions that also fail identically on origin/main (not branch-caused).
+_________________________________________________________________________________

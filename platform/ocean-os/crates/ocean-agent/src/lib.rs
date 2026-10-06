@@ -1245,19 +1245,27 @@ impl AgentRuntime {
                 // OCEAN-275 honesty: announce the reroute on the event stream —
                 // this is the path a 429'd/suspended provider takes, and it used
                 // to swap models with zero operator-visible signal. The reason
-                // clamps so a provider's JSON error blob can't flood the wire.
+                // is a FIXED class (rate limited / server error / connection
+                // failed), never the raw provider error body, which can carry
+                // upstream response content and credentials into durable storage.
                 // Also record it on the session so a later session read shows
                 // the requested model did not run.
-                let mut reason = format!("provider call failed: {e}");
-                if reason.chars().count() > 200 {
-                    reason = reason.chars().take(199).chain(['…']).collect();
+                let reason = reroute_reason_for(&e).to_string();
+                // Preserve the operator's ORIGINAL request across a second-stage
+                // (pre-stream) reroute: if selection-time failover already
+                // recorded A→B and B now fails pre-stream, keep A — never
+                // overwrite it with B and lose what the operator asked for.
+                if control.requested_model.is_none() {
+                    control.requested_model = Some(state.provider_config.selection.model.clone());
                 }
-                control.requested_model = Some(state.provider_config.selection.model.clone());
                 control.reroute_reason = Some(reason.clone());
                 if let Some(sink) = control.event_sink.as_ref() {
                     let _ = sink.send(AgentEvent::ModelRerouted {
                         session_id: req.session_id.map(|s| s.to_string()),
-                        requested: state.provider_config.selection.model.clone(),
+                        requested: control
+                            .requested_model
+                            .clone()
+                            .unwrap_or_else(|| state.provider_config.selection.model.clone()),
                         effective: alt_state.provider_config.selection.model.clone(),
                         reason,
                     });
@@ -2116,12 +2124,16 @@ impl AgentRuntime {
         };
         session.bind_workspace(Path::new(&req.cwd));
 
-        // Record any failover reroute (selection-time or pre-stream) on the
-        // session so `GET /v1/sessions/{id}` can report the requested model.
-        if let Some(requested) = control.requested_model.as_deref() {
-            session.requested_model = Some(requested.to_string());
-            session.reroute_reason = control.reroute_reason.clone();
-        }
+        // Record the effective selection and any failover reroute on the session
+        // so `GET /v1/sessions/{id}` reports what actually ran. `model`/`provider`
+        // are re-synced to the effective selection on EVERY turn (fresh or
+        // resumed), and both reroute fields are assigned unconditionally — an
+        // ordinary turn clears them — so `requested_model != model` exactly when
+        // a reroute happened.
+        session.model = snapshot.model.id.clone();
+        session.provider = snapshot.model.provider.clone();
+        session.requested_model = control.requested_model.clone();
+        session.reroute_reason = control.reroute_reason.clone();
 
         let stdout = "OCEAN_FAKE_OK\n".to_string();
 
@@ -2236,12 +2248,16 @@ impl AgentRuntime {
         };
         session.bind_workspace(Path::new(&req.cwd));
 
-        // Record any failover reroute (selection-time or pre-stream) on the
-        // session so `GET /v1/sessions/{id}` can report the requested model.
-        if let Some(requested) = control.requested_model.as_deref() {
-            session.requested_model = Some(requested.to_string());
-            session.reroute_reason = control.reroute_reason.clone();
-        }
+        // Record the effective selection and any failover reroute on the session
+        // so `GET /v1/sessions/{id}` reports what actually ran. `model`/`provider`
+        // are re-synced to the effective selection on EVERY turn (fresh or
+        // resumed), and both reroute fields are assigned unconditionally — an
+        // ordinary turn clears them — so `requested_model != model` exactly when
+        // a reroute happened.
+        session.model = snapshot.model.id.clone();
+        session.provider = snapshot.model.provider.clone();
+        session.requested_model = control.requested_model.clone();
+        session.reroute_reason = control.reroute_reason.clone();
 
         // Surface identity (Fixes 1–3). The session remembers the surface it
         // was last steered from. Detect a switch (for example, from the desktop
@@ -2853,6 +2869,43 @@ fn failover_eligible(err: &anyhow::Error) -> bool {
         // the deadline is an availability problem worth trying an alternate for.
         Some(AgentError::Timeout { .. }) => true,
         _ => false,
+    }
+}
+
+/// A fixed, typed reason string for a provider reroute — never the underlying
+/// error's display, which can carry the upstream response body (and any
+/// sensitive data near its start) into durable session storage.
+fn reroute_reason_for(err: &anyhow::Error) -> &'static str {
+    fn classify(e: &ocean_protocol::Error) -> &'static str {
+        match e {
+            ocean_protocol::Error::ProviderError { status, .. } => {
+                if *status == 429 {
+                    "rate limited"
+                } else if (500..=599).contains(status) {
+                    "server error"
+                } else {
+                    "provider error"
+                }
+            }
+            ocean_protocol::Error::MissingApiKey(_) => "missing credential",
+            ocean_protocol::Error::Http(_) | ocean_protocol::Error::Io(_) => "connection failed",
+            ocean_protocol::Error::RetryExhausted { source, .. } => classify(source),
+            ocean_protocol::Error::Cancelled => "cancelled",
+            ocean_protocol::Error::InvalidResponse(_) | ocean_protocol::Error::Json(_) => {
+                "invalid response"
+            }
+            ocean_protocol::Error::UnsupportedProvider(_) | ocean_protocol::Error::Other(_) => {
+                "provider unavailable"
+            }
+        }
+    }
+    let Some(turn) = err.downcast_ref::<TurnFailure>() else {
+        return "provider unavailable";
+    };
+    match turn.error.downcast_ref::<AgentError>() {
+        Some(AgentError::Provider(pe)) => classify(pe),
+        Some(AgentError::Timeout { .. }) => "timed out",
+        _ => "provider unavailable",
     }
 }
 
@@ -7857,6 +7910,197 @@ done
             "reroute reason must be persisted, got: {:?}",
             detail.reroute_reason
         );
+
+        let _ = std::fs::remove_dir_all(config_dir);
+    }
+
+    fn prompt_req(prompt: &str, session_id: Option<SessionId>) -> PromptRequest {
+        PromptRequest {
+            prompt: prompt.into(),
+            images: None,
+            request_id: None,
+            session_id,
+            create_if_missing: true,
+            max_turns: None,
+            yolo: false,
+            cwd: ".".into(),
+            project_id: None,
+            client_type: None,
+            decision_token: None,
+        }
+    }
+
+    // A pre-stream 429 from a credentialed primary must fail over once to a
+    // ready alternate, and the persisted session must record (F1) a FIXED reason
+    // class — never the raw provider error body — and (F3) the model that
+    // actually produced the response, not the primary that failed.
+    #[tokio::test]
+    async fn pre_stream_reroute_records_fixed_reason_and_effective_model() {
+        let config_dir = temp_config_dir("failover-prestream");
+        let env = provider_env(&[("OCEAN_PROVIDER_FALLBACK", "fake-ok")]);
+        let mut runtime = runtime_with_env(
+            config_dir.clone(),
+            // Credentialed primary → READY at selection, so the pre-stream seam
+            // (not selection-time failover) is what fires.
+            provider_config(ProviderId::DeepSeek, "deepseek-v4-pro", true),
+            Some(env),
+        );
+        runtime.test_dispatch_status.insert("deepseek", 429);
+
+        let res = runtime
+            .prompt(prompt_req("hello", None), PromptControl::yolo(false))
+            .await;
+
+        assert!(
+            res.ok,
+            "pre-stream rerouted turn should succeed: {}",
+            res.stderr
+        );
+        let detail = runtime
+            .session_detail(res.session_id.expect("session id"))
+            .expect("session detail");
+
+        // F3: the session reports the model that actually answered (fake-ok),
+        // not the primary that failed before streaming.
+        assert_eq!(detail.model, "fake-ok");
+        // F1: a fixed reason class — never the provider error body.
+        assert_eq!(detail.reroute_reason.as_deref(), Some("rate limited"));
+        assert_eq!(detail.requested_model.as_deref(), Some("deepseek-v4-pro"));
+
+        let _ = std::fs::remove_dir_all(config_dir);
+    }
+
+    // An ordinary later turn (no reroute) must CLEAR a previous reroute's
+    // requested_model/reroute_reason, not leave them sticky on the session.
+    #[tokio::test]
+    async fn ordinary_turn_clears_previous_reroute_fields() {
+        let config_dir = temp_config_dir("failover-clear");
+
+        // Turn 1: degraded deepseek reroutes to fake-ok → records a reroute.
+        let runtime = runtime_with_env(
+            config_dir.clone(),
+            provider_config(ProviderId::DeepSeek, "deepseek-v4-pro", false),
+            Some(provider_env(&[("OCEAN_PROVIDER_FALLBACK", "fake-ok")])),
+        );
+        let res = runtime
+            .prompt(prompt_req("hello", None), PromptControl::yolo(false))
+            .await;
+        assert!(res.ok, "{}", res.stderr);
+        let session_id = res.session_id.expect("session id");
+        let detail = runtime.session_detail(session_id).expect("detail");
+        assert_eq!(detail.requested_model.as_deref(), Some("deepseek-v4-pro"));
+
+        // Turn 2: resume the SAME session on a ready fake-ok primary — an
+        // ordinary turn that runs on its requested model and must not reroute.
+        let runtime2 = runtime_with_env(
+            config_dir.clone(),
+            provider_config(ProviderId::Fake, "fake-ok", false),
+            None,
+        );
+        let res2 = runtime2
+            .prompt(
+                prompt_req("again", Some(session_id)),
+                PromptControl::yolo(false),
+            )
+            .await;
+        assert!(res2.ok, "{}", res2.stderr);
+        let detail2 = runtime2.session_detail(session_id).expect("detail");
+        assert_eq!(
+            detail2.requested_model, None,
+            "an ordinary turn must clear the previous requested_model"
+        );
+        assert_eq!(
+            detail2.reroute_reason, None,
+            "an ordinary turn must clear the previous reroute_reason"
+        );
+
+        let _ = std::fs::remove_dir_all(config_dir);
+    }
+
+    // A resumed session that reroutes must re-sync `model` to the effective
+    // selection, so `requested_model != model` exactly when a reroute happened.
+    #[tokio::test]
+    async fn resumed_session_resyncs_model_after_reroute() {
+        let config_dir = temp_config_dir("failover-resume-resync");
+
+        // Turn 1: pin the session to deepseek-v4-pro with NO reroute (the Fake
+        // provider echoes without a network call, so the pin is what matters).
+        let runtime = runtime_with_env(
+            config_dir.clone(),
+            provider_config(ProviderId::Fake, "deepseek-v4-pro", false),
+            None,
+        );
+        let res = runtime
+            .prompt(prompt_req("hello", None), PromptControl::yolo(false))
+            .await;
+        assert!(res.ok, "{}", res.stderr);
+        let session_id = res.session_id.expect("session id");
+        assert_eq!(
+            runtime.session_detail(session_id).expect("detail").model,
+            "deepseek-v4-pro"
+        );
+
+        // Turn 2: the same session, but now the primary is a degraded deepseek
+        // that reroutes to fake-ok. The stored `model` must follow the effective
+        // selection rather than keep the stale pin.
+        let runtime2 = runtime_with_env(
+            config_dir.clone(),
+            provider_config(ProviderId::DeepSeek, "deepseek-v4-pro", false),
+            Some(provider_env(&[("OCEAN_PROVIDER_FALLBACK", "fake-ok")])),
+        );
+        let res2 = runtime2
+            .prompt(
+                prompt_req("again", Some(session_id)),
+                PromptControl::yolo(false),
+            )
+            .await;
+        assert!(res2.ok, "{}", res2.stderr);
+        let detail2 = runtime2.session_detail(session_id).expect("detail");
+        assert_eq!(
+            detail2.model, "fake-ok",
+            "resumed reroute must re-sync model"
+        );
+        assert_eq!(
+            detail2.requested_model.as_deref(),
+            Some("deepseek-v4-pro"),
+            "requested_model must keep the original request"
+        );
+
+        let _ = std::fs::remove_dir_all(config_dir);
+    }
+
+    // A second-stage (pre-stream) reroute must preserve the operator's ORIGINAL
+    // request: selection-time A→B, then B fails pre-stream and falls to C; the
+    // record must still describe A (not B→C).
+    #[tokio::test]
+    async fn second_reroute_preserves_original_requested_model() {
+        let config_dir = temp_config_dir("failover-second-reroute");
+        // A = deepseek (degraded, no key). B = claude-opus-4-7 (ready with an
+        // OAuth bearer) which then 429s pre-stream. C = fake-ok.
+        let env = provider_env(&[
+            ("OCEAN_PROVIDER_FALLBACK", "claude-opus-4-7, fake-ok"),
+            ("CLAUDE_CODE_ACCESS_TOKEN", "cc-bearer"),
+        ]);
+        let mut runtime = runtime_with_env(
+            config_dir.clone(),
+            provider_config(ProviderId::DeepSeek, "deepseek-v4-pro", false),
+            Some(env),
+        );
+        runtime.test_dispatch_status.insert("claude-code", 429);
+
+        let res = runtime
+            .prompt(prompt_req("hello", None), PromptControl::yolo(false))
+            .await;
+        assert!(res.ok, "second reroute should succeed: {}", res.stderr);
+        let detail = runtime
+            .session_detail(res.session_id.expect("session id"))
+            .expect("session detail");
+
+        assert_eq!(detail.model, "fake-ok");
+        // F4: the operator asked for deepseek, so the record must keep A — not
+        // overwrite it with B (claude-opus-4-7) when B fails pre-stream.
+        assert_eq!(detail.requested_model.as_deref(), Some("deepseek-v4-pro"));
+        assert_eq!(detail.reroute_reason.as_deref(), Some("rate limited"));
 
         let _ = std::fs::remove_dir_all(config_dir);
     }

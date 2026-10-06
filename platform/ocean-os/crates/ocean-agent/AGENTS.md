@@ -94,8 +94,14 @@ transcripts by session id.
 - Selection-time and pre-stream failover reroutes persist additive optional
   session fields `requested_model` and `reroute_reason` on both `Session` and
   `SessionDetail` (serde default + skip-if-none; legacy files deserialize them
-  as `None`). `model`/`provider` remain the effective selection, so a later
-  `GET /v1/sessions/{id}` can report that the requested model did not run.
+  as `None`). `model`/`provider` are re-synced to the effective selection on
+  EVERY turn (fresh or resumed) and both reroute fields are assigned
+  unconditionally — an ordinary turn clears them — so
+  `requested_model != model` exactly when a reroute happened. `reroute_reason`
+  is a fixed typed class (`rate limited`, `server error`, `connection failed`,
+  `timed out`, `missing credential`, …), never a raw provider error body; the
+  operator's ORIGINAL requested model is preserved across a second-stage
+  (pre-stream) reroute.
 - Observed primary or alternate provider 401/403 refusals suppress that provider
   as a fallback for 300 seconds in one runtime's clone-shared memory. Filter
   both selection-time and pre-stream fallback and their ready-label projection;
