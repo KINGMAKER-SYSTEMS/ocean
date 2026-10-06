@@ -400,4 +400,34 @@ fn replay_rechecks_retention_after_an_intervening_prune() {
         }
         other => panic!("expected the pruned range, got {other:?}"),
     }
+    let resumed = s.replay_page(Cursor::new(2), None, 10).unwrap();
+    assert!(resumed.events.is_empty());
+    assert!(
+        resumed.complete,
+        "the exclusive boundary is a valid empty tail"
+    );
+}
+
+#[test]
+fn replay_after_retention_boundary_returns_the_retained_tail() {
+    let d = tempdir().unwrap();
+    let s = ObservatoryStore::open(
+        &d.path().join("obs.db"),
+        RetentionPolicy {
+            max_age_days: 7,
+            max_bytes: RetentionPolicy::default().max_bytes,
+        },
+    )
+    .unwrap();
+    for id in ["old-1", "old-2"] {
+        s.append_event(event_for(id, id, 30, true)).unwrap();
+    }
+    s.append_event(event_for("recent", "recent", 0, true))
+        .unwrap();
+    assert!(s.apply_retention().unwrap() > 0);
+    assert_eq!(s.retention_boundary().unwrap(), Some(Cursor::new(2)));
+    let page = s.replay_page(Cursor::new(2), None, 10).unwrap();
+    assert_eq!(page.events.len(), 1);
+    assert_eq!(page.events[0].cursor, Cursor::new(3));
+    assert!(page.complete);
 }

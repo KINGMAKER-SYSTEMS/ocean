@@ -922,3 +922,26 @@ bd2db1d31766fcd0dffb7abc493cda74b5833524; exact-final-head independent review
 and hosted Build Ocean / Build Surface checks remain pending. No merge,
 deployment, or live outcome is claimed.
 _________________________________________________________________________________
+_________________________________________________________________________________
+time: [11:51pm] [10-05-26]
+agent: [codex] [gpt-6.1-sol]
+worktree: [codex/factory-pr31-reconcile] [/Users/risingtidesdev/.codex/worktrees/factory-pr31-reconcile/ocean]
+type: [review] PR #31 exact-head adversarial follow-up
+area: [testing] retention-boundary cursor semantics
+
+Independent review of candidate 8c55fc6399b8771c16d81565d74482520962d7db
+confirmed the two race fixes and found an exclusive-cursor edge: replay after
+the last-pruned cursor is valid because after is exclusive. Updated replay
+to return 410 only when the requested cursor is strictly below the boundary.
+Added tests for both a retained tail and an empty complete page after a full
+prune. Documented the exclusive resume contract in both owning Observatory
+AGENTS.md files.
+
+Validation after this correction: cargo test --locked -p ocean-observatory
+PASS (77 tests across package suites); cargo test --locked -p ocean-daemon
+observatory:: PASS (23/23). The targeted persistent-room test, formatting,
+docs-check, and diff-check passed on the immediately preceding code revision;
+documentation changes from this follow-up still require docs-check. These
+changes are not yet pushed; hosted checks and exact-final-head review remain
+pending. No merge, deployment, or live outcome is claimed.
+_________________________________________________________________________________

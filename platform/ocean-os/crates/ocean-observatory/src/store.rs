@@ -258,7 +258,7 @@ impl ObservatoryStore {
             [],
             |r| r.get(0),
         )?;
-        if boundary > 0 && after.into_inner() <= boundary {
+        if boundary > 0 && after.into_inner() < boundary {
             return Err(StoreError::RetentionBoundaryCrossed {
                 after: after.into_inner(),
                 boundary,

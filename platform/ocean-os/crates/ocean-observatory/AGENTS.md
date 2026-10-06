@@ -46,9 +46,11 @@ manifest (`docs/specs/2026-07-17-observatory-gate1-implementation-manifest.md`).
 - `envelope_json` is the replay/tail source of truth; the scalar columns are
   indexes over it, not a second copy the routes read.
 - Replay validates its retention boundary and reads the page under one
-  database lock. Snapshot cursor validation, retention boundary, projection
-  watermark, and projected rows share the same database lock; callers must use
-  the returned projection watermark for successful response headers.
+  database lock. Replay cursors are exclusive: equality with the last-pruned
+  boundary resumes at the retained tail; only a cursor below it crosses a gap.
+  Snapshot cursor validation, retention boundary, projection watermark, and
+  projected rows share the same database lock; callers must use the returned
+  projection watermark for successful response headers.
 
 ## Work Guidance
 
