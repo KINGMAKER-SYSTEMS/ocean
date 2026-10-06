@@ -405,6 +405,9 @@ pub enum RoomStoreError {
     },
     /// No participant with the given id is in the room (on remove).
     UnknownParticipant { room: RoomKey, participant: String },
+    /// A participant id was permanently retired in this room and cannot be
+    /// reintroduced through an unauthenticated join path.
+    RetiredParticipant { room: RoomKey, participant: String },
     /// The room exists but has no federation access projection row (P2-A).
     RoomNotFederated(RoomKey),
     /// Confirmed-ingest ordering/dedup violation: persisted state disagrees
@@ -540,6 +543,10 @@ impl std::fmt::Display for RoomStoreError {
             Self::UnknownParticipant { room, participant } => {
                 write!(f, "room '{room}' has no participant '{participant}'")
             }
+            Self::RetiredParticipant { room, participant } => write!(
+                f,
+                "room '{room}': participant '{participant}' was retired and cannot rejoin"
+            ),
             Self::RoomNotFederated(k) => {
                 write!(f, "room '{k}' is not federated (no access projection)")
             }
@@ -3548,6 +3555,32 @@ impl SqliteRoomStore {
         Ok(())
     }
 
+    /// Retirement is a permanent identity reservation. Check it under the
+    /// same IMMEDIATE transaction as roster replacement so a join racing a
+    /// retirement is ordered either before the retirement (and then removed)
+    /// or after it (and refused).
+    fn guard_retired_participant_on(
+        tx: &rusqlite::Transaction<'_>,
+        key: &RoomKey,
+        participant: &RoomParticipant,
+    ) -> Result<()> {
+        let retired: bool = tx.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM room_participant_aliases
+                 WHERE room_id = ?1 AND from_id = ?2
+            )",
+            params![key.as_str(), participant.id],
+            |row| row.get(0),
+        )?;
+        if retired {
+            return Err(RoomStoreError::RetiredParticipant {
+                room: key.clone(),
+                participant: participant.id.clone(),
+            });
+        }
+        Ok(())
+    }
+
     /// Refuse a join that would REPLACE an existing participant with one of a
     /// different kind.
     ///
@@ -3712,6 +3745,7 @@ impl SqliteRoomStore {
             )?;
         }
 
+        Self::guard_retired_participant_on(&tx, key, &participant)?;
         Self::guard_participant_kind_on(&tx, key, &participant)?;
         let existing_agent: Option<String> = tx
             .query_row(
@@ -3902,6 +3936,7 @@ impl SqliteRoomStore {
             return Err(RoomStoreError::UnknownRoom(key.clone()));
         }
 
+        Self::guard_retired_participant_on(&tx, key, &participant)?;
         Self::guard_participant_kind_on(&tx, key, &participant)?;
         // A3: re-adding an existing agent with a DIFFERENT owner is ownership
         // theft by the same unauthenticated route. Re-pointing an agent to a new
@@ -4517,6 +4552,7 @@ impl RoomStore for SqliteRoomStore {
         if !Self::room_is_open_on(&tx, key)? {
             return Err(RoomStoreError::UnknownRoom(key.clone()));
         }
+        Self::guard_retired_participant_on(&tx, key, &participant)?;
         Self::guard_participant_kind_on(&tx, key, &participant)?;
         // Idempotent on id: replace any existing entry, appending at the end of
         // the roster ordering (MAX(position)+1) to mirror the Vec push.
@@ -11275,6 +11311,147 @@ mod tests {
             "display name must not be stolen"
         );
         assert_eq!(alice.kind, RoomParticipantKind::Human);
+    }
+
+    #[test]
+    fn retired_participant_cannot_rejoin_or_post_under_the_reserved_id() {
+        let mut s = store();
+        let key = RoomKey::new("retired-rejoin");
+        s.create(key.clone(), "Retired", None, now()).unwrap();
+        s.add_participant(&key, human("surface-operator", "Operator"), now())
+            .unwrap();
+        s.add_participant(&key, human("smaths", "John"), now())
+            .unwrap();
+        s.retire_participant(
+            &key,
+            RetireParticipantInput {
+                from_id: "surface-operator".into(),
+                successor_id: "smaths".into(),
+                actor: "operator".into(),
+                decision_id: "retire-operator".into(),
+                request_digest: "retire-operator-digest".into(),
+            },
+            now(),
+        )
+        .unwrap();
+        let before = s.get(&key).unwrap().unwrap();
+
+        assert!(matches!(
+            s.add_participant(&key, human("surface-operator", "Operator"), now()),
+            Err(RoomStoreError::RetiredParticipant { .. })
+        ));
+        assert!(matches!(
+            s.append_message_threaded(
+                &key,
+                "surface-operator",
+                RoomParticipantKind::Human,
+                RoomMessageKind::Message,
+                "forged post",
+                now(),
+                None,
+                None,
+            ),
+            Err(ThreadAppendError::Store(RoomStoreError::UnknownParticipant { .. }))
+        ));
+        let after = s.get(&key).unwrap().unwrap();
+        assert_eq!(after, before, "refusal must not restore roster or transcript");
+
+        // The active successor keeps the normal same-kind reconnect path.
+        s.add_participant(&key, human("smaths", "John"), now())
+            .unwrap();
+        assert!(s.get(&key).unwrap().unwrap().room.participants.iter().any(|p| {
+            p.id == "smaths" && p.kind == RoomParticipantKind::Human
+        }));
+    }
+
+    #[test]
+    fn retirement_and_join_are_serialized_across_store_connections() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rooms.db");
+        let key = RoomKey::new("retired-race");
+        let mut setup = SqliteRoomStore::open(&path).unwrap();
+        setup.create(key.clone(), "Race", None, now()).unwrap();
+        setup
+            .add_participant(&key, human("surface-operator", "Operator"), now())
+            .unwrap();
+        setup
+            .add_participant(&key, human("smaths", "John"), now())
+            .unwrap();
+        drop(setup);
+
+        let barrier = Arc::new(Barrier::new(2));
+        let join_path = path.clone();
+        let join_key = key.clone();
+        let join_barrier = barrier.clone();
+        let join = thread::spawn(move || {
+            let mut store = SqliteRoomStore::open(join_path).unwrap();
+            join_barrier.wait();
+            store.add_participant(
+                &join_key,
+                human("surface-operator", "Operator"),
+                now(),
+            )
+        });
+        let retire_path = path.clone();
+        let retire_key = key.clone();
+        let retire_barrier = barrier.clone();
+        let retire = thread::spawn(move || {
+            let mut store = SqliteRoomStore::open(retire_path).unwrap();
+            retire_barrier.wait();
+            store.retire_participant(
+                &retire_key,
+                RetireParticipantInput {
+                    from_id: "surface-operator".into(),
+                    successor_id: "smaths".into(),
+                    actor: "operator".into(),
+                    decision_id: "retire-operator".into(),
+                    request_digest: "retire-operator-digest".into(),
+                },
+                now(),
+            )
+        });
+
+        let join_result = join.join().unwrap();
+        let retire_result = retire.join().unwrap();
+        assert!(retire_result.is_ok(), "retirement failed: {retire_result:?}");
+        assert!(
+            join_result.is_ok()
+                || matches!(join_result, Err(RoomStoreError::RetiredParticipant { .. })),
+            "join had an unexpected result: {join_result:?}"
+        );
+
+        // Reopen from disk after both writers commit. If join linearized first,
+        // retirement removes it; if retirement linearized first, the alias
+        // guard rejects it. Either ordering leaves only the durable alias.
+        let mut reopened = SqliteRoomStore::open(&path).unwrap();
+        let record = reopened.get(&key).unwrap().unwrap();
+        assert!(!record
+            .room
+            .participants
+            .iter()
+            .any(|participant| participant.id == "surface-operator"));
+        assert_eq!(
+            reopened
+                .resolve_participant_alias(&key, "surface-operator")
+                .unwrap(),
+            "smaths"
+        );
+        assert!(matches!(
+            reopened.append_message_threaded(
+                &key,
+                "surface-operator",
+                RoomParticipantKind::Human,
+                RoomMessageKind::Message,
+                "forged post",
+                now(),
+                None,
+                None,
+            ),
+            Err(ThreadAppendError::Store(RoomStoreError::UnknownParticipant { .. }))
+        ));
     }
 
     /// Same-kind re-join MUST stay idempotent — reconnects and renames are the

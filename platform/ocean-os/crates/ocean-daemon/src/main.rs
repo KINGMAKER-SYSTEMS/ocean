@@ -210,7 +210,7 @@ use model_roles::resolve_effective_model_id;
 use model_roles::{load_model_roles, resolve_advisor_alias, resolve_turn_model};
 use persistent_rooms::{
     resolve_named_agent, room_create, room_create_invite, room_db_path, room_events, room_get,
-    room_get_read_cursor, room_join, room_leave, room_patch_read_cursor, room_post_message,
+    room_get_read_cursor, room_inspect, room_join, room_leave, room_patch_read_cursor, room_post_message,
     room_redeem_invite, room_register_agents, room_retry_outbox, room_snapshot, room_transcript,
     rooms_list_persistent, run_federated_trigger_dispatcher, with_rooms, with_rooms_handle,
     RoomAccessWakeBus, RoomReadCursorWakeBus, RoomStoreHandle, RoomWakeBus,
@@ -1580,6 +1580,7 @@ fn banner_routes() -> &'static [&'static str] {
         "GET /v1/rooms/persistent",
         "POST /v1/rooms/persistent",
         "GET /v1/rooms/persistent/{key}",
+        "GET /v1/rooms/persistent/{key}/inspect",
         "POST /v1/rooms/persistent/{key}/close",
         "GET /v1/rooms/persistent/{key}/agents",
         "POST /v1/rooms/persistent/{key}/agents",
@@ -2835,6 +2836,7 @@ fn room_routes() -> Router<AppState> {
             get(rooms_list_persistent).post(room_create),
         )
         .route("/v1/rooms/persistent/{key}", get(room_get))
+        .route("/v1/rooms/persistent/{key}/inspect", get(room_inspect))
         .route(
             "/v1/rooms/persistent/{key}/close",
             post(persistent_rooms::room_close),
@@ -12906,6 +12908,14 @@ mod tests {
                 },
                 StatusCode::NOT_FOUND,
                 "room 'x' has no participant 'p'".to_string(),
+            ),
+            (
+                RoomStoreError::RetiredParticipant {
+                    room: RoomKey::new("x"),
+                    participant: "p".into(),
+                },
+                StatusCode::CONFLICT,
+                "room 'x': participant 'p' was retired and cannot rejoin".to_string(),
             ),
             (
                 RoomStoreError::Db(rusqlite::Error::QueryReturnedNoRows),
@@ -25544,6 +25554,7 @@ mod tests {
         }
         for retained in [
             "GET /v1/rooms/persistent",
+            "GET /v1/rooms/persistent/{key}/inspect",
             "POST /v1/rooms/persistent/{key}/artifacts",
             "GET /v1/rooms/persistent/{key}/artifacts",
             "GET /v1/rooms/persistent/{key}/artifacts/{artifact_id}",

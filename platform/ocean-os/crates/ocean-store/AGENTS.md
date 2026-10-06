@@ -179,6 +179,15 @@ participant retirement. One database file (`rooms.db`), one owning crate.
   bounded to eight links. A chain ending at that exact boundary resolves;
   a further link or any repeated id (including a self-cycle) fails closed
   without returning partial authority.
+- A retired alias `from_id` permanently reserves that room-scoped participant
+  identity. Every roster-creating path, including ordinary, owned-Agent, and
+  bootstrap joins, checks the alias ledger inside its IMMEDIATE transaction;
+  a racing join is either removed by the later retirement or refused after it.
+  Alias list reads are ordered and capped at 256 rows for bounded daemon
+  projections; the underlying durable ledger remains complete.
+- `inspect_room_identity` returns only room id, name, and closed state without
+  hydrating transcript rows; daemon inspect responses combine that bounded
+  metadata with the bounded public alias list.
 - **Policy and markers.** The hand-written trigger codec preserves both build
   and CI flags. Omitting a policy mutation leaves persisted flags intact. Store
   marker names use core `bounded_prose`; structured audit payloads remain raw in

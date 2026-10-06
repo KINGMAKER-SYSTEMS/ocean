@@ -34,6 +34,7 @@ use super::{
     build_prompt_control, core_sid, emit_session_changed, record_prompt_result, sdk_sid,
     sse_until_shutdown, AppState, SSE_KEEPALIVE_INTERVAL,
 };
+use super::room_retirement;
 use crate::request_control::{
     attach_request_handle, cancel_permission_waiter, register_room_agent_request_checked,
     RoomAgentRequestAuthority,
@@ -760,6 +761,7 @@ pub(super) fn room_store_error_response(
     let status = match &err {
         BadKey(_) => StatusCode::BAD_REQUEST,
         UnknownRoom(_) | UnknownParticipant { .. } => StatusCode::NOT_FOUND,
+        RetiredParticipant { .. } => StatusCode::CONFLICT,
         AlreadyExists(_) | RoomNotLocal(_) | LocalRoomOwnerConflict { .. } => StatusCode::CONFLICT,
         // The room exists but is not federated: a client-side misuse of a
         // federation-only operation, not a server fault.
@@ -1363,9 +1365,10 @@ pub(super) async fn room_get(
         // Absent key == no local ownership recorded, which is what every
         // pre-existing room reports.
         let owners = reg.agent_owners(&key)?;
-        Ok(Some((record, access, owners)))
+        let aliases = room_retirement::aliases_projection(reg, &key)?;
+        Ok(Some((record, access, owners, aliases)))
     }) {
-        Ok(Some((rec, access, owners))) => (
+        Ok(Some((rec, access, owners, aliases))) => (
             StatusCode::OK,
             Json(json!({
                 "ok": true,
@@ -1374,6 +1377,7 @@ pub(super) async fn room_get(
                 "next_seq": if rec.transcript_has_more { rec.transcript.last().map(|row| row.seq) } else { None },
                 "transcript": projected_transcript(rec.transcript),
                 "access": access,
+                "aliases": aliases,
                 "agent_owners": owners
                     .into_iter()
                     .map(|(agent, owner, owner_present)| json!({
@@ -1392,6 +1396,52 @@ pub(super) async fn room_get(
             Json(json!({ "ok": false, "error": format!("no room with key '{key}'") })),
         ),
         Err(e) => room_store_error_response(e),
+    }
+}
+
+/// `GET /v1/rooms/persistent/{key}/inspect` — bounded read-only identity
+/// inspection for operator migration and reconnect checks. It intentionally
+/// returns only the room id/name, current local owner id, and the capped alias
+/// projection; it does not expose transcript, workspace, credentials, or store
+/// internals.
+pub(super) async fn room_inspect(
+    State(state): State<AppState>,
+    Path(key): Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let trimmed = key.trim();
+    if trimmed.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": "invalid room key; must be non-empty" })),
+        );
+    }
+    let key = RoomKey::new(trimmed);
+    match with_rooms(&state, |store| {
+        let Some(room) = store.inspect_room_identity(&key)? else {
+            return Ok(None);
+        };
+        let owner = store.local_room_owner(&key)?.map(|owner| owner.member_id);
+        let aliases = room_retirement::aliases_projection(store, &key)?;
+        Ok(Some((room, owner, aliases)))
+    }) {
+        Ok(Some((room, owner, aliases))) => (
+            StatusCode::OK,
+            Json(json!({
+                "ok": true,
+                "closed": room.closed,
+                "room": {
+                    "id": room.room_id,
+                    "name": room.name,
+                },
+                "owner": { "member_id": owner },
+                "aliases": aliases,
+            })),
+        ),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "ok": false, "error": format!("no room with key '{key}'") })),
+        ),
+        Err(error) => room_store_error_response(error),
     }
 }
 
@@ -3447,10 +3497,11 @@ pub(super) async fn room_snapshot(
         // Access projection (S2-P1): the room's federated state, outbox, and
         // member roster (Local if no access row exists).
         let access = reg.room_access(&key)?;
-        Ok(Some((record, page, access, closed)))
+        let aliases = room_retirement::aliases_projection(reg, &key)?;
+        Ok(Some((record, page, access, closed, aliases)))
     });
     match result {
-        Ok(Some((rec, page, access, closed))) => {
+        Ok(Some((rec, page, access, closed, aliases))) => {
             let last_seq = page.messages.last().map(|m| m.seq);
             (
                 StatusCode::OK,
@@ -3464,6 +3515,7 @@ pub(super) async fn room_snapshot(
                     "next_seq": page.next_seq,
                     "has_more": page.has_more,
                     "access": access,
+                    "aliases": aliases,
                 })),
             )
         }
@@ -7766,6 +7818,7 @@ env = { FIXTURE = "1" }
         .unwrap();
         assert_eq!(body["ok"], json!(true));
         assert!(body["room"].is_object());
+        assert_eq!(body["aliases"], json!([]));
         // Local access serializes as {"state":"local"} (skip_serializing_if omits defaults).
         assert_eq!(body["access"], json!({"state": "local"}));
     }
@@ -7801,6 +7854,7 @@ env = { FIXTURE = "1" }
         .unwrap();
         assert_eq!(body["ok"], json!(true));
         assert_eq!(body["access"], json!({"state": "local"}));
+        assert_eq!(body["aliases"], json!([]));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -7853,6 +7907,130 @@ env = { FIXTURE = "1" }
         )
         .unwrap();
         assert_eq!(body["access"], json!({"state": "local"}));
+        assert_eq!(body["aliases"], json!([]));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn room_alias_reads_cover_inspect_detail_snapshot_and_store_reopen() {
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut state = fake_convene_state(&tmp);
+        let path = tmp.path().join("rooms.db");
+        state.rooms = Arc::new(Mutex::new(
+            ocean_store::SqliteRoomStore::open(&path).expect("file-backed store"),
+        ));
+        let key = RoomKey::new("alias-readback");
+        with_rooms(&state, |store| {
+            store
+                .create(key.clone(), "Alias Readback", None, Utc::now())
+                .expect("create room");
+            store
+                .add_participant(
+                    &key,
+                    RoomParticipant {
+                        id: "surface-operator".into(),
+                        kind: RoomParticipantKind::Human,
+                        display_name: "Operator".into(),
+                    },
+                    Utc::now(),
+                )
+                .expect("placeholder participant");
+            store
+                .add_participant(
+                    &key,
+                    RoomParticipant {
+                        id: "smaths".into(),
+                        kind: RoomParticipantKind::Human,
+                        display_name: "John".into(),
+                    },
+                    Utc::now(),
+                )
+                .expect("successor participant");
+            store
+                .bootstrap_local_room_agent(
+                    &key,
+                    "surface-operator",
+                    RoomParticipant {
+                        id: "room-builder".into(),
+                        kind: RoomParticipantKind::Agent,
+                        display_name: "Builder".into(),
+                    },
+                    "room-builder",
+                    "test-operator",
+                    Utc::now(),
+                )
+                .expect("local owner");
+            store
+                .retire_participant(
+                    &key,
+                    ocean_store::RetireParticipantInput {
+                        from_id: "surface-operator".into(),
+                        successor_id: "smaths".into(),
+                        actor: "test-operator".into(),
+                        decision_id: "retire-operator".into(),
+                        request_digest: "retire-operator-digest".into(),
+                    },
+                    Utc::now(),
+                )
+                .expect("retire placeholder");
+        });
+
+        // Reopen the durable DB through a new connection before exercising all
+        // read handlers, matching the reconnect path the alias serves.
+        state.rooms = Arc::new(Mutex::new(
+            ocean_store::SqliteRoomStore::open(&path).expect("reopen store"),
+        ));
+
+        async fn get_json(state: AppState, uri: String) -> (StatusCode, serde_json::Value) {
+            use tower::ServiceExt as _;
+            let response = room_routes()
+                .with_state(state)
+                .oneshot(
+                    axum::http::Request::get(uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = serde_json::from_slice(
+                &axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            (status, body)
+        }
+
+        for uri in [
+            format!("/v1/rooms/persistent/{key}/inspect"),
+            format!("/v1/rooms/persistent/{key}"),
+            format!("/v1/rooms/persistent/{key}/snapshot"),
+        ] {
+            let (status, body) = get_json(state.clone(), uri).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["aliases"].as_array().unwrap().len(), 1);
+            assert_eq!(body["aliases"][0]["from"], "surface-operator");
+            assert_eq!(body["aliases"][0]["to"], "smaths");
+            assert!(body["aliases"][0]["retired_at"].is_string());
+            assert_eq!(body["aliases"][0].as_object().unwrap().len(), 3);
+            if uri.ends_with("/inspect") {
+                assert_eq!(body["owner"]["member_id"], "smaths");
+                assert!(body.get("transcript").is_none());
+                assert!(body.get("access").is_none());
+            }
+        }
+
+        let plain = RoomKey::new("no-aliases");
+        with_rooms(&state, |store| {
+            store
+                .create(plain.clone(), "No Aliases", None, Utc::now())
+                .expect("create no-alias room");
+        });
+        let (status, empty) =
+            get_json(state, format!("/v1/rooms/persistent/{plain}/inspect")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(empty["aliases"], json!([]));
     }
 
     // ── Merged SSE routed tests ──────────────────────────────────────────────

@@ -28,6 +28,9 @@ use super::{fmt_ts, MessageDraft, Result, RoomStoreError, SqliteRoomStore};
 /// into a member that is itself later retired resolves two hops; anything
 /// deeper is a bug, not a use case.
 const MAX_ALIAS_HOPS: usize = 8;
+/// Keep read-boundary alias responses finite even if a room has many retired
+/// placeholders accumulated over its lifetime.
+const MAX_ROOM_PARTICIPANT_ALIASES: i64 = 256;
 
 pub(super) const ROOM_RETIREMENT_DDL: &str = r#"
     -- Rooms S0: durable `from -> to` merges of placeholder humans. One row per
@@ -63,6 +66,15 @@ pub struct ParticipantAlias {
     pub retired_at: DateTime<Utc>,
     pub retired_by: String,
     pub decision_id: String,
+}
+
+/// The non-transcript room fields needed by the daemon's bounded identity
+/// inspection response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoomIdentityInspection {
+    pub room_id: String,
+    pub name: String,
+    pub closed: bool,
 }
 
 /// One operator-approved retirement.
@@ -119,14 +131,35 @@ pub(super) fn resolve_alias_on(conn: &Connection, key: &RoomKey, id: &str) -> Re
 }
 
 impl SqliteRoomStore {
-    /// Every alias in the room, oldest first.
+    /// Read only identity metadata without hydrating the room transcript.
+    pub fn inspect_room_identity(
+        &self,
+        key: &RoomKey,
+    ) -> Result<Option<RoomIdentityInspection>> {
+        self.conn
+            .query_row(
+                "SELECT id, name, closed_at FROM rooms WHERE id = ?1",
+                params![key.as_str()],
+                |row| {
+                    Ok(RoomIdentityInspection {
+                        room_id: row.get(0)?,
+                        name: row.get(1)?,
+                        closed: row.get::<_, Option<String>>(2)?.is_some(),
+                    })
+                },
+            )
+            .optional()
+            .map_err(RoomStoreError::from)
+    }
+
+    /// At most 256 aliases in the room, oldest first.
     pub fn room_participant_aliases(&self, key: &RoomKey) -> Result<Vec<ParticipantAlias>> {
         let mut stmt = self.conn.prepare(
             "SELECT from_id, to_id, retired_at, retired_by, decision_id
                FROM room_participant_aliases WHERE room_id = ?1
-              ORDER BY retired_at, from_id",
+              ORDER BY retired_at, from_id LIMIT ?2",
         )?;
-        let rows = stmt.query_map(params![key.as_str()], |row| {
+        let rows = stmt.query_map(params![key.as_str(), MAX_ROOM_PARTICIPANT_ALIASES], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -540,6 +573,23 @@ mod tests {
             s.resolve_participant_alias(&key, "member-0"),
             Err(RoomStoreError::Encode(reason)) if reason == "participant alias chain is cyclic"
         ));
+    }
+
+    #[test]
+    fn alias_read_is_capped_at_the_documented_projection_bound() {
+        let (s, key) = legacy_room();
+        for index in 0..300 {
+            seed_alias(
+                &s,
+                &key,
+                &format!("retired-{index:03}"),
+                "smaths",
+            );
+        }
+        let aliases = s.room_participant_aliases(&key).unwrap();
+        assert_eq!(aliases.len(), MAX_ROOM_PARTICIPANT_ALIASES as usize);
+        assert_eq!(aliases.first().unwrap().from_id, "retired-000");
+        assert_eq!(aliases.last().unwrap().from_id, "retired-255");
     }
 
     #[test]
