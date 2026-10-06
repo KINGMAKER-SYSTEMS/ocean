@@ -49,14 +49,31 @@ impl Content {
     }
 }
 
+/// Token usage for one provider request, in one shape for every provider.
+///
+/// The counts nest rather than add:
+///   - `input` is every prompt token the provider processed, cached or not.
+///     `cache_read` and `cache_write` are subsets of it.
+///   - `output` is every token the model produced. `reasoning` is a subset of
+///     it.
+///   - `total_tokens` is the whole footprint of the request: the provider's
+///     own total where it reports one, `input + output` otherwise.
+///
+/// So a client may show `input + output` as a total, and must not add the
+/// cache counts to it. A provider that reports its counts differently is
+/// mapped onto this shape by its adapter: Anthropic reports cached tokens
+/// beside `input_tokens` rather than inside it, and its adapter adds them in.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Usage {
+    /// Every prompt token processed, including `cache_read` and `cache_write`.
     #[serde(default)]
     pub input: u64,
     #[serde(default)]
     pub output: u64,
+    /// Prompt tokens served from the provider's cache. A subset of `input`.
     #[serde(default)]
     pub cache_read: u64,
+    /// Prompt tokens written to the provider's cache. A subset of `input`.
     #[serde(default)]
     pub cache_write: u64,
     /// OCEAN-164: reasoning/thinking tokens billed by the provider on reasoning
@@ -77,6 +94,26 @@ pub struct Usage {
     pub reasoning: u64,
     #[serde(default)]
     pub total_tokens: u64,
+}
+
+#[cfg(test)]
+impl Usage {
+    /// Panics unless the counts nest the way the type documents. Provider
+    /// tests call this on what their adapter produced from a wire fixture.
+    pub(crate) fn assert_nested(&self) {
+        assert!(
+            self.cache_read + self.cache_write <= self.input,
+            "cache counts are subsets of input: {self:?}"
+        );
+        assert!(
+            self.reasoning <= self.output,
+            "reasoning is a subset of output: {self:?}"
+        );
+        assert!(
+            self.total_tokens >= self.input + self.output,
+            "the total covers input and output: {self:?}"
+        );
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

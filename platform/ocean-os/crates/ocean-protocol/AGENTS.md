@@ -53,7 +53,14 @@ This crate owns the multi-provider LLM wire protocol layer for Anthropic, OpenAI
   existing bounded highest-effort fallback.
 - Codex GPT-6/5.6 preserves xhigh and max. Astra/Sol 6.1 normalize unsupported
   Off/Minimal to low; other GPT-6 models encode Off as none.
-- Usage is what the provider reported, mapped onto one shape. Anthropic
+- Usage is what the provider reported, mapped onto one shape whose counts
+  nest: `input` is every prompt token processed, with `cache_read` and
+  `cache_write` as subsets of it; `reasoning` is a subset of `output`; and
+  `total_tokens` covers `input + output`. A client may total input and output
+  and must not add the cache counts to that. Anthropic reports cached tokens
+  beside `input_tokens`, not inside it, so its adapter adds both cache buckets
+  into `input` on the way out (`shared_usage`); the other adapters' prompt
+  figures already include their cached tokens. Anthropic
   `message_delta` usage is cumulative for the message: replace the running
   counts, never add, and never let a report that omits the input side erase
   what `message_start` said. Every Anthropic usage count tolerates `null`; a

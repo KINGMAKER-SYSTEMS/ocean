@@ -381,6 +381,21 @@ struct ChunkUsage {
     completion_tokens_details: Option<CompletionTokensDetails>,
 }
 
+/// Map Chat Completions usage onto the shared shape. `prompt_tokens` already
+/// includes `cached_tokens`, and `completion_tokens` already includes
+/// reasoning, so the details are subsets and nothing is added to the totals.
+fn apply_chunk_usage(usage: &mut Usage, reported: ChunkUsage) {
+    usage.input = reported.prompt_tokens;
+    usage.output = reported.completion_tokens;
+    usage.total_tokens = reported.total_tokens;
+    if let Some(details) = reported.prompt_tokens_details {
+        usage.cache_read = details.cached_tokens;
+    }
+    if let Some(details) = reported.completion_tokens_details {
+        usage.reasoning = details.reasoning_tokens;
+    }
+}
+
 #[derive(Deserialize, Debug, Default)]
 struct PromptTokensDetails {
     #[serde(default)]
@@ -1010,15 +1025,7 @@ impl Provider for OpenAiProvider {
                 }
                 if let Some(m) = chunk.model { response_model = Some(m); }
                 if let Some(u) = chunk.usage {
-                    usage.input = u.prompt_tokens;
-                    usage.output = u.completion_tokens;
-                    usage.total_tokens = u.total_tokens;
-                    if let Some(d) = u.prompt_tokens_details {
-                        usage.cache_read = d.cached_tokens;
-                    }
-                    if let Some(d) = u.completion_tokens_details {
-                        usage.reasoning = d.reasoning_tokens;
-                    }
+                    apply_chunk_usage(&mut usage, u);
                 }
                 for choice in chunk.choices {
                     if let Some(reason) = choice.finish_reason {
@@ -2692,11 +2699,21 @@ mod tests {
         let u = chunk.usage.expect("usage present");
         assert_eq!(
             u.prompt_tokens_details
+                .as_ref()
                 .expect("details present")
                 .cached_tokens,
             1024,
             "cached_tokens must decode from prompt_tokens_details"
         );
+
+        // Cached tokens are part of prompt_tokens here, so they are a subset
+        // of input and must not be added to it or to the total.
+        let mut usage = Usage::default();
+        apply_chunk_usage(&mut usage, u);
+        assert_eq!((usage.input, usage.cache_read), (1200, 1024));
+        assert_eq!(usage.total_tokens, 1240);
+        assert_eq!(usage.total_tokens, usage.input + usage.output);
+        usage.assert_nested();
     }
 
     // OCEAN-164: a usage payload carrying

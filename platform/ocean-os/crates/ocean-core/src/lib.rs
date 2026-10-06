@@ -317,15 +317,22 @@ pub struct AgentReplayGap {
 }
 
 /// Token usage for a turn, mirrored from `ocean_protocol::Usage` so `ocean-core`
-/// stays free of a protocol dependency. All counts sum across the turn's rounds.
+/// stays free of a protocol dependency. The counters sum across the turn's
+/// rounds and nest the same way on every provider: `input` is every prompt
+/// token processed and includes `cache_read` and `cache_write`; `total_tokens`
+/// covers `input + output`. A client may total input and output, and must not
+/// add the cache counts to that.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenUsage {
+    /// Every prompt token processed, including `cache_read` and `cache_write`.
     #[serde(default)]
     pub input: u64,
     #[serde(default)]
     pub output: u64,
+    /// Prompt tokens served from the provider's cache. A subset of `input`.
     #[serde(default)]
     pub cache_read: u64,
+    /// Prompt tokens written to the provider's cache. A subset of `input`.
     #[serde(default)]
     pub cache_write: u64,
     #[serde(default)]

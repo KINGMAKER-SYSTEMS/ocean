@@ -1458,50 +1458,13 @@ mod tests {
             .unwrap();
     }
 
-    /// Answer one request on `listener` with `events` as an SSE body, after
-    /// reading the whole request so the client sees a clean exchange.
-    async fn serve_one_sse(listener: tokio::net::TcpListener, events: &'static str) {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let (mut socket, _) = listener.accept().await.unwrap();
-        let mut bytes = Vec::new();
-        let mut chunk = [0u8; 4096];
-        let expected = loop {
-            let n = socket.read(&mut chunk).await.unwrap();
-            assert!(n > 0, "request ended before headers");
-            bytes.extend_from_slice(&chunk[..n]);
-            assert!(bytes.len() < 64 * 1024, "fixture request exceeds bound");
-            if let Some(end) = bytes.windows(4).position(|v| v == b"\r\n\r\n") {
-                let headers = String::from_utf8_lossy(&bytes[..end]);
-                let length = headers
-                    .lines()
-                    .find_map(|line| {
-                        let (name, value) = line.split_once(':')?;
-                        name.eq_ignore_ascii_case("content-length")
-                            .then(|| value.trim().parse::<usize>().unwrap())
-                    })
-                    .unwrap();
-                break end + 4 + length;
-            }
-        };
-        while bytes.len() < expected {
-            let n = socket.read(&mut chunk).await.unwrap();
-            assert!(n > 0);
-            bytes.extend_from_slice(&chunk[..n]);
-        }
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{events}",
-            events.len()
-        );
-        socket.write_all(response.as_bytes()).await.unwrap();
-    }
-
     /// The whole stream path, not just the helper: a round that ends on the
     /// output cap finishes as `Length` with its partial text and its usage.
     #[tokio::test]
     async fn length_capped_stream_finishes_with_text_and_usage() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(serve_one_sse(
+        let server = tokio::spawn(crate::providers::test_support::serve_one_sse(
             listener,
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\ndata: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"usage\":{\"input_tokens\":250000,\"input_tokens_details\":{\"cached_tokens\":240000},\"output_tokens\":128000,\"output_tokens_details\":{\"reasoning_tokens\":90000},\"total_tokens\":378000}}}\n\n",
         ));
@@ -1840,6 +1803,10 @@ mod tests {
         assert_eq!(usage.cache_read, 240_000);
         assert_eq!(usage.reasoning, 90_000);
         assert_eq!(usage.total_tokens, 378_000);
+        // Cached tokens are inside input_tokens on this API: a subset, never
+        // an extra on top of the total.
+        assert_eq!(usage.total_tokens, usage.input + usage.output);
+        usage.assert_nested();
     }
 
     #[test]

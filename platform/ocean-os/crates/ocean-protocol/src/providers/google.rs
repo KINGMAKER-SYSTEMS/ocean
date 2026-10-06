@@ -1155,6 +1155,13 @@ mod tests {
             usage.cached_content_token_count, 1280,
             "cachedContentTokenCount must decode from the camelCase wire shape"
         );
+
+        // Cached content is part of promptTokenCount: a subset of input.
+        let mut mapped = Usage::default();
+        apply_usage_metadata(&mut mapped, &usage);
+        assert_eq!((mapped.input, mapped.cache_read), (1500, 1280));
+        assert_eq!(mapped.total_tokens, mapped.input + mapped.output);
+        mapped.assert_nested();
     }
 
     // OCEAN-164: Gemini reports reasoning ("thoughts") tokens under

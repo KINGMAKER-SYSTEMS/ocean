@@ -5021,8 +5021,9 @@ mod tests {
             api: "test".into(),
             provider: "test".into(),
             model: "scripted".into(),
+            // In the shared shape: the cache counts are inside `input`.
             usage: ocean_protocol::Usage {
-                input: 1_000,
+                input: 53_000,
                 output: 300,
                 cache_read: 50_000,
                 cache_write: 2_000,
@@ -5084,7 +5085,7 @@ mod tests {
         assert!(!res.ok, "the second round fails the turn");
         assert!(res.stderr.contains("scripted outage"), "{}", res.stderr);
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
-        assert_eq!(res.usage.input, 1_000);
+        assert_eq!(res.usage.input, 53_000);
         assert_eq!(res.usage.output, 300);
         assert_eq!(res.usage.cache_read, 50_000);
         assert_eq!(res.usage.cache_write, 2_000);

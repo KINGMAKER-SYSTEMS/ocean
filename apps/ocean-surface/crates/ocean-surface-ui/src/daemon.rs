@@ -2248,10 +2248,13 @@ pub struct ModelInfo {
 
 /// Token usage for a turn (or summed for a session), mirrored from the daemon's
 /// TurnFinished event. All counts are real provider usage when reported.
+/// `input` is every prompt token processed and already includes `cache_read`,
+/// on every provider, so `total` is input + output and never adds the cache.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct TokenStats {
     pub input: u64,
     pub output: u64,
+    /// The part of `input` served from the provider's cache.
     pub cache_read: u64,
     /// Tokens/sec for the last turn; not meaningful when summed, so a session
     /// total leaves this at 0.

@@ -293,17 +293,28 @@ fn thinking_budget(level: ThinkingLevel) -> Option<u32> {
     }
 }
 
-/// Total token footprint for an Anthropic turn (OCEAN-188).
+/// Map the counts Anthropic reported for one message onto the shared
+/// [`Usage`] shape (OCEAN-188).
 ///
 /// Anthropic reports cache tokens SEPARATELY from `input_tokens`:
 /// `input_tokens` is the non-cached input only, while
 /// `cache_creation_input_tokens` (cache_write) and `cache_read_input_tokens`
-/// (cache_read) are reported alongside it and are NOT included in it. The full
-/// footprint that hit the model is therefore input + output + cache_write +
-/// cache_read. This keeps Anthropic consistent with the other providers, whose
-/// reported totals already fold cache-read tokens into the prompt/input figure.
-fn total_tokens(u: &crate::types::Usage) -> u64 {
-    u.input + u.output + u.cache_write + u.cache_read
+/// (cache_read) are reported alongside it and are NOT included in it. Every
+/// other provider's prompt figure already includes its cached tokens, and
+/// that is what `Usage.input` means, so both cache buckets are added to it
+/// here. Left as reported, a cached turn showed an input of a few tokens
+/// beside a cache read of a hundred thousand, and any client that totalled
+/// input and output was low by the whole cached prompt.
+///
+/// `reported` is the running count from the stream, still in Anthropic's own
+/// terms. Call this once, on the way out.
+fn shared_usage(reported: &Usage) -> Usage {
+    let input = reported.input + reported.cache_read + reported.cache_write;
+    Usage {
+        input,
+        total_tokens: input + reported.output,
+        ..reported.clone()
+    }
 }
 
 /// Map an Anthropic `stop_reason` string to our internal [`StopReason`],
@@ -812,13 +823,12 @@ impl Provider for AnthropicProvider {
                     SseEvent::MessageStop => {}
                     SseEvent::Error { error } => {
                         let err_msg = format!("{}: {}", error.kind, error.message);
-                        usage.total_tokens = total_tokens(&usage);
                         let am = AssistantMessage {
                             content: vec![],
                             api: api.clone(),
                             provider: provider.clone(),
                             model: response_model.clone().unwrap_or_else(|| model_id.clone()),
-                            usage: usage.clone(),
+                            usage: shared_usage(&usage),
                             stop_reason: StopReason::Error,
                             error_message: Some(err_msg),
                             timestamp: now_ms(),
@@ -829,17 +839,10 @@ impl Provider for AnthropicProvider {
                 }
             }
 
-            // OCEAN-188: Anthropic reports `cache_creation_input_tokens` (->
-            // cache_write) and `cache_read_input_tokens` (-> cache_read) as
-            // fields SEPARATE from `input_tokens` — `input_tokens` counts only
-            // the non-cached input. So input + output alone under-counts the
-            // total whenever prompt caching is active (the cache footprint goes
-            // invisible in the HUD). The true model footprint includes both
-            // cache buckets. This also matches every other provider's
-            // convention, where cache-read tokens are already folded into the
-            // provider-reported total (OpenAI/Gemini: cached_tokens ⊆
-            // prompt/total; Codex: cached ⊆ input ⊆ total).
-            usage.total_tokens = total_tokens(&usage);
+            // The running count is in Anthropic's terms, where cached tokens
+            // sit beside `input_tokens`. From here on it is the shared shape,
+            // where they are inside `input` (see `shared_usage`).
+            let usage = shared_usage(&usage);
             let mut out_content = Vec::with_capacity(order.len());
             for idx in &order {
                 if let Some(st) = blocks.get(idx) {
@@ -1306,23 +1309,29 @@ mod tests {
     }
 
     // OCEAN-188: Anthropic reports cache_creation/cache_read separately from
-    // input_tokens, so the total footprint must add both cache buckets on top
-    // of input + output. With input=100, output=50, cache_write=512,
-    // cache_read=200 the total is 862, not the 150 that input+output alone gave.
+    // input_tokens. The shared shape counts them inside `input`, as every
+    // other provider does, so a client can total input and output. With
+    // input=100, output=50, cache_write=512, cache_read=200 the input is 812
+    // and the total 862, not the 100 and 150 the reported figures alone gave.
     #[test]
-    fn anthropic_total_tokens_includes_both_cache_buckets() {
-        let usage = Usage {
+    fn anthropic_usage_counts_both_cache_buckets_inside_input() {
+        let usage = shared_usage(&Usage {
             input: 100,
             output: 50,
             cache_write: 512,
             cache_read: 200,
             ..Default::default()
-        };
+        });
         assert_eq!(
-            total_tokens(&usage),
-            862,
-            "total must be input + output + cache_write + cache_read"
+            usage.input, 812,
+            "input is uncached + cache_read + cache_write"
         );
+        assert_eq!(usage.total_tokens, 862);
+        assert_eq!(usage.total_tokens, usage.input + usage.output);
+        // The cache counts stay as reported: subsets of input, not extras.
+        assert_eq!((usage.cache_read, usage.cache_write), (200, 512));
+        usage.assert_nested();
+        assert_eq!(usage.output, 50);
     }
 
     // The API types these counts as nullable and compatible endpoints do send
@@ -1395,7 +1404,8 @@ mod tests {
             (usage.input, usage.cache_read, usage.cache_write),
             (1_000, 50_000, 2_000)
         );
-        assert_eq!(total_tokens(&usage), 53_300);
+        let shared = shared_usage(&usage);
+        assert_eq!((shared.input, shared.total_tokens), (53_000, 53_300));
 
         // A newer API version restates the input side cumulatively.
         apply_message_delta_usage(
@@ -1418,16 +1428,82 @@ mod tests {
         );
     }
 
-    // No caching active: cache buckets are zero, so the total collapses back to
-    // input + output — no regression for the non-cached path.
+    /// The whole stream path, not just the mapper: a cached round comes out of
+    /// the adapter with its cached tokens inside `input`, so a client that
+    /// totals input and output sees the whole prompt it was billed for.
+    #[tokio::test]
+    async fn cached_round_reports_its_whole_prompt_as_input() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(crate::providers::test_support::serve_one_sse(
+            listener,
+            concat!(
+                "event: message_start\n",
+                "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-5-5\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":12,\"cache_creation_input_tokens\":2000,\"cache_read_input_tokens\":150000,\"output_tokens\":1}}}\n\n",
+                "event: content_block_start\n",
+                "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+                "event: content_block_delta\n",
+                "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"cached reply\"}}\n\n",
+                "event: content_block_stop\n",
+                "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+                "event: message_delta\n",
+                "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":300}}\n\n",
+                "event: message_stop\n",
+                "data: {\"type\":\"message_stop\"}\n\n",
+            ),
+        ));
+        let model = Model {
+            base_url: format!("http://{address}"),
+            ..Model::anthropic_claude_sonnet_5_5()
+        };
+        let context = Context {
+            messages: vec![Message::user_text("fixture")],
+            ..Default::default()
+        };
+        let options = StreamOptions {
+            api_key: Some("synthetic-api-key".into()),
+            ..Default::default()
+        };
+        let probe = async {
+            let mut stream = crate::stream_simple(&model, &context, &options)
+                .await
+                .unwrap();
+            let mut done = None;
+            while let Some(event) = stream.next().await {
+                if let AssistantMessageEvent::Done { reason, message } = event.unwrap() {
+                    done = Some((reason, message));
+                }
+            }
+            server.await.unwrap();
+            let (reason, message) = done.expect("the round completes");
+            assert_eq!(reason, StopReason::Stop);
+            assert_eq!(message.content[0].as_text(), Some("cached reply"));
+            let usage = &message.usage;
+            assert_eq!(
+                usage.input, 152_012,
+                "12 uncached + 150,000 read from cache + 2,000 written to it"
+            );
+            assert_eq!(usage.output, 300);
+            assert_eq!((usage.cache_read, usage.cache_write), (150_000, 2_000));
+            assert_eq!(usage.total_tokens, 152_312);
+            assert_eq!(usage.total_tokens, usage.input + usage.output);
+            usage.assert_nested();
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), probe)
+            .await
+            .unwrap();
+    }
+
+    // No caching active: cache buckets are zero, so input is as reported and
+    // the total is input + output — no regression for the non-cached path.
     #[test]
-    fn anthropic_total_tokens_without_cache_is_input_plus_output() {
-        let usage = Usage {
+    fn anthropic_usage_without_cache_is_unchanged() {
+        let usage = shared_usage(&Usage {
             input: 377,
             output: 65,
             ..Default::default()
-        };
-        assert_eq!(total_tokens(&usage), 442);
+        });
+        assert_eq!((usage.input, usage.total_tokens), (377, 442));
     }
 
     // OCEAN-159: on the Anthropic family, build_body must attach an ephemeral
@@ -1576,7 +1652,7 @@ mod tests {
     #[test]
     fn anthropic_usage_delta_empty_object_is_all_zeros() {
         let u: UsageDelta = serde_json::from_str("{}").expect("empty usage decodes");
-        assert_eq!(total_tokens(&Usage::default()), 0);
+        assert_eq!(shared_usage(&Usage::default()).total_tokens, 0);
         assert_eq!(u.input_tokens + u.output_tokens, 0);
     }
 

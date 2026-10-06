@@ -432,3 +432,15 @@ Fixed the ocean-tui test that failed intermittently during this work, shell::her
 
 Validation: ocean-tui passes 511 tests (4 ignored) eight times in a row on the branch merged with current main, where the same suite had failed five of nine runs before the fix; workspace test compilation and rustfmt check pass. The failing runs' own output showed both reports present with the session report complete, which is what identified the race.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [22:14] [05-10-26]
+agent: [claude] [claude code]
+worktree: [claude/token-footprint-totals] [/Users/risingtidesdev/dev/ocean-claude-audit]
+type: [bug report]
+area: [backend] [frontend] [testing]
+
+Made the shared usage counters mean the same thing on every provider (issue #11). Usage.input meant uncached input on Anthropic and the whole prompt on OpenAI, Codex and Gemini, so any client that totalled input and output was right for three providers and low by the entire cached prompt on the fourth: a cached Claude turn showed an input of a dozen tokens beside a cache read of a hundred and fifty thousand, and Surface's token chip reported a session total about forty times too small. The contract is now written down on the type: input is every prompt token processed, with cache_read and cache_write as subsets of it; reasoning is a subset of output; total_tokens covers input plus output; a client may total input and output and must not add the cache counts. The Anthropic adapter is the one that reported differently, so it now folds both cache buckets into input on the way out, once, in a single mapper the stream calls at its two exits; the other adapters are unchanged apart from a small extraction in the OpenAI one so its mapping can be tested. Surface's chip needed no logic change, only wording: its tooltip now reads "in N (cached M)" so the cache is shown as part of the input rather than beside it. The daemon event is unchanged. Compatibility: TurnFinished.input_tokens for Anthropic sessions is now the whole prompt, which is what every other provider already sent; sessions saved before this change keep their old per-message counts, which only ever feed sums within one turn.
+
+Validation: ocean-protocol (181 plus 5), ocean-agent (266, live probe ignored), ocean-core (62), ocean-cli, ocean-runtime (128 plus integration) and ocean-providers (66) pass; workspace test compilation, rustfmt check and docs-check pass. New tests: the Anthropic mapper with and without cache; a full Anthropic stream through a loopback server whose message_start carries 12 uncached, 150,000 cached and 2,000 written tokens comes out with input 152,012 and total 152,312; the OpenAI, Codex and Gemini cached fixtures assert the nesting through a shared test check; all three Anthropic tests fail when the cache buckets are left out of input. No provider was called.
+_________________________________________________________________________________
