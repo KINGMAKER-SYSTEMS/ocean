@@ -301,6 +301,7 @@ mod tests {
             output_tokens: Some(20),
             input_tokens: Some(40),
             cache_read_tokens: None,
+            total_tokens: None,
             tokens_per_second: Some(200.0),
             context_usage: Some(ContextUsage {
                 used_tokens: 50,

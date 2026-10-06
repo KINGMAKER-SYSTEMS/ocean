@@ -511,3 +511,67 @@ ocean-tui` passed (523 passed, 4 ignored); `CARGO_INCREMENTAL=0 cargo check
 `rustfmt --check`, and `git diff --check` passed. Hosted Build Ocean validation
 is still required before merge. No daemon was installed or restarted.
 _________________________________________________________________________________
+time: [20:10] [05-10-26]
+agent: [zcode] [glm-5.3]
+worktree: [fix/tui-thinking-effort-levels]
+type: [feature-request]
+area: [frontend] [ocean-tui]
+
+Implemented issue #8: the /models picker's thinking cycler now derives its
+options from the highlighted model's catalog `effort_levels` instead of
+offering every shared ThinkingLevel for every model. `ModelEntry` deserializes
+the daemon's additive per-route `effort_levels` (older daemons deserialize to
+empty), `cycle_thinking` cycles `default` plus exactly the offered levels in
+catalog order, and unknown forward-compat names are skipped rather than
+guessed. `default` (unset) always stays available and distinct from `off`. An
+empty list — a route whose encoder sends no effort parameter, or a catalog
+still loading — leaves `default` as the only choice, so the TUI never offers a
+control the encoder ignores. Applying a model now snaps a pinned level that
+model does not offer back to `default` instead of riding a silently folded
+pin. No provider compatibility table was duplicated in the TUI: the options
+come from the daemon catalog strings. `/thinking <level>` arguments remain
+explicit operator text, unchanged.
+
+Validation: cargo check -p ocean-tui --all-targets; full cargo test -p
+ocean-tui (514 passed, 0 failed, 4 ignored — includes new tests for collapsed
+DeepSeek-style routes, single-level K3-style routes, empty-catalog default
+locking, highlighted-entry cycling, and apply-time snap); rustfmt applied;
+cargo clippy -p ocean-tui --all-targets clean; cargo build -p ocean-tui
+--release. Devlog pass: no owning contract text describes the cycler's option
+set, so AGENTS.md files are intentionally unchanged.
+_________________________________________________________________________________
+time: [20:31] [05-10-26]
+agent: [zcode] [glm-5.3]
+worktree: [fix/token-footprint-totals]
+type: [bug report]
+area: [backend] [frontend] token accounting
+
+Implemented issue #11: the provider-neutral processed-token footprint now
+rides the turn terminal, and Surface displays it as the total. The provider
+layer already maintained the correct footprint in Usage.total_tokens
+(Anthropic: input + output + cache_write + cache_read with cache counted
+outside input; OpenAI/Gemini/Codex: provider totals with cached tokens folded
+into input), but no client could see it: TurnFinished and AgentTurnResponse
+exposed only input/output/cache_read, and Surface's TokenStats::total() summed
+input + output — underreporting cached Anthropic sessions by their entire
+cache. The daemon now emits total_tokens (additive serde field, provider-
+reported totals only — a visible-text estimate never fakes a footprint);
+ocean-surface-ui and ocean-gui mirror the field, fold it into TokenStats.footprint
+(input + output fallback for older daemons), and the Surface token chip's
+tooltip labels the number "processed" with the in/out/cache breakdown beneath.
+The TUI displays no billed total (context occupancy and tok/s only), so its
+change is the event-enum fan-out. Provider-shaped tests pin both conventions:
+Anthropic cache-outside-input (862 = 100+50+512+200, input+output alone 150)
+and OpenAI cached-in-input (1240 = 1200+40 with cached 1024 already inside
+prompt_tokens); the surface test proves the daemon footprint drives the
+displayed total and the older-daemon fallback.
+
+Validation: cargo test -p ocean-protocol (182 passed incl. both footprint
+tests); cargo test -p ocean-agent-sdk; cargo test -p ocean-daemon (879);
+cargo test -p ocean-tui (514); cargo test -p ocean-acp; cargo test -p
+ocean-surface-ui (872 incl. footprint test) plus --target
+wasm32-unknown-unknown --no-run; cargo test -p ocean-gui (416); cargo check
+--workspace --tests; rustfmt and denied-warning Clippy on every touched
+crate. Devlog pass: the footprint contract is documented on the SDK field;
+no AGENTS.md text previously described TokenStats totals, so ownership docs
+are intentionally unchanged.

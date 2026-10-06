@@ -514,6 +514,7 @@ mod tests {
             output_tokens: None,
             input_tokens: None,
             cache_read_tokens: None,
+            total_tokens: None,
             tokens_per_second: None,
             context_usage: None,
         }

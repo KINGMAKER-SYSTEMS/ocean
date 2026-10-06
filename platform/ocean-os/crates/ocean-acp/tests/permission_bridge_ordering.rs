@@ -151,6 +151,7 @@ async fn agent_turn(
                 output_tokens: None,
                 input_tokens: None,
                 cache_read_tokens: None,
+                total_tokens: None,
                 tokens_per_second: None,
                 context_usage: None,
             });
@@ -164,6 +165,7 @@ async fn agent_turn(
                 output_tokens: None,
                 input_tokens: None,
                 cache_read_tokens: None,
+                total_tokens: None,
                 tokens_per_second: None,
                 context_usage: None,
                 wall_ms: None,
@@ -181,6 +183,7 @@ async fn agent_turn(
         output_tokens: Some(1),
         input_tokens: None,
         cache_read_tokens: None,
+        total_tokens: None,
         tokens_per_second: None,
         context_usage: None,
     });
@@ -194,6 +197,7 @@ async fn agent_turn(
         output_tokens: None,
         input_tokens: None,
         cache_read_tokens: None,
+        total_tokens: None,
         tokens_per_second: None,
         context_usage: None,
         wall_ms: None,

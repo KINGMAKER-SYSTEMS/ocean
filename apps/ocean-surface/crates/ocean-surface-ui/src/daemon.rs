@@ -733,6 +733,12 @@ pub enum AgentEvent {
         input_tokens: Option<u64>,
         #[serde(default)]
         cache_read_tokens: Option<u64>,
+        /// Provider-neutral processed footprint (issue #11): the daemon's
+        /// turn total. Anthropic counts cache outside `input_tokens`; other
+        /// providers fold it in — display totals must use this, not
+        /// input + output.
+        #[serde(default)]
+        total_tokens: Option<u64>,
         #[serde(default)]
         tokens_per_second: Option<f64>,
     },
@@ -2253,6 +2259,11 @@ pub struct TokenStats {
     pub input: u64,
     pub output: u64,
     pub cache_read: u64,
+    /// Provider-neutral processed footprint (issue #11): the daemon-reported
+    /// turn total when present, else the input + output fallback for older
+    /// daemons. This is what a displayed total means — `input + output` alone
+    /// undercounts Anthropic sessions by their entire cache.
+    pub footprint: u64,
     /// Tokens/sec for the last turn; not meaningful when summed, so a session
     /// total leaves this at 0.
     pub tokens_per_second: f64,
@@ -2260,7 +2271,7 @@ pub struct TokenStats {
 
 impl TokenStats {
     pub fn total(&self) -> u64 {
-        self.input + self.output
+        self.footprint
     }
 }
 
@@ -6380,6 +6391,7 @@ fn apply_event(
             output_tokens,
             input_tokens,
             cache_read_tokens,
+            total_tokens,
             tokens_per_second,
             ..
         } => {
@@ -6478,10 +6490,15 @@ fn apply_event(
             }
             // Record this turn's usage (real provider numbers when present) and
             // fold it into the running session total.
+            let in_tokens = input_tokens.unwrap_or(0);
+            let out_tokens = output_tokens.unwrap_or(0);
             let turn_stats = TokenStats {
-                input: input_tokens.unwrap_or(0),
-                output: output_tokens.unwrap_or(0),
+                input: in_tokens,
+                output: out_tokens,
                 cache_read: cache_read_tokens.unwrap_or(0),
+                // Daemon-reported footprint when present; the pre-footprint
+                // input+output sum only as an older-daemon fallback.
+                footprint: total_tokens.unwrap_or(in_tokens + out_tokens),
                 tokens_per_second: tokens_per_second.unwrap_or(0.0),
             };
             last_turn_tokens.set(Some(turn_stats));
@@ -6489,6 +6506,7 @@ fn apply_event(
                 s.input += turn_stats.input;
                 s.output += turn_stats.output;
                 s.cache_read += turn_stats.cache_read;
+                s.footprint += turn_stats.footprint;
                 // Session total isn't a rate; keep tokens_per_second at 0.
             });
         }
@@ -8283,6 +8301,7 @@ mod tests {
                 output_tokens: None,
                 input_tokens: None,
                 cache_read_tokens: None,
+                total_tokens: None,
                 tokens_per_second: None,
             },
         );
@@ -8400,8 +8419,62 @@ mod tests {
                 output_tokens: None,
                 input_tokens: None,
                 cache_read_tokens: None,
+                total_tokens: None,
                 tokens_per_second: None,
             },
+        );
+    }
+
+    #[test]
+    fn turn_total_tokens_drives_the_displayed_footprint() {
+        let daemon = daemon_with_session("s-footprint");
+
+        // Anthropic shape: the daemon-reported footprint counts cache that
+        // `input_tokens` excludes. The displayed total must be that number,
+        // not input + output.
+        apply_test_event(
+            &daemon,
+            AgentEvent::TurnFinished {
+                session_id: "s-footprint".to_string(),
+                turn_id: "t1".to_string(),
+                status: "completed".to_string(),
+                error: None,
+                wall_ms: Some(1000),
+                output_tokens: Some(50),
+                input_tokens: Some(100),
+                cache_read_tokens: Some(200),
+                total_tokens: Some(352),
+                tokens_per_second: None,
+            },
+        );
+        let s = daemon.session_tokens.get_untracked();
+        assert_eq!(s.total(), 352, "displayed total is the daemon footprint");
+        assert_eq!(
+            s.input + s.output,
+            150,
+            "input + output alone undercounts the cached session"
+        );
+
+        // Older daemon without the field: fall back to input + output.
+        apply_test_event(
+            &daemon,
+            AgentEvent::TurnFinished {
+                session_id: "s-footprint".to_string(),
+                turn_id: "t2".to_string(),
+                status: "completed".to_string(),
+                error: None,
+                wall_ms: Some(1000),
+                output_tokens: Some(10),
+                input_tokens: Some(20),
+                cache_read_tokens: None,
+                total_tokens: None,
+                tokens_per_second: None,
+            },
+        );
+        assert_eq!(
+            daemon.session_tokens.get_untracked().total(),
+            352 + 30,
+            "older daemons keep the input + output fallback"
         );
     }
 
@@ -12411,6 +12484,7 @@ mod tests {
                 output_tokens: None,
                 input_tokens: None,
                 cache_read_tokens: None,
+                total_tokens: None,
                 tokens_per_second: None,
             },
         );
@@ -12457,6 +12531,7 @@ mod tests {
                 output_tokens: None,
                 input_tokens: None,
                 cache_read_tokens: None,
+                total_tokens: None,
                 tokens_per_second: None,
             },
         );
@@ -12485,6 +12560,7 @@ mod tests {
                 output_tokens: None,
                 input_tokens: None,
                 cache_read_tokens: None,
+                total_tokens: None,
                 tokens_per_second: None,
             },
         );
@@ -12513,6 +12589,7 @@ mod tests {
                 output_tokens: None,
                 input_tokens: None,
                 cache_read_tokens: None,
+                total_tokens: None,
                 tokens_per_second: None,
             },
         );

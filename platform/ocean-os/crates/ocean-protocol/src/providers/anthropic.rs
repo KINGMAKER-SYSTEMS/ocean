@@ -1552,6 +1552,32 @@ mod tests {
         assert_eq!(u.cache_creation_input_tokens, 512);
     }
 
+    // Issue #11: `usage.total_tokens` is the provider-neutral footprint the
+    // daemon exposes to clients. Anthropic reports the cache buckets SEPARATE
+    // from `input_tokens`, so the footprint the stream loop stores
+    // (`usage.total_tokens = total_tokens(&usage)`) is
+    // input + output + cache_write + cache_read — input + output alone would
+    // hide the entire cache from a displayed total.
+    #[test]
+    fn anthropic_footprint_counts_cache_reported_outside_input() {
+        let wire = r#"{
+            "input_tokens": 100,
+            "output_tokens": 50,
+            "cache_read_input_tokens": 200,
+            "cache_creation_input_tokens": 512
+        }"#;
+        let delta: UsageDelta = serde_json::from_str(wire).expect("usage delta decodes");
+        let mut usage = Usage::default();
+        apply_message_delta_usage(&mut usage, &delta);
+        usage.total_tokens = total_tokens(&usage);
+        assert_eq!(usage.total_tokens, 862, "100 + 50 + 512 + 200");
+        assert_eq!(
+            usage.input + usage.output,
+            150,
+            "input + output alone undercounts by the whole cache"
+        );
+    }
+
     // OCEAN-198: a usage payload missing the cache fields decodes to zeros (via
     // serde defaults), NOT a parse error — so a non-cached turn doesn't panic the
     // decode path.

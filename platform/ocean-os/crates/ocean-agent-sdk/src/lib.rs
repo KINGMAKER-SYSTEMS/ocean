@@ -434,6 +434,15 @@ pub struct AgentTurnResponse {
     /// `None` on pre-turn error paths or when not reported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_read_tokens: Option<u64>,
+    /// Provider-neutral processed-token footprint for the whole turn: the
+    /// provider's reported total (or the encoder's input + output + any
+    /// separately reported cache buckets) summed across rounds. Anthropic
+    /// counts cache tokens OUTSIDE `input_tokens`; other providers fold them
+    /// in — so clients displaying a total must read this field instead of
+    /// summing `input_tokens + output_tokens`, which undercounts Anthropic
+    /// cache by construction. `None` when the provider reported no usage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<u64>,
     /// Output tokens per second (output_tokens / wall time).
     /// `None` on pre-turn error paths or when wall_ms is zero.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -680,6 +689,16 @@ pub enum AgentTurnEvent {
         /// Cache-read (prompt-cache hit) tokens for the turn, when reported.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_read_tokens: Option<u64>,
+        /// Provider-neutral processed-token footprint for the whole turn
+        /// (issue #11): the provider's reported total (or the encoder's
+        /// input + output + any separately reported cache buckets) summed
+        /// across rounds. Anthropic counts cache tokens OUTSIDE
+        /// `input_tokens`; other providers fold them in — so a client
+        /// displaying a total must read this field instead of summing
+        /// `input_tokens + output_tokens`, which undercounts Anthropic
+        /// cache by construction. `None` when no usage was reported.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        total_tokens: Option<u64>,
         /// Output tokens per second (output_tokens / wall time).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tokens_per_second: Option<f64>,
@@ -1365,6 +1384,7 @@ mod tests {
                 output_tokens: Some(42),
                 input_tokens: Some(100),
                 cache_read_tokens: Some(10),
+                total_tokens: Some(152),
                 tokens_per_second: Some(33.5),
                 context_usage: None,
             },

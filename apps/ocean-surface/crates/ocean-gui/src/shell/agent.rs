@@ -70,6 +70,9 @@ pub struct TokenStats {
     pub input: u64,
     pub output: u64,
     pub cache_read: u64,
+    /// Provider-neutral processed footprint: daemon-reported turn total,
+    /// else input + output for older daemons.
+    pub footprint: u64,
     pub tokens_per_second: f64,
 }
 
@@ -150,6 +153,11 @@ pub enum AgentEvent {
         input_tokens: Option<u64>,
         #[serde(default)]
         cache_read_tokens: Option<u64>,
+        /// Provider-neutral processed footprint (issue #11): the daemon's
+        /// turn total. Anthropic counts cache outside `input_tokens`; other
+        /// providers fold it in — display totals must use this.
+        #[serde(default)]
+        total_tokens: Option<u64>,
         #[serde(default)]
         tokens_per_second: Option<f64>,
     },
@@ -401,6 +409,7 @@ impl AgentState {
                 output_tokens,
                 input_tokens,
                 cache_read_tokens,
+                total_tokens,
                 tokens_per_second,
                 error,
                 ..
@@ -408,16 +417,20 @@ impl AgentState {
                 self.streaming = false;
                 self.active_turn_id = None;
                 self.status = error.unwrap_or_else(|| "ready".to_string());
+                let in_tokens = input_tokens.unwrap_or(0);
+                let out_tokens = output_tokens.unwrap_or(0);
                 let stats = TokenStats {
-                    input: input_tokens.unwrap_or(0),
-                    output: output_tokens.unwrap_or(0),
+                    input: in_tokens,
+                    output: out_tokens,
                     cache_read: cache_read_tokens.unwrap_or(0),
+                    footprint: total_tokens.unwrap_or(in_tokens + out_tokens),
                     tokens_per_second: tokens_per_second.unwrap_or(0.0),
                 };
                 self.last_turn_tokens = Some(stats);
                 self.session_tokens.input += stats.input;
                 self.session_tokens.output += stats.output;
                 self.session_tokens.cache_read += stats.cache_read;
+                self.session_tokens.footprint += stats.footprint;
             }
             AgentEvent::ComponentRender {
                 component_id,
@@ -634,6 +647,7 @@ mod tests {
             output_tokens: Some(11),
             input_tokens: Some(7),
             cache_read_tokens: Some(3),
+            total_tokens: None,
             tokens_per_second: Some(42.0),
         });
 

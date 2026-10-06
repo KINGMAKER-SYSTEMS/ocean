@@ -2500,8 +2500,9 @@ pub fn App() -> impl IntoView {
                                 let s = session_tokens.get();
                                 let last = last_turn_tokens.get().unwrap_or_default();
                                 format!(
-                                    "Session — in {} · out {} · cache {} · total {}\nLast turn — in {} · out {} · {:.1} tok/s",
-                                    s.input, s.output, s.cache_read, s.total(),
+                                    "Session — processed {} · in {} · out {} · cache {}\nLast turn — in {} · out {} · {:.1} tok/s",
+                                    s.total(),
+                                    s.input, s.output, s.cache_read,
                                     last.input, last.output, last.tokens_per_second,
                                 )
                             }

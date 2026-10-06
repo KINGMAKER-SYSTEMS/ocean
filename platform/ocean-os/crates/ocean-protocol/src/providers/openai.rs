@@ -2699,6 +2699,34 @@ mod tests {
         );
     }
 
+    // Issue #11: OpenAI folds cached tokens INTO `prompt_tokens` and reports
+    // `total_tokens` = prompt + completion. The footprint the stream loop
+    // stores (`usage.total_tokens = u.total_tokens`) therefore already contains
+    // `cache_read` — adding it again would double-count (unlike Anthropic,
+    // whose input EXCLUDES the cache).
+    #[test]
+    fn openai_footprint_already_contains_cached_tokens() {
+        let raw = r#"{
+            "usage": {
+                "prompt_tokens": 1200,
+                "completion_tokens": 40,
+                "total_tokens": 1240,
+                "prompt_tokens_details": {"cached_tokens": 1024}
+            }
+        }"#;
+        let chunk: Chunk = serde_json::from_str(raw).expect("usage chunk parses");
+        let u = chunk.usage.expect("usage present");
+        assert_eq!(u.total_tokens, 1240);
+        assert_eq!(u.prompt_tokens + u.completion_tokens, 1240);
+        assert_eq!(
+            u.prompt_tokens_details
+                .expect("details present")
+                .cached_tokens,
+            1024,
+            "cached tokens are a subset of prompt_tokens, not an extra bucket"
+        );
+    }
+
     // OCEAN-164: a usage payload carrying
     // `completion_tokens_details.reasoning_tokens` must decode that count so it
     // can populate usage.reasoning. Reasoning is already inside completion_tokens,
