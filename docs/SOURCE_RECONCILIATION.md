@@ -35,6 +35,23 @@ Bounded personal-source slices landed on Kingmaker main, newest first. Each
 entry names the personal source tip the slice was ported from and what was
 deliberately left behind.
 
+- 2026-10-06 — Rooms S0 participant retirement (PR #25, personal tip
+  `1bd1bc37636e0a4363f1f20aa1b72ee4c79b14cb`): the daemon operator route
+  `POST /v1/rooms/persistent/{key}/participants/{id}/retire` plus its governing
+  spec. The store half was already on Kingmaker main unchanged from the
+  publication snapshot; only the route was missing. Remaining Rooms files
+  (`room_maintenance`, `room_context`, `room_attachments`, `room_summary`,
+  `room_workspace_proxy`, `room_inspect`) still await their units on top of
+  the persistent_rooms rework.
+- 2026-10-06 — Observatory durability cluster (PR #31, personal tip
+  `1bd1bc37636e0a4363f1f20aa1b72ee4c79b14cb`): versioned idempotent
+  `observatory.db` schema migrations (v1 baseline → v2 §4.1 rebuilds), the v2
+  store with backfilled correlation/producer/recorded_at, §7.3 envelope
+  replay, admission-wiring and observer-token gates, and the daemon half
+  (first production caller for the G3 retention loop, checkpointing, extracted
+  durability pump, summary-token rotation with failure metrics). NOT ported:
+  personal's +1234-line metrics.rs expansion beyond the rotation-failure
+  counter. Kingmaker had not touched these files since the split.
 - 2026-10-05 — OAuth custody cluster (PR #23, personal tip
   `1bd1bc37636e0a4363f1f20aa1b72ee4c79b14cb`): operator-authenticated
   `/v1/auth/providers*` login/status/logout routes (`ocean-daemon/src/provider_auth.rs`),

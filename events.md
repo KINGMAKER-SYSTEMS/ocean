@@ -1045,3 +1045,21 @@ Closed the leftovers from the review that acknowledged the thinking-binding reco
 
 Validation: ocean-protocol (187 plus 5) passes; clippy with warnings denied on ocean-protocol and ocean-agent tests, rustfmt check pass. The strip test covers the thinking-only assistant turn. No provider was called.
 _________________________________________________________________________________
+_________________________________________________________________________________
+time: [16:24] [06-10-26]
+agent: [zcode] [glm-5.3]
+worktree: [docs/reconciliation-ledger-20261006]
+type: [workflow]
+area: [docs] reconciliation ledger
+
+PR #25 (Rooms S0 participant retirement) merged at 03:06Z and PR #31
+(observatory durability cluster) merged at 04:28Z — Track B's second and
+third bounded ports to land, each with full hosted checks (Build Ocean,
+Build scope, validate package) green before merge; post-merge delta fixes
+(retention-boundary exclusive replay, Observatory cursor consistency) were
+landed by parallel agents on top of #31. Updated the Reconciled slices
+section in docs/SOURCE_RECONCILIATION.md to record both landings with their
+scope boundaries, per the contract to keep the table current when
+reconciliation actually lands.
+
+Validation: cargo xtask docs-check PASS. Docs-only.
