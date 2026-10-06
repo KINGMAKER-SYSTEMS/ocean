@@ -1073,3 +1073,32 @@ Validation: room_attachments tests (17) pass; router-contract parity (123)
 green; cargo test -p ocean-daemon 925 passed / 2 deterministic issue-#42
 failures reproduced on clean main; rustfmt; denied-warning Clippy zero;
 cargo check --workspace --tests; cargo xtask docs-check PASS.
+_________________________________________________________________________________
+time: [15:02] [06-10-26]
+agent: [zcode] [glm-5.3]
+worktree: [port/rooms-maintenance] (stacked on port/rooms-attachments #46)
+type: [feature-request]
+area: [backend] reconciliation: room maintenance sweeps
+
+Ninth bounded Track B port (STACKED on #46 — the sweep's orphan cleanup walks
+room_attachments' blob layout, so the branch rebases onto the attachments
+head rather than main): retention and orphan maintenance for closed rooms.
+MaintenanceConfig resolves retention window / sweep interval / orphan grace
+from env once at startup; the loop sweeps on its own cadence until shutdown;
+POST /v1/rooms/maintenance/run (operator lane) runs a sweep now. A sweep cuts
+rooms closed past the retention window (row + transcript + attachments +
+cursors + federation index in one store transaction), reclaims attachment
+bytes and directories, and removes orphaned blobs/dirs past their grace —
+never touching open rooms. GET /health gains the room_maintenance card via a
+poison-recovering snapshot: it carries the CONFIGURATION and not just counts,
+because the failure it exists to catch (a retention window that never got
+set) is silent by construction. Adaptations: write_blob_for_test restored on
+this branch (trimmed from #46 as room_context-only, but the sweep tests also
+consume it — the trim moves to whichever PR lands second); the personal-only
+main.rs fixture helper record_sweep_for_test was not ported. Router-contract
+parity 123 → 124 on the stack.
+
+Validation: room_maintenance tests (15) pass; router-contract parity green;
+cargo test -p ocean-daemon 940 passed / 2 deterministic issue-#42 failures
+reproduced on clean main; rustfmt; denied-warning Clippy zero; cargo check
+--workspace --tests; cargo xtask docs-check PASS.
