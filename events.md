@@ -1045,3 +1045,20 @@ Closed the leftovers from the review that acknowledged the thinking-binding reco
 
 Validation: ocean-protocol (187 plus 5) passes; clippy with warnings denied on ocean-protocol and ocean-agent tests, rustfmt check pass. The strip test covers the thinking-only assistant turn. No provider was called.
 _________________________________________________________________________________
+_________________________________________________________________________________
+time: [15:42] [06-10-26]
+agent: [codex] [gpt-6]
+worktree: [port/output-economy] [/Users/risingtidesdev/.codex/worktrees/factory-pr49-artifact-debug/ocean]
+type: [bug fix] [issues #50, #53]
+area: [backend] [testing] [privacy]
+
+While preparing the output-economy lease change for release, review found that
+its derived Debug output recursively formatted the shared artifact store,
+including unrelated session output bodies. Replaced that formatter with a
+redacted view containing only the lease id and byte count, and added a sentinel
+regression test. Kept the public release record limited to this repository's
+change; source-side commit and review history remain outside the public ledger.
+The output minimizer remains default-off, with no production setter.
+
+Validation: `cargo fmt --all -- --check`, focused `cargo test -p ocean-runtime artifact_lease_debug_does_not_expose_session_artifact_bodies -- --nocapture` (1 passed), `cargo xtask docs-check` (PASS; 30 packages, 153 Markdown files, 170 local links), and `git diff --check` pass.
+_________________________________________________________________________________
