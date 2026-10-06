@@ -111,6 +111,10 @@ fn valid_display_name(value: &str) -> bool {
 /// byte-for-byte predictable across the daemon and `ocean-mcp`.
 fn parse_member_toml(path: &Path) -> Option<Identity> {
     let raw = std::fs::read_to_string(path).ok()?;
+    parse_member_text(&raw)
+}
+
+fn parse_member_text(raw: &str) -> Option<Identity> {
     let mut member_id = None;
     let mut display_name = None;
     for line in raw.lines() {
@@ -121,7 +125,11 @@ fn parse_member_toml(path: &Path) -> Option<Identity> {
         let Some((key, rest)) = line.split_once('=') else {
             continue;
         };
-        let value = unquote(rest);
+        // A malformed value poisons its line only, not the file: the file
+        // stays parseable and every OTHER well-formed key still lands.
+        let Some(value) = unquote(rest) else {
+            continue;
+        };
         match key.trim() {
             "member_id" if valid_member_id(value) => member_id = Some(value.to_string()),
             "display_name" if valid_display_name(value) => display_name = Some(value.to_string()),
@@ -135,13 +143,21 @@ fn parse_member_toml(path: &Path) -> Option<Identity> {
     })
 }
 
-/// `"John"   # optional` → `John`; an unquoted value ends at `#`.
-fn unquote(rest: &str) -> &str {
+/// `"John"   # optional"` → `John`; an unquoted value ends at `#`.
+/// Quoted values fail closed: a leading quote without its closing quote, or
+/// any non-comment text after the closing quote, is a malformed value —
+/// TOML would reject the line, so this does too.
+fn unquote(rest: &str) -> Option<&str> {
     let rest = rest.trim();
     if let Some(inner) = rest.strip_prefix('"') {
-        inner.split('"').next().unwrap_or("").trim()
+        let (value, tail) = inner.split_once('"')?;
+        let tail = tail.trim();
+        if !tail.is_empty() && !tail.starts_with('#') {
+            return None;
+        }
+        Some(value.trim())
     } else {
-        rest.split('#').next().unwrap_or("").trim()
+        Some(rest.split('#').next().unwrap_or("").trim())
     }
 }
 
@@ -229,6 +245,28 @@ mod tests {
         );
         let tmp = dir_with(Some(&long));
         assert_eq!(resolve(tmp.path(), None).display_name, None);
+    }
+
+    /// Quoted values fail closed: no closing quote, or trailing non-comment
+    /// text after it, is a malformed value the way TOML treats it.
+    #[test]
+    fn quoted_values_fail_closed_on_missing_close_or_trailing_tokens() {
+        let malformed = [
+            "member_id = \"jay",
+            "member_id = \"jay\" garbage",
+            "member_id = \"jay\"garbage",
+        ];
+        for line in malformed {
+            let parsed = parse_member_text(&format!("{line}\n"));
+            assert!(
+                parsed.map(|i| i.member_id).is_none(),
+                "malformed line accepted: {line:?}"
+            );
+        }
+        // The malformed line poisons itself, not the file.
+        // A display name without a valid member id is nothing (the file
+        // answers no one), so the whole file is treated as absent.
+        assert!(parse_member_text("member_id = \"jay\" garbage\ndisplay_name = \"Jay\"\n").is_none());
     }
 
     #[test]
