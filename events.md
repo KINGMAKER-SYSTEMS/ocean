@@ -1,5 +1,7 @@
 # Ocean events
 
+_________________________________________________________________________________
+
 time: [10:38] [05-10-26]
 agent: [Codex desktop] [GPT-6]
 worktree: [main] [/private/tmp/ocean-public-cutover]
@@ -872,4 +874,18 @@ replaying that exact decision is idempotent. The daemon fixture remains
 unverified locally because its dependency build hit `No space left on device`
 before compiling `ocean-daemon`; this follow-up awaits hosted Build Ocean and
 fresh independent review. No merge, deployment, or live outcome is claimed.
+_________________________________________________________________________________
+time: [22:53] [05-10-26]
+agent: [codex] [gpt-6.1-sol]
+worktree: [codex/factory-pr25-rooms-followup] [/Users/smathdaddy-macbook/.codex/worktrees/factory-pr25-rooms-followup]
+type: [review] PR #25 follow-up
+area: [testing] replay fixture and ledger structure
+
+Applied the exact-head review corrections on candidate head `338f36b4`: the
+retirement route replay fixture now uses the required non-nil UUID decision ID,
+and the root event ledger's opening separator is restored without changing
+existing entries. Formatting, docs-check, and diff-check passed. The daemon
+route fixture remains locally uncompiled because prior dependency compilation
+exhausted available disk; hosted required checks and a fresh independent review
+are still required. No merge, deployment, or live outcome is claimed.
 _________________________________________________________________________________

@@ -8093,7 +8093,7 @@ env = { FIXTURE = "1" }
         let retire_uri =
             format!("/v1/rooms/persistent/{key}/participants/{route_placeholder}/retire");
         let retire_body = json!({
-            "decision_id": "retire-route-placeholder",
+            "decision_id": "00000000-0000-4000-8000-000000000001",
             "successor_id": "smaths"
         });
         let (status, unauthorized) =
