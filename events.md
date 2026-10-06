@@ -702,3 +702,29 @@ unchanged because ownership boundaries and child indexes are unchanged. Candidat
 only: exact-head hosted builds, fresh independent review, merge and deployment
 remain separate release gates.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+
+time: [09:40pm] [05-10-26]
+agent: [codex desktop] [gpt-6.1-sol]
+worktree: [codex/factory-tui-deploy-ledger] [/Users/smathdaddy-macbook/.codex/worktrees/factory-tui-deploy-ledger/ocean]
+type: [gh actions] [deployment]
+area: [release] [testing]
+
+After PR #22 merged, installed the canonical Ocean TUI from clean `origin/main`
+revision `a41f9ef3823ec214e4bd65c3e5e9ded98b1b600f` using
+`ops/install-ocean-tui.sh` with `CARGO_PROFILE_RELEASE_STRIP=none` after the
+system volume ran out of space during the default strip step. The installer
+published immutable artifact `~/.local/libexec/ocean-tui/ocean-a41f9ef3823e`,
+selected it through `~/.local/libexec/ocean-tui/current`, and refreshed
+`~/.local/bin/ocean`. Code signature verification passed. A real 120x40 PTY
+launch ran for three seconds and emitted 19,750 terminal bytes including the
+rendered shell/status row. This proves installation and startup only; a real
+provider-token usage session was not exercised.
+
+The supervised daemon remains on revision `0abb558179af`; it was not restarted.
+The root daemon release contract requires a quiet intake window and runtime
+compatibility verification, which were not established in this run. Surface
+was not deployed or live-verified. Devlog pass: no component contracts or indexes
+changed; this root ledger records the release evidence.
+_________________________________________________________________________________
