@@ -371,6 +371,20 @@ This crate owns the full-screen terminal steering cockpit (`ocean` binary) for i
   the queue and any pause owner alone, so `/stop`, Esc and `Ctrl+Y`/`Ctrl+N`
   still reach the running turn. A promoted follow-up always has a user row.
   Failed turns render `Turn::ErrorNotice`, not advisor cards.
+- `/new` during an active turn is an intent, not an immediate session reset:
+  retain the old binding and event stream, discard queued follow-ups, cancel
+  the exact daemon request when its ID is known, and unbind only after its
+  matching terminal event or a matching fenced idle session sync. A cancel
+  response alone is not settlement. Keep new submissions blocked while
+  settlement is pending, and reject a different session bind until it settles;
+  generation and session identity guard late events. Reject both a different
+  session bind and an explicit resume while settlement is pending. If an
+  adopted active turn has no request ID delivered to the TUI, keep the old
+  binding and reconcile until the daemon reports idle rather than guessing
+  which request to cancel. Bound cancel and sync HTTP requests to 10 seconds;
+  retry failed cancellation at most three times and sync with bounded backoff.
+  Leave `/new` pending with an explicit retry affordance if authoritative idle
+  state remains unavailable.
 - Render-protocol components project into terminal-native chat cards. Component
   IDs are unique across inline and pinned slots when `replace` is set; unmount,
   history load, and new-session reset must not leak pinned state. Treat every

@@ -5,6 +5,7 @@
 use std::path::PathBuf;
 
 use ocean_agent_sdk::{AgentSessionId, AgentTurnEvent, ThinkingLevel};
+use ocean_core::RequestId;
 
 /// A workbench navigation target — a pane or center surface. Emitted by the `/`
 /// palette so chat never reaches into the app's private `Focus`/`Center`.
@@ -204,6 +205,30 @@ pub enum Action {
     /// `/new` — drop the bound session so the next turn mints a fresh one
     /// (stays in the current active project).
     NewSession,
+    /// Operator intent to start a new session. While a turn is active, App
+    /// retains the current binding and settles the exact daemon request before
+    /// emitting `NewSession`/`NewSessionInProject`.
+    RequestNewSession {
+        cwd: Option<PathBuf>,
+    },
+    /// A cancellation POST is only an acknowledgement; it is not proof that
+    /// execution stopped. Carry the full originating binding/request identity
+    /// so stale completions cannot affect a later session.
+    NewSessionCancelFinished {
+        generation: u64,
+        session_id: AgentSessionId,
+        binding_generation: u64,
+        request_id: RequestId,
+        result: Result<String, String>,
+    },
+    /// Fenced session reconciliation used only to prove a pending `/new` is
+    /// safe to unbind after the cancel request has settled or lost its event.
+    NewSessionSyncFinished {
+        generation: u64,
+        session_id: AgentSessionId,
+        binding_generation: u64,
+        result: Result<ocean_core::SessionSyncResponse, CompactFailure>,
+    },
     /// `/web` / `/desk` — open the bound session's chat in a sibling surface.
     /// The app owns the session id and the OS handoff; chat emits the intent.
     OpenInSurface(SurfaceTarget),

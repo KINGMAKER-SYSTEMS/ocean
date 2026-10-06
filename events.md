@@ -483,3 +483,31 @@ PR #16 merged to canonical `main` as `21c29eda42774218ea8043809433684ee012d48b` 
 
 Validation: authoritative GitHub PR/commit/check state, ruleset and variable readback, and release/deployment API readback (zero releases and zero deployments); `git diff --check`.
 _________________________________________________________________________________
+
+time: [19:46] [2026-10-05]
+agent: [codex desktop] [gpt-6.1-sol]
+worktree: [codex/issue13-cancel-new]
+type: [bug report] [testing]
+area: [backend] [testing]
+
+Implemented the Issue #13 `/new` lifecycle repair in Ocean TUI. During an active
+turn, `/new` now retains the bound session and event stream, drops queued
+follow-ups, cancels the exact request when known, and waits for that request's
+matching terminal event or a matching fenced idle session sync before unbinding.
+Cancel acknowledgement alone does not settle the turn; stale session and
+generation events cannot settle a newer binding. If an adopted operation's
+request ID was never delivered to the TUI, it stays bound and reconciles until
+the daemon reports idle rather than guessing a cancellation target.
+
+Added focused state-machine tests for exact-ID cancellation, pre-ACK turn
+identity, finish-before-ACK, stale terminal/sync events, rejected rebinding
+and resume while settlement is pending, bounded cancellation retries, and
+project-switch refusal after sync settlement. Updated the TUI lifecycle
+contract; cancel and sync HTTP requests are bounded to 10 seconds and failed
+cancellation is attempted at most three times before explicit `/new` retry.
+Validation: `CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test -p
+ocean-tui` passed (523 passed, 4 ignored); `CARGO_INCREMENTAL=0 cargo check
+-p ocean-tui`; `CARGO_INCREMENTAL=0 cargo build -p ocean-tui --release`,
+`rustfmt --check`, and `git diff --check` passed. Hosted Build Ocean validation
+is still required before merge. No daemon was installed or restarted.
+_________________________________________________________________________________

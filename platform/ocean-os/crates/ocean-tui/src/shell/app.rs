@@ -449,6 +449,23 @@ struct PendingModelPin {
     queue_pause_generation: u64,
 }
 
+#[derive(Clone, Debug)]
+struct PendingNewSession {
+    generation: u64,
+    session_id: Option<AgentSessionId>,
+    binding_generation: u64,
+    request_id: Option<RequestId>,
+    cancel_attempts: u8,
+    cancel_in_flight: bool,
+    sync_in_flight: bool,
+    sync_retry_count: u8,
+    reconciliation_paused: bool,
+    cwd: Option<PathBuf>,
+    settled: bool,
+}
+
+const MAX_NEW_SESSION_CANCEL_ATTEMPTS: u8 = 3;
+
 pub struct App {
     client: DaemonClient,
     workspace_root: String,
@@ -481,6 +498,10 @@ pub struct App {
     /// Monotonic identity for best-effort resume/busy activity probes. New
     /// submissions and compact operations invalidate older probe completions.
     session_activity_probe_generation: u64,
+    /// A `/new` requested during a turn owns the old binding until its exact
+    /// request finishes or a fenced sync proves the session idle.
+    pending_new_session: Option<PendingNewSession>,
+    new_session_generation: u64,
     /// Best-effort projection of the authoritative TUI lifecycle into a
     /// surrounding Herdr pane. Disabled automatically outside Herdr.
     herdr: HerdrReporter,
@@ -746,6 +767,8 @@ impl App {
             session_binding_generation: 0,
             stream_generation: 0,
             session_activity_probe_generation: 0,
+            pending_new_session: None,
+            new_session_generation: 0,
             herdr: HerdrReporter::from_env(),
             model_override: None,
             model_config_generation: 0,
@@ -1869,6 +1892,13 @@ impl App {
     }
 
     fn dispatch(&mut self, action: Action) {
+        // The session rail's existing event is an intent. It must not reach
+        // child components (which clear session-scoped state) until the old
+        // operation is authoritatively settled.
+        let action = match action {
+            Action::NewSessionInProject { cwd } => Action::RequestNewSession { cwd: Some(cwd) },
+            other => other,
+        };
         let completed_submission_id = match &action {
             Action::TurnSendFailed { submission_id, .. }
             | Action::TurnSessionBusy { submission_id, .. }
@@ -1903,6 +1933,7 @@ impl App {
         }
         let tray_was_visible = self.tray.is_visible();
         let mut follow_up = None;
+        let mut settle_new_session_after_update = false;
         match &action {
             Action::Quit => {
                 self.herdr.release();
@@ -1985,6 +2016,10 @@ impl App {
                         self.chat.abandon_model_queued_prompt(queue_generation);
                     }
                 }
+                settle_new_session_after_update = self
+                    .pending_new_session
+                    .as_ref()
+                    .is_some_and(|pending| pending.session_id == self.session_id);
                 self.set_notice(errfmt::humanize(err));
             }
             Action::TurnSessionBusy {
@@ -2005,6 +2040,7 @@ impl App {
                         true,
                         true,
                     );
+                    self.kick_pending_new_session_reconciliation();
                 }
             }
             Action::TurnAccepted {
@@ -2021,13 +2057,27 @@ impl App {
                     self.active_request_id = None;
                     self.interrupt_pending = false;
                     self.herdr.resolve_activity();
+                    if let Some(pending) = self.pending_new_session.as_mut() {
+                        if pending.session_id == self.session_id
+                            && pending.binding_generation == self.session_binding_generation
+                        {
+                            pending.request_id = Some(turn_id.0);
+                            settle_new_session_after_update = true;
+                        }
+                    }
                 } else {
                     // The acknowledgement is just as authoritative as
                     // TurnStarted: its turn id is the daemon request id. This
                     // closes the window where an immediate Esc had nothing it
                     // could cancel.
                     self.active_request_id = Some(turn_id.0);
-                    if self.interrupt_pending {
+                    if self.pending_new_session.as_ref().is_some_and(|pending| {
+                        pending.session_id == self.session_id
+                            && pending.binding_generation == self.session_binding_generation
+                    }) {
+                        self.set_pending_new_session_request(turn_id.0);
+                        self.start_pending_new_session_cancel(turn_id.0);
+                    } else if self.interrupt_pending {
                         follow_up = Some(Action::InterruptTurn);
                     }
                 }
@@ -2057,6 +2107,117 @@ impl App {
                         false,
                         true,
                     );
+                    self.kick_pending_new_session_reconciliation();
+                }
+            }
+            Action::RequestNewSession { cwd } => {
+                if let Some(pending) = self.pending_new_session.as_mut() {
+                    // Keep the old session bound even if the UI's busy bit has
+                    // cleared; repeating `/new` is the retry affordance after
+                    // bounded reconciliation backoff.
+                    pending.sync_retry_count = 0;
+                    pending.cancel_attempts = 0;
+                    pending.reconciliation_paused = false;
+                    if cwd.is_some() {
+                        pending.cwd = cwd.clone();
+                    }
+                    self.set_notice("retrying new session after checking active turn…".into());
+                    self.kick_pending_new_session_reconciliation();
+                } else if self.chat.is_busy() {
+                    self.new_session_generation = self.new_session_generation.wrapping_add(1);
+                    self.chat.prepare_new_session();
+                    self.pending_new_session = Some(PendingNewSession {
+                        generation: self.new_session_generation,
+                        session_id: self.session_id,
+                        binding_generation: self.session_binding_generation,
+                        request_id: self.active_request_id,
+                        cancel_attempts: 0,
+                        cancel_in_flight: false,
+                        sync_in_flight: false,
+                        sync_retry_count: 0,
+                        reconciliation_paused: false,
+                        cwd: cwd.clone(),
+                        settled: false,
+                    });
+                    self.set_notice("cancelling active turn before starting a new session…".into());
+                    if let Some(request_id) = self.active_request_id {
+                        self.start_pending_new_session_cancel(request_id);
+                    } else {
+                        self.kick_pending_new_session_reconciliation();
+                    }
+                } else {
+                    if cwd
+                        .as_ref()
+                        .is_some_and(|cwd| !self.set_active_project(cwd.clone()))
+                    {
+                        return;
+                    }
+                    follow_up = Some(Action::NewSession);
+                }
+            }
+            Action::NewSessionCancelFinished {
+                generation,
+                session_id,
+                binding_generation,
+                request_id,
+                result,
+            } => {
+                let owns_cancel = self.pending_new_session.as_ref().is_some_and(|pending| {
+                    pending.generation == *generation
+                        && pending.session_id == Some(*session_id)
+                        && pending.binding_generation == *binding_generation
+                        && pending.request_id == Some(*request_id)
+                        && pending.cancel_in_flight
+                        && self.session_id == Some(*session_id)
+                        && self.session_binding_generation == *binding_generation
+                });
+                if owns_cancel {
+                    if let Some(pending) = self.pending_new_session.as_mut() {
+                        pending.cancel_in_flight = false;
+                    }
+                    if let Err(error) = result {
+                        self.set_notice(format!(
+                            "cancel acknowledgement unavailable · waiting for authoritative session state · {}",
+                            errfmt::humanize(error)
+                        ));
+                    }
+                    self.start_pending_new_session_sync();
+                }
+            }
+            Action::NewSessionSyncFinished {
+                generation,
+                session_id,
+                binding_generation,
+                result,
+            } => {
+                let owns_sync = self.pending_new_session.as_ref().is_some_and(|pending| {
+                    pending.generation == *generation
+                        && pending.session_id == Some(*session_id)
+                        && pending.binding_generation == *binding_generation
+                        && pending.sync_in_flight
+                        && self.session_id == Some(*session_id)
+                        && self.session_binding_generation == *binding_generation
+                });
+                if owns_sync {
+                    if let Some(pending) = self.pending_new_session.as_mut() {
+                        pending.sync_in_flight = false;
+                    }
+                    match result {
+                        Ok(sync)
+                            if sync.ok
+                                && sync.session_id == session_id.0
+                                && sync.snapshot.as_ref().is_some_and(|snapshot| {
+                                    snapshot.session_id == session_id.0
+                                })
+                                && sync
+                                    .fence
+                                    .as_ref()
+                                    .is_some_and(|fence| fence.event_id.is_some()) =>
+                        {
+                            settle_new_session_after_update = true;
+                        }
+                        _ => self.retry_pending_new_session_sync(),
+                    }
                 }
             }
             Action::SessionActivityProbeFinished {
@@ -2420,10 +2581,23 @@ impl App {
                 Ok(_) => self.set_notice("interrupt sent · waiting for cancellation".into()),
                 Err(error) => self.set_notice(errfmt::humanize(error)),
             },
-            Action::SessionBound(id) => self.bind_session(*id),
-            // Session hygiene: only fold in agent events for the BOUND session.
-            // A superseded stream's last envelopes (or an unscoped daemon echo)
-            // must never pollute the current chat.
+            Action::SessionBound(id) => {
+                if self
+                    .pending_new_session
+                    .as_ref()
+                    .is_some_and(|pending| !pending.settled && pending.session_id.is_some())
+                {
+                    self.set_notice(
+                        "wait for the active turn to settle before switching sessions".into(),
+                    );
+                    return;
+                }
+                self.bind_session(*id);
+                self.attach_pending_new_session_binding(*id);
+            }
+            // Session hygiene: fold scoped agent events only into their bound
+            // session. A superseded stream's last envelopes must not pollute
+            // the current chat.
             Action::AgentEvent(evt) => {
                 if let (Some(bound), Some(evt_sid)) = (self.session_id, evt.session_id()) {
                     if bound != evt_sid {
@@ -2458,14 +2632,31 @@ impl App {
                     AgentTurnEvent::TurnStarted { turn_id, .. } => {
                         self.in_flight_images.clear();
                         self.active_request_id = Some(turn_id.0);
-                        if self.interrupt_pending {
+                        if self.pending_new_session.as_ref().is_some_and(|pending| {
+                            pending.session_id == self.session_id
+                                && pending.binding_generation == self.session_binding_generation
+                        }) {
+                            self.set_pending_new_session_request(turn_id.0);
+                            self.start_pending_new_session_cancel(turn_id.0);
+                        } else if self.interrupt_pending {
                             follow_up = Some(Action::InterruptTurn);
                         }
                     }
                     AgentTurnEvent::TurnFinished { turn_id, .. } => {
+                        let matched_active_request = self.active_request_id == Some(turn_id.0);
                         if self.active_request_id == Some(turn_id.0) {
                             self.active_request_id = None;
                             self.interrupt_pending = false;
+                        }
+                        if let Some(pending) = self.pending_new_session.as_mut() {
+                            if pending.session_id == self.session_id
+                                && pending.binding_generation == self.session_binding_generation
+                                && (pending.request_id == Some(turn_id.0)
+                                    || (pending.request_id.is_none() && matched_active_request))
+                            {
+                                pending.request_id = Some(turn_id.0);
+                                settle_new_session_after_update = true;
+                            }
                         }
                     }
                     AgentTurnEvent::SessionConfigChanged {
@@ -2698,6 +2889,16 @@ impl App {
                 }
             }
             Action::ResumeSession { id, path, cwd } => {
+                if self
+                    .pending_new_session
+                    .as_ref()
+                    .is_some_and(|pending| !pending.settled)
+                {
+                    self.set_notice(
+                        "wait for the active turn to settle before switching sessions".into(),
+                    );
+                    return;
+                }
                 if !self.set_active_project(cwd.clone()) {
                     return;
                 }
@@ -2783,6 +2984,20 @@ impl App {
             // `/new`: drop the bound session (and its stream) so the next turn
             // mints a fresh one; the chat cleared its own transcript already.
             Action::NewSession => {
+                let pending = self
+                    .pending_new_session
+                    .as_ref()
+                    .filter(|pending| pending.settled)
+                    .cloned();
+                if let Some(cwd) = pending.as_ref().and_then(|pending| pending.cwd.clone()) {
+                    // The old turn is settled now. If editor state refuses
+                    // the requested project switch, still honor `/new` in the
+                    // current project so the settled chat cannot stay busy.
+                    let _ = self.set_active_project(cwd);
+                }
+                if pending.is_some() {
+                    self.pending_new_session = None;
+                }
                 if let Some(task) = self.stream_task.take() {
                     task.abort();
                 }
@@ -3534,6 +3749,12 @@ impl App {
             self.herdr.observe(&action, self.session_id);
         }
         let chat_follow_up = self.chat.update(&action);
+        if settle_new_session_after_update {
+            if let Some(pending) = self.pending_new_session.as_mut() {
+                pending.settled = true;
+                follow_up = Some(Action::NewSession);
+            }
+        }
         // A terminal event for an adopted/pre-ACK turn may have no request id
         // App can correlate. Once Chat proves there is no active turn left,
         // retire the armed stop. While a newer submission is still busy, keep
@@ -3541,8 +3762,10 @@ impl App {
         if self.interrupt_pending && !self.chat.is_busy() {
             self.interrupt_pending = false;
         }
-        if let Some(next) = chat_follow_up {
-            self.dispatch(next);
+        if !settle_new_session_after_update {
+            if let Some(next) = chat_follow_up {
+                self.dispatch(next);
+            }
         }
         if let Some(next) = self.tray.update(&action) {
             self.dispatch(next);
@@ -3561,6 +3784,9 @@ impl App {
             self.right_rail_mode = RightRailMode::Usage;
             self.show_tree = true;
             self.apply_focus();
+        }
+        if !settle_new_session_after_update {
+            self.kick_pending_new_session_reconciliation();
         }
         if let Some(next) = follow_up {
             self.dispatch(next);
@@ -3941,6 +4167,172 @@ impl App {
     /// Mint-path bind: fresh chat, replay the session's buffered head.
     fn bind_session(&mut self, id: AgentSessionId) {
         self.bind_session_with(id, true);
+    }
+
+    fn attach_pending_new_session_binding(&mut self, id: AgentSessionId) {
+        let attached = if let Some(pending) = self.pending_new_session.as_mut() {
+            if pending.session_id.is_none() {
+                pending.session_id = Some(id);
+                pending.binding_generation = self.session_binding_generation;
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if attached {
+            if let Some(request_id) = self.active_request_id {
+                self.set_pending_new_session_request(request_id);
+                self.start_pending_new_session_cancel(request_id);
+            }
+        }
+    }
+
+    fn set_pending_new_session_request(&mut self, request_id: RequestId) {
+        if let Some(pending) = self.pending_new_session.as_mut() {
+            if pending.session_id == self.session_id
+                && pending.binding_generation == self.session_binding_generation
+                && pending.request_id.is_none()
+            {
+                pending.request_id = Some(request_id);
+                pending.cancel_attempts = 0;
+            }
+        }
+    }
+
+    fn start_pending_new_session_cancel(&mut self, request_id: RequestId) {
+        let Some((generation, session_id, binding_generation)) =
+            self.pending_new_session.as_mut().and_then(|pending| {
+                let session_id = pending.session_id?;
+                if pending.binding_generation != self.session_binding_generation
+                    || self.session_id != Some(session_id)
+                    || pending.request_id != Some(request_id)
+                    || pending.cancel_attempts >= MAX_NEW_SESSION_CANCEL_ATTEMPTS
+                    || pending.settled
+                {
+                    return None;
+                }
+                pending.cancel_attempts += 1;
+                pending.cancel_in_flight = true;
+                Some((pending.generation, session_id, pending.binding_generation))
+            })
+        else {
+            return;
+        };
+        let client = self.client.clone();
+        let tx = self.actions_tx.clone();
+        tokio::spawn(async move {
+            let result = client.cancel_request(request_id).await;
+            let _ = tx.send(Action::NewSessionCancelFinished {
+                generation,
+                session_id,
+                binding_generation,
+                request_id,
+                result,
+            });
+        });
+    }
+
+    /// Reconcile through the daemon's fenced session sync. A cancel response
+    /// only confirms that the request was received; only a matching
+    /// `TurnFinished` or an idle snapshot with a replay fence may release the
+    /// old binding.
+    fn kick_pending_new_session_reconciliation(&mut self) {
+        let Some(pending) = self.pending_new_session.as_ref() else {
+            return;
+        };
+        if pending.settled
+            || pending.reconciliation_paused
+            || pending.cancel_in_flight
+            || pending.sync_in_flight
+            || pending.session_id != self.session_id
+            || pending.binding_generation != self.session_binding_generation
+        {
+            return;
+        }
+        // Before either TurnStarted or TurnAccepted exposes the daemon request
+        // id, the submit POST may still be creating the operation; wait for its
+        // acknowledgement/event before probing or trying to cancel it.
+        if self.chat.has_pending_turn_submission() && pending.request_id.is_none() {
+            return;
+        }
+        if let Some(request_id) = pending
+            .request_id
+            .filter(|_| pending.cancel_attempts < MAX_NEW_SESSION_CANCEL_ATTEMPTS)
+        {
+            self.start_pending_new_session_cancel(request_id);
+            return;
+        }
+        self.start_pending_new_session_sync();
+    }
+
+    fn start_pending_new_session_sync(&mut self) {
+        self.spawn_pending_new_session_sync(Duration::ZERO);
+    }
+
+    fn retry_pending_new_session_sync(&mut self) {
+        const MAX_RETRIES: u8 = 5;
+        let Some(pending) = self.pending_new_session.as_mut() else {
+            return;
+        };
+        if pending.sync_retry_count >= MAX_RETRIES {
+            let can_retry_cancel = pending.request_id.is_some()
+                && pending.cancel_attempts < MAX_NEW_SESSION_CANCEL_ATTEMPTS;
+            pending.reconciliation_paused = !can_retry_cancel;
+            self.set_notice(if can_retry_cancel {
+                "new session is still waiting for the active turn to settle".into()
+            } else {
+                "new session is waiting for authoritative idle state · press /new to retry".into()
+            });
+            return;
+        }
+        pending.sync_retry_count += 1;
+        let delay_ms = 200_u64.saturating_mul(1_u64 << (pending.sync_retry_count - 1));
+        self.spawn_pending_new_session_sync(Duration::from_millis(delay_ms.min(2_000)));
+    }
+
+    fn spawn_pending_new_session_sync(&mut self, delay: Duration) {
+        if self.chat.has_pending_turn_submission()
+            && self
+                .pending_new_session
+                .as_ref()
+                .is_some_and(|pending| pending.request_id.is_none())
+        {
+            return;
+        }
+        let Some((generation, session_id, binding_generation)) =
+            self.pending_new_session.as_mut().and_then(|pending| {
+                let session_id = pending.session_id?;
+                if pending.settled
+                    || pending.reconciliation_paused
+                    || pending.cancel_in_flight
+                    || pending.sync_in_flight
+                    || pending.binding_generation != self.session_binding_generation
+                    || self.session_id != Some(session_id)
+                {
+                    return None;
+                }
+                pending.sync_in_flight = true;
+                Some((pending.generation, session_id, pending.binding_generation))
+            })
+        else {
+            return;
+        };
+        let client = self.client.clone();
+        let tx = self.actions_tx.clone();
+        tokio::spawn(async move {
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
+            let result = client.refresh_compacted_session(session_id).await;
+            let _ = tx.send(Action::NewSessionSyncFinished {
+                generation,
+                session_id,
+                binding_generation,
+                result,
+            });
+        });
     }
 
     /// Resolve a `/cd` argument to a real directory, or say why it isn't one.
@@ -7774,6 +8166,450 @@ mod tests {
         let mut app = launch_app();
         app.launch_open = false;
         app
+    }
+
+    fn finished_agent_event(session_id: AgentSessionId, turn_id: uuid::Uuid) -> Action {
+        Action::AgentEvent(Box::new(AgentTurnEvent::TurnFinished {
+            session_id,
+            turn_id: ocean_agent_sdk::AgentTurnId(turn_id),
+            status: ocean_agent_sdk::AgentTurnStatus::Completed,
+            error: None,
+            wall_ms: None,
+            output_tokens: None,
+            input_tokens: None,
+            cache_read_tokens: None,
+            tokens_per_second: None,
+            context_usage: None,
+        }))
+    }
+
+    #[tokio::test]
+    async fn new_session_cancels_exact_request_and_ignores_other_terminal_ids() {
+        let mut app = offline_app();
+        let session_id = AgentSessionId(uuid::Uuid::from_u128(13));
+        let active = uuid::Uuid::from_u128(1301);
+        let other = uuid::Uuid::from_u128(1302);
+        app.session_id = Some(session_id);
+        app.session_binding_generation = 7;
+        app.active_request_id = Some(active);
+        app.chat.seed_pending_submission_for_test(13);
+
+        app.dispatch(Action::RequestNewSession { cwd: None });
+        assert_eq!(
+            app.session_id,
+            Some(session_id),
+            "the old session stays bound"
+        );
+        let pending = app
+            .pending_new_session
+            .as_ref()
+            .expect("new-session intent");
+        assert_eq!(pending.request_id, Some(active));
+        assert!(
+            pending.cancel_attempts > 0,
+            "cancel targets the authoritative request id"
+        );
+
+        app.dispatch(finished_agent_event(session_id, other));
+        assert_eq!(
+            app.session_id,
+            Some(session_id),
+            "unrelated finishes cannot unbind"
+        );
+
+        app.dispatch(finished_agent_event(session_id, active));
+        assert_eq!(app.session_id, None, "matching TurnFinished settles /new");
+        assert!(app.pending_new_session.is_none());
+    }
+
+    #[tokio::test]
+    async fn new_session_handles_finish_before_turn_acknowledgement() {
+        let mut app = offline_app();
+        let session_id = AgentSessionId(uuid::Uuid::from_u128(14));
+        let turn_id = uuid::Uuid::from_u128(1401);
+        app.session_id = Some(session_id);
+        app.session_binding_generation = 9;
+        app.active_request_id = Some(turn_id);
+        app.chat.seed_pending_submission_for_test(14);
+
+        // The authoritative terminal wins the race, but Chat retains the turn
+        // tag until its POST acknowledgement identifies which request finished.
+        app.dispatch(finished_agent_event(session_id, turn_id));
+        assert_eq!(app.session_id, Some(session_id));
+        app.dispatch(Action::RequestNewSession { cwd: None });
+        assert_eq!(app.session_id, Some(session_id));
+        assert_eq!(
+            app.pending_new_session.as_ref().unwrap().request_id,
+            None,
+            "the already-cleared app request id is not guessed"
+        );
+
+        app.dispatch(Action::TurnAccepted {
+            submission_id: 14,
+            turn_id: ocean_agent_sdk::AgentTurnId(turn_id),
+        });
+        assert_eq!(
+            app.session_id, None,
+            "ACK correlates the stored terminal event"
+        );
+        assert!(app.pending_new_session.is_none());
+    }
+
+    #[tokio::test]
+    async fn new_session_arms_cancellation_until_pre_ack_turn_identity_arrives() {
+        let mut app = offline_app();
+        let session_id = AgentSessionId(uuid::Uuid::from_u128(141));
+        let turn_id = uuid::Uuid::from_u128(14101);
+        app.session_id = Some(session_id);
+        app.session_binding_generation = 19;
+        app.chat.seed_pending_submission_for_test(141);
+
+        app.dispatch(Action::RequestNewSession { cwd: None });
+        assert_eq!(app.session_id, Some(session_id));
+        assert_eq!(app.pending_new_session.as_ref().unwrap().request_id, None);
+
+        app.dispatch(Action::TurnAccepted {
+            submission_id: 141,
+            turn_id: ocean_agent_sdk::AgentTurnId(turn_id),
+        });
+        let pending = app.pending_new_session.as_ref().unwrap();
+        assert_eq!(pending.request_id, Some(turn_id));
+        assert!(
+            pending.cancel_attempts > 0,
+            "ACK supplies the exact cancel target"
+        );
+        assert_eq!(app.session_id, Some(session_id), "ACK alone never unbinds");
+    }
+
+    #[tokio::test]
+    async fn new_session_cancels_when_pre_ack_turn_started_arrives() {
+        let mut app = offline_app();
+        let session_id = AgentSessionId(uuid::Uuid::from_u128(142));
+        let turn_id = uuid::Uuid::from_u128(14201);
+        app.session_id = Some(session_id);
+        app.session_binding_generation = 20;
+        app.chat.seed_pending_submission_for_test(142);
+
+        app.dispatch(Action::RequestNewSession { cwd: None });
+        app.dispatch(Action::AgentEvent(Box::new(AgentTurnEvent::TurnStarted {
+            session_id,
+            turn_id: ocean_agent_sdk::AgentTurnId(turn_id),
+            model: None,
+        })));
+
+        let pending = app.pending_new_session.as_ref().unwrap();
+        assert_eq!(pending.request_id, Some(turn_id));
+        assert!(
+            pending.cancel_attempts > 0,
+            "TurnStarted supplies the exact cancel target"
+        );
+        assert_eq!(
+            app.session_id,
+            Some(session_id),
+            "TurnStarted is not settlement"
+        );
+    }
+
+    #[tokio::test]
+    async fn exhausted_new_session_sync_keeps_old_binding_and_repeated_new_retries() {
+        let mut app = offline_app();
+        let session_id = AgentSessionId(uuid::Uuid::from_u128(143));
+        app.session_id = Some(session_id);
+        app.session_binding_generation = 22;
+        app.chat.adopt_active_turn();
+        app.pending_new_session = Some(PendingNewSession {
+            generation: 1,
+            session_id: Some(session_id),
+            binding_generation: 22,
+            request_id: None,
+            cancel_attempts: 3,
+            cancel_in_flight: false,
+            sync_in_flight: true,
+            sync_retry_count: 5,
+            reconciliation_paused: false,
+            cwd: None,
+            settled: false,
+        });
+
+        app.dispatch(Action::NewSessionSyncFinished {
+            generation: 1,
+            session_id,
+            binding_generation: 22,
+            result: Err(crate::shell::action::CompactFailure {
+                message: "session has an active operation".into(),
+                transcript_may_have_changed: false,
+            }),
+        });
+        assert_eq!(app.session_id, Some(session_id));
+        let pending = app.pending_new_session.as_ref().unwrap();
+        assert!(
+            !pending.sync_in_flight,
+            "automatic retries stop at the bound"
+        );
+        assert!(!pending.settled, "failed sync never proves idle");
+        assert!(app.status.contains("press /new to retry"));
+
+        app.dispatch(Action::RequestNewSession { cwd: None });
+        let pending = app.pending_new_session.as_ref().unwrap();
+        assert!(!pending.reconciliation_paused);
+        assert!(
+            pending.sync_in_flight,
+            "explicit /new resumes reconciliation"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_new_session_cancel_retries_are_bounded_and_user_retry_rearms_them() {
+        let mut app = offline_app();
+        let session_id = AgentSessionId(uuid::Uuid::from_u128(144));
+        let request_id = uuid::Uuid::from_u128(14401);
+        app.session_id = Some(session_id);
+        app.session_binding_generation = 25;
+        app.active_request_id = Some(request_id);
+        app.chat.adopt_active_turn();
+
+        app.dispatch(Action::RequestNewSession { cwd: None });
+        let generation = app.pending_new_session.as_ref().unwrap().generation;
+        for expected_attempt in 1..=MAX_NEW_SESSION_CANCEL_ATTEMPTS {
+            let pending = app.pending_new_session.as_ref().unwrap();
+            assert_eq!(pending.cancel_attempts, expected_attempt);
+            assert!(pending.cancel_in_flight);
+            app.dispatch(Action::NewSessionCancelFinished {
+                generation,
+                session_id,
+                binding_generation: 25,
+                request_id,
+                result: Err("cancel transport failed".into()),
+            });
+            assert!(app.pending_new_session.as_ref().unwrap().sync_in_flight);
+            app.pending_new_session.as_mut().unwrap().sync_retry_count = 5;
+            app.dispatch(Action::NewSessionSyncFinished {
+                generation,
+                session_id,
+                binding_generation: 25,
+                result: Err(crate::shell::action::CompactFailure {
+                    message: "session remains active".into(),
+                    transcript_may_have_changed: false,
+                }),
+            });
+            let pending = app.pending_new_session.as_ref().unwrap();
+            if expected_attempt < MAX_NEW_SESSION_CANCEL_ATTEMPTS {
+                assert_eq!(pending.cancel_attempts, expected_attempt + 1);
+                assert!(pending.cancel_in_flight);
+            } else {
+                assert_eq!(pending.cancel_attempts, expected_attempt);
+                assert!(!pending.cancel_in_flight);
+                assert!(!pending.sync_in_flight);
+                assert!(pending.reconciliation_paused);
+            }
+        }
+
+        app.dispatch(Action::RequestNewSession { cwd: None });
+        let pending = app.pending_new_session.as_ref().unwrap();
+        assert_eq!(pending.cancel_attempts, 1);
+        assert!(
+            pending.cancel_in_flight,
+            "explicit /new rearms cancellation"
+        );
+    }
+
+    #[test]
+    fn failed_project_switch_after_fenced_settlement_still_clears_chat_busy() {
+        let mut app = offline_app();
+        let root = std::env::temp_dir().join(format!("ocean-new-settle-{}", std::process::id()));
+        let target = root.join("target");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        let file = root.join("note.txt");
+        std::fs::write(&file, "original").unwrap();
+        app.workspace_root = root.to_string_lossy().into_owned();
+        app.editor.set_root(root.clone());
+        app.editor.open(file);
+        app.editor.focused = true;
+        app.editor.handle_key(crossterm::event::KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        ));
+        app.editor.handle_paste("changed");
+        app.session_id = Some(AgentSessionId(uuid::Uuid::from_u128(145)));
+        app.chat.adopt_active_turn();
+        app.pending_new_session = Some(PendingNewSession {
+            generation: 4,
+            session_id: app.session_id,
+            binding_generation: app.session_binding_generation,
+            request_id: None,
+            cancel_attempts: 0,
+            cancel_in_flight: false,
+            sync_in_flight: false,
+            sync_retry_count: 0,
+            reconciliation_paused: false,
+            cwd: Some(target),
+            settled: true,
+        });
+
+        app.dispatch(Action::NewSession);
+
+        assert!(app.session_id.is_none());
+        assert!(app.pending_new_session.is_none());
+        assert!(!app.chat.is_busy());
+        assert_eq!(app.workspace_root, root.to_string_lossy().into_owned());
+        assert!(app.status.contains("modified editor tabs"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn stale_old_session_finish_and_sync_cannot_unbind_a_new_binding() {
+        let mut app = offline_app();
+        let old_session = AgentSessionId(uuid::Uuid::from_u128(151));
+        let new_session = AgentSessionId(uuid::Uuid::from_u128(152));
+        app.session_id = Some(old_session);
+        app.session_binding_generation = 21;
+        app.chat.adopt_active_turn();
+        app.pending_new_session = Some(PendingNewSession {
+            generation: 1,
+            session_id: Some(old_session),
+            binding_generation: 21,
+            request_id: Some(uuid::Uuid::from_u128(15101)),
+            cancel_attempts: 3,
+            cancel_in_flight: false,
+            sync_in_flight: true,
+            sync_retry_count: 0,
+            reconciliation_paused: false,
+            cwd: None,
+            settled: false,
+        });
+
+        app.dispatch(finished_agent_event(
+            old_session,
+            uuid::Uuid::from_u128(15101),
+        ));
+        app.dispatch(Action::SessionBound(new_session));
+        let new_binding_generation = app.session_binding_generation;
+        app.dispatch(finished_agent_event(
+            old_session,
+            uuid::Uuid::from_u128(15101),
+        ));
+        app.dispatch(Action::NewSessionSyncFinished {
+            generation: 1,
+            session_id: old_session,
+            binding_generation: 21,
+            result: Ok(sync_success(old_session, "old", 15102)),
+        });
+
+        assert_eq!(app.session_id, Some(new_session));
+        assert_eq!(app.session_binding_generation, new_binding_generation);
+        assert!(app.pending_new_session.is_none());
+        assert!(
+            !app.chat.is_busy(),
+            "the settled intent releases the chat latch"
+        );
+    }
+
+    #[test]
+    fn pending_new_session_rejects_a_different_binding_until_settlement() {
+        let mut app = offline_app();
+        let old_session = AgentSessionId(uuid::Uuid::from_u128(153));
+        let other_session = AgentSessionId(uuid::Uuid::from_u128(154));
+        app.session_id = Some(old_session);
+        app.session_binding_generation = 23;
+        app.chat.adopt_active_turn();
+        app.pending_new_session = Some(PendingNewSession {
+            generation: 2,
+            session_id: Some(old_session),
+            binding_generation: 23,
+            request_id: None,
+            cancel_attempts: 3,
+            cancel_in_flight: false,
+            sync_in_flight: false,
+            sync_retry_count: 0,
+            reconciliation_paused: false,
+            cwd: None,
+            settled: false,
+        });
+
+        app.dispatch(Action::SessionBound(other_session));
+
+        assert_eq!(app.session_id, Some(old_session));
+        assert_eq!(app.session_binding_generation, 23);
+        assert!(app.pending_new_session.is_some());
+        assert!(
+            app.chat.is_busy(),
+            "the active turn remains attached to its session"
+        );
+    }
+
+    #[test]
+    fn pending_new_session_rejects_resume_until_old_turn_settles() {
+        let mut app = offline_app();
+        let old_session = AgentSessionId(uuid::Uuid::from_u128(155));
+        let resume_session = AgentSessionId(uuid::Uuid::from_u128(156));
+        app.session_id = Some(old_session);
+        app.session_binding_generation = 24;
+        app.chat.adopt_active_turn();
+        app.pending_new_session = Some(PendingNewSession {
+            generation: 3,
+            session_id: Some(old_session),
+            binding_generation: 24,
+            request_id: None,
+            cancel_attempts: 3,
+            cancel_in_flight: false,
+            sync_in_flight: false,
+            sync_retry_count: 0,
+            reconciliation_paused: false,
+            cwd: None,
+            settled: false,
+        });
+
+        let cwd = PathBuf::from(app.workspace_root.clone());
+        app.dispatch(Action::ResumeSession {
+            id: resume_session,
+            path: PathBuf::from("/not-read-while-pending-new"),
+            cwd,
+        });
+
+        assert_eq!(app.session_id, Some(old_session));
+        assert_eq!(app.session_binding_generation, 24);
+        assert!(app.pending_new_session.is_some());
+        assert!(app.chat.is_busy());
+    }
+
+    #[tokio::test]
+    async fn cancel_ack_is_not_settlement_but_idle_fenced_sync_is() {
+        let mut app = offline_app();
+        let session_id = AgentSessionId(uuid::Uuid::from_u128(15));
+        let request_id = uuid::Uuid::from_u128(1501);
+        app.session_id = Some(session_id);
+        app.session_binding_generation = 11;
+        app.active_request_id = Some(request_id);
+        app.chat.adopt_active_turn();
+
+        app.dispatch(Action::RequestNewSession { cwd: None });
+        let generation = app.pending_new_session.as_ref().unwrap().generation;
+        app.dispatch(Action::NewSessionCancelFinished {
+            generation,
+            session_id,
+            binding_generation: 11,
+            request_id,
+            result: Ok("cancel accepted".into()),
+        });
+        assert_eq!(
+            app.session_id,
+            Some(session_id),
+            "cancel ACK is not terminal proof"
+        );
+        assert!(app.pending_new_session.as_ref().unwrap().sync_in_flight);
+
+        app.dispatch(Action::NewSessionSyncFinished {
+            generation,
+            session_id,
+            binding_generation: 11,
+            result: Ok(sync_success(session_id, "settled", 1502)),
+        });
+        assert_eq!(
+            app.session_id, None,
+            "idle fenced sync proves safe unbinding"
+        );
+        assert!(app.pending_new_session.is_none());
     }
 
     fn resumable_session(index: u128, title: &str) -> crate::shell::sessions::Session {
