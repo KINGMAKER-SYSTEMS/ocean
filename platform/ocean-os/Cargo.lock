@@ -3372,6 +3372,7 @@ dependencies = [
  "tokio-util",
  "toml 0.8.23",
  "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 
@@ -3751,6 +3752,7 @@ dependencies = [
  "ocean-agent-sdk",
  "ocean-browser",
  "ocean-hashline",
+ "ocean-minimizer",
  "ocean-protocol",
  "proptest",
  "regex",

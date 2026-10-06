@@ -2369,6 +2369,10 @@ impl AgentRuntime {
             hashline: hashline_edits,
             artifacts: artifact_spill,
             code_intelligence,
+            // Minimizer M2 is a runtime-only, default-off checkpoint: no
+            // `PromptControl`/harness-profile field feeds this gate until the
+            // separately reviewed M2c profile wiring lands.
+            command_output_minimization: false,
         };
         let tools = self.capabilities.tools_for_session(&tool_ctx).await;
         // `tools_disabled` is a fail-closed authorization boundary. Unlike an
@@ -4956,7 +4960,7 @@ mod tests {
         };
         let unknown = TokenUsage::default();
 
-        let mut prior_known = known.clone();
+        let mut prior_known = known;
         add_continuation_usage(&mut prior_known, &unknown);
         assert_eq!(prior_known.total_tokens, 0);
 
@@ -6342,6 +6346,183 @@ done
         assert_eq!(model.id, "claude-fable-5-1");
         assert_eq!(model.context_window, 1_000_000);
         assert_eq!(model.max_tokens, 128_000);
+    }
+
+    /// Explicit operator diagnostic for the Anthropic thinking-binding check:
+    /// two requests to one exact model id (`OCEAN_MODEL_PROBE_IDS`), the second
+    /// replaying the first's thinking block under a changed system prompt.
+    /// The request must complete either way: cleanly on an account the check
+    /// is not enforced on, or through the adapter's recovery on one it is (the
+    /// 400, the retry with the block dropped, and the API's `thinking_dropped`
+    /// report in the warn log). The probe prints which, so it also tells an
+    /// operator whether the account is enforced. Fixed prompts, no tools, no
+    /// session, no store, no credential refresh.
+    #[tokio::test]
+    #[ignore = "requires OCEAN_LIVE_MODEL_PROBE=1, OCEAN_MODEL_PROBE_IDS=<one id> and a configured account"]
+    async fn live_edited_history_still_completes_with_replayed_thinking() {
+        use futures::StreamExt;
+        use std::io::Write;
+        assert_eq!(std::env::var("OCEAN_LIVE_MODEL_PROBE").as_deref(), Ok("1"));
+        // The adapter reports what the API did to the request in its log.
+        // Keep a copy to assert on, and echo it to the probe's output.
+        static LOG: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
+        struct Sink;
+        impl Write for Sink {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if let Ok(mut log) = LOG.lock() {
+                    log.extend_from_slice(bytes);
+                }
+                std::io::stdout().write_all(bytes)?;
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                std::io::stdout().flush()
+            }
+        }
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("ocean_protocol=warn")),
+            )
+            .with_writer(|| Sink)
+            .try_init();
+        let id = std::env::var("OCEAN_MODEL_PROBE_IDS").expect("one exact model id");
+        assert!(!id.contains(','), "probe one id at a time");
+        let mut env = ProviderEnv::from_process();
+        env.vars.remove("OCEAN_PROVIDER");
+        if let Ok(provider) = std::env::var("OCEAN_MODEL_PROBE_PROVIDER") {
+            env.vars.insert("OCEAN_PROVIDER".into(), provider);
+        }
+        env.vars.insert("OCEAN_MODEL".into(), id.clone());
+        let config =
+            ocean_providers::resolve_provider_config(&env).expect("catalog route resolves");
+        assert!(config.readiness().ok, "{id}: no credential visible");
+        let model = model_from_provider_config(&config).expect("catalog model constructs");
+        let mut options = ocean_protocol::StreamOptions {
+            api_key: config
+                .credential
+                .as_ref()
+                .map(|credential| credential.secret.expose().to_owned()),
+            base_url: Some(config.selection.base_url.clone()),
+            auth: auth_method_for(&config),
+            // High enough that adaptive thinking produces a block to replay.
+            reasoning: Some(ocean_protocol::ThinkingLevel::Xhigh),
+            max_tokens: Some(4096),
+            ..Default::default()
+        };
+        if let Some(account_id) = &config.account_id {
+            options
+                .headers
+                .insert("chatgpt-account-id".into(), account_id.clone());
+        }
+        async fn complete(
+            model: &ocean_protocol::Model,
+            context: &ocean_protocol::Context,
+            options: &ocean_protocol::StreamOptions,
+        ) -> Result<ocean_protocol::AssistantMessage, String> {
+            let mut stream = ocean_protocol::stream_simple(model, context, options)
+                .await
+                .map_err(|error| error.to_string())?;
+            while let Some(event) = stream.next().await {
+                match event.map_err(|error| error.to_string())? {
+                    ocean_protocol::AssistantMessageEvent::Done { message, .. } => {
+                        return Ok(message)
+                    }
+                    ocean_protocol::AssistantMessageEvent::Error { error, .. } => {
+                        return Err(error.error_message.unwrap_or_default())
+                    }
+                    _ => {}
+                }
+            }
+            Err("missing completion".into())
+        }
+        let probe = async {
+            let first = ocean_protocol::Context {
+                system_prompt: Some("You are a terse assistant.".into()),
+                messages: vec![Message::user_text(
+                    "Reason through this privately and carefully before you answer; it has a \
+                     trap. Five people sit in a row of five seats numbered 1 to 5. Ada is not \
+                     at either end. Bo sits immediately left of Cy. Di is in seat 5. Ev is \
+                     somewhere left of Ada. Cy is not next to Di. Reply with only the seating \
+                     order from seat 1 to seat 5, names separated by commas.",
+                )],
+                ..Default::default()
+            };
+            let answer = complete(&model, &first, &options).await?;
+            for content in &answer.content {
+                let shape = match content {
+                    Content::Thinking {
+                        thinking,
+                        thinking_signature,
+                    } => format!(
+                        "thinking text={} signature={}",
+                        thinking.chars().count(),
+                        thinking_signature.as_ref().map_or(0, |s| s.len())
+                    ),
+                    Content::Text { text } => format!("text={}", text.chars().count()),
+                    other => format!("{other:?}").chars().take(40).collect(),
+                };
+                println!("BINDING_PROBE first reply block: {shape}");
+            }
+            let replayed_thinking = answer.content.iter().any(|content| {
+                matches!(
+                    content,
+                    Content::Thinking {
+                        thinking_signature: Some(signature),
+                        ..
+                    } if !signature.is_empty()
+                )
+            });
+            // The system prompt changes between the requests: the edit Ocean
+            // makes on a turn's final round.
+            let edited = ocean_protocol::Context {
+                system_prompt: Some("You are a terse assistant. Reply in uppercase words.".into()),
+                messages: vec![
+                    first.messages[0].clone(),
+                    Message::Assistant(answer),
+                    Message::user_text("Now swap Bo and Cy's constraint direction: Bo sits immediately right of Cy. Only the order."),
+                ],
+                ..Default::default()
+            };
+            let second = complete(&model, &edited, &options).await?;
+            let text: String = second
+                .content
+                .iter()
+                .filter_map(|content| content.as_text())
+                .collect();
+            Ok::<_, String>((replayed_thinking, text, second.usage.total_tokens))
+        };
+        match tokio::time::timeout(std::time::Duration::from_secs(120), probe).await {
+            Ok(Ok((replayed_thinking, text, tokens))) => {
+                assert!(
+                    replayed_thinking,
+                    "the first reply carried no signed thinking block, so nothing was replayed; rerun"
+                );
+                let log = LOG
+                    .lock()
+                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                    .unwrap_or_default();
+                let recovered = log.contains("retrying with the block dropped");
+                let reported = log.contains("thinking_dropped");
+                println!(
+                    "BINDING_PROBE {} {} completed account={} tokens={tokens} reply={:?}",
+                    config.selection.provider.as_str(),
+                    id,
+                    if recovered {
+                        "enforced"
+                    } else {
+                        "not_enforced"
+                    },
+                    text.trim()
+                );
+                assert!(
+                    !recovered || reported,
+                    "the retry completed but the API did not report the dropped block; log:\n{log}"
+                );
+            }
+            Ok(Err(error)) => panic!("BINDING_PROBE {id} failed: {error}"),
+            Err(_) => panic!("BINDING_PROBE {id} timed out"),
+        }
     }
 
     /// Explicit operator diagnostic: fixed prompt, no tools/session/store/refresh.

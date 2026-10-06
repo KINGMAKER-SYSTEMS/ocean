@@ -1009,15 +1009,71 @@ Merged Ocean PR counts observed at 04:37Z were 10 for 2026-10-05 UTC, 9 for
 window (1 so far for 2026-10-06). Calendar credits, UTC merges, and local
 delivery counts are separate; no artificial activity was added.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [10:06] [06-10-26]
+agent: [claude] [claude code]
+worktree: [claude/thinking-binding-drop-block] [/Users/risingtidesdev/dev/ocean-claude-audit]
+type: [bug report]
+area: [backend] [testing]
+
+Closed a latent failure on the newest Claude models. Fable 5.1, Opus 5.5 and Sonnet 5.5 bind each thinking block to the conversation that produced it, and on Anthropic accounts created on or after 2026-08-31 reject a request that replays a block whose prefix (system prompt, tool set, earlier messages) has changed. Ocean replays signed thinking blocks and changes that prefix in four places I read in the runtime and agent: the final round of a turn appends a budget notice to the system prompt and sends no tools, dynamic-tool mode grows the tool list as tools load, the per-send trim drops the oldest messages once the window fills, and the system prompt re-reads the ten most recent memories so a retained memory changes it for the next turn. On an enforced account each of those is a 400 rather than a reply. The Anthropic encoder now asks for a mismatched block to be dropped instead (thinking.block_binding.prefix_mismatch_behavior = drop_block) on exactly those three models, sends the thinking-binding-controls-2026-08-01 beta alongside the OAuth beta as one header value, and logs any block the API reports in message_start.input_transformations with its path and reason. between_tools takes no extra field. Other models are unchanged. The cost is that a block invalidated by one of those edits is now dropped rather than let through on accounts that were not enforced; the lasting fix is an append-only harness, recorded in the protocol contract. Also fixed two clippy errors in tests that landed with the token-footprint change.
+
+Validation: ocean-protocol (184 plus 5), ocean-agent (268, two live probes ignored) and ocean-providers (67) pass; clippy with warnings denied on both crates' tests, workspace test compilation, rustfmt check and docs-check pass. New tests: the three models carry the binding field at every level and no other model does; the beta header composes once from auth and body; message_start with and without input_transformations decodes. Live, on the subscription route with the operator's configured credential: the fixed no-tools probe passed on all three models with the new shape (71 tokens each), and a new ignored probe sent two requests to Sonnet 5.5 where the second replayed the first's signed thinking block under a changed system prompt: the API answered with input_transformations thinking_dropped / prefix_binding_mismatch at messages.1.content.0, the adapter logged it, and the request completed. No session, store or credential was touched or refreshed.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [10:26] [06-10-26]
+agent: [claude] [claude code]
+worktree: [claude/thinking-binding-drop-block] [/Users/risingtidesdev/dev/ocean-claude-audit]
+type: [review]
+area: [backend] [testing]
+
+Reworked the thinking-binding change after its review, which blocked on the design rather than the code. Asking the API to drop a mismatched thinking block on every request would have discarded reasoning on every edited turn on accounts that never reject such a block, and the review showed the dominant edit is one the first entry missed: the system prompt carries the git branch and commit and is rebuilt every turn, so every commit the agent makes invalidates every earlier block. The dynamic-tool edit was also wrong; it is Kimi K3 only and never reaches a Claude model. The adapter now sends nothing for this until the account rejects a replay. On that specific 400 it retries the one request once, which is side-effect free because the rejection comes before any output: an adaptive body gains the drop control and its beta, a between_tools body has its thinking blocks stripped instead, and the credential is remembered for the process so later requests ask up front. Two live findings decided the shape: this operator's subscription route is not enforced, an edited replay in main's exact shape completes, and sending the binding beta alone already makes that route drop the block (reported as thinking_dropped), so the beta is not the free observer the reference describes and is held back with the control.
+
+Validation: ocean-protocol (187 plus 5), ocean-agent (268, two live probes ignored) and ocean-providers pass; clippy with warnings denied on both crates' tests, workspace test compilation, rustfmt check and docs-check pass. New loopback tests drive both recoveries through the real request path: a binding 400 followed by a retry that carries the control and the beta and completes, with the credential remembered afterwards; and the same under between_tools, where the retry carries no control and no thinking blocks but keeps the text. The live probe on Sonnet 5.5 now classifies the account and completed as not enforced. Four small requests in total today beyond the earlier ones; no session, store or credential was touched or refreshed.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [10:32] [06-10-26]
+agent: [claude] [claude code]
+worktree: [claude/thinking-binding-drop-block] [/Users/risingtidesdev/dev/ocean-claude-audit]
+type: [review]
+area: [backend] [testing]
+
+Closed the leftovers from the review that acknowledged the thinking-binding recovery. Once a credential is known to be enforced, a between_tools request (Sonnet 5.5 with thinking off), which can carry no drop control, had its thinking blocks stripped only after paying a 400 and a retry on every round; it is stripped up front now, like the control is added up front. The strip dropped an assistant message down to empty content when it had held only thinking, which the API rejects, so such a message is now dropped whole. The request capture recorded the body before the recovery, never the control or the stripped history actually sent; each attempt is captured as sent. Left as noted: the remembered credential is keyed by the secret, so a token refresh costs one more rejection and retry.
+
+Validation: ocean-protocol (187 plus 5) passes; clippy with warnings denied on ocean-protocol and ocean-agent tests, rustfmt check pass. The strip test covers the thinking-only assistant turn. No provider was called.
+_________________________________________________________________________________
+_________________________________________________________________________________
+time: [15:42] [06-10-26]
+agent: [codex] [gpt-6]
+worktree: [port/output-economy] [/Users/risingtidesdev/.codex/worktrees/factory-pr49-artifact-debug/ocean]
+type: [bug fix] [issues #50, #53]
+area: [backend] [testing] [privacy]
+
+While preparing the output-economy lease change for release, review found that
+its derived Debug output recursively formatted the shared artifact store,
+including unrelated session output bodies. Replaced that formatter with a
+redacted view containing only the lease id and byte count, and added a sentinel
+regression test. Kept the public release record limited to this repository's
+change; source-side commit and review history remain outside the public ledger.
+The output minimizer remains default-off, with no production setter.
+
+Validation: `cargo fmt --all -- --check`, focused `cargo test -p ocean-runtime artifact_lease_debug_does_not_expose_session_artifact_bodies -- --nocapture` (1 passed), `cargo xtask docs-check` (PASS; 30 packages, 153 Markdown files, 170 local links), and `git diff --check` pass.
+_________________________________________________________________________________
 time: [07:25] [06-10-26]
 agent: [Claude Code] [Claude Opus 5.5]
-worktree: [fix/codex-version-gpt-6-1-sol]
+worktree: [fix/codex-version-gpt-6-1-sol-v2]
 type: [fix]
 area: [protocol]
 
-The ChatGPT Codex backend version-gates newly released models. PR #2 sent
+The ChatGPT Codex backend version-gates newly released models. main sent
 CODEX_VERSION 0.154.0, and the backend refused gpt-6.1-sol ("unsupported for
 the ChatGPT account") while the personal-repo build at 0.159.2 served it with
 the same credential. Raised CODEX_VERSION to 0.159.2 (as Risingtides-dev/ocean-os
-#529). Validation: see PR (live smoke test of gpt-6.1-sol on a spare port).
+#529). Validation: main + this change, prebuilt, on a spare port with a working
+ChatGPT sign-in: gpt-6.1-sol, glm-5.3 and deepseek-v4-pro each ran a bash tool
+call and answered; session model = requested, no reroute. ocean-protocol codex
+tests 36/36, ocean-providers 67/67.
 _________________________________________________________________________________
