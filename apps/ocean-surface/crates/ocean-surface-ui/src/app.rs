@@ -2319,17 +2319,18 @@ pub fn App() -> impl IntoView {
             if text.trim().is_empty() {
                 text = "Review the attached context.".into();
             }
-            input.set(String::new());
             // A `/` line runs a command only when it names one. Clicking Send
             // on `/model gpt-5` behaves like Enter in the menu; a mistyped
             // name stays in the composer with a hint; a path that merely
-            // starts with a slash is sent as the message it is.
+            // starts with a slash is sent as the message it is. The highlighted
+            // row is read before the input is cleared: the rows derive from it.
             let rows = slash_items.get_untracked();
             let picked = (!rows.is_empty()).then(|| {
                 rows[clamp_selection(slash_selected.get_untracked(), rows.len())]
                     .id
                     .clone()
             });
+            input.set(String::new());
             if apply_slash_input(
                 registry.resolve_slash(&text, picked.as_deref()),
                 &text,

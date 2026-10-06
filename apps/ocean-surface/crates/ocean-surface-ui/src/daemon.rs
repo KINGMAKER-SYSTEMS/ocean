@@ -2703,7 +2703,9 @@ impl Daemon {
                         return;
                     }
                 }
-                daemon.connect();
+                if daemon.session_id.get_untracked().is_none() {
+                    daemon.connect();
+                }
                 daemon.fetch_models();
                 daemon.fetch_projects();
                 return;
@@ -2820,7 +2822,11 @@ impl Daemon {
                     return;
                 }
             }
-            daemon.connect();
+            // A session the user already has (a deep link replayed during
+            // boot) is connected; a fresh connect would reset its stream.
+            if daemon.session_id.get_untracked().is_none() {
+                daemon.connect();
+            }
             // Re-fetch the model catalogue now that the daemon URL is resolved.
             // The eager fetch_models() at startup runs BEFORE bootstrap learns
             // the real origin, so remotely (phone via tunnel) it hits the wrong
@@ -8082,6 +8088,11 @@ async fn try_restore_session(daemon: &Daemon, id: &str, boot_intent: u64) -> Ses
         Err(err) => {
             log::error!("session restore fetch error: {err}");
         }
+    }
+    // A miss is stale too once the user moved on: the caller would otherwise
+    // clear the id the user's own switch just persisted.
+    if superseded() {
+        return SessionRestore::Superseded;
     }
     SessionRestore::Missing
 }

@@ -197,8 +197,8 @@ Web surface session UI:
   single-use: the parameter is dropped from the address bar as soon as it is
   read, so a reload never jumps back. A boot restore (linked or persisted)
   stands down when the user starts or opens a session while the daemon is
-  being asked, and boot then leaves that session's stream alone rather than
-  connecting afresh over it. The URL shape is a cross-client contract with
+  being asked, and boot never connects afresh over a session the user already
+  has. The URL shape is a cross-client contract with
   `ocean-tui`; change it only together. Known limit, owned by
   `ocean-surface-proxy`: an unauthenticated navigation is redirected to
   `/login` and then to `/`, which drops the parameter, so the link only works

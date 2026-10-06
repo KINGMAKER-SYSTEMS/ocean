@@ -332,7 +332,8 @@ impl<'a> SlashLine<'a> {
         if core.starts_with('/') {
             return SlashName::Other;
         }
-        let path_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '~');
+        let path_char =
+            |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '~' | ':');
         if core.contains('/') || (core.contains('.') && core.chars().all(path_char)) {
             return SlashName::Path;
         }
@@ -990,6 +991,7 @@ mod tests {
         assert_eq!(name("/etc/hosts what is this"), SlashName::Path);
         assert_eq!(name("/notes.md"), SlashName::Path);
         assert_eq!(name("/Users/me/app.rs:12"), SlashName::Path);
+        assert_eq!(name("/app.rs:12 is wrong"), SlashName::Path);
         // A pasted comment is a message.
         for text in [
             "// this function is broken\nfn foo() {}",

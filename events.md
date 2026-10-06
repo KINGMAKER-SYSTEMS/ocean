@@ -782,3 +782,15 @@ Applied the second review of the Surface slash and session-link change, which bl
 
 Validation: ocean-surface-ui native tests pass (893 plus the integration suites), with new cases for comment pastes, the dot rule, the completion path and the derived hint; rustfmt check, native and wasm clippy with warnings denied on all targets, wasm test compilation and the proxy check pass. The boot change is wasm-only control flow and is covered by reading, not by a test.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [22:30] [05-10-26]
+agent: [claude] [claude code]
+worktree: [claude/surface-slash-and-session-handoff] [/Users/risingtidesdev/dev/ocean-claude-audit-b]
+type: [review]
+area: [frontend] [testing]
+
+Closed the leftovers from the third review of the Surface slash and session-link change, which acknowledged it. Boot no longer connects afresh over a session the user already has on either path, which also covers a deep link replayed before the restore checks run, a case older than this change; a restore whose session is missing answers "superseded" rather than "missing" when the user moved on during the fetch, so the persisted id their own switch just wrote is not cleared. The Send button really does use the highlighted row now: the rows were read after the input had been cleared, so the pick was always empty. A colon is a path character, so "/app.rs:12 is wrong" is sent as a message like "/Users/me/app.rs:12" already was.
+
+Validation: ocean-surface-ui native tests pass (893 plus the integration suites); rustfmt check and native and wasm clippy with warnings denied on all targets pass. The Send-button order is view code and is covered by reading.
+_________________________________________________________________________________
