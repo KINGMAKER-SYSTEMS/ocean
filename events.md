@@ -1080,3 +1080,8 @@ cargo test -p ocean-daemon 910 passed / 3 failed — the same three
 persistent-rooms lifecycle tests that fail on clean main (issue #42),
 reproduced there before any of my changes; rustfmt; denied-warning Clippy
 zero; cargo xtask docs-check PASS covering the ported manifest.
+Addendum: docs-check flagged the ported Phase 2 manifest's links — ported the
+Rooms program governance chain it depends on (Phase 1 room-agent
+authorization manifest, Gate 0 decisions and threat model, distributed
+workspace architecture). All public program specs; no private material.
+docs-check PASS (157 active Markdown files).
