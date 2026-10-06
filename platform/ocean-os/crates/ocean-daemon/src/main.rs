@@ -1596,6 +1596,14 @@ fn banner_routes() -> &'static [&'static str] {
         "POST /v1/rooms/persistent/{key}/participants",
         "DELETE /v1/rooms/persistent/{key}/participants/{participant_id}",
         "POST /v1/rooms/persistent/{key}/participants/{participant_id}/retire",
+        "GET /v1/rooms/persistent/{key}/resources",
+        "POST /v1/rooms/persistent/{key}/resources",
+        "GET /v1/rooms/persistent/{key}/resources/{resource_id}",
+        "DELETE /v1/rooms/persistent/{key}/resources/{resource_id}",
+        "POST /v1/rooms/persistent/{key}/resources/{resource_id}/suspend",
+        "POST /v1/rooms/persistent/{key}/resources/{resource_id}/resume",
+        "POST /v1/rooms/persistent/{key}/resources/{resource_id}/list",
+        "POST /v1/rooms/persistent/{key}/resources/{resource_id}/read",
         "POST /v1/rooms/persistent/{key}/messages",
         "POST /v1/rooms/persistent/{key}/invites",
         "POST /v1/rooms/persistent/invites/redeem",
@@ -2887,6 +2895,33 @@ fn room_routes() -> Router<AppState> {
         .route(
             "/v1/rooms/persistent/{key}/participants/{participant_id}/retire",
             post(room_retirement::room_participant_retire),
+        )
+        // Rooms Phase 2 Stage 2c: contributed-folder grants and confined
+        // operator previews. Enforcement (§5 cwd rule, per-call authority)
+        // already lives in resolve_turn_cwd and DurableRoomResourceAuthority.
+        .route(
+            "/v1/rooms/persistent/{key}/resources",
+            get(room_resources::room_resources_list).post(room_resources::room_resource_grant),
+        )
+        .route(
+            "/v1/rooms/persistent/{key}/resources/{resource_id}",
+            get(room_resources::room_resource_get).delete(room_resources::room_resource_revoke),
+        )
+        .route(
+            "/v1/rooms/persistent/{key}/resources/{resource_id}/suspend",
+            post(room_resources::room_resource_suspend),
+        )
+        .route(
+            "/v1/rooms/persistent/{key}/resources/{resource_id}/resume",
+            post(room_resources::room_resource_resume),
+        )
+        .route(
+            "/v1/rooms/persistent/{key}/resources/{resource_id}/list",
+            post(room_resources::room_resource_preview_list),
+        )
+        .route(
+            "/v1/rooms/persistent/{key}/resources/{resource_id}/read",
+            post(room_resources::room_resource_preview_read),
         )
         .route(
             "/v1/rooms/persistent/{key}/messages",
@@ -25751,7 +25786,7 @@ mod tests {
         assert_eq!(admission_routes, expected_admission_routes);
         assert_eq!(
             banner.len(),
-            119,
+            127,
             "route baseline changed; review the manifest"
         );
 
