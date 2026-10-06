@@ -511,3 +511,32 @@ ocean-tui` passed (523 passed, 4 ignored); `CARGO_INCREMENTAL=0 cargo check
 `rustfmt --check`, and `git diff --check` passed. Hosted Build Ocean validation
 is still required before merge. No daemon was installed or restarted.
 _________________________________________________________________________________
+_________________________________________________________________________________
+time: [20:10] [05-10-26]
+agent: [zcode] [glm-5.3]
+worktree: [fix/tui-thinking-effort-levels]
+type: [feature-request]
+area: [frontend] [ocean-tui]
+
+Implemented issue #8: the /models picker's thinking cycler now derives its
+options from the highlighted model's catalog `effort_levels` instead of
+offering every shared ThinkingLevel for every model. `ModelEntry` deserializes
+the daemon's additive per-route `effort_levels` (older daemons deserialize to
+empty), `cycle_thinking` cycles `default` plus exactly the offered levels in
+catalog order, and unknown forward-compat names are skipped rather than
+guessed. `default` (unset) always stays available and distinct from `off`. An
+empty list — a route whose encoder sends no effort parameter, or a catalog
+still loading — leaves `default` as the only choice, so the TUI never offers a
+control the encoder ignores. Applying a model now snaps a pinned level that
+model does not offer back to `default` instead of riding a silently folded
+pin. No provider compatibility table was duplicated in the TUI: the options
+come from the daemon catalog strings. `/thinking <level>` arguments remain
+explicit operator text, unchanged.
+
+Validation: cargo check -p ocean-tui --all-targets; full cargo test -p
+ocean-tui (514 passed, 0 failed, 4 ignored — includes new tests for collapsed
+DeepSeek-style routes, single-level K3-style routes, empty-catalog default
+locking, highlighted-entry cycling, and apply-time snap); rustfmt applied;
+cargo clippy -p ocean-tui --all-targets clean; cargo build -p ocean-tui
+--release. Devlog pass: no owning contract text describes the cycler's option
+set, so AGENTS.md files are intentionally unchanged.
