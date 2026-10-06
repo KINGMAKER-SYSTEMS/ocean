@@ -1078,3 +1078,13 @@ Validation: identity module tests (4) pass; cargo test -p ocean-daemon 912
 passed / 3 failed — all three pre-existing on main; router-contract parity 120
 green; cargo check --workspace --tests; rustfmt; denied-warning Clippy zero;
 cargo xtask docs-check for the guide edit.
+Validation: room_profile tests (5) pass; router-contract parity (121) green;
+cargo test -p ocean-daemon 910 passed / 3 failed — the same three
+persistent-rooms lifecycle tests that fail on clean main (issue #42),
+reproduced there before any of my changes; rustfmt; denied-warning Clippy
+zero; cargo xtask docs-check PASS covering the ported manifest.
+Addendum: docs-check flagged the ported Phase 2 manifest's links — ported the
+Rooms program governance chain it depends on (Phase 1 room-agent
+authorization manifest, Gate 0 decisions and threat model, distributed
+workspace architecture). All public program specs; no private material.
+docs-check PASS (157 active Markdown files).
