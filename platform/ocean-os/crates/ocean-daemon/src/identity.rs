@@ -105,60 +105,33 @@ fn valid_display_name(value: &str) -> bool {
     !value.is_empty() && value.chars().count() <= 80 && !value.chars().any(char::is_control)
 }
 
-/// One `key = "value"` per line is all the file may hold; `#` comments and
-/// blank lines are skipped, a trailing `# comment` after the closing quote is
-/// allowed. No TOML crate: the file has two keys and the parser must stay
-/// byte-for-byte predictable across the daemon and `ocean-mcp`.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MemberToml {
+    member_id: String,
+    display_name: Option<String>,
+}
+
+/// Parse the same strict TOML contract used by the other identity reader.
+/// Unknown fields, duplicate keys, malformed values, and nested tables fail
+/// closed so this endpoint cannot publish a different identity for the same
+/// config file.
 fn parse_member_toml(path: &Path) -> Option<Identity> {
     let raw = std::fs::read_to_string(path).ok()?;
     parse_member_text(&raw)
 }
 
 fn parse_member_text(raw: &str) -> Option<Identity> {
-    let mut member_id = None;
-    let mut display_name = None;
-    for line in raw.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let Some((key, rest)) = line.split_once('=') else {
-            continue;
-        };
-        // A malformed value poisons its line only, not the file: the file
-        // stays parseable and every OTHER well-formed key still lands.
-        let Some(value) = unquote(rest) else {
-            continue;
-        };
-        match key.trim() {
-            "member_id" if valid_member_id(value) => member_id = Some(value.to_string()),
-            "display_name" if valid_display_name(value) => display_name = Some(value.to_string()),
-            _ => {}
-        }
+    let parsed: MemberToml = toml::from_str(raw).ok()?;
+    if !valid_member_id(&parsed.member_id) {
+        return None;
     }
-    member_id.map(|member_id| Identity {
+    let member_id = parsed.member_id;
+    Some(Identity {
         member_id: Some(member_id),
-        display_name,
+        display_name: parsed.display_name.filter(|name| valid_display_name(name)),
         source: IdentitySource::MemberToml,
     })
-}
-
-/// `"John"   # optional"` → `John`; an unquoted value ends at `#`.
-/// Quoted values fail closed: a leading quote without its closing quote, or
-/// any non-comment text after the closing quote, is a malformed value —
-/// TOML would reject the line, so this does too.
-fn unquote(rest: &str) -> Option<&str> {
-    let rest = rest.trim();
-    if let Some(inner) = rest.strip_prefix('"') {
-        let (value, tail) = inner.split_once('"')?;
-        let tail = tail.trim();
-        if !tail.is_empty() && !tail.starts_with('#') {
-            return None;
-        }
-        Some(value.trim())
-    } else {
-        Some(rest.split('#').next().unwrap_or("").trim())
-    }
 }
 
 #[cfg(test)]
@@ -233,9 +206,7 @@ mod tests {
 
         // A control character or an over-long display name is dropped while
         // the member id stands.
-        let tmp = dir_with(Some(
-            "member_id = \"jay\"\ndisplay_name = \"bad\u{7}name\"\n",
-        ));
+        let tmp = dir_with(Some("member_id = \"jay\"\ndisplay_name = \"bad\\nname\"\n"));
         let got = resolve(tmp.path(), None);
         assert_eq!(got.member_id.as_deref(), Some("jay"));
         assert_eq!(got.display_name, None);
@@ -247,8 +218,6 @@ mod tests {
         assert_eq!(resolve(tmp.path(), None).display_name, None);
     }
 
-    /// Quoted values fail closed: no closing quote, or trailing non-comment
-    /// text after it, is a malformed value the way TOML treats it.
     #[test]
     fn quoted_values_fail_closed_on_missing_close_or_trailing_tokens() {
         let malformed = [
@@ -263,18 +232,27 @@ mod tests {
                 "malformed line accepted: {line:?}"
             );
         }
-        // The malformed line poisons itself, not the file.
-        // A display name without a valid member id is nothing (the file
-        // answers no one), so the whole file is treated as absent.
-        assert!(
-            parse_member_text("member_id = \"jay\" garbage\ndisplay_name = \"Jay\"\n").is_none()
-        );
     }
 
     #[test]
-    fn parsing_is_line_based_and_tolerates_comments_and_unquoted_values() {
+    fn malformed_or_non_root_toml_falls_back_to_environment() {
+        for contents in [
+            "member_id = jay",
+            "member_id = \"first\"\nmember_id = \"second\"",
+            "[section]\nmember_id = \"nested\"",
+            "member_id = \"jay\" garbage",
+        ] {
+            let tmp = dir_with(Some(contents));
+            let got = resolve(tmp.path(), Some("fallback"));
+            assert_eq!(got.member_id.as_deref(), Some("fallback"), "{contents:?}");
+            assert_eq!(got.source, IdentitySource::Env, "{contents:?}");
+        }
+    }
+
+    #[test]
+    fn parsing_tolerates_comments_and_whitespace_in_valid_toml() {
         let tmp = dir_with(Some(
-            "\n  # comment line\nmember_id=jake   # unquoted, trailing comment\n[section]\ndisplay_name = Jake B\n",
+            "\n  # comment line\nmember_id = \"jake\"   # trailing comment\ndisplay_name = \"Jake B\"\n",
         ));
         let got = resolve(tmp.path(), None);
         assert_eq!(got.member_id.as_deref(), Some("jake"));

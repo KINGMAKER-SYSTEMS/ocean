@@ -114,6 +114,9 @@ direction wrote `~/.config/ocean/member.toml`; the daemon's config dir is
   ids omitted, the retired line.
 - ocean-mcp: strict `member.toml` parsing; flag precedence; without identity
   reads work and writes refuse with the hint and nothing is posted.
+- daemon identity: strict top-level `member.toml` parsing; malformed, duplicate,
+  or nested identity fields fall back to `OCEAN_MEMBER_ID` rather than producing
+  a value that differs from the other identity reader.
 
 ## 6. Migration on the campaigns room
 

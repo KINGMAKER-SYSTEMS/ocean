@@ -1111,3 +1111,31 @@ and behavioral tests are not verified in this run. `cargo fmt --all` corrected
 one formatting-only line in the existing identity test; formatting and diff checks
 are rerun before publishing the reconciled head.
 _________________________________________________________________________________
+time: [17:18] [06-10-26]
+agent: [codex] [gpt-6]
+worktree: [codex/rooms-identity-reconcile]
+type: [review] [bug fix]: PR #41 strict identity config parsing
+area: [backend] [testing]
+
+Independent adversarial review of `b24113355b9735175def830358014266fece1340`
+found the hand-written `member.toml` parser accepted values that strict TOML
+readers reject, including bare strings and duplicate keys, and treated nested
+table fields as identity. Replaced it with the existing workspace TOML
+deserializer and `deny_unknown_fields`; added malformed, duplicate, and nested
+field fallback cases; updated the Rooms spec; and recorded the package dependency
+in the lockfile. `cargo fmt --all -- --check`, `git diff --check`, and locked
+`cargo metadata` pass. Only 397 MiB of local disk remains, below the 4 GiB build
+threshold, so focused Rust tests and package builds are not run. Re-review and
+hosted Build Ocean/Build Surface are still required on the revised head.
+_________________________________________________________________________________
+time: [17:19] [06-10-26]
+agent: [codex] [gpt-6]
+worktree: [codex/rooms-identity-reconcile]
+type: [testing]: PR #41 strict parser follow-up
+area: [backend] [testing]
+
+After the parser/test edits, reran `cargo fmt --all -- --check` and `git diff
+--check`; both pass. Parsed the lockfile and manifest structurally to confirm
+the daemon adds exactly one existing `toml 0.8.23` dependency. Current free disk
+is 385 MiB; no Rust package build or behavior test was run.
+_________________________________________________________________________________
