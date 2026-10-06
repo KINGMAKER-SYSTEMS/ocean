@@ -1119,3 +1119,32 @@ Validation: room_summary tests (10) pass; router-contract parity (120) green;
 cargo test -p ocean-daemon 926 passed / 2 deterministic failures — the
 issue-#42 pair, reproduced on clean main before any of my changes; rustfmt;
 denied-warning Clippy zero; cargo xtask docs-check PASS.
+time: [14:00] [06-10-26]
+agent: [zcode] [glm-5.3]
+worktree: [port/rooms-stage2c-resources]
+type: [feature-request]
+area: [backend] reconciliation: Rooms Phase 2 Stage 2c grant surface
+
+Seventh bounded Track B port: the Rooms Phase 2 Stage 2c contributed-folder
+grant surface. Scoping found the enforcement half was ALREADY on Kingmaker
+main from the publication snapshot — resolve_turn_cwd applies the §5 rule
+(agent default folder > admitted grant > room workspace root),
+DurableRoomResourceAuthority gates per-call confined list/read, and
+ocean-agent already exports confine/ConfineRefusal — so this unit is the
+management surface only and grants become effective the moment they are
+created: list/grant, get/revoke, suspend, resume, and the two operator
+preview endpoints (confined list/read through the same authority an admitted
+agent uses, audited as operator_preview). Grant roots must canonicalize (the
+manifest's dangerous-root list is refused by name); the §7.4 safe projection
+never carries local_root or digests. The one structural adaptation:
+DurableRoomResourceAuthority's fields moved to the personal shape (rooms
+handle + actor), with the base persistent_rooms call site updated to match;
+check_profile_resource_refs and TurnCwd::projection were trimmed from this
+branch because their consumers are #43's profile routes and the upcoming
+room_inspect port respectively — they ride those PRs so this one stays
+warning-free. Router-contract parity moved 119 → 127.
+
+Validation: room_resources tests (3) pass; router-contract parity (127)
+green; cargo test -p ocean-daemon 909 passed / 2 deterministic issue-#42
+failures reproduced on clean main; rustfmt; denied-warning Clippy zero;
+cargo check --workspace --tests; cargo xtask docs-check PASS.
