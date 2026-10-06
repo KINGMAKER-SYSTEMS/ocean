@@ -38,11 +38,12 @@ deliberately left behind.
 - 2026-10-06 — Rooms S0 participant retirement (PR #25, personal tip
   `1bd1bc37636e0a4363f1f20aa1b72ee4c79b14cb`): the daemon operator route
   `POST /v1/rooms/persistent/{key}/participants/{id}/retire` plus its governing
-  spec. The store half was already on Kingmaker main unchanged from the
-  publication snapshot; only the route was missing. Remaining Rooms files
-  (`room_maintenance`, `room_context`, `room_attachments`, `room_summary`,
-  `room_workspace_proxy`, `room_inspect`) still await their units on top of
-  the persistent_rooms rework.
+  spec. The store retirement core already existed on Kingmaker main from the
+  publication snapshot. PR #25 also hardened that store implementation with
+  transaction-bound retired-alias reservation and bounded alias projection and
+  inspection. The remaining Rooms files (`room_maintenance`, `room_context`,
+  `room_attachments`, `room_summary`, `room_workspace_proxy`, `room_inspect`)
+  still await their units on top of the persistent_rooms rework.
 - 2026-10-06 — Observatory durability cluster (PR #31, personal tip
   `1bd1bc37636e0a4363f1f20aa1b72ee4c79b14cb`): versioned idempotent
   `observatory.db` schema migrations (v1 baseline → v2 §4.1 rebuilds), the v2

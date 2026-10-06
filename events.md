@@ -1054,12 +1054,28 @@ area: [docs] reconciliation ledger
 
 PR #25 (Rooms S0 participant retirement) merged at 03:06Z and PR #31
 (observatory durability cluster) merged at 04:28Z — Track B's second and
-third bounded ports to land, each with full hosted checks (Build Ocean,
-Build scope, validate package) green before merge; post-merge delta fixes
-(retention-boundary exclusive replay, Observatory cursor consistency) were
-landed by parallel agents on top of #31. Updated the Reconciled slices
-section in docs/SOURCE_RECONCILIATION.md to record both landings with their
-scope boundaries, per the contract to keep the table current when
-reconciliation actually lands.
+third bounded ports to land, each with Build scope, Build Ocean, and
+`validate package (macos-arm64)` successful before merge; Build Surface was
+path-skipped. PR #31's final head included the retention-boundary replay and
+Observatory cursor-consistency fixes added during parallel work before merge;
+they were not post-merge deltas. Updated the Reconciled slices section in
+docs/SOURCE_RECONCILIATION.md to record both landings and their scope
+boundaries, per the contract to keep the table current when reconciliation
+actually lands.
 
 Validation: cargo xtask docs-check PASS. Docs-only.
+_________________________________________________________________________________
+time: [13:29] [06-10-26]
+agent: [codex] [gpt-6]
+worktree: [codex/factory-ledger-accuracy] (PR #40)
+type: [review] [documentation]
+area: [analysis] source reconciliation ledger
+
+Independent review found that the PR #25 entry understated its landed
+ocean-store changes and the PR #31 entry called fixes already included in its
+final pre-merge head post-merge deltas. Corrected both claims from the merged
+PR diffs and commit history. `git diff --check` and `cargo xtask docs-check`
+pass (30 packages, 153 active Markdown files, 170 local links). The docs check
+compiled only xtask with 1.9 GiB free; no Ocean release build was run. The PR
+needs fresh review and hosted checks at the amended head before merge; no
+deployment was made.
