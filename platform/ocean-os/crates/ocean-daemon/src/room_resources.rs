@@ -206,6 +206,31 @@ pub(super) fn admitted_resource_catalog(
         .collect())
 }
 
+/// Rooms Phase 2 Stage 2b: the profile PUT names repo/tool references that
+/// become live grants in Stage 2c; refuse a profile that references a grant
+/// which does not exist or is revoked.
+pub(super) fn check_profile_resource_refs(
+    store: &mut ocean_store::SqliteRoomStore,
+    room: &RoomKey,
+    refs: impl IntoIterator<Item = String>,
+) -> Result<(), crate::room_agent_authority::ApiError> {
+    let now = Utc::now();
+    for resource_id in refs {
+        let grant = store
+            .room_resource_grant(room, &resource_id)
+            .map_err(crate::room_agent_authority::ApiError::from)?;
+        match grant {
+            Some(grant) if grant.effective_status(now) != ResourceStatus::Revoked => {}
+            _ => {
+                return Err(crate::room_agent_authority::ApiError::bad_request(
+                    "resource_not_found",
+                ))
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

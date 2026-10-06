@@ -1045,3 +1045,38 @@ Closed the leftovers from the review that acknowledged the thinking-binding reco
 
 Validation: ocean-protocol (187 plus 5) passes; clippy with warnings denied on ocean-protocol and ocean-agent tests, rustfmt check pass. The strip test covers the thinking-only assistant turn. No provider was called.
 _________________________________________________________________________________
+_________________________________________________________________________________
+time: [13:41] [06-10-26]
+agent: [zcode] [glm-5.3]
+worktree: [port/rooms-phase2-profile]
+type: [feature-request]
+area: [backend] reconciliation: Rooms Phase 2 Stage 2b room profile
+
+Fifth bounded Track B port: the Rooms Phase 2 Stage 2b room profile. The
+daemon's room_profile.rs (901 lines from personal 1bd1bc37, Kingmaker
+untouched since the split; store-side RoomProfile/CredentialSlot/
+PutRoomProfileInput already on main unchanged) lands with
+GET/PUT /v1/rooms/persistent/{key}/profile: bounded validation (repos,
+tools, credential slots with typed refusal codes), the operator decision
+lane (replay-safe through the shared decision namespace), and
+profile_with_slots — the token-free projection room_inspect needs:
+presence/expiry status only, never a credential value. Also ported the
+governing manifest (2026-09-08 phase-2 manifest) and the one cross-dependency
+check_profile_resource_refs (refuses a profile referencing a grant that does
+not exist or is revoked) adapted into room_resources.rs, whose store APIs
+already existed on main. Router-contract parity baseline moved 119 → 121.
+
+Stage 2c (resource grant routes + previews) was deliberately re-scoped OUT
+of this unit: landing grant routes without the convene-path §5 cwd-rule
+enforcement (which lives in the persistent_rooms rework) would accept grants
+that do nothing — half-wired. It stays bundled with the persistent_rooms
+cwd-rule slice. TurnCwd and resolve_turn_cwd already exist on main's
+room_resources.rs from the publication snapshot, and session_detail_optional
+already exists in ocean-agent — so after this unit room_inspect's remaining
+gap is only resources_projection + the Stage 2c grant surface.
+
+Validation: room_profile tests (5) pass; router-contract parity (121) green;
+cargo test -p ocean-daemon 910 passed / 3 failed — the same three
+persistent-rooms lifecycle tests that fail on clean main (issue #42),
+reproduced there before any of my changes; rustfmt; denied-warning Clippy
+zero; cargo xtask docs-check PASS covering the ported manifest.
