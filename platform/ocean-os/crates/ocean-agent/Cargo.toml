@@ -50,6 +50,7 @@ uuid.workspace = true
 rustix = { version = "1.1.4", features = ["fs"] }
 
 [dev-dependencies]
+tracing-subscriber.workspace = true
 # Isolated, auto-cleaned temp roots for the system_prompt tests so they never
 # read (or mutate) the operator's real ~/.config/ocean-rs/assistants (OCEAN-285).
 # Unique per test, dropped on scope exit — no shared process env, no save/restore
