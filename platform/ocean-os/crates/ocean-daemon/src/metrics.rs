@@ -76,6 +76,9 @@ pub(super) struct TurnMetrics {
     /// `ocean-agent` and surfaces its outcome to the daemon only as `res.ok`.
     /// Monotonic.
     turns_error: std::sync::atomic::AtomicU64,
+    /// Failed Observatory summary-token rotations. Monotonic; surfaced as
+    /// `ocean_observatory_token_rotation_failures_total`.
+    observer_token_rotation_failures: std::sync::atomic::AtomicU64,
     /// Cumulative count of turns whose `wall_ms` was `<=` the bucket bound at the
     /// same index in [`TURN_LATENCY_BUCKETS_MS`]. Prometheus histogram buckets
     /// are cumulative, so a single turn bumps every bucket it falls under.
@@ -115,6 +118,14 @@ impl TurnMetrics {
                 bucket.fetch_add(1, Relaxed);
             }
         }
+    }
+
+    /// Count one failed Observatory summary-token rotation and return the new
+    /// daemon-lifetime total.
+    pub(super) fn record_observer_token_rotation_failure(&self) -> u64 {
+        self.observer_token_rotation_failures
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1
     }
 
     pub(super) fn record_advisor(&self, outcome: AdvisorOutcome, elapsed: std::time::Duration) {
@@ -273,6 +284,16 @@ impl TurnMetrics {
         );
         out.push_str("# TYPE ocean_sse_events_dropped_total counter\n");
         let _ = writeln!(out, "ocean_sse_events_dropped_total {sse_events_dropped}");
+
+        out.push_str(
+            "# HELP ocean_observatory_token_rotation_failures_total Observatory summary-token rotations that failed.\n",
+        );
+        out.push_str("# TYPE ocean_observatory_token_rotation_failures_total counter\n");
+        let _ = writeln!(
+            out,
+            "ocean_observatory_token_rotation_failures_total {}",
+            self.observer_token_rotation_failures.load(Relaxed)
+        );
 
         out
     }

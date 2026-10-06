@@ -728,3 +728,39 @@ compatibility verification, which were not established in this run. Surface
 was not deployed or live-verified. Devlog pass: no component contracts or indexes
 changed; this root ledger records the release evidence.
 _________________________________________________________________________________
+_________________________________________________________________________________
+time: [22:04] [05-10-26]
+agent: [zcode] [glm-5.3]
+worktree: [port/observatory-store-migration]
+type: [feature-request]
+area: [backend] reconciliation: observatory store migration (F2 §4.1)
+
+Third bounded Track B port: the observatory durability cluster. The crate
+gains versioned idempotent schema migrations (src/migration.rs, PRAGMA
+user_version, v1 pre-F2 baseline → v2 §4.1 table rebuilds under BEGIN
+IMMEDIATE with in-transaction version bumps; 762-line migration test suite
+covering fresh/legacy/crash-restart/racing-opener shapes), the v2 store
+(correlation/producer/recorded_at columns backfilled from envelope_json,
+STORE_INDEXES, retention archive), §7.3 envelope replay in snapshot/auth, and
+the new crate contract AGENTS.md with admission-wiring and observer-token
+env-guard gates. The daemon half ports observatory.rs (retention G3 loop with
+its first production caller, checkpoints, run_checkpoints/run_retention),
+observatory_adapter.rs (extracted run_durability_pump replacing the inline
+startup loop), and observatory_auth.rs (summary-token rotation with
+consecutive-failure tracking; ROTATION_INTERVAL_SECS); metrics.rs gains only
+the observer-token rotation failure counter + export; main.rs wires the
+retention/checkpoint spawns, the metrics-counting rotation task, and the
+extracted pump, with turn_metrics hoisted so rotation failures share the
+/metrics surface. Kingmaker never touched these files since the split, so
+nothing was excluded; the only adaptations were adding the sdk's
+cache_write_tokens/total_tokens fixture fields that postdate the personal
+tree and taking just the one metrics counter instead of personal's +1234-line
+metrics diff. Checked for parallel-agent contention first (only my #25/#28
+and the Surface draft open).
+
+Validation: cargo test -p ocean-observatory (75 passed across all targets
+incl. 11 migration tests); cargo test -p ocean-daemon (907 passed, 0 failed —
+router-contract parity unchanged, no route changes); cargo check --workspace
+--tests; rustfmt; denied-warning Clippy on ocean-observatory and ocean-daemon
+(zero warnings after wiring the last extracted pump); cargo xtask docs-check
+PASS for the new AGENTS.md.

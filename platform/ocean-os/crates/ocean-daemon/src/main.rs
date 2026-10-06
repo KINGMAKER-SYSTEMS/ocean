@@ -1063,26 +1063,12 @@ async fn main() -> anyhow::Result<()> {
             tracing::error!(%error, "observatory daemon-started append failed");
         }
 
-        let (_replay, mut observatory_rx) = agent_event_bus.subscribe_with_full_replay();
-        let pump_store = Arc::clone(store);
-        let pump_adapter = Arc::clone(&observatory_adapter);
-        tokio::spawn(async move {
-            loop {
-                match observatory_rx.recv().await {
-                    Ok(envelope) => {
-                        if let Some(fact) = pump_adapter.adapt(&envelope.event) {
-                            if let Err(error) = pump_store.append_event(fact) {
-                                tracing::error!(%error, "observatory fact append failed");
-                            }
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                        tracing::warn!(skipped, "observatory pump lagged; facts were lost");
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        });
+        let (_replay, observatory_rx) = agent_event_bus.subscribe_with_full_replay();
+        tokio::spawn(observatory_adapter::run_durability_pump(
+            Arc::clone(store),
+            Arc::clone(&observatory_adapter),
+            observatory_rx,
+        ));
     }
 
     let rooms = Arc::new(Mutex::new(room_store));
@@ -1091,22 +1077,37 @@ async fn main() -> anyhow::Result<()> {
     let room_read_cursor_wakes = RoomReadCursorWakeBus::default();
     let shutdown = CancellationToken::new();
 
+    // Observatory retention (G3): the Gate 0 7-day / 1-GiB bounds were dead
+    // code with no production caller. Run a pass shortly after boot and then
+    // hourly, off the async workers, until shutdown.
+    if let Some(store) = observatory_store.clone() {
+        let cancel = shutdown.clone();
+        tokio::spawn(observatory::run_retention(store.clone(), cancel.clone()));
+        tokio::spawn(observatory::run_checkpoints(store, cancel));
+    }
+
     // Keep the local proxy credential fresh without ever distributing the
     // daemon signing secret. The file is replaced atomically every ten minutes;
     // HMAC tokens remain valid for thirty minutes, so in-flight streams survive
     // a rotation while new clients always read the current credential.
     let observer_token_refresh = observatory_auth.clone();
     let observer_token_cancel = shutdown.clone();
+    // Built here rather than in `AppState` so the rotation task can count its
+    // failures on the same `/metrics` surface.
+    let turn_metrics = Arc::new(TurnMetrics::default());
+    let observer_token_metrics = turn_metrics.clone();
     tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(10 * 60));
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(
+            observatory_auth::ROTATION_INTERVAL_SECS,
+        ));
         ticker.tick().await;
+        let mut consecutive_failures = 0_u64;
         loop {
             tokio::select! {
                 _ = observer_token_cancel.cancelled() => break,
                 _ = ticker.tick() => {
-                    if let Err(error) = observer_token_refresh.refresh_summary_token() {
-                        tracing::error!(%error, "observatory summary token rotation failed");
-                    }
+                    consecutive_failures = observer_token_refresh
+                        .rotate_summary_token(&observer_token_metrics, consecutive_failures);
                 }
             }
         }
@@ -1156,7 +1157,7 @@ async fn main() -> anyhow::Result<()> {
         // handlers and fired by the signal handler so live streams terminate.
         shutdown,
         // OCEAN-303: daemon-wide turn metrics behind `GET /metrics`.
-        metrics: Arc::new(TurnMetrics::default()),
+        metrics: turn_metrics.clone(),
         // OCEAN-304: concurrent-turn ceiling. One permit per running turn;
         // exhaustion → 429/busy at intake instead of unbounded provider fan-out.
         turn_limiter: Arc::new(tokio::sync::Semaphore::new(max_concurrent_turns())),
