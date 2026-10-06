@@ -770,3 +770,15 @@ baseline reconciled to 118, ocean-daemon 894 passed, force-pushed.
 Validation: cargo xtask docs-check PASS. Docs-only change; no owning
 contract text beyond the reconciliation doc itself changed.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [22:24] [05-10-26]
+agent: [claude] [claude code]
+worktree: [claude/surface-slash-and-session-handoff] [/Users/risingtidesdev/dev/ocean-claude-audit-b]
+type: [review]
+area: [frontend] [testing]
+
+Applied the second review of the Surface slash and session-link change, which blocked on one finding. When a boot restore stood down because the user had already opened or started a session while the daemon was being asked, boot still fell through to a fresh connect, which bumps the stream generation and retires the projection of the session the user chose: an empty transcript, or a first prompt whose stream handshake fails. Both boot paths, and the extension copy, now return after a superseded restore exactly as after a restored one. Three smaller points from the same review: a pasted comment ("// this function is broken", "/// doc", "/* note */") was kept as an unknown command and could not be sent, and is now a message when text follows the comment punctuation, while a bare "//" is still nothing; picking an argument-taking command from the menu before any argument is typed completes the name into the composer ("/th" becomes "/thinking ") instead of running it with nothing and clearing the draft, so abbreviations work again through the menu; with a single row shown the arrow keys move the caret rather than a one-row highlight, and the Send button uses the highlighted row like Enter does. The unknown-command hint now names the way to send such a line, the "/thinking" hints list the daemon's levels rather than a copy of them, and a dot no longer makes a path of a line with other punctuation in it. Withdrawn: the "linked session not found" status note, which nothing on the status chip could keep visible; the miss is logged and the contract says so. Main was merged in as well; the only overlap with the token-footprint change that landed meanwhile was a test import list.
+
+Validation: ocean-surface-ui native tests pass (893 plus the integration suites), with new cases for comment pastes, the dot rule, the completion path and the derived hint; rustfmt check, native and wasm clippy with warnings denied on all targets, wasm test compilation and the proxy check pass. The boot change is wasm-only control flow and is covered by reading, not by a test.
+_________________________________________________________________________________

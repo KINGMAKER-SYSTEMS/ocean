@@ -174,6 +174,15 @@ impl CommandRegistry {
         ranked.into_iter().map(|(_, cmd)| cmd).collect()
     }
 
+    /// The slash alias of the command `id`, with its slash.
+    pub fn slash_alias(&self, id: &str) -> Option<&'static str> {
+        self.commands
+            .get_untracked()
+            .iter()
+            .find(|cmd| cmd.id == id)
+            .and_then(|cmd| cmd.slash)
+    }
+
     /// The command whose slash alias is exactly `name` (already lowercased,
     /// without the slash).
     fn slash_exact(&self, name: &str) -> Option<Command> {
@@ -302,6 +311,15 @@ impl<'a> SlashLine<'a> {
     /// Classify the first word. Command names are ASCII letters, digits and
     /// hyphens.
     pub fn command_name(&self) -> SlashName {
+        // A pasted comment (`// broken`, `/// doc`, `//! crate`, `/* note */`)
+        // is a message: its first word is only comment punctuation, and text
+        // follows. A bare `//` is still nothing.
+        if self.finished
+            && !self.name.is_empty()
+            && self.name.chars().all(|c| matches!(c, '/' | '*' | '!'))
+        {
+            return SlashName::Path;
+        }
         let core = self.name.trim_end_matches(NAME_TRAILERS);
         if core.is_empty() {
             // A bare `/` lists every command; `/ model` or `/..` names none.
@@ -314,7 +332,8 @@ impl<'a> SlashLine<'a> {
         if core.starts_with('/') {
             return SlashName::Other;
         }
-        if core.contains('/') || core.contains('.') {
+        let path_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '~');
+        if core.contains('/') || (core.contains('.') && core.chars().all(path_char)) {
             return SlashName::Path;
         }
         if core.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
@@ -971,12 +990,34 @@ mod tests {
         assert_eq!(name("/etc/hosts what is this"), SlashName::Path);
         assert_eq!(name("/notes.md"), SlashName::Path);
         assert_eq!(name("/Users/me/app.rs:12"), SlashName::Path);
+        // A pasted comment is a message.
+        for text in [
+            "// this function is broken\nfn foo() {}",
+            "/// doc comment",
+            "//! crate docs",
+            "/* block */ code",
+            "/** jsdoc */ code",
+        ] {
+            assert_eq!(name(text), SlashName::Path, "{text:?}");
+        }
         // Not a name, and not a path either.
         assert_eq!(name("//model gpt-5"), SlashName::Other);
+        assert_eq!(name("//"), SlashName::Other);
         assert_eq!(name("/ model"), SlashName::Other);
         assert_eq!(name("/new_session"), SlashName::Other);
         assert_eq!(name("/..."), SlashName::Other);
         assert_eq!(name("/\u{e9}t\u{e9}"), SlashName::Other);
+        // A dot alone does not make a path of a line with other punctuation.
+        assert_eq!(name("/model=gpt-5.5"), SlashName::Other);
+        assert_eq!(name("/model=gpt-5"), SlashName::Other);
+    }
+
+    #[test]
+    fn slash_alias_names_a_command_with_its_slash() {
+        let registry = composer_registry();
+        assert_eq!(registry.slash_alias("thinking"), Some("/thinking"));
+        assert_eq!(registry.slash_alias("model"), Some("/model"));
+        assert_eq!(registry.slash_alias("no-such-command"), None);
     }
 
     #[test]

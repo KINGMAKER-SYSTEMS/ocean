@@ -2688,13 +2688,16 @@ impl Daemon {
                 daemon
                     .voice_ready
                     .set(crate::voice::transport::voice_ready_decision(None));
-                // Restore persisted session before connecting fresh.
+                // Restore persisted session before connecting fresh. A restore
+                // the user overtook must not connect over their session either.
                 let boot_intent = daemon.session_intent_generation.get_untracked();
                 if let Some(id) = should_restore_session(
                     load_persisted_session().as_deref(),
                     daemon.session_id.get_untracked().as_deref(),
                 ) {
-                    if restore_session_or_clear(&daemon, id, boot_intent).await {
+                    if restore_session_or_clear(&daemon, id, boot_intent).await
+                        != SessionRestore::Missing
+                    {
                         daemon.fetch_models();
                         daemon.fetch_projects();
                         return;
@@ -2786,15 +2789,21 @@ impl Daemon {
                     daemon.session_id.get_untracked().as_deref(),
                 ) {
                     match try_restore_session(&daemon, id, boot_intent).await {
-                        SessionRestore::Restored => {
+                        // Restored, or the user already opened a session of
+                        // their own: either way it is connected, and a fresh
+                        // `connect()` below would reset its stream.
+                        SessionRestore::Restored | SessionRestore::Superseded => {
                             daemon.fetch_models();
                             daemon.fetch_projects();
                             return;
                         }
                         SessionRestore::Missing => {
-                            daemon.status.set("linked session not found".into());
+                            // The status chip is rewritten by whatever loads
+                            // next, so this has nowhere lasting to show.
+                            log::warn!(
+                                "linked session {id} is not on this daemon; opening the last session instead"
+                            );
                         }
-                        SessionRestore::Superseded => {}
                     }
                 }
             }
@@ -2803,7 +2812,9 @@ impl Daemon {
                 load_persisted_session().as_deref(),
                 daemon.session_id.get_untracked().as_deref(),
             ) {
-                if restore_session_or_clear(&daemon, id, boot_intent).await {
+                if restore_session_or_clear(&daemon, id, boot_intent).await
+                    != SessionRestore::Missing
+                {
                     daemon.fetch_models();
                     daemon.fetch_projects();
                     return;
@@ -8002,18 +8013,16 @@ fn should_restore_session<'a>(persisted: Option<&'a str>, active: Option<&str>) 
 
 /// Pre-flight fetch to verify a persisted session exists on the daemon, then
 /// restore via [`Daemon::switch_session`]. On failure (non-200, decode error,
-/// missing session) the persisted key is cleared and this returns `false` so
+/// missing session) the persisted key is cleared and `Missing` is returned so
 /// the caller falls through to the normal boot path with state untouched. A
-/// restore the user overtook also returns `false`, and keeps the key.
-async fn restore_session_or_clear(daemon: &Daemon, id: &str, boot_intent: u64) -> bool {
-    match try_restore_session(daemon, id, boot_intent).await {
-        SessionRestore::Restored => true,
-        SessionRestore::Missing => {
-            clear_persisted_session();
-            false
-        }
-        SessionRestore::Superseded => false,
+/// restore the user overtook keeps the key and returns `Superseded`; the
+/// caller must then leave the user's session alone.
+async fn restore_session_or_clear(daemon: &Daemon, id: &str, boot_intent: u64) -> SessionRestore {
+    let outcome = try_restore_session(daemon, id, boot_intent).await;
+    if outcome == SessionRestore::Missing {
+        clear_persisted_session();
     }
+    outcome
 }
 
 /// How an attempt to open a named session at boot ended.
