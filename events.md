@@ -728,3 +728,20 @@ compatibility verification, which were not established in this run. Surface
 was not deployed or live-verified. Devlog pass: no component contracts or indexes
 changed; this root ledger records the release evidence.
 _________________________________________________________________________________
+_________________________________________________________________________________
+time: [21:52] [05-10-26]
+agent: [zcode] [glm-5.3]
+worktree: [docs/reconciliation-ledger-20261005]
+type: [workflow]
+area: [docs] reconciliation ledger
+
+PR #23 (OAuth custody cluster) merged as e850c39 — the first Track B
+reconciliation port to land. Added the "Reconciled slices" section to
+docs/SOURCE_RECONCILIATION.md recording it (source tip, what landed, what was
+deliberately left behind and why), per the contract to keep the
+source-tip table current when reconciliation actually lands. PR #25
+(participant retirement) was rebased onto post-#23 main: router-contract
+baseline reconciled to 118, ocean-daemon 894 passed, force-pushed.
+
+Validation: cargo xtask docs-check PASS. Docs-only change; no owning
+contract text beyond the reconciliation doc itself changed.
