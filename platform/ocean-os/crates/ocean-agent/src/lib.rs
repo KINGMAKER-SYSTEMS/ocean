@@ -984,6 +984,7 @@ impl AgentRuntime {
         // rather than the bare single-provider preflight message. A ready primary
         // passes straight through untouched.
         let requested_model = turn_snapshot.provider_config.selection.model.clone();
+        let requested_provider = turn_snapshot.provider_config.selection.provider.clone();
         let effective = match Self::resolve_turn_state_with_failover(
             turn_snapshot,
             &env,
@@ -1012,11 +1013,12 @@ impl AgentRuntime {
         if effective.provider_config.selection.model != requested_model {
             let reason = "provider degraded at selection (missing credential or not ready)";
             control.requested_model = Some(requested_model.clone());
+            control.requested_provider = Some(requested_provider.as_str().to_string());
             control.reroute_reason = Some(reason.to_string());
             if let Some(sink) = control.event_sink.as_ref() {
                 let _ = sink.send(AgentEvent::ModelRerouted {
                     session_id: req.session_id.map(|s| s.to_string()),
-                    requested: requested_model,
+                    requested: requested_model.clone(),
                     effective: effective.provider_config.selection.model.clone(),
                     reason: reason.into(),
                 });
@@ -1257,6 +1259,8 @@ impl AgentRuntime {
                 // overwrite it with B and lose what the operator asked for.
                 if control.requested_model.is_none() {
                     control.requested_model = Some(state.provider_config.selection.model.clone());
+                    control.requested_provider =
+                        Some(state.provider_config.selection.provider.as_str().to_string());
                 }
                 control.reroute_reason = Some(reason.clone());
                 if let Some(sink) = control.event_sink.as_ref() {
@@ -2115,10 +2119,26 @@ impl AgentRuntime {
         let session_id = req.session_id.unwrap_or_else(SessionId::new_v4);
 
         let supplied = req.session_id.is_some();
+        // When a REROUTED turn creates the session, the inherited pin is the
+        // REQUESTED route (what selection would have run without failover),
+        // not the substitute that actually ran — otherwise the fallback (≠
+        // global model) reads as a pin and the session stays on it forever.
+        // The requested route travels on the control (set by `prompt_inner` /
+        // `run_turn_with_failover`); `control.requested_model` being set is
+        // exactly the reroute signal. An ordinary creating turn, and every
+        // resumed turn, keeps today's behavior: inherit the effective
+        // snapshot's route / keep the stored pin untouched.
         let mut session = match session::load_resumable(&self.config_dir, session_id)? {
             Some(existing) => existing,
             None if !supplied || req.create_if_missing => {
-                session::Session::new_with_id(session_id, &snapshot.model)
+                match control.requested_model.clone() {
+                    Some(requested) => session::Session::new_with_route(
+                        session_id,
+                        requested,
+                        effective_provider_route(snapshot, &control),
+                    ),
+                    None => session::Session::new_with_id(session_id, &snapshot.model),
+                }
             }
             None => anyhow::bail!("session not found: {session_id}"),
         };
@@ -2129,11 +2149,16 @@ impl AgentRuntime {
         // `model`/`provider` are the session's AUTHORITATIVE pin (read by
         // `SessionModelConfig::from_session` for daemon turn selection) and are
         // NEVER overwritten here — a failover substitution must stay temporary,
-        // not become a durable model change. Both reroute fields are assigned
-        // unconditionally (an ordinary turn clears them), so
-        // `requested_model != model` exactly when a reroute happened.
+        // not become a durable model change. `effective_provider` carries the
+        // ROUTE that ran (`snapshot.provider_config.selection.provider`, e.g.
+        // "claude-code"), not the wire protocol provider of `snapshot.model`
+        // (e.g. "anthropic"), so OAuth routes stay distinguishable in the
+        // report. A reroute is signalled by `requested_model`/`reroute_reason`
+        // being present — `requested_model` may EQUAL `model` (the pin is the
+        // requested route by design), so equality is not the reroute test.
         session.effective_model = Some(snapshot.model.id.clone());
-        session.effective_provider = Some(snapshot.model.provider.clone());
+        session.effective_provider =
+            Some(snapshot.provider_config.selection.provider.as_str().to_string());
         session.requested_model = control.requested_model.clone();
         session.reroute_reason = control.reroute_reason.clone();
 
@@ -2238,10 +2263,26 @@ impl AgentRuntime {
         // by default (so a stale client id surfaces instead of silently forking
         // a fresh transcript). Creating with a specific id requires opt-in.
         let supplied = req.session_id.is_some();
+        // When a REROUTED turn creates the session, the inherited pin is the
+        // REQUESTED route (what selection would have run without failover),
+        // not the substitute that actually ran — otherwise the fallback (≠
+        // global model) reads as a pin and the session stays on it forever.
+        // The requested route travels on the control (set by `prompt_inner` /
+        // `run_turn_with_failover`); `control.requested_model` being set is
+        // exactly the reroute signal. An ordinary creating turn, and every
+        // resumed turn, keeps today's behavior: inherit the effective
+        // snapshot's route / keep the stored pin untouched.
         let mut session = match session::load_resumable(&self.config_dir, session_id)? {
             Some(existing) => existing,
             None if !supplied || req.create_if_missing => {
-                session::Session::new_with_id(session_id, &snapshot.model)
+                match control.requested_model.clone() {
+                    Some(requested) => session::Session::new_with_route(
+                        session_id,
+                        requested,
+                        effective_provider_route(snapshot, &control),
+                    ),
+                    None => session::Session::new_with_id(session_id, &snapshot.model),
+                }
             }
             None => anyhow::bail!(
                 "session not found: {session_id} (resume requires an existing session; \
@@ -2255,11 +2296,16 @@ impl AgentRuntime {
         // `model`/`provider` are the session's AUTHORITATIVE pin (read by
         // `SessionModelConfig::from_session` for daemon turn selection) and are
         // NEVER overwritten here — a failover substitution must stay temporary,
-        // not become a durable model change. Both reroute fields are assigned
-        // unconditionally (an ordinary turn clears them), so
-        // `requested_model != model` exactly when a reroute happened.
+        // not become a durable model change. `effective_provider` carries the
+        // ROUTE that ran (`snapshot.provider_config.selection.provider`, e.g.
+        // "claude-code"), not the wire protocol provider of `snapshot.model`
+        // (e.g. "anthropic"), so OAuth routes stay distinguishable in the
+        // report. A reroute is signalled by `requested_model`/`reroute_reason`
+        // being present — `requested_model` may EQUAL `model` (the pin is the
+        // requested route by design), so equality is not the reroute test.
         session.effective_model = Some(snapshot.model.id.clone());
-        session.effective_provider = Some(snapshot.model.provider.clone());
+        session.effective_provider =
+            Some(snapshot.provider_config.selection.provider.as_str().to_string());
         session.requested_model = control.requested_model.clone();
         session.reroute_reason = control.reroute_reason.clone();
 
@@ -2401,6 +2447,7 @@ impl AgentRuntime {
             // named here so the destructure stays exhaustive.
             display_title: _,
             requested_model: _,
+            requested_provider: _,
             reroute_reason: _,
         } = control;
         // Resolve the toolset for this turn through the capability registry —
@@ -3074,6 +3121,12 @@ pub struct PromptControl {
     /// by `prompt_inner` (selection-time) or `run_turn_with_failover`
     /// (pre-stream) and persisted on the session.
     pub requested_model: Option<String>,
+    /// Provider of the REQUESTED route (`requested_model`'s provider), set
+    /// alongside `requested_model` when failover reroutes. The runtime keeps
+    /// only the fallback's `ProviderConfig` after the reroute decision, so the
+    /// requested route's provider travels here — used to pin a
+    /// reroute-created session to the requested ROUTE, not the substitute.
+    pub requested_provider: Option<String>,
     pub reroute_reason: Option<String>,
 }
 
@@ -3190,6 +3243,7 @@ impl PromptControl {
             code_intelligence: true,
             display_title: None,
             requested_model: None,
+            requested_provider: None,
             reroute_reason: None,
         }
     }
@@ -3771,8 +3825,23 @@ fn build_state_from_env(config_dir: &std::path::Path) -> anyhow::Result<RuntimeS
 }
 
 /// Build a runtime state from an already-resolved provider config.
-fn state_from_provider_config(provider_config: ProviderConfig) -> anyhow::Result<RuntimeState> {
-    let model = model_from_provider_config(&provider_config)?;
+/// The requested ROUTE's provider for a rerouted creating turn: the provider
+/// the turn's selection would have used without failover. The runtime only
+/// carries the fallback's `ProviderConfig` (the primary's config is dropped
+/// after the reroute decision), so it travels on the turn control alongside
+/// `requested_model` — falling back to the effective route's provider when
+/// absent (never breaking the turn over provenance bookkeeping).
+fn effective_provider_route(
+    effective_snapshot: &RuntimeState,
+    control: &PromptControl,
+) -> String {
+    if let Some(provider) = control.requested_provider.clone() {
+        return provider;
+    }
+    effective_snapshot.provider_config.selection.provider.as_str().to_string()
+}
+
+fn state_from_provider_config(provider_config: ProviderConfig) -> anyhow::Result<RuntimeState> {    let model = model_from_provider_config(&provider_config)?;
     let api_key = provider_config
         .credential
         .as_ref()
@@ -7902,10 +7971,12 @@ done
         let session_id = res.session_id.expect("session id");
         let detail = runtime.session_detail(session_id).expect("session detail");
 
-        // The session's durable selection is untouched (a fresh session mints
-        // from the effective snapshot); the separate effective fields report
-        // what actually ran.
-        assert_eq!(detail.model, "fake-ok");
+        // The session's durable selection is the REQUESTED route (a session
+        // minted by a rerouted turn pins what selection would have run, not
+        // the substitute), and the separate effective fields report what
+        // actually ran.
+        assert_eq!(detail.model, "deepseek-v4-pro");
+        assert_eq!(detail.provider, "deepseek");
         assert_eq!(detail.effective_model.as_deref(), Some("fake-ok"));
         assert_eq!(detail.effective_provider.as_deref(), Some("fake"));
         // ...and also the REQUESTED model it rerouted away from, plus a reason.
@@ -8111,9 +8182,12 @@ done
             .session_detail(res.session_id.expect("session id"))
             .expect("session detail");
 
-        // The durable pin is the first attempted provider (B), while the
-        // separate effective fields report what actually answered (C = fake-ok).
-        assert_eq!(detail.model, "claude-opus-4-7");
+        // The durable pin is the operator's ORIGINAL requested route (A), while
+        // the separate effective fields report what actually answered (C =
+        // fake-ok). The pin follows the original request across BOTH reroute
+        // stages — selection-time and pre-stream.
+        assert_eq!(detail.model, "deepseek-v4-pro");
+        assert_eq!(detail.provider, "deepseek");
         assert_eq!(detail.effective_model.as_deref(), Some("fake-ok"));
         assert_eq!(detail.effective_provider.as_deref(), Some("fake"));
         // F4: the operator asked for deepseek, so the record must keep A — not
@@ -8241,7 +8315,10 @@ done
 
         assert_eq!(detail.provider, "claude-code");
         assert_eq!(detail.model, "claude-opus-5-5");
-        assert_eq!(detail.effective_provider.as_deref(), Some("anthropic"));
+        // effective_provider records the ROUTE that ran (claude-code), not the
+        // wire/protocol provider of the model (anthropic) — OAuth routes stay
+        // distinguishable in the report.
+        assert_eq!(detail.effective_provider.as_deref(), Some("claude-code"));
         assert_eq!(detail.effective_model.as_deref(), Some("claude-opus-5-5"));
         assert_eq!(detail.requested_model, None);
         assert_eq!(detail.reroute_reason, None);

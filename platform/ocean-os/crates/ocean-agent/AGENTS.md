@@ -96,17 +96,21 @@ transcripts by session id.
   `SessionDetail` (serde default + skip-if-none; legacy files deserialize them
   as `None`). `model`/`provider` are the session's AUTHORITATIVE pin (read by
   `SessionModelConfig::from_session` for daemon turn selection) and are NEVER
-  overwritten by a turn; what actually ran is recorded separately in
-  `effective_model`/`effective_provider` (set every turn). Both reroute fields
-  are assigned unconditionally — an ordinary turn clears them — so
-  `requested_model != model` exactly when a reroute happened. `reroute_reason`
-  is a fixed typed class (`rate limited`, `server error`, `connection failed`,
-  `timed out`, `missing credential`, …), never a raw provider error body; the
-  operator's ORIGINAL requested model is preserved across a second-stage
-  (pre-stream) reroute. A failover substitution must never become a durable
-  selection change: the next turn re-selects the pinned model, and an ordinary
-  claude-code turn must not rewrite the OAuth provider pin to the wire model's
-  protocol provider.
+  overwritten by an existing-session turn; what actually ran is recorded
+  separately in `effective_model`/`effective_provider` (set every turn, the
+  ROUTE's provider — e.g. `claude-code` — not the wire model's protocol
+  provider). Both reroute fields are assigned unconditionally — an ordinary
+  turn clears them. A reroute is signalled by `requested_model`/`reroute_reason`
+  being PRESENT, not by `requested_model != model`: when a rerouted turn
+  CREATES the session, the pin is the requested route
+  (`Session::new_with_route`), so `requested_model` EQUALS `model`.
+  `reroute_reason` is a fixed typed class (`rate limited`, `server error`,
+  `connection failed`, `timed out`, `missing credential`, …), never a raw
+  provider error body; the operator's ORIGINAL requested model is preserved
+  across a second-stage (pre-stream) reroute. A failover substitution must
+  never become a durable selection change: the next turn re-selects the
+  pinned (requested) model, and an ordinary claude-code turn must not rewrite
+  the OAuth provider pin to the wire model's protocol provider.
 - Observed primary or alternate provider 401/403 refusals suppress that provider
   as a fallback for 300 seconds in one runtime's clone-shared memory. Filter
   both selection-time and pre-stream fallback and their ready-label projection;

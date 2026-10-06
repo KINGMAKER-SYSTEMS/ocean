@@ -74,13 +74,25 @@ impl Session {
     }
 
     pub fn new_with_id(id: SessionId, model: &Model) -> Self {
+        Self::new_with_route(id, model.id.clone(), model.provider.clone())
+    }
+
+    /// Mint a session whose inherited (revision-zero) pin is an explicit
+    /// model/provider route pair rather than one derived from a protocol
+    /// [`Model`]. Used when a rerouted turn creates the session: the pin must
+    /// be the REQUESTED route (what selection would have run without
+    /// failover), never the substitute that ran, so the next turn re-selects
+    /// the primary once it recovers. Revision stays zero — the pin is
+    /// inherited from the turn's request, not an explicit operator mutation
+    /// (see [`Session::set_model`], the only revision-advancing writer).
+    pub fn new_with_route(id: SessionId, model: String, provider: String) -> Self {
         let now = ocean_protocol::now_ms();
         Self {
             id,
             created_ms: now,
             updated_ms: now,
-            model: model.id.clone(),
-            provider: model.provider.clone(),
+            model,
+            provider,
             config_revision: 0,
             messages: Vec::new(),
             workspace_root: None,

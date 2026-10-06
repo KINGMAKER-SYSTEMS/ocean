@@ -1107,3 +1107,13 @@ Round 3: fixed two HIGH regressions confirmed at source (review of round 2). `se
 Regression tests, all failing-first (RED shown by temporarily restoring the round-2 assignments): (a) `rerouted_real_turn_does_not_pin_the_fallback_for_the_next_turn` — pre-stream 429 reroute, then a daemon-equivalent resume whose model override comes from the persisted pin, driving the REAL loop (`run_prompt`) via a scripted provider; (b) `ordinary_claude_code_real_turn_keeps_oauth_provider_pin` — REAL-loop turn on a claude-code-pinned session keeps provider `claude-code`; (c) `resumed_session_keeps_pin_and_records_effective_after_reroute` plus effective-field assertions folded into the existing reroute tests — `effective_model` shows the fallback on a rerouted turn and the pin on an ordinary one; (d) `legacy_session_file_without_effective_fields_deserializes` — old session file without the new fields loads. Round-2 test `resumed_session_resyncs_model_after_reroute` was rewritten as (c)'s pin-preservation test since its old expectation (pin follows the reroute) encoded the regression.
 
 Validation: RED (3 failed at the predicted assertions: pin overwritten by fallback, OAuth route rewritten to anthropic, resume pin lost) then GREEN. `cargo test -p ocean-agent` 276 passed / 2 ignored; `cargo test -p ocean-daemon` 908 passed / 2 failed (the known pre-existing persistent_room envelope-key assertions, identical on origin/main); `cargo fmt --all`; `cargo clippy -p ocean-agent --all-targets` clean.
+
+time: [16:45] [10-06-26]
+agent: [ocean]
+worktree: [fix/report-model-reroute-in-session] [/Users/seenorising/dev/ocean-org-sub]
+type: [bug fix]
+area: [backend] [sessions]
+
+Round 4: closed three review findings on the round-3 reroute reporting. (F1) A rerouted turn that creates the session now pins the REQUESTED route, not the substitute that ran — `Session::new_with_route` + `PromptControl.requested_provider` carry the requested route from both failover sites (selection-time and pre-stream, preserving the original across a second-stage reroute), so the next turn re-selects the primary once it recovers and `is_session_pinned` no longer mistakes a fallback for an operator pin. (F2) `effective_provider` records the ROUTE that ran (e.g. claude-code) rather than the wire model's protocol provider (anthropic), keeping OAuth routes distinguishable in the report. (F3) AGENTS.md and field docs rewritten to the corrected semantics: a reroute is signalled by `requested_model`/`reroute_reason` presence, not by inequality with `model`. Four test expectations updated to the new pin semantics.
+
+Validation: `cargo test -p ocean-agent --lib` 276 passed / 2 ignored; `cargo check --workspace --tests` clean; `cargo clippy -p ocean-agent --lib -- -D warnings` clean.
