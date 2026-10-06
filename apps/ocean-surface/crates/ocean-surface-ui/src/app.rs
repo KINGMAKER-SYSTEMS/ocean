@@ -17,7 +17,9 @@ use crate::deck::DeckPanel;
 use crate::host::DaemonStatus;
 use crate::island_dynamic::{DynamicIsland, IslandMode};
 use crate::model::{Block, Role, Turn};
-use crate::palette::{Command, CommandRegistry, CommandScope, PaletteView};
+use crate::palette::{
+    Command, CommandRegistry, CommandScope, PaletteView, SlashInput, SlashLine, SlashName,
+};
 use crate::rooms::Rooms;
 use crate::rooms_workspace::RoomsWorkspace;
 use crate::sessions::SessionsPanel;
@@ -537,6 +539,101 @@ fn scope_label(scope: CommandScope) -> &'static str {
     }
 }
 
+/// Act on a resolved `/` line. Returns `false` when the line is a message
+/// the caller should send. A line that names no usable command, or hands
+/// words to a command that takes none, stays in the composer with a hint
+/// instead of being thrown away.
+fn apply_slash_input(
+    outcome: SlashInput,
+    text: &str,
+    input: RwSignal<String>,
+    daemon: &Daemon,
+    registry: &CommandRegistry,
+) -> bool {
+    let finished = SlashLine::parse(text).is_some_and(|line| line.finished);
+    let hint = match outcome {
+        SlashInput::Prompt => return false,
+        // `/th` picked from the menu completes to `/thinking ` so the level
+        // can be typed; running it with nothing would only show the usage
+        // hint and clear the draft.
+        SlashInput::Command { id, args }
+            if args.is_empty() && !finished && slash_takes_arguments(id) =>
+        {
+            match registry.slash_alias(id) {
+                Some(alias) => input.set(format!("{alias} ")),
+                None => input.set(String::new()),
+            }
+            return true;
+        }
+        SlashInput::Command { id, args } if args.is_empty() || slash_takes_arguments(id) => {
+            run_slash(id, &args, daemon, registry);
+            input.set(String::new());
+            return true;
+        }
+        // `/new idea for the header` is a sentence, not a request for a new
+        // session. Running the command would discard it.
+        SlashInput::Command { .. } => {
+            match SlashLine::parse(text).map(|line| line.command_name()) {
+                Some(SlashName::Command(name)) => format!("/{name} takes no arguments"),
+                _ => "that command takes no arguments".into(),
+            }
+        }
+        SlashInput::Disabled => "that command is not available here".into(),
+        SlashInput::Unknown => {
+            "unknown command \u{b7} start with a space to send it as a message".into()
+        }
+    };
+    daemon.status.set(hint);
+    input.set(text.to_string());
+    true
+}
+
+/// Commands that read the text after their name. Every other command ignores
+/// it, so [`apply_slash_input`] refuses to run one with words attached.
+fn slash_takes_arguments(id: &str) -> bool {
+    matches!(id, "model" | "thinking")
+}
+
+/// The first word of a command's argument text. `/model gpt-5 thanks`, and a
+/// Shift+Enter continuation under the command, both name `gpt-5`.
+fn first_word(args: &str) -> &str {
+    args.split_whitespace().next().unwrap_or("")
+}
+
+/// The `/thinking` usage line, listing exactly the levels the daemon accepts.
+fn thinking_usage_hint() -> String {
+    format!(
+        "use /thinking {}|default",
+        crate::daemon::THINKING_LEVELS.join("|")
+    )
+}
+
+/// What the text after `/thinking` asks for.
+#[derive(Debug, PartialEq, Eq)]
+enum ThinkingArg {
+    /// Nothing: show the choices and leave the level alone.
+    Usage,
+    /// `default`: clear the per-turn level.
+    Default,
+    /// One of the levels the daemon accepts.
+    Level(&'static str),
+    Unknown(String),
+}
+
+fn thinking_arg(args: &str) -> ThinkingArg {
+    let word = first_word(args).to_lowercase();
+    match word.as_str() {
+        "" => ThinkingArg::Usage,
+        "default" => ThinkingArg::Default,
+        _ => crate::daemon::THINKING_LEVELS
+            .iter()
+            .find(|level| **level == word)
+            .map_or(ThinkingArg::Unknown(word), |level| {
+                ThinkingArg::Level(level)
+            }),
+    }
+}
+
 /// Dispatch a composer `/` command. Arg-taking commands (`/model`, `/thinking`)
 /// are handled here so the slash popover and the ⌘K palette run identical code;
 /// `/clear` + `/help` (and every other id) delegate to the registry's own `run`
@@ -545,34 +642,38 @@ fn scope_label(scope: CommandScope) -> &'static str {
 fn run_slash(id: &str, args: &str, daemon: &Daemon, registry: &CommandRegistry) -> bool {
     match id {
         "model" => {
-            if args.is_empty() {
+            // A model id is one word.
+            let model = first_word(args);
+            if model.is_empty() {
                 daemon
                     .status
                     .set("use /model <id> or the selector below".into());
             } else {
-                daemon.set_model_override(Some(args.into()));
-                daemon.status.set(format!("model \u{2192} {args}"));
+                daemon.set_model_override(Some(model.into()));
+                daemon.status.set(format!("model \u{2192} {model}"));
             }
             true
         }
-        "thinking" => match args {
-            "" | "default" => {
-                daemon.set_thinking_level(None);
-                daemon.status.set("thinking \u{2192} default".into());
-                true
+        "thinking" => {
+            match thinking_arg(args) {
+                // A bare `/thinking` asks what the choices are. It used to
+                // reset the level silently, and `/h` + Enter landed here.
+                ThinkingArg::Usage => daemon.status.set(thinking_usage_hint()),
+                ThinkingArg::Default => {
+                    daemon.set_thinking_level(None);
+                    daemon.status.set("thinking \u{2192} default".into());
+                }
+                ThinkingArg::Level(level) => {
+                    daemon.set_thinking_level(Some(level.into()));
+                    daemon.status.set(format!("thinking \u{2192} {level}"));
+                }
+                ThinkingArg::Unknown(word) => daemon.status.set(format!(
+                    "unknown level: {word} ({}|default)",
+                    crate::daemon::THINKING_LEVELS.join("|")
+                )),
             }
-            "off" | "minimal" | "low" | "medium" | "high" | "xhigh" => {
-                daemon.set_thinking_level(Some(args.into()));
-                daemon.status.set(format!("thinking \u{2192} {args}"));
-                true
-            }
-            _ => {
-                daemon.status.set(format!(
-                    "unknown level: {args} (off|minimal|low|medium|high|xhigh|default)"
-                ));
-                true
-            }
-        },
+            true
+        }
         // `/clear`, `/help`, new-session, toggle-*, workspace-toggle,
         // open-council — all route through the registry callback so there is
         // exactly one execution path (the slash popover pick and the ⌘K palette
@@ -1914,9 +2015,7 @@ pub fn App() -> impl IntoView {
             slash: Some("/thinking"),
             enabled: always,
             run: Callback::new(move |_| {
-                daemon_thinking
-                    .status
-                    .set("use /thinking off|minimal|low|medium|high|xhigh|default".into());
+                daemon_thinking.status.set(thinking_usage_hint());
             }),
         });
         let daemon_help = daemon.clone();
@@ -1943,35 +2042,22 @@ pub fn App() -> impl IntoView {
         });
     }
 
-    // Composer `/` popover state. One reactive source of truth: `slash_query`
-    // is the command-name token (text after the leading `/`, up to the first
-    // space) so the menu keeps filtering while the user types args — e.g.
-    // `/model gpt-5` keeps `/model` selected and passes `gpt-5` as the arg on
-    // pick. `slash_items` is the single `project_rows` projection — grouped and
-    // flattened — so its index space is the one selection space: `slash_selected`
-    // indexes it, `<SlashMenu>` renders it in that exact order, and Enter/Tab
-    // dispatch `slash_items[selected]`, so keyboard order can never diverge from
-    // what the user sees. The menu is open while the input is a leading-slash
-    // line with at least one matching command.
+    // Composer `/` popover state. One source of truth: the composer text.
+    // `slash_items` is `CommandRegistry::slash_rows` for that text (the ranked
+    // matches while the name is being typed, then only the command the name
+    // spells once arguments follow), run through the single `project_rows`
+    // projection, grouped and flattened. Its index space is the one selection
+    // space: `slash_selected` indexes it, `<SlashMenu>` renders it in that
+    // exact order, and Enter, Tab and a click all hand the chosen row to
+    // `CommandRegistry::resolve_slash`, which reads the same text. The row the
+    // user sees highlighted is therefore the command that runs. The menu is
+    // open while there is at least one row.
     let slash_selected: RwSignal<usize> = RwSignal::new(0);
-    let slash_query = Signal::derive(move || {
-        input
-            .get()
-            .strip_prefix('/')
-            .and_then(|rest| rest.split_whitespace().next())
-            .unwrap_or("")
-            .to_string()
-    });
     let slash_items = Signal::derive({
         let registry = registry.clone();
         move || {
-            let t = input.get();
-            if !t.starts_with('/') {
-                return Vec::new();
-            }
-            let q = slash_query.get();
             let rows = registry
-                .slash_filter(&q)
+                .slash_rows(&input.get())
                 .into_iter()
                 .map(|c| SlashRow {
                     id: c.id.to_string(),
@@ -1987,22 +2073,31 @@ pub fn App() -> impl IntoView {
             project_rows(rows)
         }
     });
-    let slash_open =
-        Signal::derive(move || input.get().starts_with('/') && !slash_items.get().is_empty());
-    // One stable pick callback shared by the popover click + Send-button path.
-    // Args are the text after the first whitespace (empty for bare commands).
+    let slash_open = Signal::derive(move || !slash_items.get().is_empty());
+    // A new name is a new list. Keeping the old index left the highlight on
+    // whatever row it last reached, so Enter could run a command the user
+    // never looked at. Typing arguments does not change the name.
+    let slash_name = Memo::new(move |_| {
+        input.with(|text| SlashLine::parse(text).map(|line| (line.name.to_string(), line.finished)))
+    });
+    Effect::new(move |_| {
+        slash_name.track();
+        slash_selected.set(0);
+    });
+    // One stable pick callback for a click on a popover row: the same
+    // decision Enter and Tab make for the highlighted row.
     let on_slash_pick = Callback::new({
         let daemon = daemon.clone();
         let registry = registry.clone();
         move |id: String| {
-            let args = input
-                .get_untracked()
-                .split_whitespace()
-                .nth(1)
-                .unwrap_or("")
-                .to_string();
-            run_slash(&id, &args, &daemon, &registry);
-            input.set(String::new());
+            let text = input.get_untracked();
+            apply_slash_input(
+                registry.resolve_slash(&text, Some(&id)),
+                &text,
+                input,
+                &daemon,
+                &registry,
+            );
         }
     });
 
@@ -2224,25 +2319,26 @@ pub fn App() -> impl IntoView {
             if text.trim().is_empty() {
                 text = "Review the attached context.".into();
             }
+            // A `/` line runs a command only when it names one. Clicking Send
+            // on `/model gpt-5` behaves like Enter in the menu; a mistyped
+            // name stays in the composer with a hint; a path that merely
+            // starts with a slash is sent as the message it is. The highlighted
+            // row is read before the input is cleared: the rows derive from it.
+            let rows = slash_items.get_untracked();
+            let picked = (!rows.is_empty()).then(|| {
+                rows[clamp_selection(slash_selected.get_untracked(), rows.len())]
+                    .id
+                    .clone()
+            });
             input.set(String::new());
-            // A `/`-prefixed input is a slash command, never a prompt. Route
-            // it through the same dispatcher the popover uses (best subseq
-            // match on the command-name token) so clicking Send on `/model
-            // gpt-5` behaves like pressing Enter in the menu; an unknown or
-            // disabled token clears with a hint. This closes the path the
-            // textarea keydown guard can't reach (the submit button).
-            if text.starts_with('/') {
-                let rest = text.strip_prefix('/').unwrap_or("");
-                let name = rest.split_whitespace().next().unwrap_or("");
-                let args = rest.split_whitespace().nth(1).unwrap_or("");
-                match registry.slash_filter(name).into_iter().next() {
-                    Some(cmd) if cmd.enabled.get_untracked() => {
-                        run_slash(cmd.id, args, &daemon, &registry);
-                    }
-                    _ => daemon
-                        .status
-                        .set("unknown command \u{2014} type / to see them".into()),
-                }
+            if apply_slash_input(
+                registry.resolve_slash(&text, picked.as_deref()),
+                &text,
+                input,
+                &daemon,
+                &registry,
+            ) {
+                // Handled as a command, or kept as a draft with a hint.
             } else {
                 let images = attachments
                     .iter()
@@ -2262,9 +2358,13 @@ pub fn App() -> impl IntoView {
                 composer_attachments.set(Vec::new());
             }
             // Refocus + collapse the textarea so a long prior prompt doesn't
-            // leave the next turn trapped in a tall empty scrollbox.
+            // leave the next turn trapped in a tall empty scrollbox. A draft
+            // kept with a hint keeps its height: collapsing it would show one
+            // clipped line of a sentence the user still has to fix.
             if let Some(el) = textarea_ref.get_untracked() {
-                reset_composer_textarea(&el);
+                if input.get_untracked().is_empty() {
+                    reset_composer_textarea(&el);
+                }
                 let _ = el.focus();
             }
         }
@@ -2936,57 +3036,57 @@ pub fn App() -> impl IntoView {
                                         }
                                         let text = input.get_untracked();
                                         let items = slash_items.get_untracked();
-                                        // While the input is a leading-slash line
-                                        // with matching commands the popover drives:
-                                        // arrows move selection, Enter/Tab pick,
-                                        // Escape dismisses \u{2014} none fall
-                                        // through to submit.
-                                        if text.starts_with('/') && !items.is_empty() {
+                                        // While the popover has rows it drives:
+                                        // arrows move the selection, Enter/Tab
+                                        // pick, Escape dismisses \u{2014} none
+                                        // fall through to submit. A line with no
+                                        // rows (a sentence, a path, a mistyped
+                                        // name with arguments) is left to the
+                                        // form handler, and Tab moves focus.
+                                        if !items.is_empty() {
                                             // `items` is the projected order, so
                                             // moving/clamping `slash_selected`
                                             // over it tracks the visible rows 1:1.
                                             let len = items.len();
                                             match key.as_str() {
-                                                "ArrowDown" => {
+                                                // One row is nothing to move
+                                                // through: the arrows then move
+                                                // the caret in the draft.
+                                                "ArrowDown" if len > 1 => {
                                                     ev.prevent_default();
                                                     slash_selected.update(|i| {
                                                         *i = next_selection(*i, len)
                                                     });
                                                     return;
                                                 }
-                                                "ArrowUp" => {
+                                                "ArrowUp" if len > 1 => {
                                                     ev.prevent_default();
                                                     slash_selected.update(|i| {
                                                         *i = prev_selection(*i, len)
                                                     });
                                                     return;
                                                 }
-                                                "Enter" | "Tab" => {
+                                                // Shift+Enter is a newline and
+                                                // Shift+Tab moves focus back.
+                                                "Enter" | "Tab" if !ev.shift_key() => {
                                                     ev.prevent_default();
                                                     let idx = clamp_selection(
                                                         slash_selected.get_untracked(),
                                                         len,
                                                     );
-                                                    let row = &items[idx];
-                                                    if row.enabled {
-                                                        let args = text
-                                                            .split_whitespace()
-                                                            .nth(1)
-                                                            .unwrap_or("")
-                                                            .to_string();
-                                                        run_slash(
-                                                            &row.id,
-                                                            &args,
-                                                            &daemon,
-                                                            &registry,
-                                                        );
-                                                    } else {
-                                                        daemon.status.set(
-                                                            "unknown command \u{2014} type / to see them"
-                                                                .into(),
-                                                        );
-                                                    }
-                                                    input.set(String::new());
+                                                    // The highlighted row and the
+                                                    // typed line resolve together,
+                                                    // so what runs is what is shown.
+                                                    apply_slash_input(
+                                                        registry.resolve_slash(
+                                                            &text,
+                                                            Some(&items[idx].id),
+                                                        ),
+                                                        &text,
+                                                        input,
+                                                        &daemon,
+                                                        &registry,
+                                                    );
                                                     return;
                                                 }
                                                 "Escape" => {
@@ -3275,17 +3375,260 @@ pub(crate) fn parse_deep_link(raw: &str) -> Option<DeepLinkAction> {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_dictation, competing_reveal_open, composer_height_px, composer_overflow_y,
-        council_open_visibility, execute_planner_workflow, initial_planner_context,
-        island_open_visibility, parse_deep_link, planner_candidates, selected_planner_context,
-        should_submit_composer_key, token_footprint_chip, token_usage_label, topmost_reveal,
+        append_dictation, apply_slash_input, competing_reveal_open, composer_height_px,
+        composer_overflow_y, council_open_visibility, execute_planner_workflow, first_word,
+        initial_planner_context, island_open_visibility, parse_deep_link, planner_candidates,
+        run_slash, selected_planner_context, should_submit_composer_key, slash_takes_arguments,
+        thinking_arg, thinking_usage_hint, token_footprint_chip, token_usage_label, topmost_reveal,
         window_escape_should_handle, DeepLinkAction, PlannerAction, PlannerContext,
         PlannerWorkflowFailureStage, PlannerWorkflowOps, PlannerWorkflowRequest, RevealSurface,
-        RevealVisibility, COMPOSER_MAX_HEIGHT_PX, COMPOSER_MIN_HEIGHT_PX,
+        RevealVisibility, ThinkingArg, COMPOSER_MAX_HEIGHT_PX, COMPOSER_MIN_HEIGHT_PX,
     };
-    use crate::daemon::{ProjectInfo, TokenStats, WorktreeInfo};
+    use crate::daemon::{Daemon, ProjectInfo, TokenStats, WorktreeInfo};
+    use crate::palette::{Command, CommandRegistry, CommandScope};
     use futures_util::future::LocalBoxFuture;
     use futures_util::FutureExt;
+    use leptos::prelude::*;
+
+    // ── Composer slash dispatch ─────────────────────────────────────────
+
+    /// A registry of the composer's shape whose callbacks record what ran.
+    fn slash_registry(ran: RwSignal<Vec<&'static str>>) -> CommandRegistry {
+        let registry = CommandRegistry::new();
+        for (id, alias, enabled) in [
+            ("new-session", "/new", true),
+            ("toggle-sessions", "/sessions", true),
+            ("model", "/model", true),
+            ("thinking", "/thinking", true),
+            ("help", "/help", true),
+            ("resume", "/resume", false),
+        ] {
+            registry.register(Command {
+                id,
+                title: id.into(),
+                hint: None,
+                scope: CommandScope::App,
+                slash: Some(alias),
+                enabled: Signal::derive(move || enabled),
+                run: Callback::new(move |_| ran.update(|ids| ids.push(id))),
+            });
+        }
+        registry
+    }
+
+    /// Submit `text` the way the composer does: the draft is cleared first,
+    /// then the resolved line is applied. Returns whether it was handled.
+    fn submit_slash(
+        text: &str,
+        picked: Option<&str>,
+        input: RwSignal<String>,
+        daemon: &Daemon,
+        registry: &CommandRegistry,
+    ) -> bool {
+        input.set(String::new());
+        apply_slash_input(
+            registry.resolve_slash(text, picked),
+            text,
+            input,
+            daemon,
+            registry,
+        )
+    }
+
+    #[test]
+    fn a_slash_command_runs_and_clears_the_composer() {
+        let ran = RwSignal::new(Vec::new());
+        let (daemon, registry) = (Daemon::dummy(), slash_registry(ran));
+        let input = RwSignal::new(String::new());
+
+        assert!(submit_slash("/new", None, input, &daemon, &registry));
+        assert_eq!(ran.get_untracked(), vec!["new-session"]);
+        assert_eq!(input.get_untracked(), "");
+
+        // The highlighted row is what runs while the name is being typed.
+        assert!(submit_slash(
+            "/s",
+            Some("toggle-sessions"),
+            input,
+            &daemon,
+            &registry
+        ));
+        assert_eq!(ran.get_untracked(), vec!["new-session", "toggle-sessions"]);
+        assert_eq!(input.get_untracked(), "");
+    }
+
+    #[test]
+    fn words_after_a_command_that_takes_none_keep_the_draft() {
+        let ran = RwSignal::new(Vec::new());
+        let (daemon, registry) = (Daemon::dummy(), slash_registry(ran));
+        let input = RwSignal::new(String::new());
+
+        // Each of these used to run the command and throw the sentence away.
+        for (text, hint) in [
+            ("/new idea for the header", "/new takes no arguments"),
+            ("/help me fix this bug", "/help takes no arguments"),
+            ("/Sessions please", "/sessions takes no arguments"),
+        ] {
+            assert!(submit_slash(text, None, input, &daemon, &registry));
+            assert_eq!(input.get_untracked(), text);
+            assert_eq!(daemon.status.get_untracked(), hint);
+        }
+        assert!(ran.get_untracked().is_empty());
+        assert!(slash_takes_arguments("model") && slash_takes_arguments("thinking"));
+        assert!(!slash_takes_arguments("new-session"));
+    }
+
+    #[test]
+    fn a_line_that_names_no_usable_command_keeps_the_draft_with_a_hint() {
+        let ran = RwSignal::new(Vec::new());
+        let (daemon, registry) = (Daemon::dummy(), slash_registry(ran));
+        let input = RwSignal::new(String::new());
+
+        for text in [
+            "/so what do you think",
+            "/s what do you think",
+            "/zz",
+            "//model x",
+        ] {
+            assert!(submit_slash(text, None, input, &daemon, &registry));
+            assert_eq!(input.get_untracked(), text);
+            assert_eq!(
+                daemon.status.get_untracked(),
+                "unknown command \u{b7} start with a space to send it as a message"
+            );
+        }
+        for (text, picked) in [("/resume", None), ("/res", Some("resume"))] {
+            assert!(submit_slash(text, picked, input, &daemon, &registry));
+            assert_eq!(input.get_untracked(), text);
+            assert_eq!(
+                daemon.status.get_untracked(),
+                "that command is not available here"
+            );
+        }
+        assert!(ran.get_untracked().is_empty());
+    }
+
+    #[test]
+    fn a_path_or_plain_text_is_left_for_the_caller_to_send() {
+        let ran = RwSignal::new(Vec::new());
+        let (daemon, registry) = (Daemon::dummy(), slash_registry(ran));
+        let input = RwSignal::new(String::new());
+        let status = daemon.status.get_untracked();
+
+        for text in [
+            "/etc/hosts what does this do",
+            "/notes.md",
+            "// this function is broken\nfn foo() {}",
+            "hello",
+            " /new",
+        ] {
+            assert!(!submit_slash(text, None, input, &daemon, &registry));
+            // Not restored: the caller sends it and the composer stays empty.
+            assert_eq!(input.get_untracked(), "");
+        }
+        assert!(ran.get_untracked().is_empty());
+        assert_eq!(daemon.status.get_untracked(), status);
+    }
+
+    #[test]
+    fn an_argument_command_picked_without_arguments_is_completed_not_run() {
+        let ran = RwSignal::new(Vec::new());
+        let (daemon, registry) = (Daemon::dummy(), slash_registry(ran));
+        let input = RwSignal::new(String::new());
+        let status = daemon.status.get_untracked();
+
+        // `/th` + Tab, Enter or a click: the name is completed for the level.
+        assert!(submit_slash(
+            "/th",
+            Some("thinking"),
+            input,
+            &daemon,
+            &registry
+        ));
+        assert_eq!(input.get_untracked(), "/thinking ");
+        assert!(submit_slash("/model", None, input, &daemon, &registry));
+        assert_eq!(input.get_untracked(), "/model ");
+        assert_eq!(daemon.status.get_untracked(), status);
+
+        // Once the name is finished, Enter runs it and asks for the level.
+        assert!(submit_slash(
+            "/thinking ",
+            Some("thinking"),
+            input,
+            &daemon,
+            &registry
+        ));
+        assert_eq!(input.get_untracked(), "");
+        assert_eq!(daemon.status.get_untracked(), thinking_usage_hint());
+        assert!(daemon
+            .status
+            .get_untracked()
+            .contains(&crate::daemon::THINKING_LEVELS.join("|")));
+        // A command that takes no arguments still runs at once.
+        assert!(submit_slash(
+            "/ne",
+            Some("new-session"),
+            input,
+            &daemon,
+            &registry
+        ));
+        assert_eq!(ran.get_untracked(), vec!["new-session"]);
+    }
+
+    #[test]
+    fn a_bare_thinking_or_model_command_changes_nothing() {
+        let ran = RwSignal::new(Vec::new());
+        let (daemon, registry) = (Daemon::dummy(), slash_registry(ran));
+        daemon.thinking_level.set(Some("high".into()));
+        daemon.model_override.set(Some("gpt-5".into()));
+
+        // Bare `/thinking` used to reset the level without saying so.
+        assert!(run_slash("thinking", "", &daemon, &registry));
+        assert_eq!(
+            daemon.thinking_level.get_untracked().as_deref(),
+            Some("high")
+        );
+        assert!(daemon.status.get_untracked().starts_with("use /thinking "));
+        assert!(run_slash("thinking", "turbo", &daemon, &registry));
+        assert_eq!(
+            daemon.thinking_level.get_untracked().as_deref(),
+            Some("high")
+        );
+        assert!(daemon
+            .status
+            .get_untracked()
+            .starts_with("unknown level: turbo"));
+
+        assert!(run_slash("model", "  ", &daemon, &registry));
+        assert_eq!(
+            daemon.model_override.get_untracked().as_deref(),
+            Some("gpt-5")
+        );
+        assert!(daemon.status.get_untracked().starts_with("use /model "));
+        assert!(ran.get_untracked().is_empty());
+    }
+
+    #[test]
+    fn command_arguments_are_read_by_their_first_word() {
+        assert_eq!(first_word("gpt-5 thanks"), "gpt-5");
+        assert_eq!(
+            first_word("  openai/gpt-6\nand a second line"),
+            "openai/gpt-6"
+        );
+        assert_eq!(first_word("   "), "");
+
+        assert_eq!(thinking_arg(""), ThinkingArg::Usage);
+        assert_eq!(thinking_arg("  \n"), ThinkingArg::Usage);
+        assert_eq!(thinking_arg("default"), ThinkingArg::Default);
+        assert_eq!(thinking_arg("HIGH please"), ThinkingArg::Level("high"));
+        assert_eq!(thinking_arg("Max"), ThinkingArg::Level("max"));
+        assert_eq!(thinking_arg("xhigh\nmore"), ThinkingArg::Level("xhigh"));
+        assert_eq!(thinking_arg("turbo"), ThinkingArg::Unknown("turbo".into()));
+        // Every level the daemon accepts is a level here.
+        for level in crate::daemon::THINKING_LEVELS {
+            assert_eq!(thinking_arg(level), ThinkingArg::Level(level));
+        }
+    }
 
     #[test]
     fn token_usage_label_names_provider_footprint_and_cache_breakdowns() {

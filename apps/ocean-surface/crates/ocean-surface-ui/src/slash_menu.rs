@@ -9,14 +9,16 @@
 //! [`prev_selection`] and clamped via [`clamp_selection`]) and this component.
 //! Because render order equals projection order, the visually highlighted row
 //! and the row `selected` dispatches are always the same row — keyboard order
-//! can never diverge from visual order.
+//! can never diverge from visual order. The composer hands that row and the
+//! typed line to `CommandRegistry::resolve_slash`, which reads the same text
+//! the rows came from, so the command that runs is the one highlighted.
 //!
 //! This component only renders the already-projected rows, inserting a group
 //! header before the first row of each group ([`render_rows`]), and fires
 //! `on_pick(id)` on click of an enabled row. Disabled rows render greyed and
 //! do not fire. The data contract between the registry (Agent A) and this
 //! popover (Agent B) is [`SlashRow`]; rows are built upstream from
-//! `CommandRegistry::slash_filter` so there is exactly one command registry.
+//! `CommandRegistry::slash_rows` so there is exactly one command registry.
 
 use leptos::prelude::*;
 
@@ -30,7 +32,7 @@ pub const GROUP_CLASS: &str = "ocean-slash-menu__group";
 
 /// A single row in the composer `/` popover.
 ///
-/// The composer builds a `Vec<SlashRow>` from `CommandRegistry::slash_filter`
+/// The composer builds a `Vec<SlashRow>` from `CommandRegistry::slash_rows`
 /// results; this struct is the wire format between the registry and the
 /// presentational popover. Field names are pinned by the shared Agent A/B/C
 /// contract — do not rename.
