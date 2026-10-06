@@ -29,6 +29,24 @@ No source changes from that preview were pushed or merged. Temporary comparison
 commits have no place in public history. Existing model/UI work in public PR #2
 remains separate and is not declared landed.
 
+## Reconciled slices
+
+Bounded personal-source slices landed on Kingmaker main, newest first. Each
+entry names the personal source tip the slice was ported from and what was
+deliberately left behind.
+
+- 2026-10-05 — OAuth custody cluster (PR #23, personal tip
+  `1bd1bc37636e0a4363f1f20aa1b72ee4c79b14cb`): operator-authenticated
+  `/v1/auth/providers*` login/status/logout routes (`ocean-daemon/src/provider_auth.rs`),
+  `ocean-oauth` token-free block status and atomic block removal. NOT ported:
+  the personal `oauth_refresh.rs` rewrite (Kingmaker's version is the hardened
+  evolution — full-block merge comparison, failure taxonomy, custody-timeout
+  handling, no response bodies logged), the token-exchange response-body error
+  hunk (contradicts the crate's fixed-classification doctrine), and the
+  personal temp-path custody internals (the guard publisher already provides
+  the same durability). Adapted for Kingmaker-only credential sources
+  (`ClaudeCodeKeychain`, `ClaudeCodeCliAuthFile`).
+
 ## Reconciliation contracts
 
 - Port selected public diffs onto current public main, preserving Kingmaker fixes.
