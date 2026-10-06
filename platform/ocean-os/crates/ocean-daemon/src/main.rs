@@ -11985,6 +11985,8 @@ mod tests {
             provider: "test".into(),
             requested_model: None,
             reroute_reason: None,
+            effective_model: None,
+            effective_provider: None,
             config_revision: 0,
             turns: 2,
             title: "fix the thing".into(),

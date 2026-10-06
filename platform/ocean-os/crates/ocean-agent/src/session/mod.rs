@@ -46,13 +46,22 @@ pub struct Session {
     pub title: Option<String>,
     /// The model the operator originally requested when selection-time or
     /// pre-stream failover rerouted the turn to an alternate. `None` when the
-    /// turn ran on the requested model; `model`/`provider` hold the effective
-    /// selection. Persisted so `GET /v1/sessions/{id}` can report the reroute.
+    /// turn ran on the requested model. `model`/`provider` remain the session's
+    /// authoritative pin; `effective_model`/`effective_provider` hold what
+    /// actually ran. Persisted so `GET /v1/sessions/{id}` can report the reroute.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_model: Option<String>,
     /// Clamped reason for a recorded reroute (see [`Session::requested_model`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reroute_reason: Option<String>,
+    /// The model that ACTUALLY ran on the most recent turn, recorded separately
+    /// from the authoritative `model`/`provider` pin so a failover substitution
+    /// is reportable without becoming the session's durable selection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_model: Option<String>,
+    /// The provider route that actually ran (see [`Session::effective_model`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_provider: Option<String>,
 }
 
 impl Session {
@@ -82,6 +91,8 @@ impl Session {
             title: None,
             requested_model: None,
             reroute_reason: None,
+            effective_model: None,
+            effective_provider: None,
         }
     }
 
@@ -1182,6 +1193,8 @@ pub(crate) fn session_detail(session: Session) -> SessionDetail {
         provider: session.provider,
         requested_model: session.requested_model,
         reroute_reason: session.reroute_reason,
+        effective_model: session.effective_model,
+        effective_provider: session.effective_provider,
         config_revision: session.config_revision,
         turns: session.messages.len() as u32,
         title,
@@ -1488,6 +1501,8 @@ mod history_search_tests {
             title: None,
             requested_model: None,
             reroute_reason: None,
+            effective_model: None,
+            effective_provider: None,
         }
     }
 
@@ -1502,6 +1517,28 @@ mod history_search_tests {
             error_message: None,
             timestamp,
         })
+    }
+
+    // A legacy session file (predating effective_model/effective_provider) must
+    // still deserialize — both new fields fall back to None via serde default.
+    #[test]
+    fn legacy_session_file_without_effective_fields_deserializes() {
+        let json = r#"{
+            "id": "2f1c0f7a-0000-4000-8000-000000000001",
+            "created_ms": 100,
+            "updated_ms": 200,
+            "model": "claude-opus-5-5",
+            "provider": "claude-code",
+            "config_revision": 1,
+            "messages": []
+        }"#;
+        let session: Session = serde_json::from_str(json).expect("legacy session parses");
+        assert_eq!(session.model, "claude-opus-5-5");
+        assert_eq!(session.provider, "claude-code");
+        assert_eq!(session.effective_model, None);
+        assert_eq!(session.effective_provider, None);
+        assert_eq!(session.requested_model, None);
+        assert_eq!(session.reroute_reason, None);
     }
 
     #[test]

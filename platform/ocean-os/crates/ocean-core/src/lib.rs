@@ -437,12 +437,21 @@ pub struct SessionDetail {
     pub provider: String,
     /// Model the operator originally requested before a selection-time or
     /// pre-stream failover rerouted the turn. `None` when no reroute occurred;
-    /// differs from `model` (the effective selection) when set.
+    /// differs from `model` (the pinned selection) when set — see
+    /// `effective_model` for what actually ran.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_model: Option<String>,
     /// Clamped reason for a recorded reroute (see `requested_model`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reroute_reason: Option<String>,
+    /// The model that ACTUALLY ran on the most recent turn, recorded separately
+    /// from the authoritative `model`/`provider` pin so a failover substitution
+    /// is reportable without becoming the session's durable selection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_model: Option<String>,
+    /// The provider route that actually ran (see `effective_model`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_provider: Option<String>,
     /// Monotonic persisted model-config revision. Legacy sessions begin at 0.
     #[serde(default)]
     pub config_revision: u64,

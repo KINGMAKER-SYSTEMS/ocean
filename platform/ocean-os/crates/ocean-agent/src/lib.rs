@@ -2124,14 +2124,16 @@ impl AgentRuntime {
         };
         session.bind_workspace(Path::new(&req.cwd));
 
-        // Record the effective selection and any failover reroute on the session
-        // so `GET /v1/sessions/{id}` reports what actually ran. `model`/`provider`
-        // are re-synced to the effective selection on EVERY turn (fresh or
-        // resumed), and both reroute fields are assigned unconditionally — an
-        // ordinary turn clears them — so `requested_model != model` exactly when
-        // a reroute happened.
-        session.model = snapshot.model.id.clone();
-        session.provider = snapshot.model.provider.clone();
+        // Record what ACTUALLY ran in the separate effective fields, and any
+        // failover reroute, so `GET /v1/sessions/{id}` reports the reroute.
+        // `model`/`provider` are the session's AUTHORITATIVE pin (read by
+        // `SessionModelConfig::from_session` for daemon turn selection) and are
+        // NEVER overwritten here — a failover substitution must stay temporary,
+        // not become a durable model change. Both reroute fields are assigned
+        // unconditionally (an ordinary turn clears them), so
+        // `requested_model != model` exactly when a reroute happened.
+        session.effective_model = Some(snapshot.model.id.clone());
+        session.effective_provider = Some(snapshot.model.provider.clone());
         session.requested_model = control.requested_model.clone();
         session.reroute_reason = control.reroute_reason.clone();
 
@@ -2248,14 +2250,16 @@ impl AgentRuntime {
         };
         session.bind_workspace(Path::new(&req.cwd));
 
-        // Record the effective selection and any failover reroute on the session
-        // so `GET /v1/sessions/{id}` reports what actually ran. `model`/`provider`
-        // are re-synced to the effective selection on EVERY turn (fresh or
-        // resumed), and both reroute fields are assigned unconditionally — an
-        // ordinary turn clears them — so `requested_model != model` exactly when
-        // a reroute happened.
-        session.model = snapshot.model.id.clone();
-        session.provider = snapshot.model.provider.clone();
+        // Record what ACTUALLY ran in the separate effective fields, and any
+        // failover reroute, so `GET /v1/sessions/{id}` reports the reroute.
+        // `model`/`provider` are the session's AUTHORITATIVE pin (read by
+        // `SessionModelConfig::from_session` for daemon turn selection) and are
+        // NEVER overwritten here — a failover substitution must stay temporary,
+        // not become a durable model change. Both reroute fields are assigned
+        // unconditionally (an ordinary turn clears them), so
+        // `requested_model != model` exactly when a reroute happened.
+        session.effective_model = Some(snapshot.model.id.clone());
+        session.effective_provider = Some(snapshot.model.provider.clone());
         session.requested_model = control.requested_model.clone();
         session.reroute_reason = control.reroute_reason.clone();
 
@@ -7898,8 +7902,12 @@ done
         let session_id = res.session_id.expect("session id");
         let detail = runtime.session_detail(session_id).expect("session detail");
 
-        // The session reports the EFFECTIVE model that ran...
+        // The session's durable selection is untouched (a fresh session mints
+        // from the effective snapshot); the separate effective fields report
+        // what actually ran.
         assert_eq!(detail.model, "fake-ok");
+        assert_eq!(detail.effective_model.as_deref(), Some("fake-ok"));
+        assert_eq!(detail.effective_provider.as_deref(), Some("fake"));
         // ...and also the REQUESTED model it rerouted away from, plus a reason.
         assert_eq!(detail.requested_model.as_deref(), Some("deepseek-v4-pro"));
         assert!(
@@ -7933,7 +7941,8 @@ done
     // A pre-stream 429 from a credentialed primary must fail over once to a
     // ready alternate, and the persisted session must record (F1) a FIXED reason
     // class — never the raw provider error body — and (F3) the model that
-    // actually produced the response, not the primary that failed.
+    // actually produced the response in a separate effective field, while the
+    // durable `model`/`provider` pin stays the requested primary.
     #[tokio::test]
     async fn pre_stream_reroute_records_fixed_reason_and_effective_model() {
         let config_dir = temp_config_dir("failover-prestream");
@@ -7960,9 +7969,13 @@ done
             .session_detail(res.session_id.expect("session id"))
             .expect("session detail");
 
-        // F3: the session reports the model that actually answered (fake-ok),
-        // not the primary that failed before streaming.
-        assert_eq!(detail.model, "fake-ok");
+        // F3: the separate effective fields report the model that actually
+        // answered (fake-ok); the session's durable pin stays the primary that
+        // was requested (deepseek-v4-pro) — a failover must not become durable.
+        assert_eq!(detail.model, "deepseek-v4-pro");
+        assert_eq!(detail.provider, "deepseek");
+        assert_eq!(detail.effective_model.as_deref(), Some("fake-ok"));
+        assert_eq!(detail.effective_provider.as_deref(), Some("fake"));
         // F1: a fixed reason class — never the provider error body.
         assert_eq!(detail.reroute_reason.as_deref(), Some("rate limited"));
         assert_eq!(detail.requested_model.as_deref(), Some("deepseek-v4-pro"));
@@ -8017,32 +8030,31 @@ done
         let _ = std::fs::remove_dir_all(config_dir);
     }
 
-    // A resumed session that reroutes must re-sync `model` to the effective
-    // selection, so `requested_model != model` exactly when a reroute happened.
+    // A resumed session that reroutes must KEEP its durable `model`/`provider`
+    // pin and record the fallback in the separate effective fields — a failover
+    // substitution is temporary, never a durable model change.
     #[tokio::test]
-    async fn resumed_session_resyncs_model_after_reroute() {
+    async fn resumed_session_keeps_pin_and_records_effective_after_reroute() {
         let config_dir = temp_config_dir("failover-resume-resync");
 
-        // Turn 1: pin the session to deepseek-v4-pro with NO reroute (the Fake
-        // provider echoes without a network call, so the pin is what matters).
+        // Turn 1: explicitly pin the session to deepseek-v4-pro/deepseek with no
+        // reroute (a keyless Fake echo mints it; the pin is what matters).
         let runtime = runtime_with_env(
             config_dir.clone(),
             provider_config(ProviderId::Fake, "deepseek-v4-pro", false),
             None,
         );
-        let res = runtime
-            .prompt(prompt_req("hello", None), PromptControl::yolo(false))
-            .await;
-        assert!(res.ok, "{}", res.stderr);
-        let session_id = res.session_id.expect("session id");
-        assert_eq!(
-            runtime.session_detail(session_id).expect("detail").model,
-            "deepseek-v4-pro"
-        );
+        let (session_id, _, _) = runtime
+            .create_session_with_model(
+                ".",
+                None,
+                Some(("deepseek-v4-pro".into(), "deepseek".into())),
+            )
+            .unwrap();
 
         // Turn 2: the same session, but now the primary is a degraded deepseek
-        // that reroutes to fake-ok. The stored `model` must follow the effective
-        // selection rather than keep the stale pin.
+        // that reroutes to fake-ok. The stored pin must survive; effective must
+        // report the fallback.
         let runtime2 = runtime_with_env(
             config_dir.clone(),
             provider_config(ProviderId::DeepSeek, "deepseek-v4-pro", false),
@@ -8057,9 +8069,12 @@ done
         assert!(res2.ok, "{}", res2.stderr);
         let detail2 = runtime2.session_detail(session_id).expect("detail");
         assert_eq!(
-            detail2.model, "fake-ok",
-            "resumed reroute must re-sync model"
+            detail2.model, "deepseek-v4-pro",
+            "a resumed reroute must NOT overwrite the pinned model"
         );
+        assert_eq!(detail2.provider, "deepseek");
+        assert_eq!(detail2.effective_model.as_deref(), Some("fake-ok"));
+        assert_eq!(detail2.effective_provider.as_deref(), Some("fake"));
         assert_eq!(
             detail2.requested_model.as_deref(),
             Some("deepseek-v4-pro"),
@@ -8096,11 +8111,140 @@ done
             .session_detail(res.session_id.expect("session id"))
             .expect("session detail");
 
-        assert_eq!(detail.model, "fake-ok");
+        // The durable pin is the first attempted provider (B), while the
+        // separate effective fields report what actually answered (C = fake-ok).
+        assert_eq!(detail.model, "claude-opus-4-7");
+        assert_eq!(detail.effective_model.as_deref(), Some("fake-ok"));
+        assert_eq!(detail.effective_provider.as_deref(), Some("fake"));
         // F4: the operator asked for deepseek, so the record must keep A — not
         // overwrite it with B (claude-opus-4-7) when B fails pre-stream.
         assert_eq!(detail.requested_model.as_deref(), Some("deepseek-v4-pro"));
         assert_eq!(detail.reroute_reason.as_deref(), Some("rate limited"));
+
+        let _ = std::fs::remove_dir_all(config_dir);
+    }
+
+    // (a) REAL execution path: turn 1 is a pre-stream 429 on a credentialed
+    // deepseek primary (failover to fake-ok); turn 2 replays exactly what the
+    // daemon does next — reads the persisted pin, resolves it through
+    // `with_model_id`, and runs the REAL loop (`run_prompt`) with a scripted
+    // successful provider. The pin must still be the original deepseek, NOT
+    // the fallback — proving a failover never becomes the durable selection.
+    #[tokio::test]
+    async fn rerouted_real_turn_does_not_pin_the_fallback_for_the_next_turn() {
+        let config_dir = temp_config_dir("real-reroute-not-durable");
+        let env = provider_env(&[("OCEAN_PROVIDER_FALLBACK", "fake-ok")]);
+
+        // Turn 1: credentialed deepseek primary is READY at selection, enters
+        // the real loop, then 429s pre-stream → reroutes to fake-ok.
+        let mut runtime = runtime_with_env(
+            config_dir.clone(),
+            provider_config(ProviderId::DeepSeek, "deepseek-v4-pro", true),
+            Some(env),
+        );
+        runtime.test_dispatch_status.insert("deepseek", 429);
+        let res = runtime
+            .prompt(prompt_req("hello", None), PromptControl::yolo(false))
+            .await;
+        assert!(res.ok, "{}", res.stderr);
+        let session_id = res.session_id.expect("session id");
+        let detail = runtime.session_detail(session_id).expect("detail");
+        assert_eq!(detail.model, "deepseek-v4-pro");
+        assert_eq!(detail.provider, "deepseek");
+        assert_eq!(detail.effective_model.as_deref(), Some("fake-ok"));
+        assert_eq!(detail.requested_model.as_deref(), Some("deepseek-v4-pro"));
+        assert_eq!(detail.reroute_reason.as_deref(), Some("rate limited"));
+
+        // Turn 2: daemon-equivalent resume. The global model is now fake-ok
+        // (if the pin had been lost, this is what would run); the daemon
+        // instead resolves the persisted pin and passes it as the turn's
+        // model override. A scripted provider completes the REAL loop without
+        // network, so this exercises `run_prompt` persistence end to end.
+        let mut runtime2 = runtime_with_env(
+            config_dir.clone(),
+            provider_config(ProviderId::Fake, "fake-ok", false),
+            None,
+        );
+        let completion = scripted_assistant("done");
+        runtime2.test_turn_provider = Some(TestCompactProvider(Arc::new(ScriptedTurnProvider {
+            calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            rounds: vec![vec![ocean_protocol::AssistantMessageEvent::Done {
+                reason: ocean_protocol::StopReason::Stop,
+                message: completion,
+            }]],
+        })));
+        let res2 = runtime2
+            .prompt(
+                prompt_req("again", Some(session_id)),
+                PromptControl::yolo(false).with_model_id(Some("deepseek/deepseek-v4-pro".into())),
+            )
+            .await;
+        assert!(res2.ok, "{}", res2.stderr);
+        let detail2 = runtime2.session_detail(session_id).expect("detail");
+        assert_eq!(
+            detail2.model, "deepseek-v4-pro",
+            "the next turn must still select the originally pinned model, not the fallback"
+        );
+        assert_eq!(detail2.provider, "deepseek");
+        assert_eq!(detail2.effective_model.as_deref(), Some("deepseek-v4-pro"));
+        assert_eq!(detail2.effective_provider.as_deref(), Some("deepseek"));
+        assert_eq!(detail2.requested_model, None);
+        assert_eq!(detail2.reroute_reason, None);
+
+        let _ = std::fs::remove_dir_all(config_dir);
+    }
+
+    // (b) REAL execution path: an ordinary turn on a keyless `fake-tool` session
+    // pinned to claude-code/claude-opus-5-5 must NOT rewrite the OAuth provider
+    // pin. `run_prompt` sees a protocol Anthropic model (`provider: "anthropic"`)
+    // but the durable pin stays `claude-code`.
+    #[tokio::test]
+    async fn ordinary_claude_code_real_turn_keeps_oauth_provider_pin() {
+        let config_dir = temp_config_dir("claude-code-pin-survives-real-turn");
+        let runtime = runtime_with_env(
+            config_dir.clone(),
+            provider_config(ProviderId::ClaudeCode, "claude-opus-5-5", true),
+            None,
+        );
+
+        let session_id = runtime
+            .create_session_with_model(
+                ".",
+                None,
+                Some(("claude-opus-5-5".into(), "claude-code".into())),
+            )
+            .unwrap()
+            .0;
+
+        // An ordinary turn with no reroute runs the real loop (scripted
+        // successful completion via the injected ScriptedTurnProvider), and must
+        // preserve the OAuth route pin.
+        let mut runtime = runtime;
+        let mut completion = scripted_assistant("");
+        completion.model = "anthropic".into();
+        runtime.test_turn_provider = Some(TestCompactProvider(Arc::new(ScriptedTurnProvider {
+            calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            rounds: vec![vec![ocean_protocol::AssistantMessageEvent::Done {
+                reason: ocean_protocol::StopReason::Stop,
+                message: completion.clone(),
+            }]],
+        })));
+
+        let res = runtime
+            .prompt(
+                prompt_req("hello", Some(session_id)),
+                PromptControl::yolo(false),
+            )
+            .await;
+        assert!(res.ok, "{}", res.stderr);
+        let detail = runtime.session_detail(session_id).expect("detail");
+
+        assert_eq!(detail.provider, "claude-code");
+        assert_eq!(detail.model, "claude-opus-5-5");
+        assert_eq!(detail.effective_provider.as_deref(), Some("anthropic"));
+        assert_eq!(detail.effective_model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(detail.requested_model, None);
+        assert_eq!(detail.reroute_reason, None);
 
         let _ = std::fs::remove_dir_all(config_dir);
     }
