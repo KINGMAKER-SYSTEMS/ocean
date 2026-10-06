@@ -255,6 +255,10 @@
   letter-spacing: 0;
 }
 
+.ocean-tokens__total {
+  color: var(--fg-3);
+}
+
 .ocean-tokens__rate {
   padding-left: 8px;
   color: var(--fg-3);

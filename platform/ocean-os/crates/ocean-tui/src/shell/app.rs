@@ -1811,6 +1811,7 @@ impl App {
             activity: self.chat.activity(),
             git: Some(&self.git_status),
             tok_per_s: self.chat.tok_per_s(),
+            provider_footprint: self.chat.provider_footprint(),
         }
     }
 
@@ -4091,6 +4092,7 @@ impl App {
     fn bind_session_with(&mut self, id: AgentSessionId, replay_first: bool) {
         let replaces_loaded_history = !replay_first;
         if self.session_id != Some(id) || replaces_loaded_history {
+            self.chat.reset_session_usage();
             // Switching/resuming replaces visible history. Increment even for
             // A→B→A or an explicit A→A resume so queued old envelopes cannot
             // become current merely because the UUID matches.
@@ -8474,6 +8476,8 @@ mod tests {
             output_tokens: None,
             input_tokens: None,
             cache_read_tokens: None,
+            cache_write_tokens: None,
+            total_tokens: None,
             tokens_per_second: None,
             context_usage: None,
         }))
@@ -9740,6 +9744,8 @@ mod tests {
             output_tokens: None,
             input_tokens: None,
             cache_read_tokens: None,
+            cache_write_tokens: None,
+            total_tokens: None,
             tokens_per_second: None,
             context_usage: None,
         })));
@@ -11059,6 +11065,8 @@ mod tests {
                 output_tokens: None,
                 input_tokens: None,
                 cache_read_tokens: None,
+                cache_write_tokens: None,
+                total_tokens: None,
                 tokens_per_second: None,
                 context_usage: None,
             }),
@@ -11085,6 +11093,8 @@ mod tests {
             output_tokens: None,
             input_tokens: None,
             cache_read_tokens: None,
+            cache_write_tokens: None,
+            total_tokens: None,
             tokens_per_second: None,
             context_usage: None,
         })));

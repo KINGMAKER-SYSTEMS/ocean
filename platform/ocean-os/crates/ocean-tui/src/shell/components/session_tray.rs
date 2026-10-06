@@ -572,6 +572,8 @@ mod tests {
             output_tokens: Some(5),
             input_tokens: Some(100),
             cache_read_tokens: None,
+            cache_write_tokens: None,
+            total_tokens: None,
             tokens_per_second: Some(500.0),
             context_usage,
         }))
@@ -826,6 +828,8 @@ mod tests {
                 output_tokens: None,
                 input_tokens: None,
                 cache_read_tokens: None,
+                cache_write_tokens: None,
+                total_tokens: None,
                 tokens_per_second: None,
                 context_usage: None,
             },

@@ -2732,7 +2732,13 @@ fn add_continuation_usage(usage: &mut TokenUsage, continuation: &TokenUsage) {
     usage.output += continuation.output;
     usage.cache_read += continuation.cache_read;
     usage.cache_write += continuation.cache_write;
-    usage.total_tokens += continuation.total_tokens;
+    // Zero means an authoritative provider total was unavailable. A partial
+    // continuation sum must not turn that unknown into a known footprint.
+    if usage.total_tokens == 0 || continuation.total_tokens == 0 {
+        usage.total_tokens = 0;
+    } else {
+        usage.total_tokens += continuation.total_tokens;
+    }
     if continuation.context_tokens > 0 {
         usage.context_tokens = continuation.context_tokens;
         usage.context_window = continuation.context_window;
@@ -2747,6 +2753,7 @@ fn add_continuation_usage(usage: &mut TokenUsage, continuation: &TokenUsage) {
 /// not its size.
 fn usage_of_completed_rounds(messages: &[Message], context_window: u32) -> TokenUsage {
     let mut usage = TokenUsage::default();
+    let mut total_tokens_complete = true;
     for message in messages {
         let Message::Assistant(assistant) = message else {
             continue;
@@ -2755,7 +2762,14 @@ fn usage_of_completed_rounds(messages: &[Message], context_window: u32) -> Token
         usage.output += assistant.usage.output;
         usage.cache_read += assistant.usage.cache_read;
         usage.cache_write += assistant.usage.cache_write;
-        usage.total_tokens += assistant.usage.total_tokens;
+        if assistant.usage.total_tokens == 0 {
+            total_tokens_complete = false;
+        }
+        if total_tokens_complete {
+            usage.total_tokens += assistant.usage.total_tokens;
+        } else {
+            usage.total_tokens = 0;
+        }
         if assistant.usage.total_tokens > 0 {
             usage.context_tokens = assistant.usage.total_tokens;
         }
@@ -4853,9 +4867,6 @@ mod tests {
             round(1_000, 300, 50_000, 51_300),
             Message::user_text("a tool result stands between rounds"),
             round(1_200, 250, 52_000, 53_450),
-            // A synthetic assistant row with no provider measurement must not
-            // reset the context reading.
-            assistant_with_usage(Default::default()),
         ];
         let usage = usage_of_completed_rounds(&messages, 200_000);
         assert_eq!(usage.input, 2_200);
@@ -4914,6 +4925,44 @@ mod tests {
         add_continuation_usage(&mut usage, &TokenUsage::default());
         assert_eq!(usage.context_tokens, 95_000);
         assert_eq!(usage.context_window, 200_000);
+    }
+
+    #[test]
+    fn mixed_known_and_unknown_completed_rounds_keep_total_unknown() {
+        let round = |total_tokens| {
+            assistant_with_usage(ocean_protocol::Usage {
+                input: 10,
+                output: 5,
+                total_tokens,
+                ..Default::default()
+            })
+        };
+        for messages in [
+            vec![round(100), round(0), round(200)],
+            vec![round(0), round(100)],
+        ] {
+            let usage = usage_of_completed_rounds(&messages, 200_000);
+            assert_eq!(usage.total_tokens, 0);
+            assert_eq!(usage.input, messages.len() as u64 * 10);
+            assert_eq!(usage.output, messages.len() as u64 * 5);
+        }
+    }
+
+    #[test]
+    fn unknown_continuation_keeps_aggregate_total_unknown() {
+        let known = TokenUsage {
+            total_tokens: 100,
+            ..Default::default()
+        };
+        let unknown = TokenUsage::default();
+
+        let mut prior_known = known.clone();
+        add_continuation_usage(&mut prior_known, &unknown);
+        assert_eq!(prior_known.total_tokens, 0);
+
+        let mut prior_unknown = unknown;
+        add_continuation_usage(&mut prior_unknown, &known);
+        assert_eq!(prior_unknown.total_tokens, 0);
     }
 
     /// Replays one scripted provider round per call; the last script repeats.
