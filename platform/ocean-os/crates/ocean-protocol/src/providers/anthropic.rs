@@ -144,11 +144,13 @@ fn request_block_drop(body: &mut Value) -> bool {
 
 /// The recovery that needs no control: remove every thinking block from the
 /// history so the request can be answered without the reasoning they carried.
-/// Text and tool blocks stay. Returns whether anything was removed.
+/// Text and tool blocks stay; an assistant message that held only thinking is
+/// dropped whole, since the API rejects empty content. Returns whether
+/// anything was removed.
 fn strip_thinking_blocks(body: &mut Value) -> bool {
     let mut removed = false;
     if let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) {
-        for message in messages {
+        for message in messages.iter_mut() {
             if let Some(content) = message.get_mut("content").and_then(Value::as_array_mut) {
                 let before = content.len();
                 content.retain(|block| {
@@ -160,6 +162,13 @@ fn strip_thinking_blocks(body: &mut Value) -> bool {
                 removed |= content.len() != before;
             }
         }
+        messages.retain(|message| {
+            !(message.get("role").and_then(Value::as_str) == Some("assistant")
+                && message
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .is_some_and(Vec::is_empty))
+        });
     }
     removed
 }
@@ -765,16 +774,26 @@ impl Provider for AnthropicProvider {
         let checks_bindings =
             runs_prefix_binding_check(model.id.trim_start_matches("claude-code-"));
         let credential = credential_key(&api_key);
-        // An account known to reject replayed blocks gets the drop control up
-        // front; every other account keeps its reasoning and is only observed.
-        let dropping =
-            checks_bindings && binding_enforced(credential) && request_block_drop(&mut body);
-        crate::prompt_capture::capture_request_body(&model.api, &model.provider, &model.id, &body);
+        // An account known to reject replayed blocks gets the recovery up
+        // front: the drop control, or the strip where the thinking shape can
+        // carry no control. Every other account sends main's exact request.
+        let dropping = checks_bindings && binding_enforced(credential);
+        if dropping && !request_block_drop(&mut body) {
+            strip_thinking_blocks(&mut body);
+        }
         let cancel = options.cancel.clone();
         let extra_headers: BTreeMap<String, String> = options.headers.clone();
         let auth = options.auth;
 
         let send = |body: Value| {
+            // Each attempt is captured as sent, so a capture shows the control
+            // or the stripped history a recovery actually carried.
+            crate::prompt_capture::capture_request_body(
+                &model.api,
+                &model.provider,
+                &model.id,
+                &body,
+            );
             let client = self.client.clone();
             let url = url.clone();
             let api_key = api_key.clone();
@@ -2148,6 +2167,21 @@ mod tests {
             json!([{"type": "text", "text": "a"}])
         );
         assert!(!strip_thinking_blocks(&mut body), "nothing left to strip");
+        // An assistant turn that held only thinking is dropped whole: the API
+        // rejects empty content, and the retry would fail on it.
+        let mut only_thinking = json!({"messages": [
+            {"role": "user", "content": [{"type": "text", "text": "q"}]},
+            {"role": "assistant", "content": [{"type": "thinking", "thinking": "t", "signature": "s"}]},
+            {"role": "user", "content": [{"type": "text", "text": "again"}]}
+        ]});
+        assert!(strip_thinking_blocks(&mut only_thinking));
+        let roles: Vec<&str> = only_thinking["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(roles, ["user", "user"]);
 
         assert!(names_binding_mismatch(
             "messages.5.content.0: Invalid `signature` in `thinking` block. The block is bound to a different conversation. Remove the block, or set `thinking.block_binding.prefix_mismatch_behavior` to \"drop_block\"."

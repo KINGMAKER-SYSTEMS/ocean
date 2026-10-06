@@ -1033,3 +1033,15 @@ Reworked the thinking-binding change after its review, which blocked on the desi
 
 Validation: ocean-protocol (187 plus 5), ocean-agent (268, two live probes ignored) and ocean-providers pass; clippy with warnings denied on both crates' tests, workspace test compilation, rustfmt check and docs-check pass. New loopback tests drive both recoveries through the real request path: a binding 400 followed by a retry that carries the control and the beta and completes, with the credential remembered afterwards; and the same under between_tools, where the retry carries no control and no thinking blocks but keeps the text. The live probe on Sonnet 5.5 now classifies the account and completed as not enforced. Four small requests in total today beyond the earlier ones; no session, store or credential was touched or refreshed.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [10:32] [06-10-26]
+agent: [claude] [claude code]
+worktree: [claude/thinking-binding-drop-block] [/Users/risingtidesdev/dev/ocean-claude-audit]
+type: [review]
+area: [backend] [testing]
+
+Closed the leftovers from the review that acknowledged the thinking-binding recovery. Once a credential is known to be enforced, a between_tools request (Sonnet 5.5 with thinking off), which can carry no drop control, had its thinking blocks stripped only after paying a 400 and a retry on every round; it is stripped up front now, like the control is added up front. The strip dropped an assistant message down to empty content when it had held only thinking, which the API rejects, so such a message is now dropped whole. The request capture recorded the body before the recovery, never the control or the stripped history actually sent; each attempt is captured as sent. Left as noted: the remembered credential is keyed by the secret, so a token refresh costs one more rejection and retry.
+
+Validation: ocean-protocol (187 plus 5) passes; clippy with warnings denied on ocean-protocol and ocean-agent tests, rustfmt check pass. The strip test covers the thinking-only assistant turn. No provider was called.
+_________________________________________________________________________________
