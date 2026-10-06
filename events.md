@@ -1009,3 +1009,15 @@ Merged Ocean PR counts observed at 04:37Z were 10 for 2026-10-05 UTC, 9 for
 window (1 so far for 2026-10-06). Calendar credits, UTC merges, and local
 delivery counts are separate; no artificial activity was added.
 _________________________________________________________________________________
+_________________________________________________________________________________
+time: [07:25] [06-10-26]
+agent: [Claude Code] [Claude Opus 5.5]
+worktree: [fix/codex-version-gpt-6-1-sol]
+type: [fix]
+area: [protocol]
+
+The ChatGPT Codex backend version-gates newly released models. PR #2 sent
+CODEX_VERSION 0.154.0, and the backend refused gpt-6.1-sol ("unsupported for
+the ChatGPT account") while the personal-repo build at 0.159.2 served it with
+the same credential. Raised CODEX_VERSION to 0.159.2 (as Risingtides-dev/ocean-os
+#529). Validation: see PR (live smoke test of gpt-6.1-sol on a spare port).
