@@ -183,8 +183,8 @@ participant retirement. One database file (`rooms.db`), one owning crate.
   identity. Every roster-creating path, including ordinary, owned-Agent, and
   bootstrap joins, checks the alias ledger inside its IMMEDIATE transaction;
   a racing join is either removed by the later retirement or refused after it.
-  Alias list reads are ordered and capped at 256 rows for bounded daemon
-  projections; the underlying durable ledger remains complete.
+  Alias list reads return the oldest 256 ordered rows plus `has_more` for
+  bounded daemon projections; the underlying durable ledger remains complete.
 - `inspect_room_identity` returns only room id, name, and closed state without
   hydrating transcript rows; daemon inspect responses combine that bounded
   metadata with the bounded public alias list.

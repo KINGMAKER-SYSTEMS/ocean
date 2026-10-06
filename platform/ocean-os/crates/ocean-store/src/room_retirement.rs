@@ -68,6 +68,13 @@ pub struct ParticipantAlias {
     pub decision_id: String,
 }
 
+/// A bounded alias projection with an explicit completeness signal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParticipantAliasPage {
+    pub aliases: Vec<ParticipantAlias>,
+    pub has_more: bool,
+}
+
 /// The non-transcript room fields needed by the daemon's bounded identity
 /// inspection response.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,10 +139,7 @@ pub(super) fn resolve_alias_on(conn: &Connection, key: &RoomKey, id: &str) -> Re
 
 impl SqliteRoomStore {
     /// Read only identity metadata without hydrating the room transcript.
-    pub fn inspect_room_identity(
-        &self,
-        key: &RoomKey,
-    ) -> Result<Option<RoomIdentityInspection>> {
+    pub fn inspect_room_identity(&self, key: &RoomKey) -> Result<Option<RoomIdentityInspection>> {
         self.conn
             .query_row(
                 "SELECT id, name, closed_at FROM rooms WHERE id = ?1",
@@ -152,33 +156,40 @@ impl SqliteRoomStore {
             .map_err(RoomStoreError::from)
     }
 
-    /// At most 256 aliases in the room, oldest first.
-    pub fn room_participant_aliases(&self, key: &RoomKey) -> Result<Vec<ParticipantAlias>> {
+    /// Read the oldest 256 aliases and explicitly signal when more remain.
+    pub fn room_participant_aliases(&self, key: &RoomKey) -> Result<ParticipantAliasPage> {
         let mut stmt = self.conn.prepare(
             "SELECT from_id, to_id, retired_at, retired_by, decision_id
                FROM room_participant_aliases WHERE room_id = ?1
               ORDER BY retired_at, from_id LIMIT ?2",
         )?;
-        let rows = stmt.query_map(params![key.as_str(), MAX_ROOM_PARTICIPANT_ALIASES], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-            ))
-        })?;
-        rows.map(|row| {
-            let (from_id, to_id, retired_at, retired_by, decision_id) = row?;
-            Ok(ParticipantAlias {
-                from_id,
-                to_id,
-                retired_at: super::parse_ts(&retired_at)?,
-                retired_by,
-                decision_id,
+        let rows = stmt.query_map(
+            params![key.as_str(), MAX_ROOM_PARTICIPANT_ALIASES + 1],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            },
+        )?;
+        let mut aliases = rows
+            .map(|row| {
+                let (from_id, to_id, retired_at, retired_by, decision_id) = row?;
+                Ok(ParticipantAlias {
+                    from_id,
+                    to_id,
+                    retired_at: super::parse_ts(&retired_at)?,
+                    retired_by,
+                    decision_id,
+                })
             })
-        })
-        .collect()
+            .collect::<Result<Vec<_>>>()?;
+        let has_more = aliases.len() > MAX_ROOM_PARTICIPANT_ALIASES as usize;
+        aliases.truncate(MAX_ROOM_PARTICIPANT_ALIASES as usize);
+        Ok(ParticipantAliasPage { aliases, has_more })
     }
 
     /// The member that holds `id`'s authority today (`id` when never retired).
@@ -579,17 +590,32 @@ mod tests {
     fn alias_read_is_capped_at_the_documented_projection_bound() {
         let (s, key) = legacy_room();
         for index in 0..300 {
-            seed_alias(
-                &s,
-                &key,
-                &format!("retired-{index:03}"),
-                "smaths",
-            );
+            seed_alias(&s, &key, &format!("retired-{index:03}"), "smaths");
         }
         let aliases = s.room_participant_aliases(&key).unwrap();
-        assert_eq!(aliases.len(), MAX_ROOM_PARTICIPANT_ALIASES as usize);
-        assert_eq!(aliases.first().unwrap().from_id, "retired-000");
-        assert_eq!(aliases.last().unwrap().from_id, "retired-255");
+        assert_eq!(aliases.aliases.len(), MAX_ROOM_PARTICIPANT_ALIASES as usize);
+        assert!(aliases.has_more);
+        assert_eq!(aliases.aliases.first().unwrap().from_id, "retired-000");
+        assert_eq!(aliases.aliases.last().unwrap().from_id, "retired-255");
+    }
+
+    #[test]
+    fn alias_page_reports_complete_empty_and_single_alias_results() {
+        let (mut store, key) = legacy_room();
+        let empty = store.room_participant_aliases(&key).unwrap();
+        assert!(empty.aliases.is_empty());
+        assert!(!empty.has_more);
+
+        store
+            .retire_participant(
+                &key,
+                input("surface-operator", "smaths", "dec-1"),
+                Utc::now(),
+            )
+            .unwrap();
+        let one = store.room_participant_aliases(&key).unwrap();
+        assert_eq!(one.aliases.len(), 1);
+        assert!(!one.has_more);
     }
 
     #[test]
@@ -659,8 +685,9 @@ mod tests {
         assert_eq!(body["to"], "smaths");
         assert!(!audit.body.contains("digest-"));
         let aliases = s.room_participant_aliases(&key).unwrap();
-        assert_eq!(aliases.len(), 1);
-        assert_eq!(aliases[0].decision_id, "dec-1");
+        assert_eq!(aliases.aliases.len(), 1);
+        assert!(!aliases.has_more);
+        assert_eq!(aliases.aliases[0].decision_id, "dec-1");
     }
 
     #[test]
@@ -682,7 +709,7 @@ mod tests {
         assert!(changed);
         assert!(!retired.owner_moved, "the web id never owned the room");
         assert_eq!(retired.agents_moved, 0);
-        assert_eq!(s.room_participant_aliases(&key).unwrap().len(), 2);
+        assert_eq!(s.room_participant_aliases(&key).unwrap().aliases.len(), 2);
         // A chain: retire smaths into a new member later; the old alias follows.
         s.add_participant(&key, human("john"), Utc::now()).unwrap();
         s.retire_participant(&key, input("smaths", "john", "dec-3"), Utc::now())
@@ -729,7 +756,7 @@ mod tests {
             matches!(err, RoomStoreError::DecisionReplayMismatch { .. }),
             "{err:?}"
         );
-        assert_eq!(s.room_participant_aliases(&key).unwrap().len(), 1);
+        assert_eq!(s.room_participant_aliases(&key).unwrap().aliases.len(), 1);
     }
 
     #[test]
@@ -771,7 +798,7 @@ mod tests {
             RoomStoreError::ParticipantKindConflict { .. }
         ));
         assert_eq!(s.transcript(&key, None).unwrap().len(), before);
-        assert!(s.room_participant_aliases(&key).unwrap().is_empty());
+        assert!(s.room_participant_aliases(&key).unwrap().aliases.is_empty());
         assert_eq!(
             s.local_room_owner(&key).unwrap().unwrap().member_id,
             "surface-operator"

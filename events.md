@@ -829,3 +829,30 @@ Closed the leftovers from the third review of the Surface slash and session-link
 
 Validation: ocean-surface-ui native tests pass (893 plus the integration suites); rustfmt check and native and wasm clippy with warnings denied on all targets pass. The Send-button order is view code and is covered by reading.
 _________________________________________________________________________________
+
+time: [22:42] [05-10-26]
+agent: [codex] [gpt-6.1-sol]
+worktree: [codex/factory-pr25-rooms-followup] [/Users/smathdaddy-macbook/.codex/worktrees/factory-pr25-rooms-followup]
+type: [feature] PR #25 follow-up for Issues #27 and #29
+area: [backend] persistent Rooms participant retirement and identity reads
+
+Implemented the permanent retired-id join guard inside the same IMMEDIATE
+transactions as ordinary, owned-agent, and bootstrap membership writes. Added
+coverage for active same-kind reconnect and concurrent retire/join ordering
+across separate SQLite connections. Alias reads now return the oldest 256 rows
+with an explicit `has_more`; inspect, detail, and snapshot expose the public
+`{from,to,retired_at}` list plus `aliases_truncated`. Added the narrowly scoped
+read-only inspect route and a handler fixture for absent, complete, and
+truncated alias projections. Reconciled this follow-up onto canonical main
+`3273dab4` while retaining PR #25's original `51912151` commit ancestry.
+
+Validation: `cargo test -p ocean-store --locked -- --test-threads=1` PASS
+(275/275); `cargo fmt --all -- --check`, `git diff --check`, and
+`cargo xtask docs-check` PASS (30 packages, 152 active Markdown files, 170
+local links). The exact daemon inspect/detail/snapshot fixture could not reach
+the daemon crate: dependency compilation exhausted available filesystem space
+with `No space left on device`; only this factory worktree's target artifacts
+were cleaned. Push is pending a fresh PR-branch OID guard; hosted checks and
+independent review remain outstanding. No merge, deployment, or live outcome
+is claimed.
+_________________________________________________________________________________

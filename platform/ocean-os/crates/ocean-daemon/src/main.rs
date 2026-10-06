@@ -210,10 +210,10 @@ use model_roles::resolve_effective_model_id;
 use model_roles::{load_model_roles, resolve_advisor_alias, resolve_turn_model};
 use persistent_rooms::{
     resolve_named_agent, room_create, room_create_invite, room_db_path, room_events, room_get,
-    room_get_read_cursor, room_inspect, room_join, room_leave, room_patch_read_cursor, room_post_message,
-    room_redeem_invite, room_register_agents, room_retry_outbox, room_snapshot, room_transcript,
-    rooms_list_persistent, run_federated_trigger_dispatcher, with_rooms, with_rooms_handle,
-    RoomAccessWakeBus, RoomReadCursorWakeBus, RoomStoreHandle, RoomWakeBus,
+    room_get_read_cursor, room_inspect, room_join, room_leave, room_patch_read_cursor,
+    room_post_message, room_redeem_invite, room_register_agents, room_retry_outbox, room_snapshot,
+    room_transcript, rooms_list_persistent, run_federated_trigger_dispatcher, with_rooms,
+    with_rooms_handle, RoomAccessWakeBus, RoomReadCursorWakeBus, RoomStoreHandle, RoomWakeBus,
 };
 use project_registry::{
     canonical_git_common_dir, discover_project_worktrees, project_create, project_delete,

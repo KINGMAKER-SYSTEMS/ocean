@@ -59,15 +59,24 @@ struct RetireDigestInput<'a> {
     successor_id: &'a str,
 }
 
+pub(super) struct AliasProjection {
+    pub(super) aliases: Value,
+    pub(super) truncated: bool,
+}
+
 pub(super) fn aliases_projection(
     store: &mut ocean_store::SqliteRoomStore,
     room: &RoomKey,
-) -> Result<Value, RoomStoreError> {
-    let aliases = store.room_participant_aliases(room)?;
-    Ok(json!(aliases
-        .iter()
-        .map(|a| json!({ "from": a.from_id, "to": a.to_id, "retired_at": a.retired_at }))
-        .collect::<Vec<_>>()))
+) -> Result<AliasProjection, RoomStoreError> {
+    let page = store.room_participant_aliases(room)?;
+    Ok(AliasProjection {
+        aliases: json!(page
+            .aliases
+            .iter()
+            .map(|a| json!({ "from": a.from_id, "to": a.to_id, "retired_at": a.retired_at }))
+            .collect::<Vec<_>>()),
+        truncated: page.has_more,
+    })
 }
 
 pub(super) async fn room_participant_retire(
@@ -136,7 +145,7 @@ pub(super) async fn room_participant_retire(
         if let Some(audit) = audit.as_ref() {
             publish_room_wake(&state, &room, audit);
         }
-        let (owner, aliases) = with_rooms(&state, |store| {
+        let (owner, alias_projection) = with_rooms(&state, |store| {
             let owner = store.local_room_owner(&room)?.map(|o| o.member_id);
             let aliases = aliases_projection(store, &room)?;
             Ok::<_, RoomStoreError>((owner, aliases))
@@ -151,7 +160,8 @@ pub(super) async fn room_participant_retire(
                 "owner_moved": retired.owner_moved,
                 "agents_moved": retired.agents_moved.to_string(),
                 "owner_member_id": owner,
-                "aliases": aliases,
+                "aliases": alias_projection.aliases,
+                "aliases_truncated": alias_projection.truncated,
             }),
         ))
     })();

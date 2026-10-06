@@ -30,11 +30,11 @@ use tokio_stream::{wrappers::ReceiverStream, Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use super::room_retirement;
 use super::{
     build_prompt_control, core_sid, emit_session_changed, record_prompt_result, sdk_sid,
     sse_until_shutdown, AppState, SSE_KEEPALIVE_INTERVAL,
 };
-use super::room_retirement;
 use crate::request_control::{
     attach_request_handle, cancel_permission_waiter, register_room_agent_request_checked,
     RoomAgentRequestAuthority,
@@ -1377,7 +1377,8 @@ pub(super) async fn room_get(
                 "next_seq": if rec.transcript_has_more { rec.transcript.last().map(|row| row.seq) } else { None },
                 "transcript": projected_transcript(rec.transcript),
                 "access": access,
-                "aliases": aliases,
+                "aliases": aliases.aliases,
+                "aliases_truncated": aliases.truncated,
                 "agent_owners": owners
                     .into_iter()
                     .map(|(agent, owner, owner_present)| json!({
@@ -1434,7 +1435,8 @@ pub(super) async fn room_inspect(
                     "name": room.name,
                 },
                 "owner": { "member_id": owner },
-                "aliases": aliases,
+                "aliases": aliases.aliases,
+                "aliases_truncated": aliases.truncated,
             })),
         ),
         Ok(None) => (
@@ -3515,7 +3517,8 @@ pub(super) async fn room_snapshot(
                     "next_seq": page.next_seq,
                     "has_more": page.has_more,
                     "access": access,
-                    "aliases": aliases,
+                    "aliases": aliases.aliases,
+                    "aliases_truncated": aliases.truncated,
                 })),
             )
         }
@@ -7981,15 +7984,39 @@ env = { FIXTURE = "1" }
             ocean_store::SqliteRoomStore::open(&path).expect("reopen store"),
         ));
 
+        let (status, Json(join_error)) = room_join(
+            State(state.clone()),
+            Path(key.as_str().to_string()),
+            Json(RoomJoinRequest {
+                id: "surface-operator".into(),
+                display_name: "Operator".into(),
+                kind: RoomParticipantKind::Human,
+                owner_id: None,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(join_error["error"].as_str().unwrap().contains("retired"));
+
+        let (status, Json(post_error)) = room_post_message(
+            State(state.clone()),
+            Path(key.as_str().to_string()),
+            Json(RoomMessageRequest {
+                author_id: "surface-operator".into(),
+                author_kind: RoomParticipantKind::Human,
+                body: "cannot post as retired identity".into(),
+                thread_parent_seq: None,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(post_error["code"], "author_not_in_roster");
+
         async fn get_json(state: AppState, uri: String) -> (StatusCode, serde_json::Value) {
             use tower::ServiceExt as _;
             let response = room_routes()
                 .with_state(state)
-                .oneshot(
-                    axum::http::Request::get(uri)
-                        .body(Body::empty())
-                        .unwrap(),
-                )
+                .oneshot(axum::http::Request::get(uri).body(Body::empty()).unwrap())
                 .await
                 .unwrap();
             let status = response.status();
@@ -8010,6 +8037,7 @@ env = { FIXTURE = "1" }
             let (status, body) = get_json(state.clone(), uri).await;
             assert_eq!(status, StatusCode::OK);
             assert_eq!(body["aliases"].as_array().unwrap().len(), 1);
+            assert_eq!(body["aliases_truncated"], false);
             assert_eq!(body["aliases"][0]["from"], "surface-operator");
             assert_eq!(body["aliases"][0]["to"], "smaths");
             assert!(body["aliases"][0]["retired_at"].is_string());
@@ -8031,6 +8059,57 @@ env = { FIXTURE = "1" }
             get_json(state, format!("/v1/rooms/persistent/{plain}/inspect")).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(empty["aliases"], json!([]));
+        assert_eq!(empty["aliases_truncated"], false);
+
+        let crowded = RoomKey::new("many-aliases");
+        with_rooms(&state, |store| {
+            store
+                .create(crowded.clone(), "Many Aliases", None, Utc::now())
+                .expect("create alias-heavy room");
+            store
+                .add_participant(
+                    &crowded,
+                    RoomParticipant {
+                        id: "smaths".into(),
+                        kind: RoomParticipantKind::Human,
+                        display_name: "John".into(),
+                    },
+                    Utc::now(),
+                )
+                .expect("add successor");
+            for index in 0..257 {
+                let from_id = format!("web-{index:016x}");
+                store
+                    .add_participant(
+                        &crowded,
+                        RoomParticipant {
+                            id: from_id.clone(),
+                            kind: RoomParticipantKind::Human,
+                            display_name: from_id.clone(),
+                        },
+                        Utc::now(),
+                    )
+                    .expect("add placeholder");
+                store
+                    .retire_participant(
+                        &crowded,
+                        ocean_store::RetireParticipantInput {
+                            from_id,
+                            successor_id: "smaths".into(),
+                            actor: "test-operator".into(),
+                            decision_id: format!("retire-{index}"),
+                            request_digest: format!("digest-{index}"),
+                        },
+                        Utc::now(),
+                    )
+                    .expect("retire placeholder");
+            }
+        });
+        let (status, capped) =
+            get_json(state, format!("/v1/rooms/persistent/{crowded}/inspect")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(capped["aliases"].as_array().unwrap().len(), 256);
+        assert_eq!(capped["aliases_truncated"], true);
     }
 
     // ── Merged SSE routed tests ──────────────────────────────────────────────
