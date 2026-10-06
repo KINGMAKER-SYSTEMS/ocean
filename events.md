@@ -597,3 +597,32 @@ Validation: `cargo test -p ocean-protocol` (181 unit + 5 integration passed);
 `cargo check -p ocean-surface-ui --target wasm32-unknown-unknown`;
 component formatting and `git diff --check`. No deployment performed.
 _________________________________________________________________________________
+
+time: [00:52 UTC] [06-10-26]
+agent: [codex desktop] [gpt-6.1-sol]
+worktree: [codex/issue11-cached-tokens] [/Users/smathdaddy-macbook/.codex/worktrees/issue11-cached-tokens]
+type: [gh actions] [deployment]
+area: [release] [testing]
+
+PR #20 merged to canonical `main` as `7d4c446c6ea1c92b6fd2c4d42bfc9c3efc3d62ee`. The parent release owner reported installing the immutable local TUI artifact `/Users/smathdaddy-macbook/.local/libexec/ocean-tui/ocean-7d4c446c6ea1`; code signing passed and a four-second PTY smoke rendered the UI. Daemon health remained true at revision `0abb558179af`; no daemon rollout was performed.
+_________________________________________________________________________________
+
+time: [00:52 UTC] [06-10-26]
+agent: [codex desktop] [gpt-6.1-sol]
+worktree: [codex/issue11-cached-tokens] [/Users/smathdaddy-macbook/.codex/worktrees/issue11-cached-tokens]
+type: [bug report] [testing]
+area: [backend] [frontend] [testing]
+
+Addressed the two adversarial review findings on Issue #11 / PR #22. Multi-round token totals now remain unknown if any completed provider round lacks an authoritative total, across live runtime aggregation, failed-turn recovery, and continuation aggregation; mixed known/unknown regressions cover both round orders. TUI usage summaries now reset when history or session binding is replaced and when a new session is cleared, with a focused regression.
+
+Validation: focused `ocean-runtime` mixed-total and existing multi-round tests passed; focused `ocean-agent` recovery, continuation, and existing all-known aggregation tests passed; focused TUI reset test and `cargo build -p ocean-tui --release` passed. Formatting and exact-`main` reconciliation remain in progress. No deployment performed.
+_________________________________________________________________________________
+
+time: [00:56 UTC] [06-10-26]
+agent: [codex desktop] [gpt-6.1-sol]
+worktree: [codex/issue11-cached-tokens] [/Users/smathdaddy-macbook/.codex/worktrees/issue11-cached-tokens]
+type: [review] [testing]
+area: [backend] [frontend] [testing]
+
+Reconciled Issue #11 / PR #22 on top of canonical `main` at `7d4c446c6ea1c92b6fd2c4d42bfc9c3efc3d62ee`, preserving the unrelated Issue #20 release ledger. After reconciliation, focused runtime mixed-total coverage passed; Ocean Agent mixed-known/unknown recovery and continuation tests plus the existing all-known round aggregation test passed; the TUI session-reset regression and release build passed. `cargo fmt --all -- --check` and `git diff --check` passed. No deployment performed; fresh independent review and hosted PR checks remain required.
+_________________________________________________________________________________

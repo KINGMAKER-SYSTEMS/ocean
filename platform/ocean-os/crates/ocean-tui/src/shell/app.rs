@@ -4092,6 +4092,7 @@ impl App {
     fn bind_session_with(&mut self, id: AgentSessionId, replay_first: bool) {
         let replaces_loaded_history = !replay_first;
         if self.session_id != Some(id) || replaces_loaded_history {
+            self.chat.reset_session_usage();
             // Switching/resuming replaces visible history. Increment even for
             // A→B→A or an explicit A→A resume so queued old envelopes cannot
             // become current merely because the UUID matches.

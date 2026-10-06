@@ -1882,6 +1882,7 @@ impl ChatComponent {
     /// A synchronized fence is authoritative for everything before it; replay
     /// strictly after the fence re-establishes any newer active turn.
     pub fn load_history(&mut self, msgs: Vec<crate::shell::sessions::HistoryMsg>) {
+        self.reset_session_usage();
         self.turns = msgs
             .into_iter()
             .map(|m| {
@@ -2457,6 +2458,14 @@ impl ChatComponent {
         self.last_provider_footprint
     }
 
+    /// Clear per-session terminal usage when the visible transcript binding is
+    /// replaced. Usage is not hydrated from history, so carrying it over would
+    /// attribute the previous session's last turn to the new one.
+    pub(crate) fn reset_session_usage(&mut self) {
+        self.last_tok_per_s = None;
+        self.last_provider_footprint = None;
+    }
+
     /// The model driving turns (the header pill), for the status bar. `None`
     /// until the first `TurnStarted` names it.
     pub fn model(&self) -> Option<&str> {
@@ -2796,6 +2805,7 @@ impl ChatComponent {
     }
 
     fn clear_for_new_session(&mut self) {
+        self.reset_session_usage();
         self.turns.clear();
         self.md.clear();
         self.clear_tool_ui_state();
@@ -6906,6 +6916,27 @@ mod tests {
         }
         chat.update(&action);
         assert_eq!(chat.provider_footprint(), Some(862));
+    }
+
+    #[test]
+    fn replacing_or_clearing_a_session_resets_provider_footprint() {
+        let mut chat = ChatComponent::default();
+        let mut action = turn_finished(AgentTurnStatus::Completed, None);
+        if let Action::AgentEvent(event) = &mut action {
+            if let AgentTurnEvent::TurnFinished { total_tokens, .. } = event.as_mut() {
+                *total_tokens = Some(862);
+            }
+        }
+        chat.update(&action);
+        assert_eq!(chat.provider_footprint(), Some(862));
+
+        chat.load_history(Vec::new());
+        assert_eq!(chat.provider_footprint(), None);
+
+        chat.update(&action);
+        assert_eq!(chat.provider_footprint(), Some(862));
+        chat.clear_for_new_session();
+        assert_eq!(chat.provider_footprint(), None);
     }
 
     // ── turn-terminal paths ──────────────────────────────────────────────────
