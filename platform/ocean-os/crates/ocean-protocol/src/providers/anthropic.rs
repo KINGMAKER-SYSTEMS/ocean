@@ -86,6 +86,84 @@ struct MessageStartPayload {
     input_transformations: Vec<Value>,
 }
 
+/// Credentials whose account has rejected a replayed thinking block. Later
+/// requests on them ask for the drop up front, instead of paying a 400 and a
+/// retry on every edited turn. Keyed by a hash of the secret; the secret is
+/// never stored. Process-wide, so it lasts as long as the daemon.
+fn enforced_credentials() -> &'static std::sync::Mutex<std::collections::HashSet<u64>> {
+    static ENFORCED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<u64>>> =
+        std::sync::OnceLock::new();
+    ENFORCED.get_or_init(Default::default)
+}
+
+fn credential_key(secret: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    secret.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn binding_enforced(key: u64) -> bool {
+    enforced_credentials()
+        .lock()
+        .map(|set| set.contains(&key))
+        .unwrap_or(false)
+}
+
+fn remember_binding_enforced(key: u64) {
+    if let Ok(mut set) = enforced_credentials().lock() {
+        set.insert(key);
+    }
+}
+
+/// True when a 400 body is the API refusing a replayed thinking block whose
+/// history changed. The message names the control that would have dropped it.
+fn names_binding_mismatch(body: &str) -> bool {
+    body.contains("bound to a different conversation")
+        || body.contains("prefix_mismatch_behavior")
+        || body.contains("block_binding")
+}
+
+/// Ask the API to drop a mismatched thinking block for this request rather
+/// than reject it. The control rides on `thinking`; `between_tools` takes no
+/// extra field and a body without a thinking object has nothing to carry it,
+/// so those return `false` and the caller falls back to stripping.
+fn request_block_drop(body: &mut Value) -> bool {
+    let Some(thinking) = body.get_mut("thinking").and_then(Value::as_object_mut) else {
+        return false;
+    };
+    if thinking.get("type").and_then(Value::as_str) != Some("adaptive") {
+        return false;
+    }
+    thinking.insert(
+        "block_binding".into(),
+        json!({"prefix_mismatch_behavior": "drop_block"}),
+    );
+    true
+}
+
+/// The recovery that needs no control: remove every thinking block from the
+/// history so the request can be answered without the reasoning they carried.
+/// Text and tool blocks stay. Returns whether anything was removed.
+fn strip_thinking_blocks(body: &mut Value) -> bool {
+    let mut removed = false;
+    if let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) {
+        for message in messages {
+            if let Some(content) = message.get_mut("content").and_then(Value::as_array_mut) {
+                let before = content.len();
+                content.retain(|block| {
+                    !matches!(
+                        block.get("type").and_then(Value::as_str),
+                        Some("thinking") | Some("redacted_thinking")
+                    )
+                });
+                removed |= content.len() != before;
+            }
+        }
+    }
+    removed
+}
+
 /// Log each thinking block the API dropped or let through after it failed a
 /// binding check, so a history edit shows up in the daemon log rather than
 /// as silently weaker reasoning. The entries are opaque beyond their `type`,
@@ -109,14 +187,21 @@ fn note_input_transformations(model: &str, transformations: &[Value]) {
 }
 
 /// Models that check a replayed thinking block against the conversation that
-/// produced it and reject the request when the history before the block has
-/// changed (enforced on Anthropic accounts created on or after 2026-08-31).
-/// Ocean edits history between requests: it appends a budget notice to the
-/// system prompt and withdraws the tools on a turn's final round, grows the
-/// tool list as dynamic tools load, drops the oldest messages when the
-/// window fills, and re-reads recent memories into the system prompt. Each
-/// is a 400 on those accounts unless the request asks for the block to be
-/// dropped instead.
+/// produced it (system prompt, tool set, every earlier message) and, on
+/// Anthropic accounts created on or after 2026-08-31, reject the request when
+/// that history has changed. Ocean changes it between requests: the system
+/// prompt carries the git branch and commit and is rebuilt every turn, the
+/// final round of a turn appends a budget notice to it and withdraws the
+/// tools, the oldest messages are dropped when the window fills, and recent
+/// memories and re-read instructions move it too.
+///
+/// Accounts the check is not enforced on let the block through, and the model
+/// keeps that reasoning. On the subscription route the binding beta alone
+/// already makes the API drop such a block (observed live, 2026-10-06), so
+/// neither the beta nor the drop control is sent until this credential's
+/// account has rejected a replay (see `binding_enforced`); from then on both
+/// are sent up front. Sending them unconditionally would discard reasoning on
+/// every edited turn on accounts that never reject it.
 fn runs_prefix_binding_check(id: &str) -> bool {
     matches!(
         id,
@@ -501,16 +586,6 @@ fn build_body(model: &Model, context: &Context, options: &StreamOptions) -> Valu
         body["thinking"] = if between_tools {
             // `between_tools` accepts no other field.
             json!({"type": "between_tools"})
-        } else if runs_prefix_binding_check(id) {
-            // Degrade instead of fail when a replayed thinking block no longer
-            // matches the history before it (see `runs_prefix_binding_check`).
-            // The block is dropped for that request, unbilled, and reported in
-            // `input_transformations`; the request needs `ANTHROPIC_BINDING_BETA`.
-            json!({
-                "type": "adaptive",
-                "display": "summarized",
-                "block_binding": {"prefix_mismatch_behavior": "drop_block"},
-            })
         } else {
             // These models stream empty thinking text unless a summary is
             // requested, which leaves every client's reasoning view blank.
@@ -638,9 +713,10 @@ fn apply_auth(
 
 /// The one `anthropic-beta` value a request needs: the OAuth beta for a
 /// bearer token (Anthropic rejects oat01 tokens without it), and the
-/// binding-controls beta whenever the body sets `thinking.block_binding`.
-/// `None` when neither applies. Composed once so the header is never sent
-/// twice.
+/// binding-controls beta when the body asks for a mismatched thinking block
+/// to be dropped (`thinking.block_binding`), which the API accepts only under
+/// that beta. `None` when neither applies. Composed once so the header is
+/// never sent twice.
 fn beta_header(body: &Value, method: AuthMethod) -> Option<String> {
     let mut betas = Vec::new();
     if method == AuthMethod::Bearer {
@@ -650,6 +726,21 @@ fn beta_header(body: &Value, method: AuthMethod) -> Option<String> {
         betas.push(ANTHROPIC_BINDING_BETA);
     }
     (!betas.is_empty()).then(|| betas.join(","))
+}
+
+/// Authorize a request and give it its beta header: the one place both are
+/// applied, so a request can be built and inspected the way it is sent.
+fn authorize(
+    req: reqwest::RequestBuilder,
+    method: AuthMethod,
+    secret: &str,
+    body: &Value,
+) -> reqwest::RequestBuilder {
+    let req = apply_auth(req, method, secret);
+    match beta_header(body, method) {
+        Some(beta) => req.header("anthropic-beta", beta),
+        None => req,
+    }
 }
 
 #[async_trait]
@@ -670,73 +761,109 @@ impl Provider for AnthropicProvider {
             .clone()
             .unwrap_or_else(|| model.base_url.clone());
         let url = format!("{}/v1/messages", base_url.trim_end_matches('/'));
-        let body = build_body(model, context, options);
+        let mut body = build_body(model, context, options);
+        let checks_bindings =
+            runs_prefix_binding_check(model.id.trim_start_matches("claude-code-"));
+        let credential = credential_key(&api_key);
+        // An account known to reject replayed blocks gets the drop control up
+        // front; every other account keeps its reasoning and is only observed.
+        let dropping =
+            checks_bindings && binding_enforced(credential) && request_block_drop(&mut body);
         crate::prompt_capture::capture_request_body(&model.api, &model.provider, &model.id, &body);
         let cancel = options.cancel.clone();
         let extra_headers: BTreeMap<String, String> = options.headers.clone();
         let auth = options.auth;
 
-        let resp = with_retry_observed(
-            retry_config(),
-            cancel.as_ref(),
-            options.retry_observer.as_ref(),
-            |_attempt| {
-                let client = self.client.clone();
-                let url = url.clone();
-                let api_key = api_key.clone();
-                let body = body.clone();
-                let extra_headers = extra_headers.clone();
-                async move {
-                    let mut req = client
-                        .post(&url)
-                        .header("anthropic-version", ANTHROPIC_VERSION)
-                        .header("accept", "text/event-stream")
-                        .header("content-type", "application/json");
-                    req = apply_auth(req, auth, &api_key);
-                    if let Some(beta) = beta_header(&body, auth) {
-                        req = req.header("anthropic-beta", beta);
-                    }
-                    for (k, v) in extra_headers {
-                        req = req.header(k, v);
-                    }
-                    let r = match req.json(&body).send().await {
-                        Ok(r) => r,
-                        Err(e) => {
-                            return if e.is_timeout() || e.is_connect() {
-                                Attempt::Retry {
-                                    error: Error::Http(e),
-                                    retry_after: None,
-                                }
-                            } else {
-                                Attempt::Fatal(Error::Http(e))
-                            }
+        let send = |body: Value| {
+            let client = self.client.clone();
+            let url = url.clone();
+            let api_key = api_key.clone();
+            let extra_headers = extra_headers.clone();
+            with_retry_observed(
+                retry_config(),
+                cancel.as_ref(),
+                options.retry_observer.as_ref(),
+                move |_attempt| {
+                    let client = client.clone();
+                    let url = url.clone();
+                    let api_key = api_key.clone();
+                    let body = body.clone();
+                    let extra_headers = extra_headers.clone();
+                    async move {
+                        let mut req = client
+                            .post(&url)
+                            .header("anthropic-version", ANTHROPIC_VERSION)
+                            .header("accept", "text/event-stream")
+                            .header("content-type", "application/json");
+                        req = authorize(req, auth, &api_key, &body);
+                        for (k, v) in extra_headers {
+                            req = req.header(k, v);
                         }
-                    };
-                    let status = r.status();
-                    if status.is_success() {
-                        return Attempt::Ok(r);
+                        let r = match req.json(&body).send().await {
+                            Ok(r) => r,
+                            Err(e) => {
+                                return if e.is_timeout() || e.is_connect() {
+                                    Attempt::Retry {
+                                        error: Error::Http(e),
+                                        retry_after: None,
+                                    }
+                                } else {
+                                    Attempt::Fatal(Error::Http(e))
+                                }
+                            }
+                        };
+                        let status = r.status();
+                        if status.is_success() {
+                            return Attempt::Ok(r);
+                        }
+                        let retry_after = r
+                            .headers()
+                            .get("retry-after")
+                            .and_then(|v| v.to_str().ok())
+                            .and_then(parse_retry_after);
+                        let body = r.text().await.unwrap_or_default();
+                        let err = Error::ProviderError {
+                            status: status.as_u16(),
+                            body,
+                        };
+                        match classify_status(status.as_u16()) {
+                            Some(_) => Attempt::Retry {
+                                error: err,
+                                retry_after,
+                            },
+                            None => Attempt::Fatal(err),
+                        }
                     }
-                    let retry_after = r
-                        .headers()
-                        .get("retry-after")
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(parse_retry_after);
-                    let body = r.text().await.unwrap_or_default();
-                    let err = Error::ProviderError {
-                        status: status.as_u16(),
-                        body,
-                    };
-                    match classify_status(status.as_u16()) {
-                        Some(_) => Attempt::Retry {
-                            error: err,
-                            retry_after,
-                        },
-                        None => Attempt::Fatal(err),
-                    }
+                },
+            )
+        };
+
+        let resp = match send(body.clone()).await {
+            // The account rejects a replayed thinking block whose history
+            // changed. The 400 is decided before any output, so one retry is
+            // side-effect free: ask for the block to be dropped, or when the
+            // thinking shape cannot carry that control, strip the blocks. The
+            // credential is remembered so later requests ask up front.
+            Err(Error::ProviderError {
+                status: 400,
+                body: text,
+            }) if checks_bindings && !dropping && names_binding_mismatch(&text) => {
+                remember_binding_enforced(credential);
+                let recovered = request_block_drop(&mut body) || strip_thinking_blocks(&mut body);
+                if !recovered {
+                    return Err(Error::ProviderError {
+                        status: 400,
+                        body: text,
+                    });
                 }
-            },
-        )
-        .await?;
+                tracing::warn!(
+                    model = %model.id,
+                    "the account rejects a replayed thinking block whose history changed; retrying with the block dropped, and asking for that up front from now on"
+                );
+                send(body.clone()).await?
+            }
+            other => other?,
+        };
 
         let api = model.api.clone();
         let provider = model.provider.clone();
@@ -1007,11 +1134,7 @@ mod tests {
                     assert_eq!(body["thinking"], json!({"type":"disabled"}), "{id}");
                     assert!(body.get("output_config").is_none());
                 } else {
-                    // The binding control rides only on the models that run
-                    // the check; it is covered by its own test.
-                    let mut thinking = body["thinking"].clone();
-                    thinking.as_object_mut().unwrap().remove("block_binding");
-                    assert_eq!(thinking, summarized, "{id}");
+                    assert_eq!(body["thinking"], summarized, "{id}");
                     assert_eq!(body["output_config"]["effort"], expected, "{id}");
                 }
                 // Sampling parameters are a 400 on every one of these models,
@@ -1030,9 +1153,7 @@ mod tests {
             if matches!(id, "claude-opus-4-8" | "claude-code-opus-4-7") {
                 assert!(body.get("thinking").is_none(), "{id}");
             } else {
-                let mut thinking = body["thinking"].clone();
-                thinking.as_object_mut().unwrap().remove("block_binding");
-                assert_eq!(thinking, summarized, "{id}");
+                assert_eq!(body["thinking"], summarized, "{id}");
             }
             assert!(body.get("output_config").is_none(), "{id}");
             assert!(body.get("temperature").is_none(), "{id}");
@@ -1097,11 +1218,7 @@ mod tests {
                     // Any field beside `type` is a 400 with `between_tools`.
                     json!({"type":"between_tools"})
                 } else {
-                    json!({
-                        "type":"adaptive",
-                        "display":"summarized",
-                        "block_binding":{"prefix_mismatch_behavior":"drop_block"},
-                    })
+                    json!({"type":"adaptive","display":"summarized"})
                 };
                 assert_eq!(body["thinking"], expected);
                 assert_eq!(body["output_config"]["effort"], effort);
@@ -1110,11 +1227,7 @@ mod tests {
             let body = build_body(&model, &Context::default(), &StreamOptions::default());
             assert_eq!(
                 body["thinking"],
-                json!({
-                    "type":"adaptive",
-                    "display":"summarized",
-                    "block_binding":{"prefix_mismatch_behavior":"drop_block"},
-                })
+                json!({"type":"adaptive","display":"summarized"})
             );
         }
     }
@@ -1910,15 +2023,13 @@ mod tests {
 
     // One `anthropic-beta` header per request: the OAuth beta rides with a
     // bearer token (Anthropic rejects oat01 tokens without it), the binding
-    // beta rides with a body that sets `thinking.block_binding`, and a request
+    // beta rides with a model that checks thinking bindings, and a request
     // that needs both sends both in one value.
     #[test]
     fn beta_header_is_composed_once_from_auth_and_body() {
-        let plain = json!({"thinking": {"type": "adaptive"}});
-        let bound = json!({"thinking": {
-            "type": "adaptive",
-            "block_binding": {"prefix_mismatch_behavior": "drop_block"},
-        }});
+        let plain = json!({"thinking": {"type": "adaptive", "display": "summarized"}});
+        let mut bound = plain.clone();
+        assert!(request_block_drop(&mut bound));
         assert_eq!(beta_header(&plain, AuthMethod::ApiKey), None);
         assert_eq!(
             beta_header(&plain, AuthMethod::Bearer).as_deref(),
@@ -1934,68 +2045,361 @@ mod tests {
         );
         // A body without a thinking object at all (Opus 4.8 at its default).
         assert_eq!(beta_header(&json!({}), AuthMethod::ApiKey), None);
-    }
-
-    // The three models that reject a replayed thinking block whose history
-    // changed ask for the block to be dropped instead; every other model keeps
-    // its known shape, and `between_tools` takes no extra field.
-    #[test]
-    fn models_that_check_thinking_bindings_ask_for_drop_block() {
-        let binding = json!({"prefix_mismatch_behavior": "drop_block"});
+        // The models that check bindings send nothing extra by default.
         for id in ["claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5"] {
-            let model = Model {
-                id: id.into(),
-                ..anthropic_model()
-            };
-            for options in [
-                StreamOptions::default(),
-                StreamOptions {
-                    reasoning: Some(ThinkingLevel::High),
-                    ..Default::default()
-                },
-            ] {
-                let body = build_body(&model, &ctx_with_history(), &options);
-                assert_eq!(body["thinking"]["type"], "adaptive", "{id}");
-                assert_eq!(body["thinking"]["display"], "summarized", "{id}");
-                assert_eq!(body["thinking"]["block_binding"], binding, "{id}");
-            }
-        }
-        let sonnet_5_5_off = build_body(
-            &Model {
-                id: "claude-sonnet-5-5".into(),
-                ..anthropic_model()
-            },
-            &ctx_with_history(),
-            &StreamOptions {
-                reasoning: Some(ThinkingLevel::Off),
-                ..Default::default()
-            },
-        );
-        assert_eq!(sonnet_5_5_off["thinking"], json!({"type": "between_tools"}));
-        for id in [
-            "claude-fable-5",
-            "claude-opus-5",
-            "claude-opus-4-8",
-            "claude-sonnet-5",
-            "claude-sonnet-4-6",
-        ] {
             let body = build_body(
                 &Model {
                     id: id.into(),
                     ..anthropic_model()
                 },
                 &ctx_with_history(),
-                &StreamOptions {
-                    reasoning: Some(ThinkingLevel::High),
-                    ..Default::default()
-                },
+                &StreamOptions::default(),
             );
+            assert_eq!(beta_header(&body, AuthMethod::ApiKey), None, "{id}");
+        }
+    }
+
+    // The request as it is sent: auth and the beta header through the one
+    // helper the stream uses, so removing either call site fails here.
+    #[test]
+    fn authorize_sends_auth_and_the_composed_beta_header() {
+        let client = reqwest::Client::new();
+        let plain = json!({"thinking": {"type": "adaptive", "display": "summarized"}});
+        let mut bound = plain.clone();
+        assert!(request_block_drop(&mut bound));
+        let request = |method, body: &Value| {
+            authorize(
+                client.post("https://example.test/v1/messages"),
+                method,
+                "secret-1",
+                body,
+            )
+            .build()
+            .expect("request builds")
+        };
+        let bearer = request(AuthMethod::Bearer, &bound);
+        assert_eq!(
+            header_str(bearer.headers(), "authorization"),
+            Some("Bearer secret-1")
+        );
+        assert_eq!(
+            bearer.headers().get_all("anthropic-beta").iter().count(),
+            1,
+            "one beta header, never two"
+        );
+        assert_eq!(
+            header_str(bearer.headers(), "anthropic-beta"),
+            Some("oauth-2025-04-20,thinking-binding-controls-2026-08-01")
+        );
+        let key = request(AuthMethod::ApiKey, &plain);
+        assert_eq!(header_str(key.headers(), "x-api-key"), Some("secret-1"));
+        assert_eq!(header_str(key.headers(), "anthropic-beta"), None);
+        let oauth_only = request(AuthMethod::Bearer, &plain);
+        assert_eq!(
+            header_str(oauth_only.headers(), "anthropic-beta"),
+            Some(ANTHROPIC_OAUTH_BETA)
+        );
+    }
+
+    // No request asks for a mismatched block to be dropped until the account
+    // has rejected one: the control would discard reasoning on every edited
+    // turn on accounts that let the block through. Once it has, the control is
+    // added to an adaptive body, and a `between_tools` body falls back to
+    // stripping the blocks themselves.
+    #[test]
+    fn drop_control_is_opt_in_and_the_recovery_covers_both_shapes() {
+        for id in ["claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5"] {
+            let model = Model {
+                id: id.into(),
+                ..anthropic_model()
+            };
+            let body = build_body(&model, &ctx_with_history(), &StreamOptions::default());
             assert!(
                 body["thinking"].get("block_binding").is_none(),
                 "{id}: {}",
                 body["thinking"]
             );
+            assert_eq!(body["thinking"]["type"], "adaptive", "{id}");
         }
+
+        let mut adaptive = json!({"thinking": {"type": "adaptive", "display": "summarized"}});
+        assert!(request_block_drop(&mut adaptive));
+        assert_eq!(
+            adaptive["thinking"]["block_binding"],
+            json!({"prefix_mismatch_behavior": "drop_block"})
+        );
+        let mut between = json!({"thinking": {"type": "between_tools"}});
+        assert!(!request_block_drop(&mut between));
+        assert_eq!(between["thinking"], json!({"type": "between_tools"}));
+        assert!(!request_block_drop(&mut json!({"max_tokens": 1})));
+
+        let mut body = json!({"messages": [
+            {"role": "user", "content": [{"type": "text", "text": "q"}]},
+            {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "t", "signature": "s"},
+                {"type": "redacted_thinking", "data": "x"},
+                {"type": "text", "text": "a"}
+            ]},
+            {"role": "user", "content": "plain"}
+        ]});
+        assert!(strip_thinking_blocks(&mut body));
+        assert_eq!(
+            body["messages"][1]["content"],
+            json!([{"type": "text", "text": "a"}])
+        );
+        assert!(!strip_thinking_blocks(&mut body), "nothing left to strip");
+
+        assert!(names_binding_mismatch(
+            "messages.5.content.0: Invalid `signature` in `thinking` block. The block is bound to a different conversation. Remove the block, or set `thinking.block_binding.prefix_mismatch_behavior` to \"drop_block\"."
+        ));
+        assert!(!names_binding_mismatch(
+            "Invalid `signature` in `thinking` block."
+        ));
+        assert!(!names_binding_mismatch("max_tokens: must be at least 1"));
+
+        let key = credential_key("probe-secret");
+        assert_eq!(key, credential_key("probe-secret"));
+        assert_ne!(key, credential_key("other-secret"));
+        assert!(!binding_enforced(key));
+        remember_binding_enforced(key);
+        assert!(binding_enforced(key));
+        assert!(!binding_enforced(credential_key("other-secret")));
+    }
+
+    /// Answer one request per entry of `responses` on `listener`, reading each
+    /// request in full first, and hand back the raw requests so the test can
+    /// inspect the headers and bodies the adapter actually sent.
+    async fn serve_scripted(
+        listener: tokio::net::TcpListener,
+        responses: Vec<(u16, &'static str, &'static str)>,
+    ) -> Vec<String> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut requests = Vec::new();
+        for (status, content_type, body) in responses {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = Vec::new();
+            let mut chunk = [0u8; 4096];
+            let expected = loop {
+                let n = socket.read(&mut chunk).await.unwrap();
+                assert!(n > 0, "request ended before headers");
+                bytes.extend_from_slice(&chunk[..n]);
+                if let Some(end) = bytes.windows(4).position(|v| v == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&bytes[..end]);
+                    let length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap();
+                    break end + 4 + length;
+                }
+            };
+            while bytes.len() < expected {
+                let n = socket.read(&mut chunk).await.unwrap();
+                assert!(n > 0);
+                bytes.extend_from_slice(&chunk[..n]);
+            }
+            requests.push(String::from_utf8_lossy(&bytes).into_owned());
+            let reason = if status == 200 { "OK" } else { "Bad Request" };
+            let response = format!(
+                "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        }
+        requests
+    }
+
+    /// The recovery through the real request path: an account that rejects a
+    /// replayed thinking block answers the first request with the binding 400
+    /// and the adapter retries once with the drop control and its beta, then
+    /// streams the reply. The first request carried neither; the credential
+    /// is remembered so the next request asks up front.
+    #[tokio::test]
+    async fn a_rejected_replay_is_retried_once_with_the_drop_control() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let rejection = r#"{"type":"error","error":{"type":"invalid_request_error","message":"messages.1.content.0: Invalid `signature` in `thinking` block. The block is bound to a different conversation. Remove the block, or set `thinking.block_binding.prefix_mismatch_behavior` to \"drop_block\"."}}"#;
+        let reply = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-sonnet-5-5\",\"usage\":{\"input_tokens\":40,\"output_tokens\":1},\"input_transformations\":[{\"type\":\"thinking_dropped\",\"path\":\"messages.1.content.0\",\"reason\":\"prefix_binding_mismatch\"}]}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"recovered\"}}\n\n",
+            "event: content_block_stop\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        );
+        let server = tokio::spawn(serve_scripted(
+            listener,
+            vec![
+                (400, "application/json", rejection),
+                (200, "text/event-stream", reply),
+            ],
+        ));
+        let model = Model {
+            base_url: format!("http://{address}"),
+            ..Model::anthropic_claude_sonnet_5_5()
+        };
+        let context = Context {
+            messages: vec![
+                Message::user_text("first"),
+                Message::Assistant(AssistantMessage {
+                    content: vec![
+                        Content::Thinking {
+                            thinking: "earlier reasoning".into(),
+                            thinking_signature: Some("sig-1".into()),
+                        },
+                        Content::text("earlier answer"),
+                    ],
+                    api: "anthropic-messages".into(),
+                    provider: "anthropic".into(),
+                    model: "claude-sonnet-5-5".into(),
+                    usage: Usage::default(),
+                    stop_reason: StopReason::Stop,
+                    error_message: None,
+                    timestamp: 0,
+                }),
+                Message::user_text("second"),
+            ],
+            ..Default::default()
+        };
+        let secret = format!("loopback-{}", address.port());
+        let options = StreamOptions {
+            api_key: Some(secret.clone()),
+            ..Default::default()
+        };
+        assert!(!binding_enforced(credential_key(&secret)));
+        let probe = async {
+            let mut stream = crate::stream_simple(&model, &context, &options)
+                .await
+                .expect("the rejection is recovered before the stream opens");
+            let mut done = None;
+            while let Some(event) = stream.next().await {
+                if let AssistantMessageEvent::Done { message, .. } = event.unwrap() {
+                    done = Some(message);
+                }
+            }
+            let requests = server.await.unwrap();
+            assert_eq!(requests.len(), 2, "one retry, no more");
+            let (first, second) = (&requests[0], &requests[1]);
+            assert!(
+                !first.contains("block_binding"),
+                "nothing is asked until rejected"
+            );
+            assert!(!first.contains(ANTHROPIC_BINDING_BETA));
+            assert!(
+                second.contains("\"block_binding\":{\"prefix_mismatch_behavior\":\"drop_block\"}")
+            );
+            assert!(second.contains(ANTHROPIC_BINDING_BETA));
+            assert!(
+                second.contains("\"signature\":\"sig-1\""),
+                "the block is left for the API to drop, not stripped"
+            );
+            let message = done.expect("the retried request completes");
+            assert_eq!(message.content[0].as_text(), Some("recovered"));
+            assert!(binding_enforced(credential_key(&secret)));
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), probe)
+            .await
+            .unwrap();
+    }
+
+    /// With `between_tools` the control cannot be carried, so the recovery
+    /// strips the replayed thinking blocks instead and sends no beta.
+    #[tokio::test]
+    async fn a_rejected_replay_under_between_tools_is_retried_without_the_blocks() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let rejection = r#"{"type":"error","error":{"type":"invalid_request_error","message":"messages.1.content.0: Invalid `signature` in `thinking` block. The block is bound to a different conversation."}}"#;
+        let reply = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-sonnet-5-5\",\"usage\":{\"input_tokens\":40,\"output_tokens\":1}}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"stripped\"}}\n\n",
+            "event: content_block_stop\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        );
+        let server = tokio::spawn(serve_scripted(
+            listener,
+            vec![
+                (400, "application/json", rejection),
+                (200, "text/event-stream", reply),
+            ],
+        ));
+        let model = Model {
+            base_url: format!("http://{address}"),
+            ..Model::anthropic_claude_sonnet_5_5()
+        };
+        let context = Context {
+            messages: vec![
+                Message::user_text("first"),
+                Message::Assistant(AssistantMessage {
+                    content: vec![
+                        Content::Thinking {
+                            thinking: "earlier reasoning".into(),
+                            thinking_signature: Some("sig-2".into()),
+                        },
+                        Content::text("earlier answer"),
+                    ],
+                    api: "anthropic-messages".into(),
+                    provider: "anthropic".into(),
+                    model: "claude-sonnet-5-5".into(),
+                    usage: Usage::default(),
+                    stop_reason: StopReason::Stop,
+                    error_message: None,
+                    timestamp: 0,
+                }),
+                Message::user_text("second"),
+            ],
+            ..Default::default()
+        };
+        let options = StreamOptions {
+            api_key: Some(format!("loopback-off-{}", address.port())),
+            reasoning: Some(ThinkingLevel::Off),
+            ..Default::default()
+        };
+        let probe = async {
+            let mut stream = crate::stream_simple(&model, &context, &options)
+                .await
+                .expect("recovered");
+            let mut done = None;
+            while let Some(event) = stream.next().await {
+                if let AssistantMessageEvent::Done { message, .. } = event.unwrap() {
+                    done = Some(message);
+                }
+            }
+            let requests = server.await.unwrap();
+            assert_eq!(requests.len(), 2);
+            assert!(requests[0].contains("\"signature\":\"sig-2\""));
+            assert!(requests[0].contains("between_tools"));
+            assert!(
+                !requests[1].contains("\"type\":\"thinking\""),
+                "blocks stripped"
+            );
+            assert!(requests[1].contains("earlier answer"), "text stays");
+            assert!(!requests[1].contains("block_binding"));
+            assert!(!requests[1].contains(ANTHROPIC_BINDING_BETA));
+            assert_eq!(
+                done.expect("completes").content[0].as_text(),
+                Some("stripped")
+            );
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), probe)
+            .await
+            .unwrap();
     }
 
     // A `message_start` that carries `input_transformations` decodes, so a

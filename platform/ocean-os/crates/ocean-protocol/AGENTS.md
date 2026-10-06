@@ -51,20 +51,29 @@ This crate owns the multi-provider LLM wire protocol layer for Anthropic, OpenAI
 - Fable 5.1, Opus 5.5 and Sonnet 5.5 bind each thinking block to the
   conversation that produced it (system prompt, tool set, earlier messages)
   and, on Anthropic accounts created on or after 2026-08-31, reject a request
-  that replays a block whose prefix changed. Ocean changes that prefix: a
-  budget notice on the system prompt and withdrawn tools on a turn's final
-  round, a growing tool list in dynamic-tool mode, trimmed oldest messages when
-  the window fills, and re-read memories in the system prompt. Their adaptive
-  requests therefore set `thinking.block_binding.prefix_mismatch_behavior` to
-  `drop_block` and send the `thinking-binding-controls-2026-08-01` beta
-  (`beta_header` composes the one `anthropic-beta` value with the OAuth beta);
-  `between_tools` takes no extra field. A dropped or tolerated block arrives in
-  `message_start.input_transformations` and is logged at warn with its path and
-  reason. Live-verified on the subscription route for all three models; the
-  ocean-agent probe `live_edited_history_still_completes_with_replayed_thinking`
-  reproduces the drop. Making the harness append-only (freeze the system prompt
-  and tools, replay nothing after a compaction) would stop losing that
-  reasoning; until then, the drop is the documented safe setting.
+  that replays a block whose prefix changed. Ocean changes that prefix often:
+  the system prompt carries the git branch and commit and is rebuilt every
+  turn, so every commit the agent makes invalidates every earlier block; the
+  final round of a turn appends a budget notice and withdraws the tools;
+  `trim_to_context_window` drops the oldest messages; memories, re-read
+  project instructions, the client profile and room context move it too.
+  Nothing is sent for this until the account rejects a replay: on an account
+  the check is not enforced on, the block is let through and the model keeps
+  the reasoning, and the binding beta alone already makes the subscription
+  route drop such blocks (observed live, 2026-10-06), so neither it nor the
+  control is a free observer. On the specific 400 (`names_binding_mismatch`:
+  "bound to a different conversation" or the control's name) the adapter
+  retries that one request once, side-effect free since the rejection comes
+  before any output: an adaptive body gains
+  `thinking.block_binding.prefix_mismatch_behavior: drop_block` and the
+  `thinking-binding-controls-2026-08-01` beta (composed into the one
+  `anthropic-beta` value with the OAuth beta by `beta_header`/`authorize`),
+  and a `between_tools` body, which can carry no control, has its thinking
+  blocks stripped instead. The credential is remembered for the process, so
+  later requests ask for the drop up front. Any block the API reports in
+  `message_start.input_transformations` is logged at warn with path and
+  reason. The lasting fix is an append-only harness (freeze the system prompt
+  and tools, replay nothing after a compaction), which is runtime work.
 - Shared `ThinkingLevel::Max` serializes as max. Current adaptive Claude and
   Codex GPT-6/5.6 encode max directly; older provider vocabularies retain their
   existing bounded highest-effort fallback.

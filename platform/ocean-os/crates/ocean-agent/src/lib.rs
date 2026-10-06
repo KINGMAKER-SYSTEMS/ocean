@@ -6347,24 +6347,40 @@ done
     /// Explicit operator diagnostic for the Anthropic thinking-binding check:
     /// two requests to one exact model id (`OCEAN_MODEL_PROBE_IDS`), the second
     /// replaying the first's thinking block under a changed system prompt.
-    /// On a model that checks bindings the request must still complete,
-    /// because the encoder asks for a mismatched block to be dropped; the
-    /// adapter's warn log names the dropped or tolerated block, which also
-    /// tells an operator whether the account is enforced. Fixed prompts, no
-    /// tools, no session, no store, no credential refresh.
+    /// The request must complete either way: cleanly on an account the check
+    /// is not enforced on, or through the adapter's recovery on one it is (the
+    /// 400, the retry with the block dropped, and the API's `thinking_dropped`
+    /// report in the warn log). The probe prints which, so it also tells an
+    /// operator whether the account is enforced. Fixed prompts, no tools, no
+    /// session, no store, no credential refresh.
     #[tokio::test]
     #[ignore = "requires OCEAN_LIVE_MODEL_PROBE=1, OCEAN_MODEL_PROBE_IDS=<one id> and a configured account"]
     async fn live_edited_history_still_completes_with_replayed_thinking() {
         use futures::StreamExt;
+        use std::io::Write;
         assert_eq!(std::env::var("OCEAN_LIVE_MODEL_PROBE").as_deref(), Ok("1"));
-        // The adapter reports what the API did to the request in its log, so
-        // show warnings (and whatever RUST_LOG asks for) on the probe's output.
+        // The adapter reports what the API did to the request in its log.
+        // Keep a copy to assert on, and echo it to the probe's output.
+        static LOG: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
+        struct Sink;
+        impl Write for Sink {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if let Ok(mut log) = LOG.lock() {
+                    log.extend_from_slice(bytes);
+                }
+                std::io::stdout().write_all(bytes)?;
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                std::io::stdout().flush()
+            }
+        }
         let _ = tracing_subscriber::fmt()
             .with_env_filter(
                 tracing_subscriber::EnvFilter::try_from_default_env()
                     .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("ocean_protocol=warn")),
             )
-            .with_test_writer()
+            .with_writer(|| Sink)
             .try_init();
         let id = std::env::var("OCEAN_MODEL_PROBE_IDS").expect("one exact model id");
         assert!(!id.contains(','), "probe one id at a time");
@@ -6474,15 +6490,30 @@ done
         };
         match tokio::time::timeout(std::time::Duration::from_secs(120), probe).await {
             Ok(Ok((replayed_thinking, text, tokens))) => {
-                println!(
-                    "BINDING_PROBE {} {} completed replayed_thinking={replayed_thinking} tokens={tokens} reply={:?}",
-                    config.selection.provider.as_str(),
-                    id,
-                    text.trim()
-                );
                 assert!(
                     replayed_thinking,
                     "the first reply carried no signed thinking block, so nothing was replayed; rerun"
+                );
+                let log = LOG
+                    .lock()
+                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                    .unwrap_or_default();
+                let recovered = log.contains("retrying with the block dropped");
+                let reported = log.contains("thinking_dropped");
+                println!(
+                    "BINDING_PROBE {} {} completed account={} tokens={tokens} reply={:?}",
+                    config.selection.provider.as_str(),
+                    id,
+                    if recovered {
+                        "enforced"
+                    } else {
+                        "not_enforced"
+                    },
+                    text.trim()
+                );
+                assert!(
+                    !recovered || reported,
+                    "the retry completed but the API did not report the dropped block; log:\n{log}"
                 );
             }
             Ok(Err(error)) => panic!("BINDING_PROBE {id} failed: {error}"),
