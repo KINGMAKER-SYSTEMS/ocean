@@ -1045,6 +1045,39 @@ Closed the leftovers from the review that acknowledged the thinking-binding reco
 
 Validation: ocean-protocol (187 plus 5) passes; clippy with warnings denied on ocean-protocol and ocean-agent tests, rustfmt check pass. The strip test covers the thinking-only assistant turn. No provider was called.
 _________________________________________________________________________________
+_________________________________________________________________________________
+time: [15:42] [06-10-26]
+agent: [codex] [gpt-6]
+worktree: [port/output-economy] [/Users/risingtidesdev/.codex/worktrees/factory-pr49-artifact-debug/ocean]
+type: [bug fix] [issues #50, #53]
+area: [backend] [testing] [privacy]
+
+While preparing the output-economy lease change for release, review found that
+its derived Debug output recursively formatted the shared artifact store,
+including unrelated session output bodies. Replaced that formatter with a
+redacted view containing only the lease id and byte count, and added a sentinel
+regression test. Kept the public release record limited to this repository's
+change; source-side commit and review history remain outside the public ledger.
+The output minimizer remains default-off, with no production setter.
+
+Validation: `cargo fmt --all -- --check`, focused `cargo test -p ocean-runtime artifact_lease_debug_does_not_expose_session_artifact_bodies -- --nocapture` (1 passed), `cargo xtask docs-check` (PASS; 30 packages, 153 Markdown files, 170 local links), and `git diff --check` pass.
+_________________________________________________________________________________
+time: [07:25] [06-10-26]
+agent: [Claude Code] [Claude Opus 5.5]
+worktree: [fix/codex-version-gpt-6-1-sol-v2]
+type: [fix]
+area: [protocol]
+
+The ChatGPT Codex backend version-gates newly released models. main sent
+CODEX_VERSION 0.154.0, and the backend refused gpt-6.1-sol ("unsupported for
+the ChatGPT account") while the personal-repo build at 0.159.2 served it with
+the same credential. Raised CODEX_VERSION to 0.159.2 (as Risingtides-dev/ocean-os
+#529). Validation: main + this change, prebuilt, on a spare port with a working
+ChatGPT sign-in: gpt-6.1-sol, glm-5.3 and deepseek-v4-pro each ran a bash tool
+call and answered; session model = requested, no reroute. ocean-protocol codex
+tests 36/36, ocean-providers 67/67.
+
+_________________________________________________________________________________
 
 _________________________________________________________________________________
 time: [12:20pm] [06-10-26]
@@ -1067,3 +1100,12 @@ area: [backend] [automations]
 
 The operator asked for Ocean restored immediately, before the installer fix landed. I did the installer's promotion step by hand using a locked release build from clean origin/main 32bd82a9 (`--features legacy-chromium`): staged ~/.local/libexec/ocean-daemon/ocean-daemon-32bd82a93f27..., installed main's deploy/ocean-daemon.sh as launch.sh (previous launcher kept as launch.sh.prev-0abb558179af), flipped `current`, and ran `launchctl kickstart -k`. The prior artifact ocean-daemon-0abb558179af is kept for rollback. /health reports rev 32bd82a93f27, /ready is ok, /v1/models lists glm/glm-5.3 and openai-codex/gpt-5.6-sol as ready, and a live glm/glm-5.3 turn returned ok. Future installs should go through ops/install-ocean-daemon.sh once this branch merges.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [16:45] [07-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/repair-ocean39-20261007] [/private/tmp/ocean-repair-39-20261007]
+type: [bug report]
+area: [automations] [testing]
+
+Reconciled installer PR #39 with current public main, preserving both ledger histories. The modern enabled fixture reproduces exit 70 on the unchanged main parser; the repaired parser passes all 14 non-live installer fixtures and bash syntax validation, including preservation of explicit disabled overrides. Updated the component devlog to document both supported launchd vocabularies; root ownership and child indexes remain unchanged. This is source/fixture validation only: no live launchd, daemon restart, provider credential, or database operation occurred. Hosted build and fresh reviewer acknowledgement remain required before merge.
