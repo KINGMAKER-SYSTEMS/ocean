@@ -1077,3 +1077,13 @@ ChatGPT sign-in: gpt-6.1-sol, glm-5.3 and deepseek-v4-pro each ran a bash tool
 call and answered; session model = requested, no reroute. ocean-protocol codex
 tests 36/36, ocean-providers 67/67.
 _________________________________________________________________________________
+_________________________________________________________________________________
+time: [16:39] [07-10-26]
+agent: [codex] [gpt-6]
+worktree: [codex/fix-room-alias-envelope-fixtures] [/Users/smathdaddy-macbook/.codex/worktrees/factory-issue42-current/ocean]
+type: [bug fix] [issue #42]
+area: [backend] [testing]
+
+Fresh validation against `origin/main` `aa1e317b2e25d39f95463d08305570c073c7a55b` found that two persistent-room HTTP regression tests still expected the pre-alias detail/snapshot envelopes, although the current daemon contract and route include bounded `aliases` and `aliases_truncated`. Updated those exact-envelope fixtures to require the documented empty list and `false` completeness flag. The third close-tail test raced its task startup against room closure: receiver-count observation did not prove durable replay and the open-room check had completed. It now closes at the existing replay-ready seam, then verifies the queued close marker and stream termination. Production behavior is unchanged.
+
+Validation: all three issue tests pass; the close-tail test also passed five consecutive focused runs. The full serialized daemon suite passes (910 passed, 0 failed), as do `cargo fmt --all -- --check` and `git diff --check`. Independent adversarial review found no actionable issue. Changes are on a factory-owned isolated branch and remain unmerged; required hosted builds and final-head review are pending. Global merge hold #54 remains active.

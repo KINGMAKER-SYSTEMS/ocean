@@ -9809,9 +9809,12 @@ env = { FIXTURE = "1" }
         .unwrap();
         join_participant(&state, &key, "alice", RoomParticipantKind::Human, "Alice");
 
-        let hints = state.room_wakes.subscribe();
-        let mut stream = room_message_tail(state.clone(), key.clone(), None, hints, None);
-        wait_for_wake_receivers(&state, 1).await;
+        // Wait until replay has been emitted and the tail has checked the room
+        // is still open before racing its close marker against the live wait.
+        // Merely observing a broadcast receiver is insufficient: the task may
+        // not have started replay yet, in which case it sees only a closed room
+        // and exits before yielding either durable row.
+        let (mut stream, release) = paused_tail(&state, &key, None).await;
 
         let (status, _) = room_close(
             State(state.clone()),
@@ -9823,6 +9826,9 @@ env = { FIXTURE = "1" }
         )
         .await;
         assert_eq!(status, StatusCode::OK);
+        release
+            .send(())
+            .expect("release replayed tail into live wait");
 
         // The close marker still arrives — after the join marker the initial
         // catch-up already replayed.

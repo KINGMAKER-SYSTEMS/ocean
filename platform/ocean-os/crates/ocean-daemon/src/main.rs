@@ -13079,6 +13079,8 @@ mod tests {
             &detail,
             &[
                 "access",
+                "aliases",
+                "aliases_truncated",
                 "agent_owners",
                 "ok",
                 "room",
@@ -13090,6 +13092,8 @@ mod tests {
         assert_eq!(detail["ok"], true);
         assert_eq!(detail["has_more"], false);
         assert!(detail["next_seq"].is_null());
+        assert_eq!(detail["aliases"], json!([]));
+        assert_eq!(detail["aliases_truncated"], false);
         assert_eq!(detail["room"]["id"], "lifecycle-room");
         assert_eq!(detail["room"]["name"], "  Verbatim Room Name  ");
         assert!(detail["room"].get("workspace_root").is_none());
@@ -13166,6 +13170,8 @@ mod tests {
             &detail,
             &[
                 "access",
+                "aliases",
+                "aliases_truncated",
                 "agent_owners",
                 "ok",
                 "room",
@@ -13177,6 +13183,8 @@ mod tests {
         assert_eq!(detail["ok"], true);
         assert_eq!(detail["has_more"], false);
         assert!(detail["next_seq"].is_null());
+        assert_eq!(detail["aliases"], json!([]));
+        assert_eq!(detail["aliases_truncated"], false);
         let transcript = detail["transcript"].as_array().unwrap();
         assert_eq!(transcript.len(), 3);
         assert_eq!(
@@ -21315,6 +21323,8 @@ mod tests {
             &snapshot,
             &[
                 "access",
+                "aliases",
+                "aliases_truncated",
                 "closed",
                 "ok",
                 "room",
@@ -21329,6 +21339,8 @@ mod tests {
         assert_eq!(snapshot["closed"], true);
         assert_eq!(snapshot["room"]["id"], "closed-audit");
         assert_eq!(snapshot["room"]["name"], "Closed Audit");
+        assert_eq!(snapshot["aliases"], json!([]));
+        assert_eq!(snapshot["aliases_truncated"], false);
         // Closed room shows exact Local access projection (no extra keys).
         assert_eq!(snapshot["access"], json!({"state": "local"}));
         let expected_participants = json!([{
