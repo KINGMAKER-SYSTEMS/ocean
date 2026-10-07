@@ -19,3 +19,5 @@ getrandom.workspace = true
 tracing.workspace = true
 ocean-providers.workspace = true
 parking_lot.workspace = true
+uuid.workspace = true
+jsonwebtoken = { version = "10.4", features = ["rust_crypto"] }

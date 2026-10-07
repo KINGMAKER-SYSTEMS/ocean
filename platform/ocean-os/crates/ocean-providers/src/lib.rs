@@ -73,6 +73,8 @@ pub enum ProviderId {
     OpenAi,
     /// OpenAI Codex over a ChatGPT subscription OAuth token (Responses API).
     OpenAiCodex,
+    /// ChatGPT-plan OAuth over the public OpenAI Responses API.
+    OpenAiChatGpt,
     Anthropic,
     /// Claude Code over Anthropic Messages wire protocol, authenticated with a
     /// Claude Code OAuth bearer token (not an x-api-key).
@@ -98,6 +100,7 @@ impl ProviderId {
             Self::DeepSeek => "deepseek",
             Self::OpenAi => "openai",
             Self::OpenAiCodex => "openai-codex",
+            Self::OpenAiChatGpt => "openai-chatgpt",
             Self::Anthropic => "anthropic",
             Self::ClaudeCode => "claude-code",
             Self::MiniMax => "minimax",
@@ -117,6 +120,7 @@ impl ProviderId {
             // Codex uses the OAuth token from auth.json / Codex CLI auth, not
             // an env API key.
             Self::OpenAiCodex => &[],
+            Self::OpenAiChatGpt => &[],
             // Claude Code env credentials are OAuth bearer access tokens.
             Self::ClaudeCode => &["OCEAN_CLAUDE_CODE_ACCESS_TOKEN", "CLAUDE_CODE_ACCESS_TOKEN"],
             Self::Anthropic => &["OCEAN_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"],
@@ -953,6 +957,28 @@ pub fn model_routes() -> Vec<ModelRoute> {
             aliases: Vec::new(),
         });
     }
+    // ChatGPT-plan choices must stay qualified: the same GPT ids also route
+    // through Codex and the metered OpenAI API, so adding them to `known_models`
+    // would make its bare-id contract ambiguous.
+    for (model_id, label) in [
+        ("gpt-6.1-sol", "GPT-6.1 Sol (ChatGPT)"),
+        ("gpt-6-sol", "GPT-6 Sol (ChatGPT)"),
+        ("gpt-6-luna", "GPT-6 Luna (ChatGPT)"),
+        ("gpt-6-astra", "GPT-6 Astra (ChatGPT)"),
+    ] {
+        routes.push(ModelRoute {
+            id: format!("openai-chatgpt/{model_id}"),
+            model_id: model_id.to_string(),
+            provider: "openai-chatgpt".into(),
+            label: label.into(),
+            ready: false,
+            effort_levels: model_effort_levels(model_id)
+                .iter()
+                .map(|level| (*level).into())
+                .collect(),
+            aliases: Vec::new(),
+        });
+    }
     routes
 }
 
@@ -999,6 +1025,27 @@ pub fn resolve_model_selection(env: &ProviderEnv) -> Result<ModelSelection, Prov
     let Some(chosen) = chosen else {
         return Err(ProviderConfigError::NoModelSelected);
     };
+    // A qualified picker route is an explicit provider selection. Resolve it
+    // before ambient OCEAN_PROVIDER so a saved ChatGPT-plan choice cannot be
+    // silently routed through Codex or a metered API key.
+    if chosen.contains('/') {
+        if let Some(route) = catalog_model(chosen) {
+            return model_for_explicit_provider(&route.provider, &route.id, env);
+        }
+    }
+    // ChatGPT-plan exposes an account-scoped catalog, so newly listed slugs
+    // cannot be bundled into this binary's static catalog. Preserve the exact
+    // slug from the qualified route and let the public API validate it.
+    if let Some(("openai-chatgpt", model)) = chosen.split_once('/') {
+        if !model.is_empty()
+            && !model.contains('/')
+            && model
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        {
+            return model_for_explicit_provider("openai-chatgpt", model, env);
+        }
+    }
     let model = normalize_model_id(chosen);
     if let Some((provider, id)) = model.split_once('/') {
         if provider.is_empty() || id.is_empty() || id.contains('/') {
@@ -1546,6 +1593,13 @@ fn model_for_explicit_provider(
             400_000,
             128_000,
         )),
+        "openai-chatgpt" => Ok(model_selection(
+            ProviderId::OpenAiChatGpt,
+            model,
+            OPENAI_BASE_URL,
+            1_050_000,
+            128_000,
+        )),
         "anthropic" => Ok(model_selection(
             ProviderId::Anthropic,
             model,
@@ -1667,6 +1721,21 @@ fn resolve_credential(
             source: auth.source,
             kind: CredentialKind::OAuthBearer,
         }));
+    }
+    if matches!(provider, ProviderId::OpenAiChatGpt) {
+        if let Some(path) = env.auth_file.as_ref().filter(|path| path.exists()) {
+            let json = read_auth_json(path)?;
+            if let Some(token) = oauth_access_token(&json, "openai-chatgpt") {
+                return Ok(Some(ResolvedCredential {
+                    secret: SecretString::new(token).expect("OAuth token is non-empty"),
+                    source: CredentialSource::OceanAuthFile {
+                        path: path.display().to_string(),
+                    },
+                    kind: CredentialKind::OAuthBearer,
+                }));
+            }
+        }
+        return Ok(None);
     }
 
     // 1. Plain API keys and provider-specific env credentials.
@@ -2539,6 +2608,33 @@ mod tests {
                 known.id, selection.model, known.id, selection.model,
             );
         }
+    }
+
+    #[test]
+    fn qualified_chatgpt_plan_route_overrides_ambient_provider() {
+        let route = "openai-chatgpt/gpt-6-astra";
+        let selection = resolve_model_selection(&env(&[
+            ("OCEAN_MODEL", route),
+            ("OCEAN_PROVIDER", "openai"),
+        ]))
+        .unwrap();
+        assert_eq!(selection.provider, ProviderId::OpenAiChatGpt);
+        assert_eq!(selection.model, "gpt-6-astra");
+        assert_eq!(selection.base_url, OPENAI_BASE_URL);
+        assert!(model_routes().iter().any(|candidate| candidate.id == route));
+    }
+
+    #[test]
+    fn dynamically_listed_chatgpt_plan_slug_is_routable_without_static_catalog_entry() {
+        let selection = resolve_model_selection(&env(&[
+            ("OCEAN_MODEL", "openai-chatgpt/gpt-next-preview"),
+            ("OCEAN_PROVIDER", "openai-codex"),
+        ]))
+        .unwrap();
+        assert_eq!(selection.provider, ProviderId::OpenAiChatGpt);
+        assert_eq!(selection.model, "gpt-next-preview");
+        assert_eq!(selection.base_url, OPENAI_BASE_URL);
+        assert!(catalog_model("openai-chatgpt/gpt-next-preview").is_none());
     }
 
     #[test]

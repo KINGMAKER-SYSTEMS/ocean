@@ -31,6 +31,13 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   selections. Session creation/config accept both legacy ids and qualified
   catalog routes, persist the wire model/provider pair, and reconstruct the
   qualified route for resumed turns through `SessionModelConfig::model_spec`.
+- ChatGPT-plan choices are account-specific: query public `/v1/models` with
+  the `openai-chatgpt` bearer token, preserve the response's listed order and
+  `display_name`, and expose only `models[]` entries with
+  `visibility:"list"` as provider-qualified routes. These routes may use
+  dynamically listed slugs that are absent from the bundled catalog. Failure
+  to fetch leaves bundled ChatGPT routes unready; a stored credential alone
+  never proves model entitlement.
 - Restart the daemon only by specific PID; do not use blind `pkill` sweeps.
 - HTTP turn routes must resolve effective cwd from client cwd/project metadata and must never fall back to daemon process cwd.
 - Do not bypass runtime permission gates from daemon route code.

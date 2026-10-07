@@ -84,7 +84,7 @@ pub(crate) struct ProviderLogins {
     /// (`OCEAN_AUTH_FILE`, then the default config path). Tests pin a temp file.
     auth_file: Option<PathBuf>,
     attempts: Mutex<HashMap<&'static str, Attempt>>,
-    operations: [Arc<tokio::sync::Mutex<()>>; 2],
+    operations: [Arc<tokio::sync::Mutex<()>>; 3],
     #[cfg(test)]
     provider_env: ProviderEnv,
 }
@@ -107,6 +107,7 @@ impl ProviderLogins {
             &self.operations[match provider {
                 OAuthProvider::Claude => 0,
                 OAuthProvider::Codex => 1,
+                OAuthProvider::ChatGptPlan => 2,
             }],
         )
     }
@@ -227,13 +228,15 @@ fn provider_id(provider: OAuthProvider) -> ProviderId {
     match provider {
         OAuthProvider::Claude => ProviderId::ClaudeCode,
         OAuthProvider::Codex => ProviderId::OpenAiCodex,
+        OAuthProvider::ChatGptPlan => ProviderId::OpenAiChatGpt,
     }
 }
 
 fn display_label(provider: OAuthProvider) -> &'static str {
     match provider {
         OAuthProvider::Claude => "Claude (Pro/Max plan)",
-        OAuthProvider::Codex => "Codex (ChatGPT plan)",
+        OAuthProvider::Codex => "Codex OAuth",
+        OAuthProvider::ChatGptPlan => "ChatGPT plan",
     }
 }
 

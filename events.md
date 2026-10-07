@@ -1077,3 +1077,34 @@ ChatGPT sign-in: gpt-6.1-sol, glm-5.3 and deepseek-v4-pro each ran a bash tool
 call and answered; session model = requested, no reroute. ocean-protocol codex
 tests 36/36, ocean-providers 67/67.
 _________________________________________________________________________________
+time: [17:42] [10-07-26]
+agent: [Codex] [GPT-6.1]
+worktree: [codex/chatgpt-plan-responses-provider]
+type: [fix]
+area: [backend]: ChatGPT-plan OAuth and model routing
+
+Investigated Ocean TUI model failures for issue #61. Added a distinct Sign in
+with ChatGPT OAuth registration, token refresh, and public Responses route while
+leaving Codex OAuth separate. The model picker now reads the account's
+`models[].slug`, `display_name`, and `visibility` catalog, supports dynamically
+listed slugs, and refreshes an expired ChatGPT token before discovery. Live
+account sign-in/inference remains unverified pending user authorization.
+
+Validation: `cargo fmt --all -- --check`; targeted OAuth, provider, protocol,
+agent refresh, daemon model-catalog, and TUI login tests; scoped `cargo check`
+for ocean-oauth, ocean-providers, ocean-protocol, ocean-agent, ocean-daemon, and
+ocean-tui. All recorded checks passed.
+_________________________________________________________________________________
+
+time: [17:45] [10-07-26]
+agent: [Codex] [GPT-6.1]
+worktree: [codex/chatgpt-plan-responses-provider]
+type: [fix]
+area: [testing]: OAuth callback recovery
+
+Follow-up to issue #61: a forged callback with the wrong OAuth state returned an
+error but also consumed the pending login's one-shot result sender. It now rejects
+the request without ending the login, and regression tests prove a subsequent
+valid callback still completes. `cargo test --locked -p ocean-oauth
+server::tests:: -- --test-threads=1`, formatting check, and `git diff --check` pass.
+_________________________________________________________________________________

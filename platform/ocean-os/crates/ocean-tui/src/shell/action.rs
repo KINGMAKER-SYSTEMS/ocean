@@ -24,6 +24,8 @@ pub enum LoginTarget {
     Claude,
     /// Codex / ChatGPT subscription OAuth.
     Codex,
+    /// ChatGPT plan OAuth for the public Responses API.
+    ChatGptPlan,
 }
 
 /// Sibling surface targeted by `/web` or `/desk`. The handoff opens the
@@ -271,7 +273,7 @@ pub enum Action {
     /// `/thinking <level>` — override the thinking level for subsequent turns
     /// this session (`None` = daemon default; rides `AgentTurnRequest`).
     SetThinking(Option<ThinkingLevel>),
-    /// `/login [claude|codex]` — open a browser login flow for provider OAuth.
+    /// `/login [claude|codex|chatgpt]` — open a browser login flow for provider OAuth.
     Login(LoginTarget),
     /// Terminal status of an async `/login` OAuth flow (begin → browser → token
     /// exchange). Lands the final success/failure message in the status line and

@@ -14,9 +14,10 @@ This crate owns browser OAuth 2.0 + PKCE login for provider subscriptions: bind 
 
 - Flow constants (endpoints, client ids, scopes, callback ports) mirror OMP's working implementation (`@oh-my-pi/pi-ai` `registry/oauth/{anthropic,openai-codex}.ts`). Do not change them without re-verifying against a working client.
 - Claude binds port 54545 with ephemeral fallback; Codex is pinned to `http://localhost:1455/auth/callback` — no fallback, since OpenAI validates the registered redirect URI.
-- Written blocks (`claude-code`, `openai-codex`) must stay consumable by `ocean-providers` credential resolution AND `ocean-agent::oauth_refresh` (`type:"oauth"`, `access`, `refresh`, `expires` in epoch ms, `accountId` for Codex).
+- ChatGPT-plan login is a separate Sign in with ChatGPT public-client flow for the public Responses API. First registration uses `dynamic_agent_client`; retain the callback-issued client id, stable `ext_agent_host_id`, validated OIDC subject/id token, and granted scopes in `openai-chatgpt`. Use loopback `127.0.0.1`, PKCE/state/nonce, request `chatgpt.tokens.use.direct`, and fail closed if that scope is absent. Returning sign-in reuses the issued client id and must match the saved verified subject. See [Sign in with ChatGPT](https://developers.openai.com/siwc/token-sharing-open-source/sign-in).
+- Written blocks (`claude-code`, `openai-codex`, `openai-chatgpt`) must stay consumable by `ocean-providers` credential resolution AND `ocean-agent::oauth_refresh` (`type:"oauth"`, `access`, `refresh`, `expires` in epoch ms; `accountId` for Codex; issued registration/account metadata for ChatGPT plan).
 - This crate performs fresh logins only. Token refresh lives in `ocean-agent::oauth_refresh` / `ocean-protocol::oauth` — never duplicate it here.
-- Token endpoints honor the same env overrides as the refresh pass: `OCEAN_OAUTH_ANTHROPIC_TOKEN_URL`, `OCEAN_OAUTH_OPENAI_TOKEN_URL`.
+- Token endpoints honor the same env overrides as the refresh pass: `OCEAN_OAUTH_ANTHROPIC_TOKEN_URL`, `OCEAN_OAUTH_OPENAI_TOKEN_URL`, `OCEAN_OAUTH_CHATGPT_TOKEN_URL`.
 - Auth-file writers fresh-read/merge under `ocean-providers::lock_auth_file` and
   use its guard-bound unique create-new publisher, Unix0600 at creation. Lock
   failure/timeout refuses the write; unrelated provider blocks survive. Login

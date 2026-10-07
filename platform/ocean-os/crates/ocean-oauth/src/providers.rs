@@ -41,10 +41,18 @@ pub(crate) const CODEX: ProviderConsts = ProviderConsts {
     scope: "openid profile email offline_access api.connectors.read api.connectors.invoke",
 };
 
+pub(crate) const CHATGPT_PLAN: ProviderConsts = ProviderConsts {
+    client_id: "dynamic_agent_client",
+    authorize_url: "https://auth.openai.com/api/accounts/authorize",
+    token_url: "https://auth.openai.com/api/accounts/oauth/token",
+    scope: "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct",
+};
+
 pub(crate) fn consts(provider: OAuthProvider) -> &'static ProviderConsts {
     match provider {
         OAuthProvider::Claude => &ANTHROPIC,
         OAuthProvider::Codex => &CODEX,
+        OAuthProvider::ChatGptPlan => &CHATGPT_PLAN,
     }
 }
 
@@ -55,6 +63,7 @@ pub(crate) fn bind_spec(provider: OAuthProvider) -> BindSpec {
             preferred_port: 54545,
             allow_fallback: true,
             fixed_redirect_uri: None,
+            redirect_host: "localhost",
             label: "claude",
         },
         OAuthProvider::Codex => BindSpec {
@@ -62,7 +71,16 @@ pub(crate) fn bind_spec(provider: OAuthProvider) -> BindSpec {
             preferred_port: 1455,
             allow_fallback: false,
             fixed_redirect_uri: Some("http://localhost:1455/auth/callback"),
+            redirect_host: "localhost",
             label: "codex",
+        },
+        OAuthProvider::ChatGptPlan => BindSpec {
+            callback_path: "/auth/callback",
+            preferred_port: 0,
+            allow_fallback: true,
+            fixed_redirect_uri: None,
+            redirect_host: "127.0.0.1",
+            label: "chatgpt",
         },
     }
 }
@@ -104,7 +122,50 @@ pub(crate) fn build_authorize_url(
             ];
             format!("{}?{}", c.authorize_url, build_query(&params))
         }
+        OAuthProvider::ChatGptPlan => build_chatgpt_authorize_url(
+            None,
+            "urn:uuid:00000000-0000-4000-8000-000000000000",
+            None,
+            "",
+            state,
+            challenge,
+            redirect_uri,
+        ),
     }
+}
+
+/// Build the documented Sign in with ChatGPT authorization request. New
+/// registrations use OpenAI's dynamic client entry point; later logins reuse
+/// the issued client id and identity hint stored with that account.
+pub(crate) fn build_chatgpt_authorize_url(
+    issued_client_id: Option<&str>,
+    host_id: &str,
+    id_token_hint: Option<&str>,
+    nonce: &str,
+    state: &str,
+    challenge: &str,
+    redirect_uri: &str,
+) -> String {
+    let client_id = issued_client_id.unwrap_or(CHATGPT_PLAN.client_id);
+    let mut params = vec![
+        ("response_type", "code"),
+        ("client_id", client_id),
+        ("redirect_uri", redirect_uri),
+        ("scope", CHATGPT_PLAN.scope),
+        ("resource", "https://api.openai.com/v1"),
+        ("state", state),
+        ("nonce", nonce),
+        ("code_challenge_method", "S256"),
+        ("code_challenge", challenge),
+        ("ext_agent_host_id", host_id),
+    ];
+    if issued_client_id.is_none() {
+        params.push(("agent_name_hint", "Ocean"));
+    }
+    if let Some(id_token_hint) = id_token_hint {
+        params.push(("id_token_hint", id_token_hint));
+    }
+    format!("{}?{}", CHATGPT_PLAN.authorize_url, build_query(&params))
 }
 
 pub(crate) struct ExchangedToken {
@@ -112,6 +173,8 @@ pub(crate) struct ExchangedToken {
     pub refresh: String,
     pub expires_ms: i64,
     pub account_id: Option<String>,
+    /// Provider-specific metadata kept in the same atomic auth block.
+    pub metadata: Option<serde_json::Value>,
 }
 
 /// Exchange an authorization code for tokens at the given (possibly overridden)
@@ -134,7 +197,171 @@ pub(crate) async fn exchange(
         OAuthProvider::Codex => {
             exchange_codex(&client, token_url, code, redirect_uri, verifier).await
         }
+        OAuthProvider::ChatGptPlan => {
+            bail!("ChatGPT plan exchange requires its registration context")
+        }
     }
+}
+
+pub(crate) async fn exchange_chatgpt(
+    token_url: &str,
+    code: &str,
+    callback_client_id: Option<&str>,
+    expected_client_id: Option<&str>,
+    redirect_uri: &str,
+    verifier: &str,
+    nonce: &str,
+    host_id: &str,
+    expected_subject: Option<&str>,
+) -> Result<ExchangedToken> {
+    let client_id = match expected_client_id {
+        Some(expected) => {
+            if callback_client_id.is_some_and(|actual| actual != expected) {
+                bail!("ChatGPT account registration changed during sign-in");
+            }
+            expected
+        }
+        None => callback_client_id
+            .filter(|issued| !issued.trim().is_empty() && *issued != CHATGPT_PLAN.client_id)
+            .ok_or_else(|| anyhow!("ChatGPT registration did not return an issued client id"))?,
+    };
+    let form = [
+        ("grant_type", "authorization_code"),
+        ("client_id", client_id),
+        ("code", code),
+        ("code_verifier", verifier),
+        ("redirect_uri", redirect_uri),
+        ("resource", "https://api.openai.com/v1"),
+    ];
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
+    let response = client.post(token_url).form(&form).send().await?;
+    check_exchange_status(OAuthProvider::ChatGptPlan, response.status())?;
+    let parsed: ChatGptTokenResponse = response
+        .json()
+        .await
+        .context("ChatGPT plan token response was not valid JSON")?;
+    let scopes = parsed
+        .scope
+        .as_deref()
+        .unwrap_or("")
+        .split_whitespace()
+        .collect::<Vec<_>>();
+    if !scopes.contains(&"chatgpt.tokens.use.direct") {
+        bail!("ChatGPT sign-in did not grant ChatGPT plan inference access");
+    }
+    let claims = verify_chatgpt_id_token(&client, &parsed.id_token, client_id, nonce).await?;
+    if expected_subject.is_some_and(|subject| subject != claims.sub) {
+        bail!("ChatGPT sign-in identity did not match the saved account");
+    }
+    let expires_ms = now_millis() + parsed.expires_in.saturating_mul(1000);
+    let metadata = serde_json::json!({
+        "client_id": client_id,
+        "ext_agent_host_id": host_id,
+        "issuer": claims.iss,
+        "subject": claims.sub,
+        "email": claims.email,
+        "id_token": parsed.id_token,
+        "scopes": scopes,
+    });
+    Ok(ExchangedToken {
+        access: parsed.access_token,
+        refresh: parsed.refresh_token,
+        expires_ms,
+        account_id: Some(claims.sub),
+        metadata: Some(metadata),
+    })
+}
+
+#[derive(Deserialize)]
+struct ChatGptTokenResponse {
+    access_token: String,
+    refresh_token: String,
+    expires_in: i64,
+    id_token: String,
+    #[serde(default)]
+    scope: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct OpenIdConfiguration {
+    issuer: String,
+    jwks_uri: String,
+}
+
+#[derive(Deserialize)]
+struct ChatGptIdClaims {
+    iss: String,
+    sub: String,
+    aud: serde_json::Value,
+    exp: usize,
+    nonce: String,
+    #[serde(default)]
+    email: Option<String>,
+}
+
+async fn verify_chatgpt_id_token(
+    client: &reqwest::Client,
+    id_token: &str,
+    client_id: &str,
+    expected_nonce: &str,
+) -> Result<ChatGptIdClaims> {
+    use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
+    const ISSUER: &str = "https://auth.openai.com";
+    let discovery: OpenIdConfiguration = client
+        .get(format!("{ISSUER}/.well-known/openid-configuration"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    if discovery.issuer != ISSUER {
+        bail!("ChatGPT identity issuer did not match the expected issuer");
+    }
+    let jwks_url = reqwest::Url::parse(&discovery.jwks_uri)?;
+    if jwks_url.scheme() != "https" || jwks_url.host_str() != Some("auth.openai.com") {
+        bail!("ChatGPT identity key endpoint was not an approved HTTPS origin");
+    }
+    let jwks: jsonwebtoken::jwk::JwkSet = client
+        .get(jwks_url)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let header = decode_header(id_token)?;
+    if !matches!(header.alg, Algorithm::RS256 | Algorithm::ES256) {
+        bail!("ChatGPT identity token used an unsupported signing algorithm");
+    }
+    let kid = header
+        .kid
+        .as_deref()
+        .ok_or_else(|| anyhow!("ChatGPT identity token had no key id"))?;
+    let jwk = jwks
+        .find(kid)
+        .ok_or_else(|| anyhow!("ChatGPT identity signing key was not found"))?;
+    let key = DecodingKey::from_jwk(jwk)?;
+    let mut validation = Validation::new(header.alg);
+    validation.set_issuer(&[ISSUER]);
+    validation.set_audience(&[client_id]);
+    let token = decode::<ChatGptIdClaims>(id_token, &key, &validation)?;
+    if token.claims.iss != ISSUER
+        || token.claims.nonce != expected_nonce
+        || token.claims.sub.trim().is_empty()
+        || token.claims.exp <= now_millis().max(0) as usize / 1000
+    {
+        bail!("ChatGPT identity token claims did not match this sign-in");
+    }
+    let valid_audience = match &token.claims.aud {
+        serde_json::Value::String(aud) => aud == client_id,
+        serde_json::Value::Array(auds) => auds.iter().any(|aud| aud.as_str() == Some(client_id)),
+        _ => false,
+    };
+    if !valid_audience {
+        bail!("ChatGPT identity token audience did not match the issued client");
+    }
+    Ok(token.claims)
 }
 
 async fn exchange_anthropic(
@@ -182,6 +409,7 @@ async fn exchange_anthropic(
         refresh: parsed.refresh_token,
         expires_ms,
         account_id,
+        metadata: None,
     })
 }
 
@@ -222,6 +450,7 @@ async fn exchange_codex(
         refresh: parsed.refresh_token,
         expires_ms,
         account_id: Some(account_id),
+        metadata: None,
     })
 }
 
@@ -234,6 +463,7 @@ fn check_exchange_status(provider: OAuthProvider, status: reqwest::StatusCode) -
     let provider = match provider {
         OAuthProvider::Claude => "anthropic",
         OAuthProvider::Codex => "codex",
+        OAuthProvider::ChatGptPlan => "ChatGPT",
     };
     bail!("{provider} token exchange failed: HTTP {}", status.as_u16())
 }
@@ -341,14 +571,25 @@ pub(crate) fn build_block(provider: OAuthProvider, token: &ExchangedToken) -> se
                 "accountId": id,
             })
         }
+        OAuthProvider::ChatGptPlan => {
+            let mut block = token.metadata.clone().unwrap_or_default();
+            let object = block
+                .as_object_mut()
+                .expect("ChatGPT metadata is an object");
+            object.insert("type".into(), serde_json::json!("oauth"));
+            object.insert("access".into(), serde_json::json!(token.access));
+            object.insert("refresh".into(), serde_json::json!(token.refresh));
+            object.insert("expires".into(), serde_json::json!(token.expires_ms));
+            block
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        build_authorize_url, build_block, check_exchange_status, consts, decode_jwt_payload,
-        extract_account_id, ExchangedToken, CODEX,
+        build_authorize_url, build_block, build_chatgpt_authorize_url, check_exchange_status,
+        consts, decode_jwt_payload, extract_account_id, ExchangedToken, CHATGPT_PLAN, CODEX,
     };
     use crate::util::query_get;
     use crate::OAuthProvider;
@@ -468,6 +709,66 @@ mod tests {
     }
 
     #[test]
+    fn chatgpt_plan_authorize_url_uses_issued_registration_and_public_resource() {
+        let first = build_chatgpt_authorize_url(
+            None,
+            "urn:uuid:host",
+            None,
+            "nonce-value",
+            "state-value",
+            "challenge-value",
+            "http://127.0.0.1:4567/auth/callback",
+        );
+        assert!(first.starts_with("https://auth.openai.com/api/accounts/authorize?"));
+        let query = query_of(&first);
+        assert_eq!(
+            query_get(query, "client_id").as_deref(),
+            Some("dynamic_agent_client")
+        );
+        assert_eq!(
+            query_get(query, "resource").as_deref(),
+            Some("https://api.openai.com/v1")
+        );
+        assert_eq!(
+            query_get(query, "ext_agent_host_id").as_deref(),
+            Some("urn:uuid:host")
+        );
+        assert_eq!(
+            query_get(query, "agent_name_hint").as_deref(),
+            Some("Ocean")
+        );
+        assert_eq!(query_get(query, "nonce").as_deref(), Some("nonce-value"));
+        assert_eq!(
+            query_get(query, "scope").as_deref(),
+            Some(CHATGPT_PLAN.scope)
+        );
+        assert_eq!(
+            query_get(query, "redirect_uri").as_deref(),
+            Some("http://127.0.0.1:4567/auth/callback")
+        );
+
+        let returning = build_chatgpt_authorize_url(
+            Some("issued-client"),
+            "urn:uuid:host",
+            Some("saved-id-token"),
+            "nonce-value",
+            "state-value",
+            "challenge-value",
+            "http://127.0.0.1:4567/auth/callback",
+        );
+        let query = query_of(&returning);
+        assert_eq!(
+            query_get(query, "client_id").as_deref(),
+            Some("issued-client")
+        );
+        assert_eq!(
+            query_get(query, "id_token_hint").as_deref(),
+            Some("saved-id-token")
+        );
+        assert_eq!(query_get(query, "agent_name_hint"), None);
+    }
+
+    #[test]
     fn authorize_url_param_order_is_stable() {
         // Order mirrors OMP; verify by raw key positions.
         let url = build_authorize_url(
@@ -561,6 +862,7 @@ mod tests {
             refresh: "rt".to_string(),
             expires_ms: expires,
             account_id: account.map(str::to_string),
+            metadata: None,
         }
     }
 
@@ -588,6 +890,25 @@ mod tests {
             blk.get("accountId").is_none(),
             "claude block must omit accountId when absent: {blk}"
         );
+    }
+
+    #[test]
+    fn chatgpt_block_keeps_issued_registration_and_verified_account_metadata() {
+        let mut token = token("access", 1234, Some("verified-subject"));
+        token.metadata = Some(json!({
+            "client_id": "issued-client",
+            "ext_agent_host_id": "urn:uuid:host",
+            "subject": "verified-subject",
+            "id_token": "verified-id-token",
+            "scopes": ["chatgpt.tokens.use.direct"]
+        }));
+        let block = build_block(OAuthProvider::ChatGptPlan, &token);
+        assert_eq!(block["type"], "oauth");
+        assert_eq!(block["client_id"], "issued-client");
+        assert_eq!(block["subject"], "verified-subject");
+        assert_eq!(block["id_token"], "verified-id-token");
+        assert_eq!(block["access"], "access");
+        assert_eq!(block["refresh"], "rt");
     }
 
     #[test]
