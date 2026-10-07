@@ -1077,3 +1077,15 @@ ChatGPT sign-in: gpt-6.1-sol, glm-5.3 and deepseek-v4-pro each ran a bash tool
 call and answered; session model = requested, no reroute. ocean-protocol codex
 tests 36/36, ocean-providers 67/67.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [18:43] [07-10-26]
+agent: [claude] [claude code]
+worktree: [fix/failover-current-models] [/Users/risingtidesdev/dev/ocean-fallback]
+type: [bug report]
+area: [backend] [testing]
+
+Fixed the cross-provider failover list after a live report: a Fable 5.1 turn hit the Anthropic account's rate limit and Ocean failed over to gpt-5.4, which ChatGPT-account Codex refuses, so the operator saw "The 'gpt-5.4' model is not supported" instead of the real cause. DEFAULT_FALLBACK_ORDER is a hard-coded list of one model per provider, and two entries had gone stale: the Codex entry gpt-5.4 and the MiniMax entry minimax-m2, which still resolves but is no longer in the model catalog. The list now uses gpt-6-astra and MiniMax-M2.7, and Claude Sonnet 5.5 instead of Sonnet 5 at the top; GPT-6 Astra and Sonnet 5.5 both completed live turns on the operator's subscription routes today. A new test requires every default entry to resolve to its intended provider and to be a catalog model, which is how the MiniMax entry was found.
+
+Validation: ocean-providers 68 tests pass, rustfmt check passes. No other crate reads the default list.
+_________________________________________________________________________________
