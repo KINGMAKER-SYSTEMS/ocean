@@ -1057,3 +1057,13 @@ Every Ocean turn was failing with "turn failed". The supervised daemon was still
 
 Validation: `bash -n` and ops/test_install_ocean_daemon.py pass (14 tests, 2 new for the modern vocabulary, both enabled and disabled). The daemon still has to be reinstalled from main after this merges.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [10:50am] [07-10-26]
+agent: [claude] [claude-opus-5-5]
+worktree: [worktree-fix-installer-launchd-enabled] [.claude/worktrees/fix-installer-launchd-enabled]
+type: [bug report]
+area: [backend] [automations]
+
+The operator asked for Ocean restored immediately, before the installer fix landed. I did the installer's promotion step by hand using a locked release build from clean origin/main 32bd82a9 (`--features legacy-chromium`): staged ~/.local/libexec/ocean-daemon/ocean-daemon-32bd82a93f27..., installed main's deploy/ocean-daemon.sh as launch.sh (previous launcher kept as launch.sh.prev-0abb558179af), flipped `current`, and ran `launchctl kickstart -k`. The prior artifact ocean-daemon-0abb558179af is kept for rollback. /health reports rev 32bd82a93f27, /ready is ok, /v1/models lists glm/glm-5.3 and openai-codex/gpt-5.6-sol as ready, and a live glm/glm-5.3 turn returned ok. Future installs should go through ops/install-ocean-daemon.sh once this branch merges.
+_________________________________________________________________________________
