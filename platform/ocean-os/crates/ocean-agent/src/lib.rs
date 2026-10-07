@@ -792,7 +792,13 @@ impl AgentRuntime {
     /// global selection. Fails (touching nothing) if the alias doesn't resolve
     /// or has no credential.
     fn resolve_state_for_model(&self, model_spec: &str) -> anyhow::Result<RuntimeState> {
-        let mut env = ProviderEnv::from_process();
+        // Same env snapshot the turn's failover decision uses (`turn_env`): the
+        // per-turn override must resolve against the environment this turn
+        // actually runs in, not a second, divergent read of the process env.
+        // In production `turn_env` IS the process env; in tests it is the
+        // injected hermetic env, so an override whose credential lives there
+        // resolves instead of spuriously degrading.
+        let mut env = self.turn_env();
         env.vars
             .insert("OCEAN_MODEL".to_string(), model_spec.to_string());
         let provider_config = resolve_provider_config(&env)
@@ -1010,7 +1016,14 @@ impl AgentRuntime {
         // hiding it from an operator who pinned a model is lying — announce the
         // reroute on the event stream BEFORE any output, and record it on the
         // session so a later `GET /v1/sessions/{id}` shows the requested model.
-        if effective.provider_config.selection.model != requested_model {
+        // Detection is the (provider, model) ROUTE pair, not the model id
+        // alone: a same-model fallback through a DIFFERENT provider (e.g.
+        // claude-code/claude-opus-5-5 → anthropic/claude-opus-5-5 via
+        // OCEAN_PROVIDER_FALLBACK) is just as much a reroute.
+        let effective_selection = &effective.provider_config.selection;
+        if effective_selection.provider != requested_provider
+            || effective_selection.model != requested_model
+        {
             let reason = "provider degraded at selection (missing credential or not ready)";
             control.requested_model = Some(requested_model.clone());
             control.requested_provider = Some(requested_provider.as_str().to_string());
@@ -1018,8 +1031,16 @@ impl AgentRuntime {
             if let Some(sink) = control.event_sink.as_ref() {
                 let _ = sink.send(AgentEvent::ModelRerouted {
                     session_id: req.session_id.map(|s| s.to_string()),
-                    requested: requested_model.clone(),
-                    effective: effective.provider_config.selection.model.clone(),
+                    requested: reroute_event_route(
+                        &requested_model,
+                        requested_provider.as_str(),
+                        &effective_selection.model,
+                    ),
+                    effective: reroute_event_route(
+                        &effective_selection.model,
+                        effective_selection.provider.as_str(),
+                        &requested_model,
+                    ),
                     reason: reason.into(),
                 });
             }
@@ -1270,13 +1291,36 @@ impl AgentRuntime {
                 }
                 control.reroute_reason = Some(reason.clone());
                 if let Some(sink) = control.event_sink.as_ref() {
+                    // Same route-pair notion as the selection-time site: the
+                    // alternate always differs in provider, but the MODEL ids
+                    // can be identical — qualify both strings then, so the
+                    // event never reads as a no-op.
+                    let alt_selection = &alt_state.provider_config.selection;
+                    let requested_model_str = control
+                        .requested_model
+                        .clone()
+                        .unwrap_or_else(|| state.provider_config.selection.model.clone());
+                    let requested_provider_str =
+                        control.requested_provider.clone().unwrap_or_else(|| {
+                            state
+                                .provider_config
+                                .selection
+                                .provider
+                                .as_str()
+                                .to_string()
+                        });
                     let _ = sink.send(AgentEvent::ModelRerouted {
                         session_id: req.session_id.map(|s| s.to_string()),
-                        requested: control
-                            .requested_model
-                            .clone()
-                            .unwrap_or_else(|| state.provider_config.selection.model.clone()),
-                        effective: alt_state.provider_config.selection.model.clone(),
+                        requested: reroute_event_route(
+                            &requested_model_str,
+                            &requested_provider_str,
+                            &alt_selection.model,
+                        ),
+                        effective: reroute_event_route(
+                            &alt_selection.model,
+                            alt_selection.provider.as_str(),
+                            &requested_model_str,
+                        ),
                         reason,
                     });
                 }
@@ -2079,7 +2123,20 @@ impl AgentRuntime {
         // run path, which serializes load→run→save on an id a client may
         // already be steering).
         let session_id = SessionId::new_v4();
-        let mut session = session::Session::new_with_id(session_id, &snapshot.model);
+        // Same route rule as the run paths: with no explicit model the pin is
+        // the global selection's ROUTE (e.g. claude-code), not the wire
+        // model's protocol provider (anthropic). An explicit pair goes through
+        // `set_model`, which already stores exactly what the caller passed.
+        let mut session = session::Session::new_with_route(
+            session_id,
+            snapshot.model.id.clone(),
+            snapshot
+                .provider_config
+                .selection
+                .provider
+                .as_str()
+                .to_string(),
+        );
         if let Some((model, provider)) = initial_model {
             session.set_model(model, provider);
         }
@@ -2142,7 +2199,22 @@ impl AgentRuntime {
                     requested,
                     requested_provider_route(snapshot, &control),
                 ),
-                None => session::Session::new_with_id(session_id, &snapshot.model),
+                // Ordinary creation still pins the ROUTE (selection provider),
+                // never the wire model's protocol provider — a claude-code
+                // OAuth selection must persist `provider = "claude-code"`, not
+                // the Anthropic protocol id its wire model carries. This write
+                // happens BEFORE the provider call (accepted-user checkpoint),
+                // so it is the pin a pre-stream failover leaves behind.
+                None => session::Session::new_with_route(
+                    session_id,
+                    snapshot.model.id.clone(),
+                    snapshot
+                        .provider_config
+                        .selection
+                        .provider
+                        .as_str()
+                        .to_string(),
+                ),
             },
             None => anyhow::bail!("session not found: {session_id}"),
         };
@@ -2290,7 +2362,22 @@ impl AgentRuntime {
                     requested,
                     requested_provider_route(snapshot, &control),
                 ),
-                None => session::Session::new_with_id(session_id, &snapshot.model),
+                // Ordinary creation still pins the ROUTE (selection provider),
+                // never the wire model's protocol provider — a claude-code
+                // OAuth selection must persist `provider = "claude-code"`, not
+                // the Anthropic protocol id its wire model carries. This write
+                // happens BEFORE the provider call (accepted-user checkpoint),
+                // so it is the pin a pre-stream failover leaves behind.
+                None => session::Session::new_with_route(
+                    session_id,
+                    snapshot.model.id.clone(),
+                    snapshot
+                        .provider_config
+                        .selection
+                        .provider
+                        .as_str()
+                        .to_string(),
+                ),
             },
             None => anyhow::bail!(
                 "session not found: {session_id} (resume requires an existing session; \
@@ -3857,6 +3944,23 @@ fn requested_provider_route(effective_snapshot: &RuntimeState, control: &PromptC
         .provider
         .as_str()
         .to_string()
+}
+
+/// Render one side of a `ModelRerouted` event. A reroute is a ROUTE change
+/// (provider, model) — but when both routes carry the SAME model id, the bare
+/// model strings would be identical and the event would read as a no-op
+/// ("claude-opus-5-5 → claude-opus-5-5"). In that case each side is qualified
+/// with its own route provider (`claude-code/claude-opus-5-5` →
+/// `anthropic/claude-opus-5-5`). Different-model reroutes keep the bare model
+/// ids, so existing event consumers see exactly what they saw before. Only
+/// fixed route identifiers are ever placed in these strings — never provider
+/// error text.
+fn reroute_event_route(model: &str, provider: &str, other_model: &str) -> String {
+    if model == other_model {
+        format!("{provider}/{model}")
+    } else {
+        model.to_string()
+    }
 }
 
 /// Build a runtime state from an already-resolved provider config.
@@ -8519,6 +8623,211 @@ done
         assert_eq!(detail.effective_model.as_deref(), Some("claude-opus-5-5"));
         assert_eq!(detail.requested_model, None);
         assert_eq!(detail.reroute_reason, None);
+
+        let _ = std::fs::remove_dir_all(config_dir);
+    }
+
+    // (c) SELECTION-TIME reroute with the SAME model id on a DIFFERENT provider
+    // (claude-code/claude-opus-5-5 → anthropic/claude-opus-5-5). Model-id-only
+    // comparison missed this class entirely: no reroute recorded, no event, and
+    // the creation pin fell to the ordinary constructor (protocol provider
+    // "anthropic"). Detection must use the (provider, model) ROUTE pair, and
+    // because the event's requested/effective model strings would be identical,
+    // they are provider-qualified so the event still says something.
+    #[tokio::test]
+    async fn same_model_cross_provider_reroute_is_recorded_and_pins_requested_route() {
+        let config_dir = temp_config_dir("same-model-cross-provider-reroute");
+
+        // Keyless claude-code primary → DEGRADED at selection; the only fallback
+        // is the SAME model id through the direct anthropic API route (ready
+        // via ANTHROPIC_API_KEY). `provider/model` split aliases are valid
+        // OCEAN_PROVIDER_FALLBACK entries, so this is pure configuration.
+        let env = provider_env(&[
+            ("OCEAN_PROVIDER_FALLBACK", "anthropic/claude-opus-5-5"),
+            ("ANTHROPIC_API_KEY", "hermetic-test-key"),
+        ]);
+        let mut runtime = runtime_with_env(
+            config_dir.clone(),
+            provider_config(ProviderId::ClaudeCode, "claude-opus-5-5", false),
+            Some(env),
+        );
+
+        // The fallback runs the REAL loop; a scripted provider completes it
+        // without network.
+        let mut completion = scripted_assistant("done");
+        completion.model = "anthropic".into();
+        runtime.test_turn_provider = Some(TestCompactProvider(Arc::new(ScriptedTurnProvider {
+            calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            rounds: vec![vec![ocean_protocol::AssistantMessageEvent::Done {
+                reason: ocean_protocol::StopReason::Stop,
+                message: completion,
+            }]],
+        })));
+
+        // Capture the event stream so the ModelRerouted emission is asserted,
+        // not just inferred from the session record.
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let res = runtime
+            .prompt(
+                prompt_req("hello", None),
+                PromptControl::yolo(false).with_event_sink(event_tx),
+            )
+            .await;
+        assert!(
+            res.ok,
+            "same-model rerouted turn should succeed: {}",
+            res.stderr
+        );
+        let session_id = res.session_id.expect("session id");
+        let detail = runtime.session_detail(session_id).expect("session detail");
+
+        // The reroute IS a reroute even though the model id is unchanged: the
+        // requested route (claude-code) differs from the route that ran
+        // (anthropic). The record must show requested model + fixed reason
+        // class, and the creation pin must be the REQUESTED route.
+        assert_eq!(
+            detail.requested_model.as_deref(),
+            Some("claude-opus-5-5"),
+            "a same-model cross-provider reroute must record requested_model"
+        );
+        assert_eq!(
+            detail.reroute_reason.as_deref(),
+            Some("provider degraded at selection (missing credential or not ready)"),
+            "the reroute reason must be the fixed selection-time class"
+        );
+        assert_eq!(detail.model, "claude-opus-5-5");
+        assert_eq!(
+            detail.provider, "claude-code",
+            "the creation pin must be the REQUESTED route's provider, not the fallback's"
+        );
+        assert_eq!(detail.effective_model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(detail.effective_provider.as_deref(), Some("anthropic"));
+
+        // The event must have fired, with provider-qualified strings — a bare
+        // "claude-opus-5-5 → claude-opus-5-5" would read as a no-op.
+        let mut reroute: Option<(String, String)> = None;
+        while let Ok(event) = event_rx.try_recv() {
+            if let AgentEvent::ModelRerouted {
+                requested,
+                effective,
+                ..
+            } = event
+            {
+                reroute = Some((requested, effective));
+            }
+        }
+        let (requested, effective) = reroute.expect("a ModelRerouted event must be emitted");
+        assert_eq!(requested, "claude-code/claude-opus-5-5");
+        assert_eq!(effective, "anthropic/claude-opus-5-5");
+
+        let _ = std::fs::remove_dir_all(config_dir);
+    }
+
+    // (d) PRE-STREAM reroute on the turn that CREATES a session whose primary
+    // is a claude-code OAuth route. The accepted-user checkpoint persists the
+    // session BEFORE the provider call, so the ordinary constructor decides the
+    // pin — and it used to store the wire model's PROTOCOL provider
+    // ("anthropic") instead of the ROUTE ("claude-code"). The next turn's
+    // daemon-equivalent selection must then resolve the claude-code route.
+    #[tokio::test]
+    async fn claude_code_pre_stream_failover_creates_session_with_route_pin() {
+        let config_dir = temp_config_dir("claude-code-prestream-creation-route");
+
+        // Turn 1: credentialed claude-code primary is READY at selection,
+        // enters the real loop, persists the accepted-user checkpoint, then
+        // 429s pre-stream → reroutes to fake-ok.
+        let env = provider_env(&[("OCEAN_PROVIDER_FALLBACK", "fake-ok")]);
+        let mut runtime = runtime_with_env(
+            config_dir.clone(),
+            provider_config(ProviderId::ClaudeCode, "claude-opus-5-5", true),
+            Some(env),
+        );
+        runtime.test_dispatch_status.insert("claude-code", 429);
+        let res = runtime
+            .prompt(prompt_req("hello", None), PromptControl::yolo(false))
+            .await;
+        assert!(
+            res.ok,
+            "pre-stream rerouted turn should succeed: {}",
+            res.stderr
+        );
+        let session_id = res.session_id.expect("session id");
+
+        // The pin the checkpoint wrote is the ROUTE the operator selected
+        // (claude-code), not the wire model's protocol provider (anthropic).
+        let detail = runtime.session_detail(session_id).expect("detail");
+        assert_eq!(detail.model, "claude-opus-5-5");
+        assert_eq!(
+            detail.provider, "claude-code",
+            "ordinary creation must pin the selection ROUTE, not the protocol provider"
+        );
+        assert_eq!(detail.requested_model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(detail.reroute_reason.as_deref(), Some("rate limited"));
+        assert_eq!(detail.effective_model.as_deref(), Some("fake-ok"));
+        assert_eq!(detail.effective_provider.as_deref(), Some("fake"));
+
+        // Turn 2: the claude-code credential is healthy again and the daemon's
+        // global selection is fake-ok — exactly what would run forever if the
+        // pin were wrong or absent. Resolve the turn's model exactly as the
+        // daemon does: session_model_config_optional → is_session_pinned →
+        // model_spec() override.
+        let env2 = provider_env(&[("CLAUDE_CODE_ACCESS_TOKEN", "cc-bearer")]);
+        let mut runtime2 = runtime_with_env(
+            config_dir.clone(),
+            provider_config(ProviderId::Fake, "fake-ok", false),
+            Some(env2),
+        );
+        let (_global_provider, global_model) = runtime2.current_model();
+        assert_eq!(global_model, "fake-ok");
+        let config = runtime2
+            .session_model_config_optional(session_id)
+            .expect("session config read")
+            .expect("session exists");
+        assert!(
+            config.is_session_pinned(&global_model),
+            "the route pin must read as a pin: model={} global={}",
+            config.model,
+            global_model
+        );
+        assert_eq!(
+            config.model_spec(),
+            "claude-code/claude-opus-5-5",
+            "the pin must resolve through the claude-code route, not anthropic"
+        );
+
+        // A scripted provider completes the REAL loop on the recovered route
+        // without network.
+        let mut completion = scripted_assistant("done");
+        completion.model = "anthropic".into();
+        runtime2.test_turn_provider = Some(TestCompactProvider(Arc::new(ScriptedTurnProvider {
+            calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            rounds: vec![vec![ocean_protocol::AssistantMessageEvent::Done {
+                reason: ocean_protocol::StopReason::Stop,
+                message: completion,
+            }]],
+        })));
+        let res2 = runtime2
+            .prompt(
+                prompt_req("again", Some(session_id)),
+                PromptControl::yolo(false).with_model_id(Some(config.model_spec())),
+            )
+            .await;
+        assert!(
+            res2.ok,
+            "next turn on the recovered route should succeed: {}",
+            res2.stderr
+        );
+        let detail2 = runtime2.session_detail(session_id).expect("detail");
+        assert_eq!(detail2.model, "claude-opus-5-5");
+        assert_eq!(detail2.provider, "claude-code");
+        assert_eq!(
+            detail2.effective_provider.as_deref(),
+            Some("claude-code"),
+            "the next turn must RUN on the claude-code route the pin resolved"
+        );
+        assert_eq!(detail2.effective_model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(detail2.requested_model, None);
+        assert_eq!(detail2.reroute_reason, None);
 
         let _ = std::fs::remove_dir_all(config_dir);
     }

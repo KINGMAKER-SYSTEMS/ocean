@@ -67,12 +67,18 @@ pub struct Session {
 impl Session {
     /// Mint a session with a fresh random id. Only used by tests today
     /// (production always mints the id at the daemon layer and calls
-    /// `new_with_id`), hence `cfg(test)` to keep the non-test build clean.
+    /// `new_with_route`), hence `cfg(test)` to keep the non-test build clean.
     #[cfg(test)]
     pub fn new(model: &Model) -> Self {
         Self::new_with_id(SessionId::new_v4(), model)
     }
 
+    /// Test scaffolding constructor: pins the wire model's id and PROTOCOL
+    /// provider. Production creation paths must NOT use this — they pin the
+    /// selection ROUTE via [`Session::new_with_route`] (see the reroute/
+    /// route-pin tests in ocean-agent). Kept `cfg(test)` for the same reason
+    /// as [`Session::new`].
+    #[cfg(test)]
     pub fn new_with_id(id: SessionId, model: &Model) -> Self {
         Self::new_with_route(id, model.id.clone(), model.provider.clone())
     }

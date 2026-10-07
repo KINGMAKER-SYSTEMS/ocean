@@ -111,6 +111,25 @@ transcripts by session id.
   never become a durable selection change: the next turn re-selects the
   pinned (requested) model, and an ordinary claude-code turn must not rewrite
   the OAuth provider pin to the wire model's protocol provider.
+- Reroute detection compares the (provider, model) ROUTE pair, not the model
+  id alone: a same-model fallback through a different provider
+  (claude-code/claude-opus-5-5 → anthropic/claude-opus-5-5 via
+  `OCEAN_PROVIDER_FALLBACK`'s `provider/model` entries) IS a reroute — it is
+  recorded and emitted. When both routes carry the same model id, the
+  `ModelRerouted` event's requested/effective strings are provider-qualified
+  (`claude-code/claude-opus-5-5` → `anthropic/claude-opus-5-5`), never bare
+  identical ids; different-model reroutes keep bare model ids. Only fixed
+  route identifiers enter these strings.
+- Session creation pins the selection ROUTE everywhere: ordinary creation in
+  `run_prompt`/`run_fake_prompt`/`create_session_with_model` uses
+  `Session::new_with_route(id, snapshot.model.id, selection.provider)` — a
+  claude-code OAuth selection persists `provider = "claude-code"`, never the
+  wire model's protocol `anthropic`, even when a pre-stream failure makes the
+  accepted-user checkpoint the first durable write. `Session::new_with_id`
+  (protocol-provider pin) is test scaffolding only (`cfg(test)`).
+- The per-turn model override and every failover decision resolve against ONE
+  env snapshot per turn (`turn_env()`); the override must never take a second,
+  divergent `ProviderEnv::from_process()` read.
 - Observed primary or alternate provider 401/403 refusals suppress that provider
   as a fallback for 300 seconds in one runtime's clone-shared memory. Filter
   both selection-time and pre-stream fallback and their ready-label projection;
