@@ -792,12 +792,11 @@ impl AgentRuntime {
     /// global selection. Fails (touching nothing) if the alias doesn't resolve
     /// or has no credential.
     fn resolve_state_for_model(&self, model_spec: &str) -> anyhow::Result<RuntimeState> {
-        // Same env snapshot the turn's failover decision uses (`turn_env`): the
-        // per-turn override must resolve against the environment this turn
-        // actually runs in, not a second, divergent read of the process env.
-        // In production `turn_env` IS the process env; in tests it is the
-        // injected hermetic env, so an override whose credential lives there
-        // resolves instead of spuriously degrading.
+        // Same env source the turn's failover decisions use (`turn_env`). This
+        // is not a cached per-turn snapshot: outside tests each call is a fresh
+        // `ProviderEnv::from_process()` read, exactly as before. Under
+        // `cfg(test)` it is the injected hermetic env, so an override whose
+        // credential lives there resolves instead of spuriously degrading.
         let mut env = self.turn_env();
         env.vars
             .insert("OCEAN_MODEL".to_string(), model_spec.to_string());

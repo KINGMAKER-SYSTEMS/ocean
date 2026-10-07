@@ -127,9 +127,10 @@ transcripts by session id.
   wire model's protocol `anthropic`, even when a pre-stream failure makes the
   accepted-user checkpoint the first durable write. `Session::new_with_id`
   (protocol-provider pin) is test scaffolding only (`cfg(test)`).
-- The per-turn model override and every failover decision resolve against ONE
-  env snapshot per turn (`turn_env()`); the override must never take a second,
-  divergent `ProviderEnv::from_process()` read.
+- The per-turn model override and the failover decisions read their
+  environment from the same source (`turn_env()`). Outside tests each call is a
+  fresh `ProviderEnv::from_process()` read (not one cached snapshot per turn);
+  under `cfg(test)` both see the injected hermetic env.
 - Observed primary or alternate provider 401/403 refusals suppress that provider
   as a fallback for 300 seconds in one runtime's clone-shared memory. Filter
   both selection-time and pre-stream fallback and their ready-label projection;
