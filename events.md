@@ -1077,3 +1077,14 @@ ChatGPT sign-in: gpt-6.1-sol, glm-5.3 and deepseek-v4-pro each ran a bash tool
 call and answered; session model = requested, no reroute. ocean-protocol codex
 tests 36/36, ocean-providers 67/67.
 _________________________________________________________________________________
+_________________________________________________________________________________
+time: [16:47] [07-10-26]
+agent: [claude] [claude code]
+worktree: [port/private-proposals] [/Users/risingtidesdev/dev/port-misc]
+type: [plan]
+area: [docs]
+
+Ported the public half of ocean-private #72, the PROPOSED A3b contract amendment, onto public main: the new spec at platform/ocean-os/docs/specs/2026-10-03-ocean-extension-a3b-contract-amendment.md proposes nullable committed/state_revision facts with a non-retry CLI exit 5 and an explicit choice between postcommit live-trust reconciliation under retained enablement and mandatory disable/reap before trust, while the accepted Stage A manifest stays byte-unchanged. The platform and docs AGENTS.md Stage A lines and the docs README index now point at it. The private text linked its PR 56 and issue 71 at the public repository, where those numbers belong to unrelated items; the port names ocean-private for both, states that the A3a registry writer is present here because ocean-private #56 merged before the publication snapshot with its slice acceptance left as a separate gate, and says complete A3b follows A3a rather than calling it next. Nothing from org/ was carried.
+
+Validation: cargo xtask docs-check PASS (30 packages, 154 active Markdown files, 172 local links); git diff --check clean. Documentation only, no Rust changes.
+_________________________________________________________________________________

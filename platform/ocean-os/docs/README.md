@@ -71,6 +71,7 @@ Active plans:
 
 Proposals awaiting operator ruling:
 
+- [`specs/2026-10-03-ocean-extension-a3b-contract-amendment.md`](specs/2026-10-03-ocean-extension-a3b-contract-amendment.md) — ocean-private issue #71's proposed treatment of unknown commit/revision evidence and confirmed live-trust reconciliation. Both decisions require explicit operator ruling before A3b source; the accepted Stage A manifest and complete A3b boundary remain authoritative.
 - [`specs/2026-07-19-cross-device-approval-and-attention.md`](specs/2026-07-19-cross-device-approval-and-attention.md) — phased design for permission-block notifications, a daemon-wide "Needs you" attention surface, and Web Push background reach, building on the 2026-07-19 `/web` `/desk` `/beam` session-handoff fabric. Phase 1 (notify on block) is accepted and implemented in `ocean-surface-ui`; Phases 2–3 remain proposed.
 
 Active implementation reference:
