@@ -69,6 +69,10 @@ Active plans:
 - [`specs/2026-07-19-ocean-daemon-longhouse-governance-control-extraction-manifest.md`](specs/2026-07-19-ocean-daemon-longhouse-governance-control-extraction-manifest.md) — published behavior-neutral extraction of the exact claim/revoke/recall/breach/board HTTP adapter boundary; real convene remains a later security-sensitive manifest.
 - [`specs/2026-07-18-ocean-crew-orchestration-and-durable-workflow-manifest.md`](specs/2026-07-18-ocean-crew-orchestration-and-durable-workflow-manifest.md) — operator-accepted 2026-07-21 design ratification for extension-owned durable orchestration: the Ocean Crew task-graph extension, six generic host seams, absorbed R5 durable-workflow engine, Undertow/Offshore facade lanes, member acceptance and budget/attention semantics, staging/grace safety, and the read-only Observatory relationship. Stage A's exact implementation manifest was operator-ratified on 2026-07-27; Stages B–E each require separate implementation manifests. The generic host seams and Crew engine remain unimplemented.
 
+Proposals awaiting independent review:
+
+- [`specs/2026-10-04-generic-plugin-quiescence-manifest.md`](specs/2026-10-04-generic-plugin-quiescence-manifest.md) — PROPOSED generic subprocess owner, launch fence, observed-exit receipt, restart recovery and legacy retirement contract for ocean-private issue #88; does not authorize source or ocean-private issue #85 adoption.
+
 Proposals awaiting operator ruling:
 
 - [`specs/2026-10-03-ocean-extension-a3b-contract-amendment.md`](specs/2026-10-03-ocean-extension-a3b-contract-amendment.md) — ocean-private issue #71's proposed treatment of unknown commit/revision evidence and confirmed live-trust reconciliation. Both decisions require explicit operator ruling before A3b source; the accepted Stage A manifest and complete A3b boundary remain authoritative.

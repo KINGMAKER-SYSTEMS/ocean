@@ -1088,3 +1088,14 @@ Ported the public half of ocean-private #72, the PROPOSED A3b contract amendment
 
 Validation: cargo xtask docs-check PASS (30 packages, 154 active Markdown files, 172 local links); git diff --check clean. Documentation only, no Rust changes.
 _________________________________________________________________________________
+_________________________________________________________________________________
+time: [16:48] [07-10-26]
+agent: [claude] [claude code]
+worktree: [port/private-proposals] [/Users/risingtidesdev/dev/port-misc]
+type: [plan]
+area: [docs]
+
+Ported the public half of ocean-private #97 onto public main: the PROPOSED generic plugin process-ownership and quiescence manifest at platform/ocean-os/docs/specs/2026-10-04-generic-plugin-quiescence-manifest.md defines a lifecycle coordinator that every production subprocess-plugin launch must enroll in, an exclusive launch/invocation/write fence ahead of quiescence inventory, a monotonic Starting/Running/Stopping/ExitedAndReaped state machine with Unknown and Quarantined escapes, sanitized quiescence receipts, restart recovery that fails closed, and a two-epoch legacy retirement, ordered as D0-D4 with an acceptance matrix. It authorizes documentation review only. The docs README gains a proposals-awaiting-independent-review list pointing at it. The issue88/issue85/PR94 numbers it cites are ocean-private trackers, so the port says so once in the status paragraph and in the README line instead of leaving bare numbers that collide with this repository's own numbering, and the snapshot it analyzes is named as the frozen private main this monorepo was published from. The cited source anchors (discover_plugin_providers, build_agent_capability_providers, spawn_io_task, start_kill, kill_on_drop, plugins/ocean-subagents/install.sh) were verified present on current public main.
+
+Validation: cargo xtask docs-check PASS (30 packages, 155 active Markdown files, 173 local links); git diff --check clean. Documentation only, no Rust changes.
+_________________________________________________________________________________
