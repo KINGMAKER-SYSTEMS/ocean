@@ -391,7 +391,7 @@ fn grant_from_row(key: &RoomKey, row: GrantRow) -> Result<RoomResourceGrant> {
     })
 }
 
-fn load_grant_on(
+pub(super) fn load_grant_on(
     conn: &Connection,
     key: &RoomKey,
     resource_id: &str,
@@ -404,6 +404,32 @@ fn load_grant_on(
     .optional()?
     .map(|row| grant_from_row(key, row))
     .transpose()
+}
+
+/// Validate a profile's resource references while its profile write owns an
+/// IMMEDIATE transaction. Exact profile-decision replays must be handled by
+/// the caller before this check, so revoking a referenced grant cannot make a
+/// previously consumed decision fail on retry.
+pub(super) fn validate_profile_resource_refs_on(
+    conn: &Connection,
+    key: &RoomKey,
+    resource_ids: impl IntoIterator<Item = String>,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let mut resource_ids = resource_ids
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    for resource_id in std::mem::take(&mut resource_ids) {
+        let is_live = load_grant_on(conn, key, &resource_id)?
+            .is_some_and(|grant| grant.effective_status(now) != ResourceStatus::Revoked);
+        if !is_live {
+            return Err(RoomStoreError::UnknownResourceGrant {
+                room: key.clone(),
+                resource_id,
+            });
+        }
+    }
+    Ok(())
 }
 
 fn audit_on(

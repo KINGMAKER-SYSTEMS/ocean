@@ -1077,3 +1077,74 @@ ChatGPT sign-in: gpt-6.1-sol, glm-5.3 and deepseek-v4-pro each ran a bash tool
 call and answered; session model = requested, no reroute. ocean-protocol codex
 tests 36/36, ocean-providers 67/67.
 _________________________________________________________________________________
+
+time: [16:53] [07-10-26]
+agent: [codex] [gpt-6]
+worktree: [codex/issue56-profile-grant-serialization]
+type: [bug fix] [issue #56]
+area: [backend] [testing]
+
+Moved room-profile resource-reference validation into the store's IMMEDIATE
+write transaction, after exact/cross-ledger replay checks and before profile
+persistence. New writes refuse missing or effectively revoked grants, while
+suspended grants remain resumable and an exact consumed retry remains
+idempotent after revocation. Updated the store contract and added replay,
+missing-reference, and lock-contention regressions. No daemon route or
+production runtime behavior was added; profile writes remain deferred on main.
+
+Validation: `cargo test -p ocean-store --locked` (279 passed),
+`cargo clippy -p ocean-store --all-targets --locked -- -D warnings`, and
+`cargo fmt --all -- --check` pass. The issue #54 global merge hold remains
+active; PR creation and hosted builds are pending final review.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [17:00] [10-07-26] America/New_York
+agent: [Codex desktop] [GPT-6]
+worktree: [codex/issue56-profile-grant-serialization]
+type: [review], [testing] [issue #56]
+area: [backend], [testing]
+
+Closed the independent review's P2 contention-test finding. The regression now
+uses a plain rusqlite busy-handler function pointer with test-local atomic
+synchronization: SQLite signals only after the profile writer's IMMEDIATE
+transaction actually encounters the revoker's held write lock; the test commits
+the revocation before releasing the handler. Adversarial re-review of the exact
+code diff passed. `cargo test -p ocean-store --locked` passed all 279 tests,
+`cargo clippy -p ocean-store --all-targets --locked -- -D warnings` passed, and
+`cargo fmt --all -- --check` passed. PR creation and required hosted builds remain
+pending final diff review; issue #54's repository-level merge hold remains active.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [17:01] [10-07-26] America/New_York
+agent: [Codex desktop] [GPT-6]
+worktree: [codex/issue56-profile-grant-serialization]
+type: [testing] [issue #56]
+area: [backend], [testing]
+
+Expanded the missing-reference regression to exercise repo, room-default, and
+per-agent-default references independently, proving each refusal leaves both
+profile and decision ledger unchanged. Final focused verification after this
+test-only extension: `cargo test -p ocean-store --locked` (279 passed),
+`cargo clippy -p ocean-store --all-targets --locked -- -D warnings`,
+`cargo fmt --all -- --check`, and `cargo xtask docs-check` (30 packages, 153
+active Markdown files, 170 local links) all pass. Exact final diff review is
+pending; issue #54 remains an explicit repository-level merge hold.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [17:03] [10-07-26] America/New_York
+agent: [Codex desktop] [GPT-6]
+worktree: [codex/issue56-profile-grant-serialization]
+type: [workflow] [throughput checkpoint]
+area: [analysis], [gh actions]
+
+Risingtides-dev account contribution calendar observed at 2026-10-07 21:01:51
+UTC: 2026-10-06 = 133, 2026-10-07 = 131 (account-wide; 169 below the 300
+daily target at observation). Separately, the Ocean repository has zero PRs
+merged by Risingtides-dev on 2026-10-07 UTC or America/New_York date so far.
+The GitHub deployments endpoint currently returns no records. The supervised
+daemon's health endpoint remains live-verified at revision aa1e317b2e25; that is
+separate from this unmerged issue #56 change, which is not deployed.
+_________________________________________________________________________________
