@@ -1077,3 +1077,13 @@ ChatGPT sign-in: gpt-6.1-sol, glm-5.3 and deepseek-v4-pro each ran a bash tool
 call and answered; session model = requested, no reroute. ocean-protocol codex
 tests 36/36, ocean-providers 67/67.
 _________________________________________________________________________________
+time:      [00:15] [07-10-26]
+agent:     [claude] [claude code]
+worktree:  [port/private-subagent-chain] [/Users/risingtidesdev/dev/port-subagents]
+type:      [refactor]
+area:      [backend] [testing]
+
+Ported the ocean-private subagent chain (#77, #82, #86, #94) onto public main, reconciled with the rework that landed in #5. Strict cancellation acknowledgement was missing: a run now becomes cancelling only on `ok` exactly true with the same request id and state cancelling, any other answer is an error that writes nothing from both cancel and the watchdog, and a failed cancel no longer repeats the daemon's response body; main's settle-from-daemon-truth handling of `ok:false` was kept over the private raise-and-stay-running. Request fencing was already on main (`JsonStore.update(expect_request=...)`), so only the late-response race regressions were ported. The send-side cap was already on main; the shared admission lock across spawn and send was ported so concurrent admissions cannot both take the last slot or start two follow-ups for one run, while main's lost settlement of a request the daemon no longer tracks was kept over the private hold-forever. The custody design doc was ported as `CUSTODY.md`, rewritten to describe the plugin as it is on main (retention pruning, lost settlement, admission lock), and remains a proposal that authorizes nothing.
+
+Validation: `python3 -m unittest test_ocean_subagents -v` (47 passed, up from 33), `python3 ocean-subagents.py --check`, `python3 test_wire.py`, `python3 -m py_compile ocean-subagents.py`, `sh -n install.sh`, `git diff --check`, `cargo xtask docs-check` (PASS, 154 files; it does not scan plugin Markdown, so the one new link, README to CUSTODY.md, was checked by hand). New cancellation tests fail on main's source; the three admission race tests fail without the lock; five fence tests fail with the request fence removed.
+_________________________________________________________________________________

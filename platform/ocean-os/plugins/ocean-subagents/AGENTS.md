@@ -10,6 +10,7 @@ Provide working, permission-gated subagent tools inside ordinary Ocean turns by 
 - `plugin.toml` owns the model-visible tool contract.
 - `agent/ocean-subagent-worker/` owns the fixed child profile that excludes the subagent plugin and prevents recursive delegation.
 - `install.sh` installs only this plugin and fixed worker agent under the Ocean config root.
+- `CUSTODY.md` owns the proposed (not authorized) manifest for single-owner state custody, unresolved-dispatch holds, storage budgets, migration and rollback. Its acceptance does not authorize source work on its own; the host quiescence prerequisite it names must be proven first.
 
 ## Local Contracts
 
@@ -17,7 +18,7 @@ Provide working, permission-gated subagent tools inside ordinary Ocean turns by 
 - Spawn returns immediately with durable run, turn, and session identifiers.
 - Child execution remains an ordinary Ocean session with normal tool permissions; every child turn carries a private decision token, and the plugin accepts permission decisions only for the exact run/request/session/tool tuple.
 - Enforce fixed worker-profile binding, maximum four active runs, bounded output, and an elapsed-time watchdog.
-- `spawn` and `send` share one admission lock held from the capacity check through publishing the accepted turn, so concurrent admissions cannot both take the last slot or start two follow-ups for one run. Queued, running, waiting-for-permission and cancelling runs hold slots; a failed observation keeps its slot. A refused admission starts no turn and leaves a finished target unchanged, and an unknown or refused turn reply is never replayed or published. Lifecycle reads never take the admission lock. Admission is per plugin instance: it is not a cross-process or restart-safe limit.
+- `spawn` and `send` share one admission lock held from the capacity check through publishing the accepted turn, so concurrent admissions cannot both take the last slot or start two follow-ups for one run. Queued, running, waiting-for-permission and cancelling runs hold slots; a failed observation keeps its slot. A refused admission starts no turn and leaves a finished target unchanged, and an unknown or refused turn reply is never replayed or published. Lifecycle reads never take the admission lock. Admission is per plugin instance: it is not a cross-process or restart-safe limit (see `CUSTODY.md`).
 - The recursion guard fails closed: before every child turn (`spawn` and `send`), confirm the worker profile resolves in the daemon with an allowlist (`config.tools` plus `tools/`) that names at least one always-present built-in tool and no subagent tool, and binds no subprocess capability. The daemon keeps every tool for an unresolved named agent, an empty allowlist, or an allowlist that matches nothing, and adds subprocess-capability tools after narrowing.
 - Persist metadata atomically under `~/.local/state/ocean/subagents` by default. Refreshing an unchanged run writes nothing; finished runs are settled and only the newest 200 are retained.
 - Do not claim exactly-once execution; daemon request/session truth wins during refresh.
@@ -30,6 +31,7 @@ Provide working, permission-gated subagent tools inside ordinary Ocean turns by 
 ## Work Guidance
 
 - Keep the implementation Python-standard-library only.
+- Request fencing and the admission lock work inside one process only. Two plugin processes on one state root can still erase each other's runs; do not claim shared custody until `CUSTODY.md` is accepted and implemented. Keep `CUSTODY.md` describing the plugin as it is when these contracts change.
 - Stdout is exclusively JSON-RPC; diagnostics go to stderr.
 - Keep names, descriptions, and schemas identical between `plugin.toml` and live `list_tools`.
 - The test daemon mirrors the real control contract (volatile registry, HTTP 200 `ok:false` cancel refusals, `cancelling` before `cancelled`, 404 for an unknown session). Change it only alongside the daemon.

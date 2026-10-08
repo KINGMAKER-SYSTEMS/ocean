@@ -47,6 +47,8 @@ Approve the subagent plugin calls when Ocean asks. Child mutating tools remain s
 
 This is at-least-once local lifecycle metadata around daemon-owned turns. The daemon remains authoritative for execution and session state.
 
+Admission, request fencing and state writes are per plugin process. Two plugin processes sharing one state root can overwrite each other's runs, and a turn the daemon accepted whose reply was lost is not tracked. [`CUSTODY.md`](CUSTODY.md) proposes single-owner custody and durable holds for unknown dispatches; it is a proposal only and changes nothing above.
+
 ## Verify
 
 ```bash
