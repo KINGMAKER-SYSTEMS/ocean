@@ -1,5 +1,8 @@
 import importlib.util
 import json
+import os
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -37,6 +40,12 @@ class FakeDaemon:
         self.decisions = []
         self.payloads = []
         self.cancel_calls = []
+        # (status, body) to answer the next cancels with, instead of the
+        # contract above; the request is left untouched. Bodies may be bytes.
+        self.cancel_reply = None
+        # Called with the request id before a cancel is processed, so a test
+        # can let the request finish in the window after the plugin's refresh.
+        self.before_cancel = None
         self.unavailable = False
         self.sessions_unreadable = False
         self.requests_malformed = False
@@ -55,7 +64,7 @@ class FakeDaemon:
                 return json.loads(self.rfile.read(length) or b"{}")
 
             def reply(self, status, body):
-                encoded = json.dumps(body).encode()
+                encoded = body if isinstance(body, bytes) else json.dumps(body).encode()
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(encoded)))
@@ -96,22 +105,37 @@ class FakeDaemon:
                     return
                 if self.path.startswith("/v1/requests/") and self.path.endswith("/cancel"):
                     request_id = self.path.split("/")[3]
+                    if owner.before_cancel is not None:
+                        owner.before_cancel(request_id)
                     with owner.lock:
                         owner.cancel_calls.append(request_id)
                         request = owner.requests.get(request_id)
-                        if request is None:
-                            body = {"ok": False, "state": "errored", "message": "request not found"}
-                        elif request["state"] in TERMINAL_REQUEST_STATES:
-                            body = {
+                        if owner.cancel_reply is not None:
+                            status, body = owner.cancel_reply
+                        elif request is None:
+                            status, body = 200, {
                                 "ok": False,
+                                "request_id": request_id,
+                                "state": "errored",
+                                "message": "request not found",
+                            }
+                        elif request["state"] in TERMINAL_REQUEST_STATES:
+                            status, body = 200, {
+                                "ok": False,
+                                "request_id": request_id,
                                 "state": request["state"],
                                 "message": "request is already terminal; cancel ignored",
                             }
                         else:
                             request["state"] = "cancelling"
                             request["message"] = "cancel requested; cancellation token sent"
-                            body = {"ok": True, "state": "cancelling"}
-                    self.reply(200, body)
+                            status, body = 200, {
+                                "ok": True,
+                                "request_id": request_id,
+                                "state": "cancelling",
+                                "message": "cancel requested; runtime cancellation token signalled",
+                            }
+                    self.reply(status, body)
                     return
                 if self.path.startswith("/v1/permissions/") and self.path.endswith("/decision"):
                     permission_id = self.path.split("/")[3]
@@ -290,6 +314,50 @@ class OceanSubagentTests(unittest.TestCase):
 
     def stored(self, root, run_id):
         return json.loads((Path(root) / "state/runs.json").read_text())["runs"][run_id]
+
+    def unwatched_run(self, manager, root, task="unwatched"):
+        """A run whose elapsed-time watchdog is not armed, so a test controls
+        exactly when, and against which request, the watchdog fires."""
+        with mock.patch.object(manager, "_start_watchdog"):
+            return manager.spawn({"task": task, "cwd": root})
+
+    def expire_watchdog(self, manager, run):
+        """Arm the run's watchdog with its ceiling already passed and return
+        the stored run once that watchdog thread has finished."""
+        manager.store.update(run["run_id"], started_at="2000-01-01T00:00:00Z", timeout_seconds=30)
+        manager._start_watchdog(run["run_id"])
+        key = (run["run_id"], run["turn_id"])
+        self.assertTrue(wait_until(lambda: key not in manager.watchdogs), "watchdog did not finish")
+        return manager.store.get(run["run_id"])
+
+    def wire_responses(self, root, daemon, messages):
+        """Drive the real plugin executable over stdio against the loopback
+        daemon and return its JSON-RPC responses."""
+        env = dict(
+            os.environ,
+            OCEAN_DAEMON_URL=daemon.url,
+            OCEAN_SUBAGENT_STATE_DIR=str(Path(root) / "state"),
+        )
+        process = subprocess.run(
+            [sys.executable, str(ROOT / "ocean-subagents.py")],
+            input="".join(json.dumps(message) + "\n" for message in messages),
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=10,
+            check=True,
+        )
+        self.assertEqual(process.stderr, "")
+        return [json.loads(line) for line in process.stdout.splitlines()]
+
+    @staticmethod
+    def rpc(message_id, name, **args):
+        return {
+            "jsonrpc": "2.0",
+            "id": message_id,
+            "method": "invoke_tool",
+            "params": {"name": name, "args": args},
+        }
 
     def test_manifest_and_live_tools_match(self):
         manifest = tomllib.loads((ROOT / "plugin.toml").read_text())
@@ -617,6 +685,127 @@ class OceanSubagentTests(unittest.TestCase):
             result = manager.cancel({"run_id": run["run_id"]})
             self.assertEqual(result["status"], "completed")
             self.assertEqual(result["output"], "finished first")
+
+    def test_a_malformed_cancel_acknowledgement_changes_nothing(self):
+        # Only the daemon's own acknowledgement (`ok` exactly true, the same
+        # request id, state cancelling) means a cancellation is in flight.
+        # Anything else is neither acceptance nor refusal: an error, no write.
+        with tempfile.TemporaryDirectory() as root, FakeDaemon() as daemon:
+            manager = self.manager(root, daemon)
+            run = self.unwatched_run(manager, root)
+            accepted = {"ok": True, "request_id": run["turn_id"], "state": "cancelling"}
+            responses = [
+                {},
+                dict(accepted, ok=1),
+                dict(accepted, ok="true"),
+                {"ok": True, "state": "cancelling"},
+                dict(accepted, request_id="another-request"),
+                {"ok": True, "request_id": run["turn_id"]},
+                dict(accepted, state="running"),
+                dict(accepted, state="completed"),
+                dict(accepted, state="cancelled"),
+                [],
+                b"not JSON: private daemon details",
+            ]
+            before = manager.store.path.read_bytes()
+            for response in responses:
+                with self.subTest(response=response):
+                    daemon.cancel_reply = (200, response)
+                    with self.assertRaises(module.PluginError) as raised:
+                        manager.cancel({"run_id": run["run_id"]})
+                    self.assertNotIn("private daemon details", str(raised.exception))
+                    self.assertEqual(manager.store.path.read_bytes(), before)
+                    self.assertEqual(manager.store.get(run["run_id"])["status"], "running")
+                    self.assertEqual(daemon.requests[run["turn_id"]]["state"], "running")
+            self.assertEqual(len(daemon.cancel_calls), len(responses))
+
+            # The daemon's real acknowledgement still works afterwards.
+            daemon.cancel_reply = None
+            self.assertEqual(manager.cancel({"run_id": run["run_id"]})["status"], "cancelling")
+            self.assertEqual(daemon.requests[run["turn_id"]]["state"], "cancelling")
+
+    def test_a_failed_cancel_call_never_exposes_the_daemon_response_body(self):
+        with tempfile.TemporaryDirectory() as root, FakeDaemon() as daemon:
+            manager = self.manager(root, daemon)
+            manager.watchdog_attempts = 1
+            run = self.unwatched_run(manager, root)
+            daemon.cancel_reply = (503, {"error": "private daemon details"})
+            with self.assertRaises(module.PluginError) as raised:
+                manager.cancel({"run_id": run["run_id"]})
+            self.assertEqual(str(raised.exception), "Ocean daemon cancellation request failed")
+            self.assertEqual(manager.store.get(run["run_id"])["status"], "running")
+
+            # The watchdog stores the same controlled reason, not the body.
+            expired = self.expire_watchdog(manager, run)
+            self.assertEqual(expired["status"], "running")
+            self.assertEqual(expired["error"], "Ocean daemon cancellation request failed")
+
+            responses = self.wire_responses(root, daemon, [self.rpc(1, "cancel", run_id=run["run_id"])])
+            self.assertEqual(responses[0]["error"]["code"], -32602)
+            self.assertNotIn("private daemon details", responses[0]["error"]["message"])
+            self.assertEqual(self.stored(root, run["run_id"])["status"], "running")
+
+    def test_the_watchdog_never_claims_a_cancellation_the_daemon_did_not_accept(self):
+        with tempfile.TemporaryDirectory() as root, FakeDaemon() as daemon:
+            manager = self.manager(root, daemon)
+            manager.watchdog_attempts = 1
+
+            # The child finishes between the watchdog's refresh and its
+            # cancel: the daemon refuses, and the run settles as it finished.
+            finished = self.unwatched_run(manager, root, "finishes first")
+            daemon.before_cancel = lambda request_id: daemon.complete(request_id, "beat the clock")
+            settled = self.expire_watchdog(manager, finished)
+            daemon.before_cancel = None
+            self.assertEqual(settled["status"], "completed")
+            self.assertEqual(settled["output"], "beat the clock")
+            self.assertIsNone(settled["error"])
+            self.assertEqual(daemon.cancel_calls, [finished["turn_id"]])
+
+            # A malformed acknowledgement is recorded as the error it is; the
+            # run stays running rather than cancelling.
+            run = self.unwatched_run(manager, root, "answered badly")
+            daemon.cancel_reply = (200, {"ok": True, "state": "running"})
+            expired = self.expire_watchdog(manager, run)
+            self.assertEqual(expired["status"], "running")
+            self.assertIn("invalid cancellation acknowledgement", expired["error"])
+            self.assertEqual(daemon.cancel_calls, [finished["turn_id"], run["turn_id"]])
+
+            # Once the daemon answers properly, a poll re-arms the ceiling and
+            # the cancellation goes through.
+            daemon.cancel_reply = None
+            manager.refresh(run["run_id"])
+            self.assertTrue(
+                wait_until(lambda: manager.store.get(run["run_id"])["status"] == "cancelling")
+            )
+            self.assertIn("elapsed-time ceiling", manager.store.get(run["run_id"])["error"])
+
+    def test_cancel_acknowledgement_over_real_stdio(self):
+        with tempfile.TemporaryDirectory() as root, FakeDaemon() as daemon:
+            manager = self.manager(root, daemon)
+            run = self.unwatched_run(manager, root)
+
+            daemon.cancel_reply = (200, {"ok": True, "state": "cancelling"})
+            responses = self.wire_responses(root, daemon, [self.rpc(1, "cancel", run_id=run["run_id"])])
+            self.assertEqual(responses[0]["error"]["code"], -32602)
+            self.assertIn("invalid cancellation acknowledgement", responses[0]["error"]["message"])
+            self.assertEqual(self.stored(root, run["run_id"])["status"], "running")
+
+            daemon.cancel_reply = None
+            responses = self.wire_responses(root, daemon, [self.rpc(2, "cancel", run_id=run["run_id"])])
+            self.assertEqual(responses[0]["result"]["status"], "cancelling")
+            self.assertEqual(self.stored(root, run["run_id"])["status"], "cancelling")
+            daemon.finish_cancel(run["turn_id"])
+            responses = self.wire_responses(root, daemon, [self.rpc(3, "status", run_id=run["run_id"])])
+            self.assertEqual(responses[0]["result"]["status"], "cancelled")
+
+            # A cancel the daemon refuses because the turn already finished
+            # reports how it finished instead of an error.
+            other = self.unwatched_run(manager, root, "finished before cancel")
+            daemon.complete(other["turn_id"], "wire completion")
+            responses = self.wire_responses(root, daemon, [self.rpc(4, "cancel", run_id=other["run_id"])])
+            self.assertEqual(responses[0]["result"]["status"], "completed")
+            self.assertEqual(responses[0]["result"]["output"], "wire completion")
+            self.assertEqual(daemon.cancel_calls, [run["turn_id"], run["turn_id"], other["turn_id"]])
 
     def test_spawn_refuses_when_the_worker_profile_would_not_narrow_tools(self):
         with tempfile.TemporaryDirectory() as root, FakeDaemon() as daemon:

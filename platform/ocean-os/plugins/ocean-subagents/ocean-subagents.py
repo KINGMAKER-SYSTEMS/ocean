@@ -475,9 +475,34 @@ class DaemonClient:
             body["reason"] = reason
         return self.request("POST", f"/v1/permissions/{quoted}/decision", body)
 
-    def cancel(self, request_id: str) -> dict[str, Any]:
+    def cancel(self, request_id: str) -> bool:
+        """Ask the daemon to cancel a request.
+
+        True when the daemon accepted and the request is now cancelling. False
+        when it refused with `ok:false`, which it does for a request it does
+        not know or that already finished. An acceptance is only the strict
+        acknowledgement the daemon sends: `ok` exactly true, the same request
+        id and `state` cancelling. Anything else is not an acknowledgement at
+        all and is an error, so a malformed answer can neither mark a run
+        cancelling nor settle it. A failed call carries no daemon response
+        body, since the message reaches the parent model and the run's stored
+        error.
+        """
         quoted = urllib.parse.quote(request_id, safe="")
-        return self.request("POST", f"/v1/requests/{quoted}/cancel", {})
+        try:
+            response = self.request("POST", f"/v1/requests/{quoted}/cancel", {})
+        except PluginError:
+            raise PluginError("Ocean daemon cancellation request failed") from None
+        ok = response.get("ok")
+        if ok is False:
+            return False
+        if (
+            ok is True
+            and response.get("request_id") == request_id
+            and response.get("state") == "cancelling"
+        ):
+            return True
+        raise PluginError("Ocean daemon returned an invalid cancellation acknowledgement")
 
 
 class Subagents:
@@ -882,8 +907,10 @@ class Subagents:
         """Ask the daemon to cancel this run's turn. True when a cancellation is
         now in flight. The daemon answers HTTP 200 `ok:false` for a request it
         does not know or that already finished; neither can ever reach
-        `cancelled`, so the run is settled from daemon truth instead."""
-        if self.client.cancel(run["request_id"]).get("ok"):
+        `cancelled`, so the run is settled from daemon truth instead. An
+        acknowledgement that is neither acceptance nor refusal raises and
+        leaves the run as it was."""
+        if self.client.cancel(run["request_id"]):
             return True
         request = self.client.request_status(run["request_id"])
         if request is None:
