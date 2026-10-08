@@ -509,6 +509,10 @@ class Subagents:
     def __init__(self, client: DaemonClient, store: JsonStore):
         self.client = client
         self.store = store
+        # Held by spawn and send from the capacity check through publishing the
+        # accepted turn, so two admissions cannot both take the last slot or
+        # both start a follow-up for one run. Lifecycle reads never take it.
+        self.admission_lock = threading.Lock()
         self.watchdogs: set[tuple[str, str]] = set()
         self.watchdog_lock = threading.Lock()
         self.watchdog_attempts = WATCHDOG_ATTEMPTS
@@ -603,50 +607,51 @@ class Subagents:
         thinking_level = validate_thinking_level(args.get("thinking_level"))
         cwd = validate_cwd(args.get("cwd"))
         timeout_seconds = validate_timeout(args.get("timeout_seconds"))
-        self._require_free_slot()
         assert task is not None and role is not None
-        self._require_worker_profile()
-        decision_token = secrets.token_urlsafe(48)
-        response = self.client.start_turn(
-            self._prompt(task, role),
-            cwd,
-            model=model,
-            decision_token=decision_token,
-            thinking_level=thinking_level,
-        )
-        now = now_iso()
-        run = {
-            "run_id": str(uuid.uuid4()),
-            "task": task,
-            "role": role,
-            "cwd": cwd,
-            "model": model,
-            "thinking_level": thinking_level,
-            "permission_id": None,
-            "reported_permission_id": None,
-            "status": "running",
-            "turn_id": response["turn_id"],
-            "request_id": response["turn_id"],
-            "session_id": response["session_id"],
-            "output": None,
-            "error": None,
-            "created_at": now,
-            "updated_at": now,
-            "started_at": now,
-            "finished_at": None,
-            "timeout_seconds": timeout_seconds,
-            "decision_token": decision_token,
-            "turns": [
-                {
-                    "turn_id": response["turn_id"],
-                    "request_id": response["turn_id"],
-                    "started_at": now,
-                }
-            ],
-        }
-        self.store.put(run)
-        self._start_watchdog(run["run_id"])
-        return self._public(run)
+        with self.admission_lock:
+            self._require_free_slot()
+            self._require_worker_profile()
+            decision_token = secrets.token_urlsafe(48)
+            response = self.client.start_turn(
+                self._prompt(task, role),
+                cwd,
+                model=model,
+                decision_token=decision_token,
+                thinking_level=thinking_level,
+            )
+            now = now_iso()
+            run = {
+                "run_id": str(uuid.uuid4()),
+                "task": task,
+                "role": role,
+                "cwd": cwd,
+                "model": model,
+                "thinking_level": thinking_level,
+                "permission_id": None,
+                "reported_permission_id": None,
+                "status": "running",
+                "turn_id": response["turn_id"],
+                "request_id": response["turn_id"],
+                "session_id": response["session_id"],
+                "output": None,
+                "error": None,
+                "created_at": now,
+                "updated_at": now,
+                "started_at": now,
+                "finished_at": None,
+                "timeout_seconds": timeout_seconds,
+                "decision_token": decision_token,
+                "turns": [
+                    {
+                        "turn_id": response["turn_id"],
+                        "request_id": response["turn_id"],
+                        "started_at": now,
+                    }
+                ],
+            }
+            self.store.put(run)
+            self._start_watchdog(run["run_id"])
+            return self._public(run)
 
     def refresh(self, run_id: str) -> dict[str, Any]:
         run_id = bounded_text(run_id, "run_id", 100)
@@ -787,46 +792,47 @@ class Subagents:
         run_id = bounded_text(args.get("run_id"), "run_id", 100)
         message = bounded_text(args.get("message"), "message", MAX_TASK_BYTES)
         assert run_id is not None and message is not None
-        current = self.refresh(run_id)
-        if current["status"] not in TERMINAL_STATES:
-            raise PluginError("subagent still has an active turn")
-        run = self.store.get(run_id)
-        self._require_free_slot(starting=run_id)
-        self._require_worker_profile()
-        decision_token = secrets.token_urlsafe(48)
-        response = self.client.start_turn(
-            self._prompt(message, run["role"]),
-            run["cwd"],
-            session_id=run["session_id"],
-            model=run.get("model"),
-            decision_token=decision_token,
-            thinking_level=run.get("thinking_level"),
-        )
-        now = now_iso()
-        turns = run.get("turns", [])
-        turns.append(
-            {
-                "turn_id": response["turn_id"],
-                "request_id": response["turn_id"],
-                "started_at": now,
-            }
-        )
-        run = self.store.update(
-            run_id,
-            task=message,
-            status="running",
-            turn_id=response["turn_id"],
-            request_id=response["turn_id"],
-            output=None,
-            error=None,
-            started_at=now,
-            finished_at=None,
-            decision_token=decision_token,
-            permission_id=None,
-            turns=turns,
-        )
-        self._start_watchdog(run_id)
-        return self._public(run)
+        with self.admission_lock:
+            current = self.refresh(run_id)
+            if current["status"] not in TERMINAL_STATES:
+                raise PluginError("subagent still has an active turn")
+            run = self.store.get(run_id)
+            self._require_free_slot(starting=run_id)
+            self._require_worker_profile()
+            decision_token = secrets.token_urlsafe(48)
+            response = self.client.start_turn(
+                self._prompt(message, run["role"]),
+                run["cwd"],
+                session_id=run["session_id"],
+                model=run.get("model"),
+                decision_token=decision_token,
+                thinking_level=run.get("thinking_level"),
+            )
+            now = now_iso()
+            turns = run.get("turns", [])
+            turns.append(
+                {
+                    "turn_id": response["turn_id"],
+                    "request_id": response["turn_id"],
+                    "started_at": now,
+                }
+            )
+            run = self.store.update(
+                run_id,
+                task=message,
+                status="running",
+                turn_id=response["turn_id"],
+                request_id=response["turn_id"],
+                output=None,
+                error=None,
+                started_at=now,
+                finished_at=None,
+                decision_token=decision_token,
+                permission_id=None,
+                turns=turns,
+            )
+            self._start_watchdog(run_id)
+            return self._public(run)
 
     def permissions(self, args: dict[str, Any]) -> dict[str, Any]:
         run_id = bounded_text(args.get("run_id"), "run_id", 100)

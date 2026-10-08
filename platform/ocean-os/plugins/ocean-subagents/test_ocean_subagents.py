@@ -52,6 +52,11 @@ class FakeDaemon:
         self.before_cancel_reply = None
         self.before_requests_reply = None
         self.before_session_reply = None
+        # (status, body) to answer the next turn POSTs with. A body with
+        # `ok:false` registers nothing, like a refusal before registration.
+        self.turn_reply = None
+        # Called with the payload while an accepted turn's response is held.
+        self.before_turn_reply = None
         self.unavailable = False
         self.sessions_unreadable = False
         self.requests_malformed = False
@@ -87,27 +92,31 @@ class FakeDaemon:
                         turn_id = str(uuid.uuid4())
                         session_id = payload.get("session_id") or str(uuid.uuid4())
                         owner.payloads.append(payload)
-                        owner.requests[turn_id] = {
-                            "request_id": turn_id,
-                            "session_id": session_id,
-                            "state": "running",
-                            "message": "agent turn running",
-                        }
-                        # The daemon saves the accepted prompt before any
-                        # provider call.
-                        owner.sessions.setdefault(session_id, []).append(
-                            {"role": "user", "text": payload["prompt"]}
+                        status, body = owner.turn_reply or (
+                            202,
+                            {
+                                "ok": True,
+                                "turn_id": turn_id,
+                                "session_id": session_id,
+                                "status": "running",
+                                "event_id_prefix": turn_id[:8],
+                            },
                         )
-                    self.reply(
-                        202,
-                        {
-                            "ok": True,
-                            "turn_id": turn_id,
-                            "session_id": session_id,
-                            "status": "running",
-                            "event_id_prefix": turn_id[:8],
-                        },
-                    )
+                        if not (isinstance(body, dict) and body.get("ok") is False):
+                            owner.requests[turn_id] = {
+                                "request_id": turn_id,
+                                "session_id": session_id,
+                                "state": "running",
+                                "message": "agent turn running",
+                            }
+                            # The daemon saves the accepted prompt before any
+                            # provider call.
+                            owner.sessions.setdefault(session_id, []).append(
+                                {"role": "user", "text": payload["prompt"]}
+                            )
+                    if owner.before_turn_reply is not None:
+                        owner.before_turn_reply(payload)
+                    self.reply(status, body)
                     return
                 if self.path.startswith("/v1/requests/") and self.path.endswith("/cancel"):
                     request_id = self.path.split("/")[3]
@@ -413,6 +422,58 @@ class OceanSubagentTests(unittest.TestCase):
         with mock.patch.object(manager, "_start_watchdog"):
             followed = manager.send({"run_id": run["run_id"], "message": "explicit second turn"})
         return followed, manager.store.get(run["run_id"]), manager.store.path.read_bytes()
+
+    def completed_run(self, manager, root, daemon):
+        run = self.unwatched_run(manager, root, "finished target")
+        daemon.complete(run["turn_id"], "retained result")
+        manager.refresh(run["run_id"])
+        return manager.store.get(run["run_id"])
+
+    def overlapping_admissions(self, daemon, first, second):
+        """Hold the first admission's accepted turn POST, start the second
+        meanwhile, and return both outcomes (results or PluginErrors). The
+        second must not reach the daemon while the first is unpublished."""
+        barrier = ReplyBarrier()
+        second_dispatched = threading.Event()
+        second_started = threading.Event()
+        results = []
+        results_lock = threading.Lock()
+
+        def hold(payload):
+            if barrier.entered.is_set():
+                second_dispatched.set()
+            barrier(payload)
+
+        def call(operation, started=None):
+            if started is not None:
+                started.set()
+            try:
+                result = operation()
+            except module.PluginError as error:
+                result = error
+            with results_lock:
+                results.append(result)
+
+        daemon.before_turn_reply = hold
+        first_thread = threading.Thread(target=call, args=(first,), daemon=True)
+        second_thread = threading.Thread(target=call, args=(second, second_started), daemon=True)
+        first_thread.start()
+        try:
+            self.assertTrue(barrier.entered.wait(timeout=3), "first dispatch never reached the daemon")
+            second_thread.start()
+            self.assertTrue(second_started.wait(timeout=3))
+            self.assertFalse(
+                second_dispatched.wait(timeout=0.3),
+                "a second admission dispatched while the first was unpublished",
+            )
+        finally:
+            barrier.release.set()
+            first_thread.join(timeout=5)
+            if second_thread.ident is not None:
+                second_thread.join(timeout=5)
+            daemon.before_turn_reply = None
+        self.assertFalse(first_thread.is_alive() or second_thread.is_alive())
+        return results
 
     @staticmethod
     def rpc(message_id, name, **args):
@@ -1175,6 +1236,124 @@ class OceanSubagentTests(unittest.TestCase):
                 manager.spawn({"task": f"task {number}", "cwd": root})
             with self.assertRaisesRegex(module.PluginError, "concurrency limit"):
                 manager.send({"run_id": finished["run_id"], "message": "a fifth child"})
+
+    def test_a_refused_follow_up_starts_no_turn_and_leaves_its_run_unchanged(self):
+        for observation in ("states", "unreadable"):
+            with self.subTest(observation=observation), tempfile.TemporaryDirectory() as root, FakeDaemon() as daemon:
+                manager = self.manager(root, daemon)
+                completed = self.completed_run(manager, root, daemon)
+                active = [self.unwatched_run(manager, root) for _ in range(module.MAX_ACTIVE)]
+                if observation == "states":
+                    # Every active state holds its slot.
+                    with daemon.lock:
+                        for run, state in zip(
+                            active, ("queued", "running", "waiting_for_permission", "cancelling")
+                        ):
+                            daemon.requests[run["turn_id"]]["state"] = state
+                else:
+                    # A request list that cannot be read proves nothing finished.
+                    daemon.requests_malformed = True
+                for operation in (
+                    lambda: manager.send({"run_id": completed["run_id"], "message": "refused"}),
+                    lambda: manager.spawn({"task": "refused", "cwd": root}),
+                ):
+                    with self.assertRaisesRegex(module.PluginError, "concurrency limit"):
+                        operation()
+                self.assertEqual(manager.store.get(completed["run_id"]), completed)
+                self.assertEqual(len(daemon.payloads), 1 + module.MAX_ACTIVE)
+                self.assertTrue(
+                    all(manager.store.get(run["run_id"])["status"] in module.ACTIVE_STATES for run in active)
+                )
+
+    def test_concurrent_spawn_and_send_cannot_both_take_the_last_slot(self):
+        for first_kind in ("spawn", "send"):
+            with self.subTest(first=first_kind), tempfile.TemporaryDirectory() as root, FakeDaemon() as daemon:
+                manager = self.manager(root, daemon)
+                completed = self.completed_run(manager, root, daemon)
+                for _ in range(module.MAX_ACTIVE - 1):
+                    self.unwatched_run(manager, root)
+                spawn = lambda: manager.spawn({"task": "contending spawn", "cwd": root})
+                send = lambda: manager.send({"run_id": completed["run_id"], "message": "contending send"})
+                first, second = (spawn, send) if first_kind == "spawn" else (send, spawn)
+                with mock.patch.object(manager, "_start_watchdog"):
+                    results = self.overlapping_admissions(daemon, first, second)
+                self.assertEqual(sum(isinstance(result, dict) for result in results), 1)
+                errors = [result for result in results if isinstance(result, module.PluginError)]
+                self.assertEqual(len(errors), 1)
+                self.assertIn("concurrency limit", str(errors[0]))
+                self.assertEqual(len(daemon.payloads), module.MAX_ACTIVE + 1)
+                active = [run for run in manager.store.all() if run["status"] in module.ACTIVE_STATES]
+                self.assertEqual(len(active), module.MAX_ACTIVE)
+                if first_kind == "spawn":
+                    self.assertEqual(manager.store.get(completed["run_id"]), completed)
+
+    def test_concurrent_sends_start_one_follow_up_for_a_run(self):
+        with tempfile.TemporaryDirectory() as root, FakeDaemon() as daemon:
+            manager = self.manager(root, daemon)
+            completed = self.completed_run(manager, root, daemon)
+            send = lambda: manager.send({"run_id": completed["run_id"], "message": "one follow-up"})
+            with mock.patch.object(manager, "_start_watchdog") as watchdog:
+                results = self.overlapping_admissions(daemon, send, send)
+            accepted = [result for result in results if isinstance(result, dict)]
+            errors = [result for result in results if isinstance(result, module.PluginError)]
+            self.assertEqual(len(accepted), 1)
+            self.assertEqual(len(errors), 1)
+            self.assertIn("active turn", str(errors[0]))
+            current = manager.store.get(completed["run_id"])
+            self.assertEqual(current["request_id"], accepted[0]["turn_id"])
+            self.assertEqual(len(current["turns"]), 2)
+            self.assertEqual(len(daemon.payloads), 2)
+            # The refused send's refresh re-arms the (idempotent) watchdog for
+            # the turn the first one started; nothing else is armed.
+            self.assertEqual({call.args for call in watchdog.call_args_list}, {(completed["run_id"],)})
+
+    def test_lifecycle_reads_do_not_wait_for_an_admission_in_flight(self):
+        with tempfile.TemporaryDirectory() as root, FakeDaemon() as daemon:
+            manager = self.manager(root, daemon)
+            completed = self.completed_run(manager, root, daemon)
+            barrier = ReplyBarrier()
+            daemon.before_turn_reply = barrier
+
+            def observe_predecessor():
+                # Held POST: the store and refresh stay usable meanwhile, and
+                # the run still names its predecessor until publication.
+                self.assertEqual(manager.store.get(completed["run_id"]), completed)
+                return manager.refresh(completed["run_id"])
+
+            with mock.patch.object(manager, "_start_watchdog") as watchdog:
+                observed, followed = self.observe_while_replaced(
+                    lambda: manager.send({"run_id": completed["run_id"], "message": "during a refresh"}),
+                    barrier,
+                    observe_predecessor,
+                )
+            self.assertEqual(observed["status"], "completed")
+            current = manager.store.get(completed["run_id"])
+            self.assertEqual(followed["status"], "running")
+            self.assertEqual(current["request_id"], followed["turn_id"])
+            self.assertNotEqual(current["decision_token"], completed["decision_token"])
+            self.assertEqual(current["decision_token"], daemon.payloads[-1]["decision_token"])
+            self.assertEqual(current["turns"][:-1], completed["turns"])
+            watchdog.assert_called_once_with(completed["run_id"])
+
+    def test_a_refused_or_unreadable_turn_reply_is_never_replayed_or_published(self):
+        for reply in ({"ok": False, "error": "synthetic refusal"}, {"ok": True}, b"lost acknowledgement"):
+            with self.subTest(reply=reply), tempfile.TemporaryDirectory() as root, FakeDaemon() as daemon:
+                manager = self.manager(root, daemon)
+                completed = self.completed_run(manager, root, daemon)
+                encoded = manager.store.path.read_bytes()
+                daemon.turn_reply = (202, reply)
+                with mock.patch.object(manager, "_start_watchdog") as watchdog:
+                    with self.assertRaises(module.PluginError):
+                        manager.send({"run_id": completed["run_id"], "message": "one explicit attempt"})
+                self.assertEqual(manager.store.path.read_bytes(), encoded)
+                self.assertEqual(len(daemon.payloads), 2)
+                watchdog.assert_not_called()
+                daemon.turn_reply = None
+                manager.refresh(completed["run_id"])
+                manager.wait({"run_id": completed["run_id"], "timeout_seconds": 0})
+                manager.list_runs({})
+                self.assertEqual(len(daemon.payloads), 2)
+                self.assertEqual(manager.store.get(completed["run_id"]), completed)
 
     def overdue_run(self, root, request_id, session_id):
         state = Path(root) / "state"

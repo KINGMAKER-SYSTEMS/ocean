@@ -32,7 +32,7 @@ Approve the subagent plugin calls when Ocean asks. Child mutating tools remain s
 
 ## Runtime behavior
 
-- Maximum four active children per plugin instance; `send` counts against the same cap.
+- Maximum four active children per plugin instance; `send` counts against the same cap. Spawns and follow-ups are admitted one at a time from the capacity check until the accepted turn is recorded, so two cannot both take the last slot and one run cannot get two follow-ups. A refused admission starts no turn and leaves the finished run as it was; a turn reply the plugin cannot read is reported as an error and never retried.
 - Default elapsed-time ceiling: 600 seconds; configurable per spawn from 30–1800 seconds.
 - `model` is passed to the daemon as given; omit it to use the daemon's current model. A name the daemon cannot route fails the child turn, and the failure lists the ready catalog ids. `send` reuses the run's model, so recover with a new `spawn`.
 - `thinking_level` (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`) sets the child's reasoning effort and is reused by `send`; omit it for the model's default.
