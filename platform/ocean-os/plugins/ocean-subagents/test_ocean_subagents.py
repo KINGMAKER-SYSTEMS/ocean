@@ -46,6 +46,12 @@ class FakeDaemon:
         # Called with the request id before a cancel is processed, so a test
         # can let the request finish in the window after the plugin's refresh.
         self.before_cancel = None
+        # Called just before a response is written, after the daemon state it
+        # reports was read, so a test can hold a response in flight while a
+        # newer turn replaces the one it describes.
+        self.before_cancel_reply = None
+        self.before_requests_reply = None
+        self.before_session_reply = None
         self.unavailable = False
         self.sessions_unreadable = False
         self.requests_malformed = False
@@ -135,6 +141,8 @@ class FakeDaemon:
                                 "state": "cancelling",
                                 "message": "cancel requested; runtime cancellation token signalled",
                             }
+                    if owner.before_cancel_reply is not None:
+                        owner.before_cancel_reply(request_id)
                     self.reply(status, body)
                     return
                 if self.path.startswith("/v1/permissions/") and self.path.endswith("/decision"):
@@ -172,6 +180,8 @@ class FakeDaemon:
                         requests = [dict(item) for item in owner.requests.values()]
                     if owner.requests_malformed:
                         requests = None
+                    if owner.before_requests_reply is not None:
+                        owner.before_requests_reply(requests)
                     self.reply(200, {"ok": True, "requests": requests})
                     return
                 if self.path == "/v1/permissions":
@@ -204,6 +214,8 @@ class FakeDaemon:
                             if item["session_id"] == session_id
                             and item["state"] not in TERMINAL_REQUEST_STATES
                         ] + owner.session_claims_active.get(session_id, [])
+                    if owner.before_session_reply is not None:
+                        owner.before_session_reply(session_id)
                     self.reply(
                         200,
                         {
@@ -290,6 +302,26 @@ class FakeDaemon:
         self.thread.join(timeout=2)
 
 
+class ReplyBarrier:
+    """Hold the first response it is called for until released. Later calls
+    pass straight through. No daemon or store lock is held while waiting."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.claimed = False
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def __call__(self, *_args):
+        with self.lock:
+            if self.claimed:
+                return
+            self.claimed = True
+        self.entered.set()
+        if not self.release.wait(timeout=5):
+            raise RuntimeError("reply barrier was never released")
+
+
 def wait_until(predicate, timeout=3.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -349,6 +381,38 @@ class OceanSubagentTests(unittest.TestCase):
         )
         self.assertEqual(process.stderr, "")
         return [json.loads(line) for line in process.stdout.splitlines()]
+
+    def observe_while_replaced(self, operation, barrier, publish):
+        """Run `operation` in a thread until its daemon response is held at
+        `barrier`, run `publish` meanwhile, then let the response land.
+        Returns (publish result, operation result)."""
+        result = {}
+
+        def observe():
+            try:
+                result["value"] = operation()
+            except Exception as error:  # surfaced below on the test thread
+                result["error"] = error
+
+        thread = threading.Thread(target=observe, daemon=True)
+        thread.start()
+        try:
+            self.assertTrue(barrier.entered.wait(timeout=3), "response never reached the barrier")
+            published = publish()
+        finally:
+            barrier.release.set()
+            thread.join(timeout=5)
+        self.assertFalse(thread.is_alive(), "held operation did not finish")
+        if "error" in result:
+            raise result["error"]
+        return published, result["value"]
+
+    def follow_up_snapshot(self, manager, run):
+        """Send an explicit follow-up and return it with the stored run and
+        the exact state bytes right after it was published."""
+        with mock.patch.object(manager, "_start_watchdog"):
+            followed = manager.send({"run_id": run["run_id"], "message": "explicit second turn"})
+        return followed, manager.store.get(run["run_id"]), manager.store.path.read_bytes()
 
     @staticmethod
     def rpc(message_id, name, **args):
@@ -981,6 +1045,125 @@ class OceanSubagentTests(unittest.TestCase):
             self.assertEqual(manager.refresh(run["run_id"])["status"], "running")
             daemon.session_claims_active.clear()
             self.assertEqual(manager.refresh(run["run_id"])["status"], "lost")
+
+    def test_a_late_completion_read_by_the_watchdog_leaves_a_follow_up_alone(self):
+        with tempfile.TemporaryDirectory() as root, FakeDaemon() as daemon:
+            manager = self.manager(root, daemon)
+            run = self.unwatched_run(manager, root)
+            daemon.complete(run["turn_id"], "old turn result")
+            barrier = ReplyBarrier()
+            daemon.before_session_reply = barrier
+            (followed, snapshot, encoded), observed = self.observe_while_replaced(
+                lambda: self.expire_watchdog(manager, run),
+                barrier,
+                lambda: self.follow_up_snapshot(manager, run),
+            )
+            self.assertEqual(manager.store.get(run["run_id"]), snapshot)
+            self.assertEqual(manager.store.path.read_bytes(), encoded)
+            self.assertEqual(observed, snapshot)
+            self.assertEqual(snapshot["request_id"], followed["turn_id"])
+            self.assertEqual(snapshot["status"], "running")
+            self.assertEqual(daemon.cancel_calls, [])
+
+            # The follow-up is still the run's turn for cancel and restart.
+            self.assertEqual(manager.cancel({"run_id": run["run_id"]})["status"], "cancelling")
+            self.assertEqual(daemon.cancel_calls, [followed["turn_id"]])
+            self.assertEqual(len(daemon.payloads), 2)
+
+    def test_a_late_request_read_returns_the_follow_up_untouched(self):
+        for state in ("errored", "cancelled"):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as root, FakeDaemon() as daemon:
+                manager = self.manager(root, daemon)
+                run = self.unwatched_run(manager, root)
+                with daemon.lock:
+                    daemon.requests[run["turn_id"]].update(
+                        state=state, message="old request outcome", finished_at="2026-07-29T12:00:00Z"
+                    )
+                barrier = ReplyBarrier()
+                daemon.before_requests_reply = barrier
+                (followed, snapshot, encoded), observed = self.observe_while_replaced(
+                    lambda: manager.refresh(run["run_id"]),
+                    barrier,
+                    lambda: self.follow_up_snapshot(manager, run),
+                )
+                self.assertEqual(manager.store.get(run["run_id"]), snapshot)
+                self.assertEqual(manager.store.path.read_bytes(), encoded)
+                self.assertEqual(observed, manager._public(snapshot))
+                self.assertEqual(observed["turn_id"], followed["turn_id"])
+                self.assertEqual(observed["status"], "running")
+                self.assertIsNone(observed["error"])
+                self.assertEqual(len(daemon.payloads), 2)
+
+    def test_a_late_cancel_acknowledgement_never_marks_a_follow_up_cancelling(self):
+        with tempfile.TemporaryDirectory() as root, FakeDaemon() as daemon:
+            manager = self.manager(root, daemon)
+            run = self.unwatched_run(manager, root)
+            barrier = ReplyBarrier()
+            daemon.before_cancel_reply = barrier
+
+            def publish():
+                daemon.finish_cancel(run["turn_id"])
+                return self.follow_up_snapshot(manager, run)
+
+            (followed, snapshot, encoded), observed = self.observe_while_replaced(
+                lambda: manager.cancel({"run_id": run["run_id"]}), barrier, publish
+            )
+            self.assertEqual(manager.store.get(run["run_id"]), snapshot)
+            self.assertEqual(manager.store.path.read_bytes(), encoded)
+            self.assertEqual(observed, manager._public(snapshot))
+            self.assertEqual(observed["status"], "running")
+            self.assertEqual(manager.cancel({"run_id": run["run_id"]})["status"], "cancelling")
+            self.assertEqual(daemon.cancel_calls, [run["turn_id"], followed["turn_id"]])
+
+    def test_a_late_watchdog_acknowledgement_never_marks_a_follow_up_cancelling(self):
+        with tempfile.TemporaryDirectory() as root, FakeDaemon() as daemon:
+            manager = self.manager(root, daemon)
+            run = self.unwatched_run(manager, root)
+            barrier = ReplyBarrier()
+            daemon.before_cancel_reply = barrier
+
+            def publish():
+                daemon.finish_cancel(run["turn_id"])
+                return self.follow_up_snapshot(manager, run)
+
+            (followed, snapshot, encoded), observed = self.observe_while_replaced(
+                lambda: self.expire_watchdog(manager, run), barrier, publish
+            )
+            self.assertEqual(manager.store.get(run["run_id"]), snapshot)
+            self.assertEqual(manager.store.path.read_bytes(), encoded)
+            self.assertEqual(observed, snapshot)
+            self.assertIsNone(snapshot["error"])
+            self.assertEqual(daemon.cancel_calls, [run["turn_id"]])
+            self.assertEqual(daemon.requests[followed["turn_id"]]["state"], "running")
+
+    def test_an_old_watchdog_never_cancels_the_turn_that_replaced_its_own(self):
+        # The watchdog checks its request before refreshing. If a follow-up
+        # lands in between, that refresh reads the new turn (a fenced, correct
+        # read), and the cancel is still refused because the request changed.
+        with tempfile.TemporaryDirectory() as root, FakeDaemon() as daemon:
+            manager = self.manager(root, daemon)
+            run = self.unwatched_run(manager, root)
+            barrier = ReplyBarrier()
+            refresh = manager.refresh
+
+            def held_refresh(*args, **kwargs):
+                barrier()
+                return refresh(*args, **kwargs)
+
+            def publish():
+                daemon.complete(run["turn_id"])
+                return self.follow_up_snapshot(manager, run)
+
+            with mock.patch.object(manager, "refresh", side_effect=held_refresh):
+                (followed, snapshot, encoded), observed = self.observe_while_replaced(
+                    lambda: self.expire_watchdog(manager, run), barrier, publish
+                )
+            self.assertEqual(manager.store.get(run["run_id"]), snapshot)
+            self.assertEqual(manager.store.path.read_bytes(), encoded)
+            self.assertEqual(observed, snapshot)
+            self.assertEqual(daemon.cancel_calls, [])
+            self.assertEqual(daemon.requests[followed["turn_id"]]["state"], "running")
+            self.assertEqual(len(daemon.payloads), 2)
 
     def test_send_respects_the_concurrency_cap(self):
         with tempfile.TemporaryDirectory() as root, FakeDaemon() as daemon:
