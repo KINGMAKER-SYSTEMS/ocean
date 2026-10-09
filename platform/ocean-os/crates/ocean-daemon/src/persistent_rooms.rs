@@ -2153,6 +2153,8 @@ pub(super) async fn room_post_message(
     // human/bot/system-authored lines can convene an agent.
     let mut fired = Vec::new();
     let mut convened = std::collections::HashSet::new();
+    // Agents whose turn this row actually admitted (a subset of `convened`).
+    let mut admitted = std::collections::HashSet::new();
     if !matches!(req.author_kind, RoomParticipantKind::Agent) {
         // Every trigger source for THIS row, in a fixed order: each @-mention in
         // body order, then (G3) the thread-root author when this post is a reply.
@@ -2224,7 +2226,8 @@ pub(super) async fn room_post_message(
 
             let target = decision.target_participant.clone().unwrap_or_default();
             let reason = decision.reason.clone();
-            if let Err(error) = spawn_room_agent_turn(
+            let agent_id = agent.id.clone();
+            match spawn_room_agent_turn(
                 state.clone(),
                 admission,
                 turn_permit,
@@ -2245,53 +2248,45 @@ pub(super) async fn room_post_message(
             )
             .await
             {
-                tracing::info!(room = %key, reason = error.code(),
-                    "room-agent convene refused before runtime dispatch");
+                Ok(_) => {
+                    admitted.insert(agent_id);
+                }
+                Err(error) => {
+                    tracing::info!(room = %key, reason = error.code(),
+                        "room-agent convene refused before runtime dispatch");
+                }
             }
         }
 
         // Team-platform P4: a human reply in a thread answers every run parked
-        // there by `room_ask`. Close the parked run and convene the same
-        // (room, agent) session with the reply — unless this row already
-        // convened that agent above.
+        // there by `room_ask`. Each parked run is first claimed by this answer
+        // with a durable compare-and-swap (a concurrent reply that loses the
+        // claim leaves it alone), then the same (room, agent) session is
+        // convened with the reply, and only an admitted successor closes the
+        // run `Done`. A refused admission releases the claim: the run stays
+        // parked and the next reply can resume it. One successor per agent per
+        // row: an agent this row already admitted above closes on that turn.
         if let Some(root) = req.thread_parent_seq {
             let parked = with_rooms(&state, |store| store.parked_room_agent_runs(&key, root))
                 .unwrap_or_default();
             for run in parked {
+                if !crate::room_agent_runs::claim_answer(&state, &run, msg.seq) {
+                    continue;
+                }
                 let agent_id = run.agent_id.clone();
-                crate::room_agent_runs::close_answered(&state, run);
-                if !convened.insert(agent_id.clone()) {
-                    continue;
-                }
-                let Some(agent) = resolve_agent_participant(&roster, &agent_id) else {
-                    continue;
+                let resumed = if admitted.contains(&agent_id) {
+                    true
+                } else if !convened.insert(agent_id.clone()) {
+                    false
+                } else {
+                    let started =
+                        resume_parked_room_agent(&state, &key, &roster, &agent_id, msg.seq).await;
+                    if started {
+                        admitted.insert(agent_id);
+                    }
+                    started
                 };
-                if resolve_named_agent(&agent.id).is_err() {
-                    continue;
-                }
-                let Ok((admission, turn_permit)) = room_agent_authority::admit_room_agent(
-                    &state,
-                    &key,
-                    &agent.id,
-                    &agent.id,
-                    AdmissionTrigger::ThreadReply,
-                )
-                .await
-                else {
-                    continue;
-                };
-                let _ = spawn_room_agent_turn(
-                    state.clone(),
-                    admission,
-                    turn_permit,
-                    agent,
-                    msg.seq,
-                    None,
-                    Uuid::new_v4(),
-                    None,
-                    None,
-                )
-                .await;
+                crate::room_agent_runs::settle_answer(&state, &run, msg.seq, resumed);
             }
         }
     }
@@ -2300,6 +2295,47 @@ pub(super) async fn room_post_message(
         StatusCode::CREATED,
         Json(json!({ "ok": true, "message": msg, "triggers_fired": fired })),
     )
+}
+
+/// Convene `agent_id` on a thread answer at `answer_seq`, resuming its parked
+/// `room_ask` session. `true` only once the successor turn is admitted.
+async fn resume_parked_room_agent(
+    state: &AppState,
+    key: &RoomKey,
+    roster: &[RoomParticipant],
+    agent_id: &str,
+    answer_seq: u64,
+) -> bool {
+    let Some(agent) = resolve_agent_participant(roster, agent_id) else {
+        return false;
+    };
+    if resolve_named_agent(&agent.id).is_err() {
+        return false;
+    }
+    let Ok((admission, turn_permit)) = room_agent_authority::admit_room_agent(
+        state,
+        key,
+        &agent.id,
+        &agent.id,
+        AdmissionTrigger::ThreadReply,
+    )
+    .await
+    else {
+        return false;
+    };
+    spawn_room_agent_turn(
+        state.clone(),
+        admission,
+        turn_permit,
+        agent,
+        answer_seq,
+        None,
+        Uuid::new_v4(),
+        None,
+        None,
+    )
+    .await
+    .is_ok()
 }
 
 #[derive(Debug, Deserialize)]
@@ -9060,6 +9096,148 @@ env = { FIXTURE = "1" }
             "same session continues"
         );
         assert_eq!(resumed.state, ocean_core::RoomAgentRunState::Done);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn p4_answer_resumption_claims_once_and_survives_refused_admission() {
+        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _env = TestEnvRestore::capture(&[
+            "OCEAN_AUTH_FILE",
+            "OCEAN_CODEX_AUTH_FILE",
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+            "OCEAN_AGENTS_DIR",
+        ]);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state = crate::tests::isolated_room_fixture_state(&tmp);
+        let agents_root = tmp.path().join("agents");
+        write_agent_fixture(&agents_root, "asker", "model = \"fake-ok\"\n", None);
+        std::env::set_var("OCEAN_AGENTS_DIR", &agents_root);
+        let key = RoomKey::new("p4-answer-claim");
+        create_mention_room(&state, &key);
+        join_human(&state, &key);
+        let (status, _) = room_join(
+            State(state.clone()),
+            Path(key.as_str().to_string()),
+            Json(RoomJoinRequest {
+                id: "asker".into(),
+                display_name: "Asker".into(),
+                kind: RoomParticipantKind::Agent,
+                owner_id: Some("human".into()),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let generation = authorize_room_agent_fixture(
+            &state,
+            &key,
+            "asker",
+            ActivationPolicy::TaskAndThread,
+            ContextPolicy::InvocationOnly,
+        );
+
+        // A run parked by `room_ask` on a thread rooted at the human's task.
+        let root = append_room_message(
+            &state,
+            &key,
+            "human",
+            RoomParticipantKind::Human,
+            RoomMessageKind::Message,
+            "paint the shed",
+        )
+        .unwrap()
+        .seq;
+        let mut tracker = crate::room_agent_runs::RunTracker::start(
+            state.clone(),
+            key.clone(),
+            "asker",
+            authorized_room_agent_session_id(&key, "asker", generation),
+            root,
+            root,
+            tmp.path().display().to_string(),
+        );
+        tracker.awaiting_reply("Which colour?", None);
+        drop(tracker);
+        let parked_id = with_rooms(&state, |store| store.parked_room_agent_runs(&key, root))
+            .unwrap()
+            .pop()
+            .expect("parked run")
+            .run_id;
+        let run = |id: &str| {
+            with_rooms(&state, |store| store.room_agent_run(id))
+                .unwrap()
+                .unwrap()
+        };
+        let reply = |body: &str| {
+            room_post_message(
+                State(state.clone()),
+                Path(key.as_str().to_string()),
+                Json(RoomMessageRequest {
+                    author_id: String::new(),
+                    author_kind: RoomParticipantKind::Human,
+                    body: body.into(),
+                    thread_parent_seq: Some(root),
+                }),
+            )
+        };
+        let run_count = || {
+            with_rooms(&state, |store| store.room_agent_runs(&key, 10))
+                .unwrap()
+                .len()
+        };
+
+        // The successor cannot be admitted: the answer must not be consumed.
+        std::fs::remove_dir_all(agents_root.join("asker")).unwrap();
+        let (status, _) = reply("blue").await;
+        assert_eq!(status, StatusCode::CREATED);
+        let after_refusal = run(&parked_id);
+        assert!(
+            after_refusal.state.is_parked(),
+            "a refused admission leaves the run parked: {after_refusal:?}"
+        );
+        assert_eq!(after_refusal.answer_seq, None, "claim released");
+        assert_eq!(run_count(), 1, "no successor");
+
+        // Another answer holds the claim (a concurrent reply in flight): this
+        // reply is refused and starts nothing.
+        write_agent_fixture(&agents_root, "asker", "model = \"fake-ok\"\n", None);
+        assert!(with_rooms(&state, |store| store
+            .claim_parked_room_agent_run(&parked_id, 9_999, Utc::now()))
+        .unwrap()
+        .is_some());
+        let (status, _) = reply("green").await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(run(&parked_id).answer_seq, Some(9_999));
+        assert_eq!(run_count(), 1, "the losing reply starts no successor");
+        with_rooms(&state, |store| {
+            store.settle_room_agent_run_answer(&parked_id, 9_999, false, Utc::now())
+        })
+        .unwrap()
+        .unwrap();
+
+        // The next answer resumes it exactly once and only then closes it.
+        let (status, body) = reply("red").await;
+        assert_eq!(status, StatusCode::CREATED);
+        let answer_seq = body.0["message"]["seq"].as_u64().unwrap();
+        let closed = run(&parked_id);
+        assert_eq!(closed.state, ocean_core::RoomAgentRunState::Done);
+        assert_eq!(closed.answer_seq, Some(answer_seq));
+        let runs = wait_for_runs(&state, &key, 2).await;
+        assert_eq!(runs.len(), 2);
+        let resumed = runs.iter().find(|r| r.run_id != parked_id).unwrap();
+        assert_eq!(resumed.trigger_seq, answer_seq);
+        assert_eq!(resumed.thread_root_seq, root);
+        // A late duplicate reply finds nothing left to claim.
+        let (status, _) = reply("red again").await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(
+            with_rooms(&state, |store| store.room_agent_runs(&key, 10))
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     #[tokio::test]

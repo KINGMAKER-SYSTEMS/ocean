@@ -52,19 +52,33 @@ pub(crate) fn run_decision_token(run_id: &str) -> Option<String> {
     tokens().get(run_id).cloned()
 }
 
-/// Close a parked `room_ask` run once a human has answered in its thread; the
-/// answer convenes a fresh run on the same session.
-pub(crate) fn close_answered(state: &AppState, mut run: RoomAgentRun) {
-    if !run.state.is_parked() {
-        return;
+/// Atomically claim a parked `room_ask` run for the thread answer at
+/// `answer_seq`. `None` when the run is no longer parked or another answer
+/// already holds it, so of concurrent replies exactly one resumes the run.
+pub(crate) fn claim_answer(state: &AppState, run: &RoomAgentRun, answer_seq: u64) -> bool {
+    match with_rooms(state, |store| {
+        store.claim_parked_room_agent_run(&run.run_id, answer_seq, Utc::now())
+    }) {
+        Ok(Some(_)) => true,
+        Ok(None) => false,
+        Err(e) => {
+            tracing::warn!(room = %run.room_id, %e, "room agent run claim failed");
+            false
+        }
     }
-    run.state = RoomAgentRunState::Done;
-    run.updated_at = Utc::now();
-    if let Err(e) = with_rooms(state, |store| store.put_room_agent_run(&run)) {
-        tracing::warn!(room = %run.room_id, %e, "room agent run write failed");
-        return;
+}
+
+/// Settle a claim made by [`claim_answer`]. `resumed` (the successor turn was
+/// admitted) closes the run `Done`; otherwise the claim is released and the
+/// run stays parked with the answer still in its thread.
+pub(crate) fn settle_answer(state: &AppState, run: &RoomAgentRun, answer_seq: u64, resumed: bool) {
+    match with_rooms(state, |store| {
+        store.settle_room_agent_run_answer(&run.run_id, answer_seq, resumed, Utc::now())
+    }) {
+        Ok(Some(_)) => publish_room_access_wake(state, &run.room_id),
+        Ok(None) => {}
+        Err(e) => tracing::warn!(room = %run.room_id, %e, "room agent run settle failed"),
     }
-    publish_room_access_wake(state, &run.room_id);
 }
 
 /// Owns one run's projection and persists every change.
@@ -103,6 +117,7 @@ impl RunTracker {
                 tool_count: 0,
                 reply_seq: None,
                 pending_permission: None,
+                answer_seq: None,
             },
             cwd,
         };

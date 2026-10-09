@@ -6002,6 +6002,89 @@ impl SqliteRoomStore {
             .collect())
     }
 
+    /// Rewrite one run inside an immediate transaction when `update` accepts
+    /// the current row (returns `true` after changing it). The row is read and
+    /// written under the same write lock, so concurrent callers compare and
+    /// swap rather than overwrite each other.
+    fn update_room_agent_run_if(
+        &mut self,
+        run_id: &str,
+        update: impl FnOnce(&mut RoomAgentRun) -> bool,
+    ) -> Result<Option<RoomAgentRun>> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let body: Option<String> = tx
+            .query_row(
+                "SELECT body FROM room_agent_runs WHERE run_id = ?1",
+                params![run_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(body) = body else {
+            return Ok(None);
+        };
+        let mut run = decode_agent_run(&body)?;
+        if !update(&mut run) {
+            return Ok(None);
+        }
+        let body = serde_json::to_string(&run)
+            .map_err(|e| RoomStoreError::Encode(format!("agent run: {e}")))?;
+        tx.execute(
+            "UPDATE room_agent_runs SET body = ?1 WHERE run_id = ?2",
+            params![body, run_id],
+        )?;
+        tx.commit()?;
+        Ok(Some(run))
+    }
+
+    /// Claim a parked `room_ask` run for the thread answer at `answer_seq`
+    /// (team-platform P4). Compare-and-swap: only a run that is still
+    /// `AwaitingReply` with no outstanding claim takes the answer, so of two
+    /// concurrent replies exactly one gets `Some`. The run stays parked, with
+    /// the answer recorded, until [`Self::settle_room_agent_run_answer`].
+    pub fn claim_parked_room_agent_run(
+        &mut self,
+        run_id: &str,
+        answer_seq: u64,
+        now: DateTime<Utc>,
+    ) -> Result<Option<RoomAgentRun>> {
+        self.update_room_agent_run_if(run_id, |run| {
+            if !run.state.is_parked() || run.answer_seq.is_some() {
+                return false;
+            }
+            run.answer_seq = Some(answer_seq);
+            run.updated_at = now;
+            true
+        })
+    }
+
+    /// Settle the claim `answer_seq` holds on a parked run. `resumed` (the
+    /// successor turn was admitted) closes the run `Done`; otherwise the claim
+    /// is released and the run stays parked, so the answer is still in the
+    /// thread and the next reply can resume it. Any other claim or state is
+    /// left untouched (`None`).
+    pub fn settle_room_agent_run_answer(
+        &mut self,
+        run_id: &str,
+        answer_seq: u64,
+        resumed: bool,
+        now: DateTime<Utc>,
+    ) -> Result<Option<RoomAgentRun>> {
+        self.update_room_agent_run_if(run_id, |run| {
+            if !run.state.is_parked() || run.answer_seq != Some(answer_seq) {
+                return false;
+            }
+            if resumed {
+                run.state = RoomAgentRunState::Done;
+            } else {
+                run.answer_seq = None;
+            }
+            run.updated_at = now;
+            true
+        })
+    }
+
     /// One agent's per-room settings; default (empty) when never set.
     pub fn room_agent_settings(&self, key: &RoomKey, agent_id: &str) -> Result<RoomAgentSettings> {
         if !self.room_exists(key)? {
@@ -6050,23 +6133,43 @@ impl SqliteRoomStore {
     }
 
     /// Restart recovery: every non-terminal run belonged to a turn that died
-    /// with the previous daemon. Mark each `Failed` so no card spins forever,
-    /// and return the rewritten runs.
+    /// with the previous daemon. Mark each `Failed` so no card spins forever.
+    /// A parked run whose answer claim was still outstanding settles from
+    /// durable evidence: a successor run convened by that answer closes it
+    /// `Done`; otherwise the claim is released and the run stays parked for
+    /// the next reply (the ambiguous dispatch is never replayed). Returns the
+    /// rewritten runs.
     pub fn interrupt_open_room_agent_runs(
         &mut self,
         now: DateTime<Utc>,
     ) -> Result<Vec<RoomAgentRun>> {
-        let open: Vec<RoomAgentRun> = {
+        let all: Vec<RoomAgentRun> = {
             let mut stmt = self.conn.prepare("SELECT body FROM room_agent_runs")?;
             let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
             rows.map(|row| decode_agent_run(&row?))
                 .collect::<Result<Vec<_>>>()?
-                .into_iter()
-                .filter(|run| !run.state.is_terminal() && !run.state.is_parked())
-                .collect()
         };
-        let mut out = Vec::with_capacity(open.len());
-        for mut run in open {
+        let mut out = Vec::new();
+        for run in &all {
+            let Some(answer_seq) = run.answer_seq.filter(|_| run.state.is_parked()) else {
+                continue;
+            };
+            let resumed = all.iter().any(|other| {
+                other.run_id != run.run_id
+                    && other.room_id == run.room_id
+                    && other.agent_id == run.agent_id
+                    && other.trigger_seq == answer_seq
+            });
+            if let Some(settled) =
+                self.settle_room_agent_run_answer(&run.run_id, answer_seq, resumed, now)?
+            {
+                out.push(settled);
+            }
+        }
+        for mut run in all
+            .into_iter()
+            .filter(|run| !run.state.is_terminal() && !run.state.is_parked())
+        {
             run.state = RoomAgentRunState::Failed {
                 reason: "interrupted by daemon restart".into(),
             };
@@ -15056,7 +15159,87 @@ mod tests {
             tool_count: 0,
             reply_seq: None,
             pending_permission: None,
+            answer_seq: None,
         }
+    }
+
+    #[test]
+    fn parked_answer_claim_is_single_and_settles_only_its_own_claim() {
+        let mut s = store();
+        let key = RoomKey::new("claims");
+        s.create(key.clone(), "claims", None, now()).unwrap();
+        let mut asked = agent_run(&key, "ask", now());
+        asked.state = RoomAgentRunState::AwaitingReply;
+        s.put_room_agent_run(&asked).unwrap();
+
+        // Two replies race for one parked run: exactly one claim wins.
+        let won = s.claim_parked_room_agent_run("ask", 10, now()).unwrap();
+        assert_eq!(won.as_ref().and_then(|r| r.answer_seq), Some(10));
+        assert!(s.claim_parked_room_agent_run("ask", 11, now()).unwrap().is_none());
+        // The loser cannot settle the winner's claim.
+        assert!(s
+            .settle_room_agent_run_answer("ask", 11, true, now())
+            .unwrap()
+            .is_none());
+        let claimed = s.room_agent_run("ask").unwrap().unwrap();
+        assert!(claimed.state.is_parked(), "claimed, not yet closed");
+        assert_eq!(claimed.answer_seq, Some(10));
+
+        // A refused admission releases the claim: still parked, answerable.
+        let released = s
+            .settle_room_agent_run_answer("ask", 10, false, now())
+            .unwrap()
+            .unwrap();
+        assert!(released.state.is_parked());
+        assert_eq!(released.answer_seq, None);
+        assert_eq!(s.parked_room_agent_runs(&key, 1).unwrap().len(), 1);
+
+        // The next answer claims it and an admitted successor closes it.
+        assert!(s.claim_parked_room_agent_run("ask", 12, now()).unwrap().is_some());
+        let closed = s
+            .settle_room_agent_run_answer("ask", 12, true, now())
+            .unwrap()
+            .unwrap();
+        assert_eq!(closed.state, RoomAgentRunState::Done);
+        assert!(s.claim_parked_room_agent_run("ask", 13, now()).unwrap().is_none());
+        assert!(s.parked_room_agent_runs(&key, 1).unwrap().is_empty());
+        assert!(s.claim_parked_room_agent_run("missing", 1, now()).unwrap().is_none());
+    }
+
+    #[test]
+    fn restart_settles_outstanding_answer_claims_from_durable_successors() {
+        let mut s = store();
+        let key = RoomKey::new("claim-restart");
+        s.create(key.clone(), "claim-restart", None, now()).unwrap();
+        // Died after admission: the successor convened by answer 20 exists.
+        let mut resumed = agent_run(&key, "resumed", now());
+        resumed.state = RoomAgentRunState::AwaitingReply;
+        resumed.answer_seq = Some(20);
+        s.put_room_agent_run(&resumed).unwrap();
+        let mut successor = agent_run(&key, "successor", now());
+        successor.trigger_seq = 20;
+        successor.state = RoomAgentRunState::Thinking;
+        s.put_room_agent_run(&successor).unwrap();
+        // Died between the claim and admission: no successor for answer 30.
+        let mut orphaned = agent_run(&key, "orphaned", now());
+        orphaned.state = RoomAgentRunState::AwaitingReply;
+        orphaned.answer_seq = Some(30);
+        s.put_room_agent_run(&orphaned).unwrap();
+
+        let rewritten = s.interrupt_open_room_agent_runs(now()).unwrap();
+        assert_eq!(rewritten.len(), 3);
+        assert_eq!(
+            s.room_agent_run("resumed").unwrap().unwrap().state,
+            RoomAgentRunState::Done
+        );
+        assert!(matches!(
+            s.room_agent_run("successor").unwrap().unwrap().state,
+            RoomAgentRunState::Failed { .. }
+        ));
+        let orphaned = s.room_agent_run("orphaned").unwrap().unwrap();
+        assert!(orphaned.state.is_parked(), "the obligation is not lost");
+        assert_eq!(orphaned.answer_seq, None, "and the next reply can claim it");
+        assert!(s.interrupt_open_room_agent_runs(now()).unwrap().is_empty());
     }
 
     #[test]
