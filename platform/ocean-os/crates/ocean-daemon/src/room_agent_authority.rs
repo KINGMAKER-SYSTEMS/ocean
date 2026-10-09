@@ -826,10 +826,19 @@ fn room_owner_proof(
     let Some(credential) = store.room_credential(room)? else {
         return Ok(None);
     };
-    let eligible = access.members.iter().any(|member| {
+    // This is sovereign agent custody on the credential-owning node, not
+    // shared Room administration. An invited Member may authorize its own
+    // locally bound Agent; the exact target/owner proof below still applies.
+    let eligible = matches!(
+        access.state,
+        RoomAccessState::Live | RoomAccessState::Recovering
+    ) && access.members.iter().any(|member| {
         member.member_id == credential.local_human_member_id
             && member.actor_type == FederatedActorType::User
-            && member.role_in_room == FederatedRoomRole::Owner
+            && matches!(
+                member.role_in_room,
+                FederatedRoomRole::Owner | FederatedRoomRole::Member
+            )
     });
     Ok(Some(RoomOwnerProof {
         member_id: credential.local_human_member_id,

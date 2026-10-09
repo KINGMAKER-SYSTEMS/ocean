@@ -1087,3 +1087,13 @@ Ported the daemon half of ocean-private #59 so Room-agent consent can no longer 
 
 Validation: `cargo test -p ocean-daemon room_reviewed_digest_ --locked -- --test-threads=1` (3 passed) on this commit; full gates are recorded with the follow-up #66 port entry.
 _________________________________________________________________________________
+time: [22:41] [08-10-26]
+agent: [claude] [claude code]
+worktree: [port/room-agent-consent] [/Users/risingtidesdev/dev/port-misc]
+type: [refactor]
+area: [backend] [testing]
+
+Ported the daemon half of ocean-private #66 so an invited Room Member can review and authorize its own locally bound agents. The proof behind consent now accepts the credential-owning human as Owner or Member, but only while federated access is Live or Recovering, and the exact target must still be an Agent owned by that human with the captured local package binding. Room administration, Local bootstrap, the digest precondition from the previous commit, generation and lifetime checks and per-turn tool permissions keep their existing boundaries. The source diff applied three-way without conflict on top of the #59 port, including the registered-route fixtures for two disposable node identities and the fake-provider federation dispatch proof parameterized for Owner and invited Member. The only adaptation is the ocean-daemon contract text, which names ocean-private issue numbers and drops the private base hash.
+
+Validation: `cargo fmt --all -- --check`, `cargo check --workspace --tests --locked`, `cargo run -q -p xtask -- docs-check` (PASS; 30 packages, 153 Markdown files, 170 local links) and `git diff --check` pass. `cargo test -p ocean-daemon --locked`: 918 passed, 2 failed; the two failures are the alias-envelope fixtures already failing on main (issue #42, fixed by open PR #58). Focused `room_reviewed_digest_` 3, `room_sovereign_` 6 and `p2c_` 40 passed. No external provider was called.
+_________________________________________________________________________________

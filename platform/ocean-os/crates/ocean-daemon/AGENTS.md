@@ -308,6 +308,46 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   disposable absolute paths, unchanged HOME. Independent exact-head review is
   required; no store/schema, client, dependency, route or permission expansion.
 
+### Sovereign federated own-agent consent manifest (ocean-private #62)
+
+- Base: the reviewed package-consent section above (ocean-private #59);
+  ported here from ocean-private #66. Exact targets are
+  `src/room_agent_authority.rs`, registered production-route fixtures in
+  `src/main.rs`, test-only federation execution fixtures in
+  `src/persistent_rooms.rs`, and this contract. The accepted Surface
+  [post-G3 program](../../../../apps/ocean-surface/docs/specs/2026-08-13-ocean-rooms-post-g3-product-depth.md)
+  separates R5 sovereign agent custody from R6 Room administration.
+- `room_owner_proof` proves node-local own-agent identity, not shared Room
+  administration: in Live/Recovering federation, the stored credential must
+  name an exact current User roster row with Owner or Member role. Local
+  ownership/bootstrap stays unchanged and Local-only. The exact target must
+  remain an Agent owned by that human with the captured local package binding.
+  Missing/revoked credentials, missing/reclassified rows, Connecting/Revoked
+  access and foreign ownership fail closed. Preserve existing refusal codes.
+- The only three direct calls are Local/federated `target_proof` and binding
+  list identity projection. Preserve its transitive preview/consent/status,
+  admission, request registration/lifetime/cancellation, scoped memory/resources/
+  tool authority and federated reply consumers. No role promotion, Room
+  administration, store/schema, protocol, client, operator, ordinary permission,
+  provider, dependency or deployment change belongs here.
+- Registered route fixtures use two independent disposable node identities:
+  creator Owner and invited Member with distinct owned agents. Prove own
+  preview/digest consent, reauthorization, invocation/admission, status/revoke
+  and generation cancellation; foreign node/agent/key/credential/roster/kind/
+  package/digest/access, replay and cross-Room authority remain refused with
+  appropriate no-mutation assertions. Keep existing Local/operator/permission
+  and digest fixtures. Parameterize the actual fake-provider federation
+  execution proof for both Owner and invited Member; make no external provider
+  calls.
+- Root owns the sole locked remote Cargo lane: relevant complete Room groups,
+  full daemon tests, all-target denied-warning Clippy, locked workspace-test
+  compilation and docs-check. Both auth and config/XDG paths are absolute
+  disposable paths; HOME stays unchanged. Require independent exact-head
+  review and both actual hosted builds. Native broker/served clients, actual
+  two-human/two-machine R1-R7 and ocean-private #22/#48 deployment acceptance
+  remain separate; the ocean-private #58 billing and original-repository
+  migration holds remain intact.
+
 ### Rooms persistence migration boundary
 
 - Preserve the accepted store/core foundation and #14–19 repairs. The scoped
@@ -438,6 +478,8 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
 - `cargo test -p ocean-daemon room_read_cursor_ --locked -- --nocapture`
 - `cargo test -p ocean-daemon room_ -- --nocapture`
 - `cargo test -p ocean-daemon room_reviewed_digest_ --locked -- --nocapture --test-threads=1`
+- `cargo test -p ocean-daemon room_sovereign_ --locked -- --nocapture --test-threads=1`
+- `cargo test -p ocean-daemon p2c_ --locked -- --nocapture --test-threads=1`
 - `cargo test -p ocean-daemon at_mention_queues_turn_and_posts_reply_back -- --nocapture`
 - `cargo test -p ocean-daemon closed_persistent_room_preserves_audit_http_asymmetry -- --nocapture`
 - `cargo test -p ocean-daemon workspace_policy::tests:: -- --nocapture`
