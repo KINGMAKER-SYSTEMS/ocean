@@ -1107,3 +1107,13 @@ Ported Rooms P5 and P6 on top of the P2-P4 port. P5 splits the Rooms workspace i
 
 Validation: in apps/ocean-surface, fmt, `cargo test -p ocean-surface-ui` (865 unit tests plus integration suites), WASM clippy with warnings denied, WASM check, WASM test compilation, proxy check and proxy tests pass. In platform/ocean-os, fmt, ocean-core (63) and ocean-store (286) tests, `cargo check --workspace --tests` and docs-check pass; ocean-daemon is 920 passed, 3 failed, all three the persistent-room lifecycle fixtures that fail on main and are fixed by open #58. No live daemon, browser or desktop run.
 _________________________________________________________________________________
+time: [23:09] [08-10-26]
+agent: [claude] [claude code]
+worktree: [port/rooms-visual-attention] [/Users/risingtidesdev/dev/fix-pr69]
+type: [bug report]
+area: [backend] [frontend] [testing]
+
+Fixed three review findings on the Rooms P5-P6 port (PR #69). The mentions inbox moved from GET /v1/rooms/persistent/inbox, where its static segment made a room keyed inbox unreachable through its own detail route, to GET /v1/rooms/inbox; the daemon banner and operator guide, the Surface inbox client and a new proxy route follow, and a call room id inbox still reaches its LiveKit token route. The inbox now scans only the 50 most recently active open rooms (updated_at order) instead of every open room under the store lock, and room search refuses queries over 200 characters with 400 query_too_long (the Surface search input carries the same maxlength).
+
+Validation: in platform/ocean-os, `cargo fmt --all -- --check`, `cargo check --workspace --tests` and docs-check pass; `cargo test -p ocean-daemon --locked room` is 268 passed, 2 failed, both the alias-envelope fixtures that fail on main. The new route-precedence, inbox-cap and search-cap tests were each confirmed to fail with their fix reverted. In apps/ocean-surface, fmt, `cargo test -p ocean-surface-ui` (866 unit tests plus integration suites), WASM clippy with warnings denied, `cargo check -p ocean-surface-proxy` and the new proxy inbox routing test (fails without the route) pass. No live daemon, browser or desktop run.
+_________________________________________________________________________________

@@ -404,7 +404,8 @@ Web surface session UI:
   line; grouped rows keep the avatar gutter with the time revealed on intent.
 - Attention (P6, `room_attention.rs`, `styles/rooms-attention.css`): the
   left-rail @ icon swaps the room list for the mentions inbox
-  (`GET /v1/rooms/persistent/inbox`; render the daemon's `author_name`);
+  (`GET /v1/rooms/inbox`, also forwarded by the proxy; render the daemon's
+  `author_name`); room search input is capped at the daemon's 200 characters;
   picking an item opens its room and thread via an origin- and room-key-scoped `Rooms.focus_thread`, consumed only after that room record and root load. Inbox/search responses retire on newer reads, changed daemon origins, room admissions, query edits, and panel cleanup. Mute errors only publish into their originating room. The
   header search icon opens room search in the right rail (thread > search >
   members). Muted rooms (`GET/PUT .../prefs`) dim and drop the unread dot.

@@ -103,11 +103,17 @@ impl AttentionResponseFence {
     }
 }
 
+/// The daemon's longest accepted search query (characters).
+pub const SEARCH_MAX_CHARS: usize = 200;
+
+/// The owner's mentions inbox. It lives outside `/v1/rooms/persistent/{key}`
+/// so a room keyed `inbox` keeps its own detail route.
+pub fn inbox_url(base: &str) -> String {
+    format!("{base}/v1/rooms/inbox?limit=50")
+}
+
 pub async fn fetch_inbox(base: &str) -> Result<Vec<InboxItem>, String> {
-    match Request::get(&format!("{base}/v1/rooms/persistent/inbox?limit=50"))
-        .send()
-        .await
-    {
+    match Request::get(&inbox_url(base)).send().await {
         Ok(r) if r.ok() => r
             .json::<InboxEnvelope>()
             .await
@@ -411,6 +417,7 @@ pub fn RoomSearchPanel(rooms: Rooms, on_pick: Callback<u64>) -> impl IntoView {
                     type="search"
                     aria-label="Search this room"
                     placeholder="Search"
+                    maxlength=SEARCH_MAX_CHARS
                     node_ref=input_ref
                     prop:value=move || query.get()
                     on:input=move |ev| {
@@ -486,6 +493,15 @@ pub(crate) fn toggle_mute(rooms: Rooms, muted_now: bool) {
 mod tests {
     use super::*;
     use crate::rooms::{RoomMessageKind, RoomParticipantKind};
+
+    #[test]
+    fn inbox_url_is_outside_the_room_key_namespace() {
+        assert_eq!(
+            inbox_url("http://127.0.0.1:4780"),
+            "http://127.0.0.1:4780/v1/rooms/inbox?limit=50"
+        );
+        assert!(!inbox_url("").contains("/persistent/"));
+    }
 
     fn run(agent: &str, state: RoomAgentRunState) -> RoomAgentRun {
         RoomAgentRun {

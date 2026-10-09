@@ -1365,12 +1365,20 @@ pub(super) async fn rooms_list_persistent(
 
 /// Shortest accepted search query (characters, after trimming).
 const ROOM_SEARCH_MIN_CHARS: usize = 2;
+/// Longest accepted search query (characters, after trimming); longer queries
+/// are refused with 400 `query_too_long` before the store is touched.
+const ROOM_SEARCH_MAX_CHARS: usize = 200;
 const ROOM_SEARCH_DEFAULT_LIMIT: usize = 20;
 const ROOM_SEARCH_MAX_LIMIT: usize = 50;
 const ROOM_INBOX_DEFAULT_LIMIT: usize = 30;
 const ROOM_INBOX_MAX_LIMIT: usize = 100;
 /// Newest rows scanned per room when building the inbox.
 const ROOM_INBOX_SCAN_PER_ROOM: usize = 500;
+/// Open rooms scanned per inbox read, most recently active (`updated_at`)
+/// first. Bounds the work done under the store lock to
+/// `ROOM_INBOX_MAX_ROOMS * ROOM_INBOX_SCAN_PER_ROOM` rows; mentions in quieter
+/// rooms beyond the cap are not listed.
+const ROOM_INBOX_MAX_ROOMS: usize = 50;
 
 #[derive(Debug, Deserialize, Default)]
 pub(super) struct RoomSearchQuery {
@@ -1398,6 +1406,12 @@ pub(super) async fn room_search(
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "ok": false, "error": "query_too_short" })),
+        );
+    }
+    if query.chars().count() > ROOM_SEARCH_MAX_CHARS {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": "query_too_long" })),
         );
     }
     let limit = q
@@ -1456,11 +1470,13 @@ fn inbox_reason(
     None
 }
 
-/// `GET /v1/rooms/persistent/inbox?limit=` — mentions of, and thread replies
-/// to, the local owner across every open room, newest first. "Me" is the
-/// daemon owner in Local rooms and the credential's local member in federated
-/// rooms. Each room contributes from its newest
-/// [`ROOM_INBOX_SCAN_PER_ROOM`] rows only.
+/// `GET /v1/rooms/inbox?limit=` — mentions of, and thread replies to, the
+/// local owner across open rooms, newest first. "Me" is the daemon owner in
+/// Local rooms and the credential's local member in federated rooms. Only the
+/// [`ROOM_INBOX_MAX_ROOMS`] most recently active open rooms are scanned, and
+/// each contributes from its newest [`ROOM_INBOX_SCAN_PER_ROOM`] rows only.
+/// The route sits outside `/v1/rooms/persistent/{key}` so a room keyed
+/// `inbox` stays reachable.
 pub(super) async fn room_inbox(
     State(state): State<AppState>,
     Query(q): Query<RoomInboxQuery>,
@@ -1475,7 +1491,12 @@ pub(super) async fn room_inbox(
     };
     let result = with_rooms(&state, |store| {
         let mut items: Vec<InboxItem> = Vec::new();
-        for (key, name) in store.open_room_names()? {
+        // `open_room_names` is ordered `updated_at DESC`.
+        for (key, name) in store
+            .open_room_names()?
+            .into_iter()
+            .take(ROOM_INBOX_MAX_ROOMS)
+        {
             let access = store.room_access(&key)?;
             let me = match access.state {
                 RoomAccessState::Local => owner.clone(),
@@ -5542,6 +5563,130 @@ mod tests {
             body["results"].as_array().unwrap().len(),
             1,
             "limit clamps to 1"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn p6_room_search_refuses_queries_over_the_length_cap() {
+        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _env = TestEnvRestore::capture(&[
+            "OCEAN_AUTH_FILE",
+            "OCEAN_CODEX_AUTH_FILE",
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let state = crate::tests::isolated_room_fixture_state(&tmp);
+        let key = RoomKey::new("p6-search-cap");
+        create_plain_room(&state, &key);
+        join_human(&state, &key);
+        let at_cap = "é".repeat(ROOM_SEARCH_MAX_CHARS);
+        let seq = p6_post(&state, &key, "human", &at_cap, None);
+        let path = || Path(key.as_str().to_string());
+
+        // Exactly the cap (counted in characters, after trimming) is accepted.
+        let padded = format!("  {at_cap}  ");
+        let (status, Json(body)) =
+            room_search(State(state.clone()), path(), p6_search(Some(&padded), None)).await;
+        assert_eq!(status, StatusCode::OK);
+        let seqs: Vec<u64> = body["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["seq"].as_u64().unwrap())
+            .collect();
+        assert_eq!(seqs, vec![seq]);
+
+        // One character over is refused before any lookup, even for an
+        // unknown room.
+        let over = "é".repeat(ROOM_SEARCH_MAX_CHARS + 1);
+        let (status, Json(body)) =
+            room_search(State(state.clone()), path(), p6_search(Some(&over), None)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body, json!({ "ok": false, "error": "query_too_long" }));
+        let (status, Json(body)) = room_search(
+            State(state.clone()),
+            Path("p6-missing".into()),
+            p6_search(Some(&over), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body, json!({ "ok": false, "error": "query_too_long" }));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn p6_inbox_scans_only_the_most_recently_active_rooms() {
+        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _env = TestEnvRestore::capture(&[
+            "OCEAN_AUTH_FILE",
+            "OCEAN_CODEX_AUTH_FILE",
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let state = crate::tests::isolated_room_fixture_state(&tmp);
+        seed_owner(&state, "ada", "Ada");
+        // One more open room than the cap, each holding one mention of the
+        // owner; rooms are touched in creation order, so `p6-cap-00` is the
+        // least recently active.
+        let rooms: Vec<RoomKey> = (0..=ROOM_INBOX_MAX_ROOMS)
+            .map(|i| RoomKey::new(format!("p6-cap-{i:02}")))
+            .collect();
+        for room in &rooms {
+            create_plain_room(&state, room);
+            p6_post(&state, room, "bob", "@ada ping", None);
+        }
+        let inbox_rooms = |body: &serde_json::Value| -> Vec<String> {
+            let mut ids: Vec<String> = body["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|i| i["room_id"].as_str().unwrap().to_string())
+                .collect();
+            ids.sort();
+            ids.dedup();
+            ids
+        };
+        let max = Query(RoomInboxQuery {
+            limit: Some(ROOM_INBOX_MAX_LIMIT),
+        });
+
+        let (status, Json(body)) = room_inbox(State(state.clone()), max).await;
+        assert_eq!(status, StatusCode::OK);
+        let expected: Vec<String> = rooms[1..].iter().map(|k| k.to_string()).collect();
+        assert_eq!(
+            inbox_rooms(&body),
+            expected,
+            "only the {ROOM_INBOX_MAX_ROOMS} most recently active rooms are scanned"
+        );
+
+        // New activity in the oldest room brings it back into the window and
+        // pushes the next-oldest out.
+        p6_post(&state, &rooms[0], "bob", "@ada again", None);
+        let (_, Json(body)) = room_inbox(
+            State(state.clone()),
+            Query(RoomInboxQuery {
+                limit: Some(ROOM_INBOX_MAX_LIMIT),
+            }),
+        )
+        .await;
+        let ids = inbox_rooms(&body);
+        assert_eq!(ids.len(), ROOM_INBOX_MAX_ROOMS);
+        assert!(ids.contains(&rooms[0].to_string()));
+        assert!(!ids.contains(&rooms[1].to_string()));
+        let from_oldest = body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|i| i["room_id"] == json!(rooms[0].as_str()))
+            .count();
+        assert_eq!(
+            from_oldest, 2,
+            "the re-admitted room contributes every mention"
         );
     }
 

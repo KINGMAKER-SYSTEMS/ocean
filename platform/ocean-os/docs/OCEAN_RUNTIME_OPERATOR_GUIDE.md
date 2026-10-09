@@ -597,8 +597,8 @@ GET    /v1/rooms/persistent/{key}/runs                    recent agent work card
 POST   /v1/rooms/persistent/{key}/runs/{run_id}/permission  owner approve/deny for a run's pending tool permission ({decision: allow|allow_session|deny}); 409 when nothing is pending
 GET    /v1/rooms/persistent/{key}/agents/{agent_id}/settings  per-room agent overrides (instructions overlay, model); local only, never federated
 PUT    /v1/rooms/persistent/{key}/agents/{agent_id}/settings  replace per-room agent overrides; empty body fields clear them
-GET    /v1/rooms/persistent/{key}/search                  ?q=&limit= case-insensitive chat-message body search, newest first (q >= 2 chars, limit 1..50, default 20)
-GET    /v1/rooms/persistent/inbox                         ?limit= mentions of and thread replies to the local owner across open rooms, newest first (limit 1..100, default 30)
+GET    /v1/rooms/persistent/{key}/search                  ?q=&limit= case-insensitive chat-message body search, newest first (q 2..200 chars, else 400 query_too_short / query_too_long; limit 1..50, default 20)
+GET    /v1/rooms/inbox                                    ?limit= mentions of and thread replies to the local owner across the 50 most recently active open rooms, newest first (limit 1..100, default 30)
 GET    /v1/rooms/persistent/{key}/prefs                   per-room owner prefs {muted}; local only, never federated
 PUT    /v1/rooms/persistent/{key}/prefs                   replace per-room owner prefs ({"muted":bool})
 GET    /v1/rooms/persistent/{key}/events                  SSE: initial full room_access projection (no id) + id-bearing room_message frames via ?after_seq=N / Last-Event-ID replay, then post-commit access-update + message tail; open non-call rooms only
