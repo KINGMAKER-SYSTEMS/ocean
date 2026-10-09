@@ -3241,6 +3241,7 @@ mod tests {
             session_token: "test-session".to_string(),
             secure_cookie: false,
             observer_token_path: PathBuf::from("/not-used"),
+            operator_key_path: PathBuf::from("/not-used-operator-key"),
         });
         let app = build_app(state, dist.path());
 
