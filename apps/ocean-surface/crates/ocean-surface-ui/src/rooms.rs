@@ -2050,6 +2050,134 @@ pub struct RoomAgentRun {
     pub tool_count: u32,
     #[serde(default)]
     pub reply_seq: Option<u64>,
+    /// The tool approval this run is blocked on (owner-local).
+    #[serde(default)]
+    pub pending_permission: Option<RoomRunPermission>,
+}
+
+/// A pending tool approval on a run. Mirrors `ocean_core::RoomRunPermission`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct RoomRunPermission {
+    pub permission_id: String,
+    pub tool_label: String,
+}
+
+/// Per-room agent overrides. Mirrors `ocean_core::RoomAgentSettings`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomAgentSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RoomAgentSettingsEnvelope {
+    settings: RoomAgentSettings,
+}
+
+#[derive(Deserialize)]
+struct RoomErrorEnvelope {
+    #[serde(default)]
+    error: String,
+}
+
+const UNREACHABLE: &str = "Ocean could not reach the room service.";
+
+/// Owner approve/deny for a run's pending tool permission. The card updates
+/// from the next `room_agent_run` frame; nothing is applied optimistically.
+pub async fn decide_run_permission(
+    base: &str,
+    key: &str,
+    run_id: &str,
+    allow: bool,
+) -> Result<(), String> {
+    let url = format!(
+        "{base}/v1/rooms/persistent/{}/runs/{}/permission",
+        encode(key),
+        encode(run_id)
+    );
+    let body = if allow {
+        r#"{"decision":"allow"}"#
+    } else {
+        r#"{"decision":"deny"}"#
+    };
+    let request = Request::post(&url)
+        .header("content-type", "application/json")
+        .body(body)
+        .map_err(|_| UNREACHABLE.to_string())?;
+    match request.send().await {
+        Ok(r) if r.ok() => Ok(()),
+        Ok(r) if r.status() == 409 || r.status() == 404 => Err("Already decided.".into()),
+        Ok(_) => Err("Ocean could not record the decision.".into()),
+        Err(_) => Err(UNREACHABLE.into()),
+    }
+}
+
+fn agent_settings_url(base: &str, key: &str, agent_id: &str) -> String {
+    format!(
+        "{base}/v1/rooms/persistent/{}/agents/{}/settings",
+        encode(key),
+        encode(agent_id)
+    )
+}
+
+pub async fn fetch_agent_settings(
+    base: &str,
+    key: &str,
+    agent_id: &str,
+) -> Result<RoomAgentSettings, String> {
+    match Request::get(&agent_settings_url(base, key, agent_id))
+        .send()
+        .await
+    {
+        Ok(r) if r.ok() => r
+            .json::<RoomAgentSettingsEnvelope>()
+            .await
+            .map(|e| e.settings)
+            .map_err(|_| "Ocean returned invalid agent settings.".into()),
+        Ok(_) => Err("Ocean could not load agent settings.".into()),
+        Err(_) => Err(UNREACHABLE.into()),
+    }
+}
+
+pub async fn save_agent_settings(
+    base: &str,
+    key: &str,
+    agent_id: &str,
+    settings: &RoomAgentSettings,
+) -> Result<RoomAgentSettings, String> {
+    let body = serde_json::to_string(settings).map_err(|_| UNREACHABLE.to_string())?;
+    let request = Request::put(&agent_settings_url(base, key, agent_id))
+        .header("content-type", "application/json")
+        .body(body)
+        .map_err(|_| UNREACHABLE.to_string())?;
+    match request.send().await {
+        Ok(r) if r.ok() => r
+            .json::<RoomAgentSettingsEnvelope>()
+            .await
+            .map(|e| e.settings)
+            .map_err(|_| "Ocean returned invalid agent settings.".into()),
+        Ok(r) if r.status() == 400 => {
+            let code = r
+                .json::<RoomErrorEnvelope>()
+                .await
+                .map(|e| e.error)
+                .unwrap_or_default();
+            Err(settings_error_message(&code).into())
+        }
+        Ok(_) => Err("Ocean could not save agent settings.".into()),
+        Err(_) => Err(UNREACHABLE.into()),
+    }
+}
+
+/// Human text for a settings validation code.
+pub(crate) fn settings_error_message(code: &str) -> &'static str {
+    match code {
+        "instructions_too_long" => "Instructions are too long.",
+        "invalid_model" => "That model name is not valid.",
+        _ => "Ocean rejected these settings.",
+    }
 }
 
 /// Ids of the runs whose card attaches under thread root `root_seq`.

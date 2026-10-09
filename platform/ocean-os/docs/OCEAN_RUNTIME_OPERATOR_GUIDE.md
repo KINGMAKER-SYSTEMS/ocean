@@ -594,6 +594,9 @@ POST   /v1/rooms/persistent/{key}/artifacts/{artifact_id}/amend   rewrite in pla
 GET    /v1/rooms/persistent/{key}/snapshot                hydrate: room+participants+transcript+last_seq+next_seq+has_more (?after_seq=N&limit=M)
 GET    /v1/rooms/persistent/{key}/inspect                 bounded read-only room identity + local owner + aliases (no transcript/workspace data)
 GET    /v1/rooms/persistent/{key}/runs                    recent agent work cards (RoomAgentRun, oldest first, max 50); live updates arrive as room_agent_run SSE frames
+POST   /v1/rooms/persistent/{key}/runs/{run_id}/permission  owner approve/deny for a run's pending tool permission ({decision: allow|allow_session|deny}); 409 when nothing is pending
+GET    /v1/rooms/persistent/{key}/agents/{agent_id}/settings  per-room agent overrides (instructions overlay, model); local only, never federated
+PUT    /v1/rooms/persistent/{key}/agents/{agent_id}/settings  replace per-room agent overrides; empty body fields clear them
 GET    /v1/rooms/persistent/{key}/events                  SSE: initial full room_access projection (no id) + id-bearing room_message frames via ?after_seq=N / Last-Event-ID replay, then post-commit access-update + message tail; open non-call rooms only
 GET    /v1/rooms/persistent/{key}/read-cursor             fetch the daemon-owned read cursor projection for Local/Live rooms; closed/pending/revoked return typed unsupported
 PATCH  /v1/rooms/persistent/{key}/read-cursor             advance the daemon-owned read cursor { read_seq }; Local/Live only, monotonic, publishes room_read_cursor wake on success

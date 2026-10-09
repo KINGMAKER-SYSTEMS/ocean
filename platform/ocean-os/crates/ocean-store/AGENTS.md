@@ -50,6 +50,7 @@ participant retirement. One database file (`rooms.db`), one owning crate.
   use `RoomReadCursorMirrorCas`: callers supply the previously observed mirror;
   mismatches return `Stale` without writing, including stale clears.
 - `room_agent_runs` — team-platform P3 mutable work-card projections
+- `room_agent_settings` (team-platform P4) keys per-room agent overrides by `(room_id, agent_id)` with a JSON `RoomAgentSettings` body that cascades with the room; writing empty settings deletes the row. `AwaitingReply` runs are parked, not open: `interrupt_open_room_agent_runs` leaves them, and `parked_room_agent_runs(key, thread_root_seq)` finds them for resume.
   `{run_id, room_id, started_at, body JSON RoomAgentRun}` (cascade with the
   room). Not a transcript: `put_room_agent_run` upserts, `room_agent_runs`
   returns the newest N oldest-first, `interrupt_open_room_agent_runs` fails

@@ -453,6 +453,7 @@ fn build_app(state: Arc<AppState>, dist: &std::path::Path) -> Router {
             "/v1/rooms/persistent/{*rest}",
             get(proxy_rooms_persistent)
                 .post(proxy_rooms_persistent)
+                .put(proxy_rooms_persistent)
                 .delete(proxy_rooms_persistent),
         )
         .route(

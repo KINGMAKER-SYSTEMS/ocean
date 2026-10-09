@@ -15,8 +15,8 @@ use chrono::Utc;
 use ocean_agent_sdk::{AgentSessionId, AgentTurnEvent};
 use ocean_core::{
     evaluate_trigger_policy, PermissionMode, PromptRequest, PublicAgentDescriptor, RequestState,
-    RoomAccessProjection, RoomAccessState, RoomAgentRun, RoomArtifactKind, RoomArtifactState,
-    RoomKey, RoomMessage, RoomMessageKind, RoomParticipant, RoomParticipantKind,
+    RoomAccessProjection, RoomAccessState, RoomAgentRun, RoomAgentSettings, RoomArtifactKind,
+    RoomArtifactState, RoomKey, RoomMessage, RoomMessageKind, RoomParticipant, RoomParticipantKind,
     RoomReadCursorProjection, RoomReadCursorUpdateRequest, RoomTriggerEvent, RoomTriggerPolicy,
 };
 #[cfg(test)]
@@ -32,8 +32,9 @@ use uuid::Uuid;
 
 use super::room_retirement;
 use super::{
-    build_prompt_control, core_sid, emit_session_changed, record_prompt_result, sdk_sid,
-    sse_until_shutdown, AppState, SSE_KEEPALIVE_INTERVAL,
+    build_room_prompt_control, core_sid, emit_session_changed, record_prompt_result,
+    resolve_permission_waiter, sdk_sid, sse_until_shutdown, AppState, PermissionDecisionBody,
+    PermissionId, PermissionWaitHook, SSE_KEEPALIVE_INTERVAL,
 };
 use crate::request_control::{
     attach_request_handle, cancel_permission_waiter, register_room_agent_request_checked,
@@ -372,7 +373,7 @@ fn require_current_output_on(
     }
 }
 
-fn append_authorized_room_agent_reply(
+pub(super) fn append_authorized_room_agent_reply(
     state: &AppState,
     admission: &RoomAgentAdmission,
     body: &str,
@@ -875,6 +876,7 @@ struct RoomTurnCapture {
         std::path::PathBuf,
         Vec<ocean_agent::agentdir::SubprocessCapability>,
     )>,
+    extra_tools: Vec<String>,
 }
 
 #[cfg(test)]
@@ -888,6 +890,7 @@ fn capture_room_turn(agent_id: &str, prompt: &str, control: &ocean_agent::Prompt
         tool_allowlist: control.tool_allowlist.clone(),
         model: control.agent_model.clone(),
         subprocess_caps: control.agent_capabilities.clone(),
+        extra_tools: control.room_turn_tool_names(),
     };
     match ROOM_TURN_CAPTURES.lock() {
         Ok(mut captures) => captures.push(capture),
@@ -2246,6 +2249,51 @@ pub(super) async fn room_post_message(
                     "room-agent convene refused before runtime dispatch");
             }
         }
+
+        // Team-platform P4: a human reply in a thread answers every run parked
+        // there by `room_ask`. Close the parked run and convene the same
+        // (room, agent) session with the reply — unless this row already
+        // convened that agent above.
+        if let Some(root) = req.thread_parent_seq {
+            let parked = with_rooms(&state, |store| store.parked_room_agent_runs(&key, root))
+                .unwrap_or_default();
+            for run in parked {
+                let agent_id = run.agent_id.clone();
+                crate::room_agent_runs::close_answered(&state, run);
+                if !convened.insert(agent_id.clone()) {
+                    continue;
+                }
+                let Some(agent) = resolve_agent_participant(&roster, &agent_id) else {
+                    continue;
+                };
+                if resolve_named_agent(&agent.id).is_err() {
+                    continue;
+                }
+                let Ok((admission, turn_permit)) = room_agent_authority::admit_room_agent(
+                    &state,
+                    &key,
+                    &agent.id,
+                    &agent.id,
+                    AdmissionTrigger::ThreadReply,
+                )
+                .await
+                else {
+                    continue;
+                };
+                let _ = spawn_room_agent_turn(
+                    state.clone(),
+                    admission,
+                    turn_permit,
+                    agent,
+                    msg.seq,
+                    None,
+                    Uuid::new_v4(),
+                    None,
+                    None,
+                )
+                .await;
+            }
+        }
     }
 
     (
@@ -3268,6 +3316,12 @@ async fn spawn_room_agent_turn(
             Some(instructions) => super::compose_folder_agent_prompt(instructions, &prompt),
             None => prompt,
         };
+        // Team-platform P4: this room's own overrides for the agent (local only).
+        let settings = &admission.settings_snapshot;
+        if let Some(instructions) = settings.instructions.as_deref() {
+            prompt_req.prompt =
+                super::compose_folder_agent_prompt(instructions, &prompt_req.prompt);
+        }
 
         // G3: the card and the reply attach to the ROOT of the line that
         // convened the agent. When the trigger row is itself a thread reply,
@@ -3292,7 +3346,8 @@ async fn spawn_room_agent_turn(
                 prompt_req.cwd.clone(),
             ),
         ));
-        // Room turns have no product SSE bridge; use this turn's runtime sink.
+        // The turn's own runtime events drive the card (room turns have no
+        // product SSE bridge onto the agent bus).
         let (run_sink, run_events) = mpsc::unbounded_channel();
         let run_watch = tokio::spawn(crate::room_agent_runs::watch_runtime_events(
             tracker.clone(),
@@ -3306,13 +3361,36 @@ async fn spawn_room_agent_turn(
             f(&mut guard);
         };
 
-        let control = build_prompt_control(
+        // Team-platform P4: the run's own decision token binds every permission
+        // waiter of this turn, and each wait is mirrored onto the work card so
+        // the owner can decide in the room (`POST .../runs/{run_id}/permission`).
+        let decision_token = match tracker.lock() {
+            Ok(guard) => guard.mint_decision_token(),
+            Err(poisoned) => poisoned.into_inner().mint_decision_token(),
+        };
+        let hook_tracker = tracker.clone();
+        let wait_hook: PermissionWaitHook = Arc::new(
+            move |pending: Option<(PermissionId, &str, &serde_json::Value)>| {
+                let mut t = match hook_tracker.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                match pending {
+                    Some((permission_id, tool, args)) => {
+                        t.awaiting_permission(permission_id.to_string(), tool, args)
+                    }
+                    None => t.permission_resolved(),
+                }
+            },
+        );
+        let control = build_room_prompt_control(
             &state,
             request_id,
             Some(core_sid(session_id)),
             permission_mode,
             cancel.clone(),
-            prompt_req.decision_token.clone(),
+            decision_token,
+            wait_hook,
         )
         .with_event_sink(run_sink);
         let control = room_agent_authority::apply_admission_to_control(control, &admission);
@@ -3329,6 +3407,24 @@ async fn spawn_room_agent_turn(
         let control = match room_history {
             Some(history) => control.with_room_history(history),
             None => control,
+        };
+        // Room tools post into this run's thread. Local rooms only: federated
+        // threads are not writable yet.
+        let control = if federated_member_id.is_none() {
+            let tools = crate::room_tools::room_turn_tools(crate::room_tools::RoomTurnBinding {
+                state: state.clone(),
+                admission: admission.clone(),
+                session_id,
+                cancel: cancel.clone(),
+                thread_root,
+                tracker: tracker.clone(),
+            });
+            match state.runtime.admit_room_turn_tools(&admission, tools) {
+                Ok(tools) => control.with_room_turn_tools(tools),
+                Err(_) => control,
+            }
+        } else {
+            control
         };
         #[cfg(test)]
         capture_room_turn(&agent.id, &prompt_req.prompt, &control);
@@ -3351,6 +3447,10 @@ async fn spawn_room_agent_turn(
         // write so no step is lost and no trailing event lands after it.
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), run_watch).await;
 
+        let parked = match tracker.lock() {
+            Ok(guard) => guard.is_parked(),
+            Err(poisoned) => poisoned.into_inner().is_parked(),
+        };
         if !result.ok {
             with_tracker(&mut |t| t.finish_failed("turn_failed"));
         }
@@ -3371,7 +3471,8 @@ async fn spawn_room_agent_turn(
         if result.ok {
             let body = clamp_room_message_body(result.stdout.trim());
             let mut reply_seq = None;
-            if !body.is_empty() {
+            // A `room_ask` already posted the question and parked the run.
+            if !body.is_empty() && !parked {
                 if let Some(member_id) = federated_member_id.as_deref() {
                     if state
                         .room_federation
@@ -4274,6 +4375,172 @@ pub(super) async fn room_agent_runs_list(
         store.room_agent_runs(&key, crate::room_agent_runs::ROOM_RUNS_LIMIT)
     }) {
         Ok(runs) => (StatusCode::OK, Json(json!({ "ok": true, "runs": runs }))),
+        Err(e) => room_store_error_response(e),
+    }
+}
+
+/// `POST /v1/rooms/persistent/{key}/runs/{run_id}/permission` — the owner's
+/// in-room approve/deny for a run's pending tool permission (team-platform
+/// P4). The existing header-only Room operator authorizes the decision;
+/// the run's daemon-held token then binds it to the pending waiter
+/// through the same authority as `/v1/permissions/{id}/decision`.
+pub(super) async fn room_agent_run_permission(
+    State(state): State<AppState>,
+    Path((key, run_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Result<Json<PermissionDecisionBody>, JsonRejection>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(error) = room_agent_authority::operator(&state, &headers) {
+        return error.response();
+    }
+
+    let Ok(Json(decision)) = body else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": "invalid_request" })),
+        );
+    };
+    let key = RoomKey::new(key.trim());
+    let run = match with_rooms(&state, |store| store.room_agent_run(run_id.trim())) {
+        Ok(Some(run)) if run.room_id == key => run,
+        Ok(_) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "ok": false, "error": "run_not_found" })),
+            )
+        }
+        Err(e) => return room_store_error_response(e),
+    };
+    let pending = run
+        .pending_permission
+        .as_ref()
+        .and_then(|p| p.permission_id.parse::<PermissionId>().ok());
+    let (Some(permission_id), Some(token)) = (
+        pending,
+        crate::room_agent_runs::run_decision_token(&run.run_id),
+    ) else {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({ "ok": false, "error": "no_pending_permission" })),
+        );
+    };
+    let (status, resp) =
+        resolve_permission_waiter(&state, permission_id, decision, Some(&token)).await;
+    (
+        status,
+        Json(json!({ "ok": resp.ok, "message": resp.message })),
+    )
+}
+
+/// Longest per-room instructions overlay (characters).
+const ROOM_AGENT_INSTRUCTIONS_CHARS: usize = 4000;
+/// Longest model alias (characters).
+const ROOM_AGENT_MODEL_CHARS: usize = 128;
+
+/// Trim, drop empties, and bound a settings body.
+fn normalize_agent_settings(mut s: RoomAgentSettings) -> Result<RoomAgentSettings, &'static str> {
+    let clean = |v: Option<String>| v.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
+    s.instructions = clean(s.instructions);
+    s.model = clean(s.model);
+    if s.instructions
+        .as_ref()
+        .is_some_and(|i| i.chars().count() > ROOM_AGENT_INSTRUCTIONS_CHARS)
+    {
+        return Err("instructions_too_long");
+    }
+    if let Some(m) = &s.model {
+        if m.chars().count() > ROOM_AGENT_MODEL_CHARS
+            || !m
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':'))
+        {
+            return Err("invalid_model");
+        }
+    }
+    Ok(s)
+}
+
+/// The room's agent participant `agent_id`, or a typed error response.
+fn room_agent_or_error(
+    state: &AppState,
+    key: &RoomKey,
+    agent_id: &str,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    match with_rooms(state, |store| store.get(key)) {
+        Ok(Some(rec)) => {
+            if resolve_agent_participant(&rec.room.participants, agent_id).is_some() {
+                Ok(())
+            } else {
+                Err((
+                    StatusCode::NOT_FOUND,
+                    Json(json!({ "ok": false, "error": "agent_not_in_room" })),
+                ))
+            }
+        }
+        Ok(None) => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "ok": false, "error": "room_not_found" })),
+        )),
+        Err(e) => Err(room_store_error_response(e)),
+    }
+}
+
+/// `GET /v1/rooms/persistent/{key}/agents/{agent_id}/settings` (P4, local only).
+pub(super) async fn room_agent_settings_get(
+    State(state): State<AppState>,
+    Path((key, agent_id)): Path<(String, String)>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let key = RoomKey::new(key.trim());
+    if let Err(resp) = room_agent_or_error(&state, &key, &agent_id) {
+        return resp;
+    }
+    match with_rooms(&state, |store| store.room_agent_settings(&key, &agent_id)) {
+        Ok(settings) => (
+            StatusCode::OK,
+            Json(json!({ "ok": true, "settings": settings })),
+        ),
+        Err(e) => room_store_error_response(e),
+    }
+}
+
+/// `PUT /v1/rooms/persistent/{key}/agents/{agent_id}/settings` (P4, local
+/// only). Replaces the agent's overrides for this room; empty clears them.
+pub(super) async fn room_agent_settings_put(
+    State(state): State<AppState>,
+    Path((key, agent_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Result<Json<RoomAgentSettings>, JsonRejection>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(error) = room_agent_authority::operator(&state, &headers) {
+        return error.response();
+    }
+
+    let Ok(Json(settings)) = body else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": "invalid_request" })),
+        );
+    };
+    let settings = match normalize_agent_settings(settings) {
+        Ok(s) => s,
+        Err(code) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "ok": false, "error": code })),
+            )
+        }
+    };
+    let key = RoomKey::new(key.trim());
+    if let Err(resp) = room_agent_or_error(&state, &key, &agent_id) {
+        return resp;
+    }
+    match with_rooms(&state, |store| {
+        store.put_room_agent_settings(&key, &agent_id, &settings)
+    }) {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(json!({ "ok": true, "settings": settings })),
+        ),
         Err(e) => room_store_error_response(e),
     }
 }
@@ -8222,6 +8489,350 @@ env = { FIXTURE = "1" }
         assert_eq!(status, StatusCode::OK);
         assert_eq!(listed["runs"][0]["run_id"], run.run_id);
         assert_eq!(listed["runs"][0]["state"], "done");
+    }
+
+    #[tokio::test]
+    async fn p4_mutations_require_explicit_room_operator_before_lookup() {
+        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _env = TestEnvRestore::capture(&[
+            "OCEAN_AUTH_FILE",
+            "OCEAN_CODEX_AUTH_FILE",
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let state = crate::tests::isolated_room_fixture_state(&tmp);
+        for (headers, expected) in [
+            (HeaderMap::new(), StatusCode::SERVICE_UNAVAILABLE),
+            (
+                {
+                    let mut h = HeaderMap::new();
+                    h.insert(
+                        crate::room_operator::OPERATOR_HEADER,
+                        "wrong".parse().unwrap(),
+                    );
+                    h
+                },
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                {
+                    let mut h = HeaderMap::new();
+                    h.insert(
+                        crate::room_operator::OPERATOR_HEADER,
+                        "test-room-operator".parse().unwrap(),
+                    );
+                    h.insert("cookie", "ambient=1".parse().unwrap());
+                    h
+                },
+                StatusCode::FORBIDDEN,
+            ),
+        ] {
+            let path = || Path(("missing-room".into(), "missing-run".into()));
+            let (status, _) = room_agent_run_permission(
+                State(state.clone()),
+                path(),
+                headers.clone(),
+                Ok(Json(PermissionDecisionBody::Allow)),
+            )
+            .await;
+            assert_eq!(status, expected);
+            let (status, _) = room_agent_settings_put(
+                State(state.clone()),
+                path(),
+                headers,
+                Ok(Json(RoomAgentSettings::default())),
+            )
+            .await;
+            assert_eq!(status, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn p4_room_tools_refuse_cancelled_and_stale_generation_writes() {
+        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _env = TestEnvRestore::capture(&[
+            "OCEAN_AUTH_FILE",
+            "OCEAN_CODEX_AUTH_FILE",
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+            "OCEAN_AGENTS_DIR",
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let state = crate::tests::isolated_room_fixture_state(&tmp);
+        let agents_root = tmp.path().join("agents");
+        write_agent_fixture(&agents_root, "guarded", "model = \"fake-ok\"\n", None);
+        std::env::set_var("OCEAN_AGENTS_DIR", &agents_root);
+        let key = RoomKey::new("p4-write-guards");
+        create_mention_room(&state, &key);
+        join_human(&state, &key);
+        let (status, _) = room_join(
+            State(state.clone()),
+            Path(key.as_str().into()),
+            Json(RoomJoinRequest {
+                id: "guarded".into(),
+                display_name: "Guarded".into(),
+                kind: RoomParticipantKind::Agent,
+                owner_id: Some("human".into()),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let generation = authorize_room_agent_fixture(
+            &state,
+            &key,
+            "guarded",
+            ActivationPolicy::Mention,
+            ContextPolicy::InvocationOnly,
+        );
+        let (admission, _permit) = room_agent_authority::admit_room_agent(
+            &state,
+            &key,
+            "guarded",
+            "guarded",
+            AdmissionTrigger::Mention,
+        )
+        .await
+        .unwrap();
+        with_rooms(&state, |store| {
+            store.put_room_agent_settings(
+                &key,
+                "guarded",
+                &RoomAgentSettings {
+                    model: Some("new-model".into()),
+                    instructions: Some("next turn".into()),
+                },
+            )
+        })
+        .unwrap();
+        let control = room_agent_authority::apply_admission_to_control(
+            ocean_agent::PromptControl::yolo(false),
+            &admission,
+        );
+        assert_eq!(control.agent_model.as_deref(), Some("fake-ok"));
+        assert!(
+            room_agent_authority::append_admission_allow(&state, &admission).is_err(),
+            "changed settings cannot register against an older admitted snapshot"
+        );
+        let session_id = authorized_room_agent_session_id(&key, "guarded", generation);
+        let trigger = with_rooms(&state, |store| store.transcript(&key, None))
+            .unwrap()
+            .last()
+            .unwrap()
+            .seq;
+        let tracker = Arc::new(Mutex::new(crate::room_agent_runs::RunTracker::start(
+            state.clone(),
+            key.clone(),
+            "guarded",
+            session_id,
+            trigger,
+            trigger,
+            tmp.path().display().to_string(),
+        )));
+        let baseline = with_rooms(&state, |store| store.transcript(&key, None)).unwrap();
+        for cancelled in [false, true] {
+            let cancel = CancellationToken::new();
+            let mut scoped = admission.clone();
+            if cancelled {
+                cancel.cancel();
+            } else {
+                scoped.generation += 1;
+            }
+            let tools = crate::room_tools::room_turn_tools(crate::room_tools::RoomTurnBinding {
+                state: state.clone(),
+                admission: scoped,
+                session_id,
+                cancel,
+                thread_root: trigger,
+                tracker: tracker.clone(),
+            });
+            assert!(tools[0]
+                .execute("update", json!({"text": "must not commit"}))
+                .await
+                .is_err());
+            assert!(tools[1]
+                .execute("ask", json!({"question": "must not commit"}))
+                .await
+                .is_err());
+            assert_eq!(
+                with_rooms(&state, |store| store.transcript(&key, None)).unwrap(),
+                baseline
+            );
+        }
+    }
+
+    async fn wait_for_runs(state: &AppState, key: &RoomKey, n: usize) -> Vec<RoomAgentRun> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let runs = with_rooms(state, |store| store.room_agent_runs(key, 10)).unwrap();
+            if runs.len() >= n && runs.iter().all(|r| r.state.is_terminal()) {
+                return runs;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "runs never settled: {runs:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn p4_settings_tools_and_thread_reply_resume_a_parked_run() {
+        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _env = TestEnvRestore::capture(&[
+            "OCEAN_AUTH_FILE",
+            "OCEAN_CODEX_AUTH_FILE",
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+            "OCEAN_AGENTS_DIR",
+        ]);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state = crate::tests::isolated_room_fixture_state(&tmp);
+        let agents_root = tmp.path().join("agents");
+        write_agent_fixture(&agents_root, "asker", "model = \"fake-ok\"\n", None);
+        std::env::set_var("OCEAN_AGENTS_DIR", &agents_root);
+        let key = RoomKey::new("p4-ask");
+        create_mention_room(&state, &key);
+        join_human(&state, &key);
+        let (status, _) = room_join(
+            State(state.clone()),
+            Path(key.as_str().to_string()),
+            Json(RoomJoinRequest {
+                id: "asker".into(),
+                display_name: "Asker".into(),
+                kind: RoomParticipantKind::Agent,
+                owner_id: Some("human".into()),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        authorize_room_agent_fixture(
+            &state,
+            &key,
+            "asker",
+            ActivationPolicy::TaskAndThread,
+            ContextPolicy::InvocationOnly,
+        );
+        let mut operator_headers = HeaderMap::new();
+        operator_headers.insert(
+            crate::room_operator::OPERATOR_HEADER,
+            "test-room-operator".parse().unwrap(),
+        );
+        let path = |agent: &str| Path((key.as_str().to_string(), agent.to_string()));
+
+        // Per-room settings: normalized on write, scoped to room agents.
+        let (status, _) = room_agent_settings_put(
+            State(state.clone()),
+            path("asker"),
+            operator_headers.clone(),
+            Ok(Json(RoomAgentSettings {
+                instructions: Some("  P4-OVERLAY-MARKER  ".into()),
+                model: Some("fake-ok".into()),
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, Json(got)) =
+            room_agent_settings_get(State(state.clone()), path("asker")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(got["settings"]["instructions"], "P4-OVERLAY-MARKER");
+        let (status, _) = room_agent_settings_get(State(state.clone()), path("nobody")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = room_agent_settings_put(
+            State(state.clone()),
+            path("asker"),
+            operator_headers.clone(),
+            Ok(Json(RoomAgentSettings {
+                instructions: None,
+                model: Some("bad model!".into()),
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let (status, body) = room_post_message(
+            State(state.clone()),
+            Path(key.as_str().to_string()),
+            Json(RoomMessageRequest {
+                author_id: String::new(),
+                author_kind: RoomParticipantKind::Human,
+                body: "@asker paint the shed".into(),
+                thread_parent_seq: None,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let trigger_seq = body.0["message"]["seq"].as_u64().expect("trigger seq");
+        let first = wait_for_runs(&state, &key, 1).await.remove(0);
+
+        // The convened turn carries the overlay, the room model, and the
+        // room tools.
+        let capture = ROOM_TURN_CAPTURES
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .find(|c| c.agent_id == "asker" && c.prompt.contains("P4-OVERLAY-MARKER"))
+            .cloned()
+            .expect("settings overlay reaches the prompt");
+        assert_eq!(capture.model.as_deref(), Some("fake-ok"));
+        assert!(capture.extra_tools.iter().any(|t| t == "room_post_update"));
+        assert!(capture.extra_tools.iter().any(|t| t == "room_ask"));
+
+        // Nothing pending: the in-room decision route refuses honestly.
+        let (status, _) = room_agent_run_permission(
+            State(state.clone()),
+            Path((key.as_str().to_string(), first.run_id.clone())),
+            operator_headers.clone(),
+            Ok(Json(PermissionDecisionBody::Allow)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let (status, _) = room_agent_run_permission(
+            State(state.clone()),
+            Path((key.as_str().to_string(), "no-such-run".into())),
+            operator_headers.clone(),
+            Ok(Json(PermissionDecisionBody::Allow)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // Park the run exactly as `room_ask` does, then answer in its thread.
+        let mut parked = first.clone();
+        parked.state = ocean_core::RoomAgentRunState::AwaitingReply;
+        with_rooms(&state, |store| store.put_room_agent_run(&parked)).unwrap();
+        let (status, body) = room_post_message(
+            State(state.clone()),
+            Path(key.as_str().to_string()),
+            Json(RoomMessageRequest {
+                author_id: String::new(),
+                author_kind: RoomParticipantKind::Human,
+                body: "blue".into(),
+                thread_parent_seq: Some(trigger_seq),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let answer_seq = body.0["message"]["seq"].as_u64().expect("answer seq");
+
+        let runs = wait_for_runs(&state, &key, 2).await;
+        assert_eq!(runs.len(), 2, "the answer convenes exactly one new run");
+        let closed = runs.iter().find(|r| r.run_id == first.run_id).unwrap();
+        assert_eq!(closed.state, ocean_core::RoomAgentRunState::Done);
+        let resumed = runs.iter().find(|r| r.run_id != first.run_id).unwrap();
+        assert_eq!(resumed.agent_id, "asker");
+        assert_eq!(resumed.trigger_seq, answer_seq);
+        assert_eq!(resumed.thread_root_seq, trigger_seq);
+        assert_eq!(
+            resumed.session_id, first.session_id,
+            "same session continues"
+        );
+        assert_eq!(resumed.state, ocean_core::RoomAgentRunState::Done);
     }
 
     #[tokio::test]

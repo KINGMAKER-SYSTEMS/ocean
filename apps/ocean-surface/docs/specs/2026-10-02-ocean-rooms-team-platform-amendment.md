@@ -102,6 +102,13 @@ Interfaces:
 
 Gate P4: an agent asks a clarifying question, the operator answers in the thread, the agent continues and finishes; a permission request is approved from the room card.
 
+P4 as landed (narrowing):
+
+- `room_post_update` and `room_ask` are offered only in Local rooms; federated threads stay unwritable until the Bedrock message contract carries `thread_parent_seq`.
+- Thread-reply resume is driven by parked runs, not the `on_thread_reply` policy (whose target is the thread root's author, a human here).
+- Settings are an instructions overlay and a model alias; trigger policy stays room-level and unexposed.
+- The `room.agent_run` ledger publication (deferred from P3) is still deferred; remote members see the agent's posted replies and questions as ordinary messages.
+
 ## P5 — Visual revamp
 
 - Dark-first, dense, premium treatment on the OCEAN depth ramp. Colors only in `styles/tokens.css`. Refined type scale, 4px spacing rhythm, hover/focus/active states, reduced-motion-safe motion, `compact.css` parity.

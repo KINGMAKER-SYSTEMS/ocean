@@ -30,6 +30,7 @@ mod palette;
 mod place_call;
 mod room_markdown;
 mod room_messages;
+mod room_overflow;
 mod room_work_card;
 mod rooms;
 mod rooms_workspace;

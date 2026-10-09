@@ -142,6 +142,30 @@ pub fn RoomWorkCard(run_id: String, rooms: Rooms, daemon: StoredValue<Daemon>) -
         });
     });
 
+    // Team-platform P4: the owner decides a pending tool permission here.
+    // Nothing is applied optimistically; the next run frame clears the row.
+    let deciding = RwSignal::new(false);
+    let decide_error = RwSignal::new(None::<String>);
+    let decide = move |allow: bool| {
+        if deciding.get_untracked() {
+            return;
+        }
+        let Some(key) = rooms.open_key.get_untracked() else {
+            return;
+        };
+        let base = rooms.url.get_untracked();
+        let id = run_id.get_value();
+        deciding.set(true);
+        decide_error.set(None);
+        spawn_local(async move {
+            let result = crate::rooms::decide_run_permission(&base, &key, &id, allow).await;
+            deciding.set(false);
+            if let Err(e) = result {
+                decide_error.set(Some(e));
+            }
+        });
+    };
+
     view! {
         {move || run.get().map(|r| {
             let agent = crate::rooms::author_display_name(
@@ -157,6 +181,9 @@ pub fn RoomWorkCard(run_id: String, rooms: Rooms, daemon: StoredValue<Daemon>) -
             let file_count = files.len();
             let tool_count = r.tool_count;
             let summary = r.summary.clone();
+            let pending = matches!(r.state, RoomAgentRunState::AwaitingPermission)
+                .then(|| r.pending_permission.clone())
+                .flatten();
             view! {
                 <section
                     class="room-card"
@@ -190,6 +217,34 @@ pub fn RoomWorkCard(run_id: String, rooms: Rooms, daemon: StoredValue<Daemon>) -
                             <crate::icons::ChevronDown />
                         </span>
                     </button>
+                    {pending.map(|p| view! {
+                        <div class="room-card__approval" role="group" aria-label="Permission request">
+                            <span class="room-card__approval-tool">{p.tool_label}</span>
+                            <button
+                                class="room-card__decide room-card__decide--allow"
+                                type="button"
+                                aria-label="Approve"
+                                title="Approve"
+                                disabled=move || deciding.get()
+                                on:click=move |_| decide(true)
+                            >
+                                <crate::icons::Check />
+                            </button>
+                            <button
+                                class="room-card__decide room-card__decide--deny"
+                                type="button"
+                                aria-label="Deny"
+                                title="Deny"
+                                disabled=move || deciding.get()
+                                on:click=move |_| decide(false)
+                            >
+                                <crate::icons::Close />
+                            </button>
+                        </div>
+                    })}
+                    {move || decide_error.get().map(|e| view! {
+                        <div class="room-card__error room-card__error--decide" role="alert">{e}</div>
+                    })}
                     // Chat-grade markdown; `markdown::render` textifies raw HTML.
                     {summary.map(|s| view! {
                         <div class="room-card__summary md" inner_html=crate::markdown::render(&s)></div>

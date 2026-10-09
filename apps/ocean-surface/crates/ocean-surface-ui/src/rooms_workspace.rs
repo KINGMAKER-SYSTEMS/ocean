@@ -115,7 +115,7 @@ fn speaker_id(rooms: Rooms) -> String {
 
 /// Local rooms are always shareable by their daemon owner; a Live federated
 /// room only by the member this daemon speaks as, and only if it owns the room.
-fn access_allows_sharing(access: Option<&RoomAccessProjection>) -> bool {
+pub(crate) fn access_allows_sharing(access: Option<&RoomAccessProjection>) -> bool {
     match access {
         Some(RoomAccessProjection {
             state: RoomAccessState::Local,
@@ -1716,43 +1716,16 @@ pub fn RoomsWorkspace(
                                         {room_name.clone()}
                                     </h1>
                                     <div class="rooms-workspace__center-actions">
-                                        {if joined {
-                                            view! {
-                                                <button
-                                                    class="room-stage__leave"
-                                                    type="button"
-                                                    on:click=move |_| rooms.leave_open()
-                                                >
-                                                    "Leave"
-                                                </button>
-                                            }.into_any()
-                                        } else {
-                                            view! {
-                                                <button
-                                                    class="rooms-workspace__join-btn"
-                                                    type="button"
-                                                    on:click=move |_| rooms.join_open()
-                                                >
-                                                    "Join room"
-                                                </button>
-                                            }.into_any()
-                                        }}
-                                        {move || access_allows_sharing(
-                                            rooms.access.get().as_ref(),
-                                        ).then(|| view! {
+                                        {(!joined).then(|| view! {
                                             <button
-                                                class="rooms-workspace__share-btn"
+                                                class="rooms-workspace__join-btn"
                                                 type="button"
-                                                disabled=move || rooms.invite_loading.get()
-                                                on:click=move |_| rooms.create_invite()
+                                                on:click=move |_| rooms.join_open()
                                             >
-                                                {move || if rooms.invite_loading.get() {
-                                                    "Creating link…"
-                                                } else {
-                                                    "Share"
-                                                }}
+                                                "Join room"
                                             </button>
                                         })}
+                                        <crate::room_overflow::RoomOverflow rooms=rooms joined=joined />
                                         <button
                                             class="rooms-workspace__center-back"
                                             type="button"

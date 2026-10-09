@@ -7,12 +7,18 @@
 //! steps/diffs stay in the agent session, which only the owner's surfaces read.
 //!
 //! Runs are local to the owning daemon and never cross federation.
+//!
+//! P4 adds the agent's voice inside the run: `room_post_update` progress posts,
+//! `room_ask` parking (`AwaitingReply`, resumed by a human thread reply), and
+//! in-room approvals (`AwaitingPermission` + a per-run decision token that only
+//! the owning daemon's `POST .../runs/{run_id}/permission` route presents).
 
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
 
 use chrono::Utc;
 use ocean_agent_sdk::AgentSessionId;
-use ocean_core::{RoomAgentRun, RoomAgentRunState, RoomKey};
+use ocean_core::{RoomAgentRun, RoomAgentRunState, RoomKey, RoomRunPermission};
 use ocean_runtime::AgentEvent;
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -27,6 +33,39 @@ pub(crate) const ROOM_RUNS_LIMIT: usize = 50;
 const SUMMARY_CHARS: usize = 280;
 /// Longest tool label kept on a run (characters).
 const LABEL_CHARS: usize = 60;
+
+/// Per-run permission decision tokens, held only in daemon memory for the
+/// life of the turn. A room turn's permission waiters are bound to its token,
+/// so the generic `/v1/permissions/{id}/decision` route cannot resolve them
+/// without it; the room run route looks it up here.
+static RUN_DECISION_TOKENS: LazyLock<Mutex<HashMap<String, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn tokens() -> std::sync::MutexGuard<'static, HashMap<String, String>> {
+    RUN_DECISION_TOKENS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// The live decision token for `run_id`, if its turn is still running.
+pub(crate) fn run_decision_token(run_id: &str) -> Option<String> {
+    tokens().get(run_id).cloned()
+}
+
+/// Close a parked `room_ask` run once a human has answered in its thread; the
+/// answer convenes a fresh run on the same session.
+pub(crate) fn close_answered(state: &AppState, mut run: RoomAgentRun) {
+    if !run.state.is_parked() {
+        return;
+    }
+    run.state = RoomAgentRunState::Done;
+    run.updated_at = Utc::now();
+    if let Err(e) = with_rooms(state, |store| store.put_room_agent_run(&run)) {
+        tracing::warn!(room = %run.room_id, %e, "room agent run write failed");
+        return;
+    }
+    publish_room_access_wake(state, &run.room_id);
+}
 
 /// Owns one run's projection and persists every change.
 pub(crate) struct RunTracker {
@@ -63,11 +102,68 @@ impl RunTracker {
                 files_changed: Vec::new(),
                 tool_count: 0,
                 reply_seq: None,
+                pending_permission: None,
             },
             cwd,
         };
         tracker.save();
         tracker
+    }
+
+    pub(crate) fn is_parked(&self) -> bool {
+        self.run.state.is_parked()
+    }
+
+    /// Mint and register this run's permission decision token.
+    pub(crate) fn mint_decision_token(&self) -> String {
+        let token = Uuid::new_v4().simple().to_string();
+        tokens().insert(self.run.run_id.clone(), token.clone());
+        token
+    }
+
+    /// The turn is blocked on `permission_id` for `tool`.
+    pub(crate) fn awaiting_permission(&mut self, permission_id: String, tool: &str, args: &Value) {
+        if self.run.state.is_terminal() {
+            return;
+        }
+        self.run.pending_permission = Some(RoomRunPermission {
+            permission_id,
+            tool_label: tool_label(tool, args, &self.cwd),
+        });
+        self.run.state = RoomAgentRunState::AwaitingPermission;
+        self.save();
+    }
+
+    /// The pending permission was decided (or cancelled).
+    pub(crate) fn permission_resolved(&mut self) {
+        if self.run.pending_permission.take().is_none() {
+            return;
+        }
+        if !self.run.state.is_terminal() {
+            self.run.state = RoomAgentRunState::Thinking;
+        }
+        self.save();
+    }
+
+    /// `room_post_update`: the agent's latest progress line becomes the
+    /// card summary.
+    pub(crate) fn posted_update(&mut self, text: &str) {
+        if self.run.state.is_terminal() {
+            return;
+        }
+        self.run.summary = summarize(text);
+        self.save();
+    }
+
+    /// `room_ask`: park the run until a human answers in its thread.
+    pub(crate) fn awaiting_reply(&mut self, question: &str, ask_seq: Option<u64>) {
+        if self.run.state.is_terminal() {
+            return;
+        }
+        self.run.summary = summarize(question);
+        self.run.reply_seq = ask_seq;
+        self.run.state = RoomAgentRunState::AwaitingReply;
+        self.save();
     }
 
     fn save(&mut self) {
@@ -82,7 +178,7 @@ impl RunTracker {
 
     /// Move to `next` unless the run is already terminal or unchanged.
     pub(crate) fn set_state(&mut self, next: RoomAgentRunState) {
-        if self.run.state.is_terminal() || self.run.state == next {
+        if self.run.state.is_terminal() || self.run.state.is_parked() || self.run.state == next {
             return;
         }
         self.run.state = next;
@@ -92,7 +188,7 @@ impl RunTracker {
     /// Record a tool call: bump the count, label the running step, and note a
     /// written path.
     pub(crate) fn tool_started(&mut self, name: &str, args: &Value) {
-        if self.run.state.is_terminal() {
+        if self.run.state.is_terminal() || self.run.state.is_parked() {
             return;
         }
         self.run.tool_count = self.run.tool_count.saturating_add(1);
@@ -108,9 +204,11 @@ impl RunTracker {
     }
 
     pub(crate) fn finish_done(&mut self, reply: &str, reply_seq: Option<u64>) {
-        if self.run.state.is_terminal() {
+        tokens().remove(&self.run.run_id);
+        if self.run.state.is_terminal() || self.run.state.is_parked() {
             return;
         }
+        self.run.pending_permission = None;
         self.run.summary = summarize(reply);
         self.run.reply_seq = reply_seq;
         self.run.state = RoomAgentRunState::Done;
@@ -118,9 +216,11 @@ impl RunTracker {
     }
 
     pub(crate) fn finish_failed(&mut self, reason: &str) {
+        tokens().remove(&self.run.run_id);
         if self.run.state.is_terminal() {
             return;
         }
+        self.run.pending_permission = None;
         self.run.state = RoomAgentRunState::Failed {
             reason: truncate(
                 reason.lines().next().unwrap_or("turn failed"),

@@ -1095,6 +1095,12 @@ impl RoomAgentRunState {
     pub fn is_terminal(&self) -> bool {
         matches!(self, Self::Done | Self::Failed { .. } | Self::Cancelled)
     }
+
+    /// Parked: the turn ended on `room_ask` and the run resumes from a thread
+    /// reply. Survives a daemon restart (no in-memory wait is held).
+    pub fn is_parked(&self) -> bool {
+        matches!(self, Self::AwaitingReply)
+    }
 }
 
 /// One agent turn in a room, rendered as a single live work card.
@@ -1126,6 +1132,32 @@ pub struct RoomAgentRun {
     /// Transcript row of the agent's reply, once posted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_seq: Option<u64>,
+    /// The permission request this run is blocked on (`AwaitingPermission`).
+    /// Owner-local: a short tool label only, never raw tool arguments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_permission: Option<RoomRunPermission>,
+}
+
+/// A pending tool approval projected onto a run card (team-platform P4).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomRunPermission {
+    pub permission_id: String,
+    /// Short, path-relative description of the tool call awaiting approval.
+    pub tool_label: String,
+}
+
+/// Per-room overrides for one agent participant (team-platform P4). Local to
+/// the owning daemon; never federated.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoomAgentSettings {
+    /// Extra steering layered under the agent's own instructions for this room.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+    /// Model alias for this agent's turns in this room (fail-soft to the
+    /// agent's own model when unresolvable).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2878,6 +2910,7 @@ mod tests {
             files_changed: vec!["src/lib.rs".into()],
             tool_count: 2,
             reply_seq: None,
+            pending_permission: None,
         };
         let wire = serde_json::to_value(&run).unwrap();
         assert_eq!(wire["state"], "running_tool");

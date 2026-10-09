@@ -188,6 +188,8 @@ transcripts by session id.
   error, timeout, empty summary) leaves the stored transcript untouched, and
   corrupt storage is an `Err`, never a wipe.
 
+- P4 Room voice tools use an opaque final-admission handle for only `room_post_update` and `room_ask`, appended after the unchanged ambient capability intersection. Reserve both names against ambient providers. The daemon implementations own exact generation/session/cancellation validation for every write; `without_tools()` suppresses the handle too.
+
 ## Work Guidance
 
 - Issue #29's bounded restore owns only `src/lib.rs` and this contract: private

@@ -18,8 +18,8 @@ use axum::{
 };
 use chrono::Utc;
 use ocean_core::{
-    FederatedActorType, FederatedRoomRole, RequestId, RoomAccessState, RoomKey, RoomParticipant,
-    RoomParticipantKind, RoomTriggerEvent,
+    FederatedActorType, FederatedRoomRole, RequestId, RoomAccessState, RoomAgentSettings, RoomKey,
+    RoomParticipant, RoomParticipantKind, RoomTriggerEvent,
 };
 use ocean_store::{
     ActivationPolicy, AgentBindingStatus, AuthorizeAgentInput, ContextPolicy, MemoryScope,
@@ -140,6 +140,7 @@ pub(super) struct RoomAgentAdmission {
     pub(super) context_policy: ContextPolicy,
     pub(super) effective_capabilities: Vec<String>,
     pub(super) room_memory: Option<ocean_agent::AdmittedRoomMemory>,
+    pub(super) settings_snapshot: RoomAgentSettings,
     // Shared turn lifetime; capabilities never retain its execution permit.
     pub(super) operation_cancel: tokio_util::sync::CancellationToken,
 }
@@ -1951,6 +1952,10 @@ pub(super) async fn admit_room_agent(
         .into_iter()
         .filter(|capability| PHASE1_SAFE_CAPABILITIES.contains(&capability.as_str()))
         .collect();
+    let settings_snapshot = with_rooms(state, |store| {
+        store.room_agent_settings(room, agent_member_id)
+    })
+    .map_err(ApiError::from)?;
     let mut admission = RoomAgentAdmission {
         admission_id,
         room: room.clone(),
@@ -1962,6 +1967,7 @@ pub(super) async fn admit_room_agent(
         context_policy: binding.context_policy,
         effective_capabilities,
         room_memory: None,
+        settings_snapshot,
         operation_cancel: tokio_util::sync::CancellationToken::new(),
     };
     if wants_room_memory {
@@ -2012,7 +2018,12 @@ pub(super) fn append_admission_allow(
         .map_err(ApiError::from)?
         .filter(|binding| binding.agent_definition_digest == admission.package.definition_digest)
         .ok_or_else(|| ApiError::conflict("authority_changed_before_registration"))?;
-        if admission.operation_cancel.is_cancelled() {
+        if admission.operation_cancel.is_cancelled()
+            || store
+                .room_agent_settings(&admission.room, &admission.agent_member_id)
+                .map_err(ApiError::from)?
+                != admission.settings_snapshot
+        {
             return Err(ApiError::conflict("authority_changed_before_registration"));
         }
         store
@@ -2110,7 +2121,13 @@ pub(super) fn apply_admission_to_control(
     if !admission.package.tool_allowlist.is_empty() {
         control = control.with_tool_allowlist(admission.package.tool_allowlist.clone());
     }
-    control = control.with_agent_model(admission.package.model.clone());
+    control = control.with_agent_model(
+        admission
+            .settings_snapshot
+            .model
+            .clone()
+            .or_else(|| admission.package.model.clone()),
+    );
     if !subprocess.is_empty() {
         control = control.with_agent_capabilities(admission.package.root.clone(), subprocess);
     }

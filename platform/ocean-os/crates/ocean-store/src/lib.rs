@@ -90,10 +90,10 @@ use std::{path::Path, time::Duration};
 use chrono::{DateTime, Utc};
 use ocean_core::{
     bounded_prose, FederatedMessageMeta, FederatedRoomMemberProjection, OutboxItemState, Room,
-    RoomAccessProjection, RoomAccessState, RoomAgentRun, RoomAgentRunState, RoomArtifact,
-    RoomArtifactKind, RoomArtifactState, RoomAttachment, RoomKey, RoomMessage, RoomMessageKind,
-    RoomOutboxItem, RoomParticipant, RoomParticipantKind, RoomReadCursorProjection,
-    RoomReadCursorUpdateRequest, RoomTriggerPolicy,
+    RoomAccessProjection, RoomAccessState, RoomAgentRun, RoomAgentRunState, RoomAgentSettings,
+    RoomArtifact, RoomArtifactKind, RoomArtifactState, RoomAttachment, RoomKey, RoomMessage,
+    RoomMessageKind, RoomOutboxItem, RoomParticipant, RoomParticipantKind,
+    RoomReadCursorProjection, RoomReadCursorUpdateRequest, RoomTriggerPolicy,
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
@@ -2115,6 +2115,14 @@ impl SqliteRoomStore {
             );
             CREATE INDEX IF NOT EXISTS room_agent_runs_room_started
                 ON room_agent_runs (room_id, started_at);
+
+            -- Per-room overrides for one agent (team-platform P4). Local only.
+            CREATE TABLE IF NOT EXISTS room_agent_settings (
+                room_id  TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+                agent_id TEXT NOT NULL,
+                body     TEXT NOT NULL,        -- JSON RoomAgentSettings
+                PRIMARY KEY (room_id, agent_id)
+            );
 
             CREATE TABLE IF NOT EXISTS daemon_owner (
                 singleton      INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -5980,6 +5988,67 @@ impl SqliteRoomStore {
         Ok(runs)
     }
 
+    /// Parked `room_ask` runs in `key` whose thread root is `thread_root_seq`
+    /// (team-platform P4). A human thread reply resumes each one.
+    pub fn parked_room_agent_runs(
+        &self,
+        key: &RoomKey,
+        thread_root_seq: u64,
+    ) -> Result<Vec<RoomAgentRun>> {
+        Ok(self
+            .room_agent_runs(key, usize::MAX >> 1)?
+            .into_iter()
+            .filter(|run| run.state.is_parked() && run.thread_root_seq == thread_root_seq)
+            .collect())
+    }
+
+    /// One agent's per-room settings; default (empty) when never set.
+    pub fn room_agent_settings(&self, key: &RoomKey, agent_id: &str) -> Result<RoomAgentSettings> {
+        if !self.room_exists(key)? {
+            return Err(RoomStoreError::UnknownRoom(key.clone()));
+        }
+        let body: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT body FROM room_agent_settings WHERE room_id = ?1 AND agent_id = ?2",
+                params![key.as_str(), agent_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match body {
+            Some(b) => serde_json::from_str(&b)
+                .map_err(|e| RoomStoreError::Encode(format!("agent settings: {e}"))),
+            None => Ok(RoomAgentSettings::default()),
+        }
+    }
+
+    /// Replace one agent's per-room settings. Empty settings delete the row.
+    pub fn put_room_agent_settings(
+        &mut self,
+        key: &RoomKey,
+        agent_id: &str,
+        settings: &RoomAgentSettings,
+    ) -> Result<()> {
+        if !self.room_exists(key)? {
+            return Err(RoomStoreError::UnknownRoom(key.clone()));
+        }
+        if *settings == RoomAgentSettings::default() {
+            self.conn.execute(
+                "DELETE FROM room_agent_settings WHERE room_id = ?1 AND agent_id = ?2",
+                params![key.as_str(), agent_id],
+            )?;
+            return Ok(());
+        }
+        let body = serde_json::to_string(settings)
+            .map_err(|e| RoomStoreError::Encode(format!("agent settings: {e}")))?;
+        self.conn.execute(
+            "INSERT INTO room_agent_settings (room_id, agent_id, body) VALUES (?1, ?2, ?3)
+             ON CONFLICT (room_id, agent_id) DO UPDATE SET body = excluded.body",
+            params![key.as_str(), agent_id, body],
+        )?;
+        Ok(())
+    }
+
     /// Restart recovery: every non-terminal run belonged to a turn that died
     /// with the previous daemon. Mark each `Failed` so no card spins forever,
     /// and return the rewritten runs.
@@ -5993,7 +6062,7 @@ impl SqliteRoomStore {
             rows.map(|row| decode_agent_run(&row?))
                 .collect::<Result<Vec<_>>>()?
                 .into_iter()
-                .filter(|run| !run.state.is_terminal())
+                .filter(|run| !run.state.is_terminal() && !run.state.is_parked())
                 .collect()
         };
         let mut out = Vec::with_capacity(open.len());
@@ -14986,6 +15055,7 @@ mod tests {
             files_changed: Vec::new(),
             tool_count: 0,
             reply_seq: None,
+            pending_permission: None,
         }
     }
 
@@ -15033,6 +15103,57 @@ mod tests {
 
         let missing = RoomKey::new("nope");
         assert!(s.put_room_agent_run(&agent_run(&missing, "c", t0)).is_err());
+    }
+
+    #[test]
+    fn parked_runs_survive_restart_and_match_their_thread() {
+        let mut s = store();
+        let key = RoomKey::new("parked");
+        s.create(key.clone(), "parked", None, now()).unwrap();
+        let mut asked = agent_run(&key, "ask", now());
+        asked.thread_root_seq = 7;
+        asked.state = RoomAgentRunState::AwaitingReply;
+        s.put_room_agent_run(&asked).unwrap();
+        let mut other = agent_run(&key, "other", now());
+        other.thread_root_seq = 9;
+        other.state = RoomAgentRunState::AwaitingReply;
+        s.put_room_agent_run(&other).unwrap();
+
+        assert!(s.interrupt_open_room_agent_runs(now()).unwrap().is_empty());
+        let parked = s.parked_room_agent_runs(&key, 7).unwrap();
+        assert_eq!(parked.len(), 1);
+        assert_eq!(parked[0].run_id, "ask");
+        assert!(s.parked_room_agent_runs(&key, 8).unwrap().is_empty());
+    }
+
+    #[test]
+    fn room_agent_settings_roundtrip_and_clear() {
+        let mut s = store();
+        let key = RoomKey::new("settings");
+        s.create(key.clone(), "settings", None, now()).unwrap();
+        assert_eq!(
+            s.room_agent_settings(&key, "helper").unwrap(),
+            RoomAgentSettings::default()
+        );
+        let set = RoomAgentSettings {
+            instructions: Some("Prefer small PRs.".into()),
+            model: Some("glm-5.3".into()),
+        };
+        s.put_room_agent_settings(&key, "helper", &set).unwrap();
+        assert_eq!(s.room_agent_settings(&key, "helper").unwrap(), set);
+        assert_eq!(
+            s.room_agent_settings(&key, "other").unwrap(),
+            RoomAgentSettings::default()
+        );
+        s.put_room_agent_settings(&key, "helper", &RoomAgentSettings::default())
+            .unwrap();
+        assert_eq!(
+            s.room_agent_settings(&key, "helper").unwrap(),
+            RoomAgentSettings::default()
+        );
+        assert!(s
+            .room_agent_settings(&RoomKey::new("nope"), "helper")
+            .is_err());
     }
 
     #[test]

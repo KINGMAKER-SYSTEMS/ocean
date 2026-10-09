@@ -166,6 +166,7 @@ mod room_profile;
 mod room_resources;
 /// Rooms S0 — retire a placeholder human into a real member (operator lane).
 mod room_retirement;
+mod room_tools;
 /// Host fulfillment lifecycle retained for the external `ocean-slack` extension.
 mod slack_canvas_fulfillment;
 /// Ephemeral OpenAI Realtime client-secret mint (voice phases 2/3) — the
@@ -667,7 +668,14 @@ struct DaemonPermissionPolicy {
     /// turn was submitted without binding (legacy client). Never emitted on SSE.
     decision_token: Option<String>,
     lifecycle: Option<LifecyclePermissionContext>,
+    /// Observer for this turn's permission waits (team-platform P4 room work
+    /// cards): called with the request when a waiter is registered and with
+    /// `None` once it is decided or cancelled. Never decides anything.
+    wait_hook: Option<PermissionWaitHook>,
 }
+
+/// See [`DaemonPermissionPolicy::wait_hook`].
+type PermissionWaitHook = Arc<dyn Fn(Option<(PermissionId, &str, &Value)>) + Send + Sync>;
 
 /// Parse a `Last-Event-ID` SSE reconnect header (RFC: EventSource sets it to the
 /// last `id:` it saw) into a `Uuid`. Returns `None` when absent or unparseable.
@@ -1621,6 +1629,9 @@ fn banner_routes() -> &'static [&'static str] {
         "POST /v1/rooms/persistent/{key}/artifacts/{artifact_id}/amend",
         "GET /v1/rooms/persistent/{key}/snapshot",
         "GET /v1/rooms/persistent/{key}/runs",
+        "POST /v1/rooms/persistent/{key}/runs/{run_id}/permission",
+        "GET /v1/rooms/persistent/{key}/agents/{agent_id}/settings",
+        "PUT /v1/rooms/persistent/{key}/agents/{agent_id}/settings",
         "GET /v1/rooms/persistent/{key}/events",
         "GET /v1/rooms/persistent/{key}/read-cursor",
         "PATCH /v1/rooms/persistent/{key}/read-cursor",
@@ -2285,7 +2296,25 @@ async fn permission_decision(
             }),
         );
     }
+    let (status, body) = resolve_permission_waiter(
+        &state,
+        permission_id,
+        decision.decision,
+        decision.decision_token.as_deref(),
+    )
+    .await;
+    (status, Json(body))
+}
 
+/// Verify `decision_token` against the pending waiter, release it with
+/// `decision`, and record the result. Shared by the generic decision route and
+/// the room run route (team-platform P4), so both keep one authority.
+pub(crate) async fn resolve_permission_waiter(
+    state: &AppState,
+    permission_id: PermissionId,
+    decision: PermissionDecisionBody,
+    decision_token: Option<&str>,
+) -> (StatusCode, PermissionControlResponse) {
     // OCEAN-185 (P0): verify the per-turn secret BEFORE consuming the waiter, so
     // an attacker who sniffed the broadcast `permission_id` off /v1/events but
     // doesn't hold the token can neither approve the tool nor burn the pending
@@ -2301,19 +2330,16 @@ async fn permission_decision(
                 drop(permissions);
                 return (
                     StatusCode::NOT_FOUND,
-                    Json(PermissionControlResponse {
+                    PermissionControlResponse {
                         ok: false,
                         permission_id,
                         message: "permission request not found or already handled".into(),
-                    }),
+                    },
                 );
             }
             Some(waiter) => {
                 if let Some(expected) = waiter.decision_token.as_deref() {
-                    if !ocean_core::decision_token_matches(
-                        Some(expected),
-                        decision.decision_token.as_deref(),
-                    ) {
+                    if !ocean_core::decision_token_matches(Some(expected), decision_token) {
                         drop(permissions);
                         tracing::warn!(
                             %permission_id,
@@ -2321,13 +2347,13 @@ async fn permission_decision(
                         );
                         return (
                             StatusCode::FORBIDDEN,
-                            Json(PermissionControlResponse {
+                            PermissionControlResponse {
                                 ok: false,
                                 permission_id,
                                 message: "forbidden: missing or invalid decision token; this \
                                     decision was not authorized by the turn's submitter"
                                     .into(),
-                            }),
+                            },
                         );
                     }
                 }
@@ -2345,15 +2371,15 @@ async fn permission_decision(
         // our remove. Treat as already-handled.
         return (
             StatusCode::NOT_FOUND,
-            Json(PermissionControlResponse {
+            PermissionControlResponse {
                 ok: false,
                 permission_id,
                 message: "permission request not found or already handled".into(),
-            }),
+            },
         );
     };
 
-    let agent_decision = match decision.decision {
+    let agent_decision = match decision {
         PermissionDecisionBody::Allow => AgentPermissionDecision::Allow,
         // "Allow for this session": the runtime records the tool in the agent
         // loop's per-run `session_allowed` set, so identical follow-up calls of
@@ -2401,11 +2427,11 @@ async fn permission_decision(
 
     (
         StatusCode::OK,
-        Json(PermissionControlResponse {
+        PermissionControlResponse {
             ok: true,
             permission_id,
             message: "permission decision recorded and waiter released".into(),
-        }),
+        },
     )
 }
 
@@ -2438,6 +2464,52 @@ fn build_prompt_control_with_lifecycle(
     decision_token: Option<String>,
     lifecycle: Option<LifecyclePermissionContext>,
 ) -> PromptControl {
+    build_prompt_control_inner(
+        state,
+        request_id,
+        session_id,
+        mode,
+        cancel,
+        decision_token,
+        lifecycle,
+        None,
+    )
+}
+
+/// A room turn's control: its waiters are bound to the run's decision token
+/// and every wait is reported to the run's work card.
+fn build_room_prompt_control(
+    state: &AppState,
+    request_id: RequestId,
+    session_id: Option<SessionId>,
+    mode: PermissionMode,
+    cancel: CancellationToken,
+    decision_token: String,
+    wait_hook: PermissionWaitHook,
+) -> PromptControl {
+    build_prompt_control_inner(
+        state,
+        request_id,
+        session_id,
+        mode,
+        cancel,
+        Some(decision_token),
+        None,
+        Some(wait_hook),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_prompt_control_inner(
+    state: &AppState,
+    request_id: RequestId,
+    session_id: Option<SessionId>,
+    mode: PermissionMode,
+    cancel: CancellationToken,
+    decision_token: Option<String>,
+    lifecycle: Option<LifecyclePermissionContext>,
+    wait_hook: Option<PermissionWaitHook>,
+) -> PromptControl {
     let control: Arc<dyn PermissionPolicy> = Arc::new(DaemonPermissionPolicy {
         mode,
         request_id,
@@ -2449,6 +2521,7 @@ fn build_prompt_control_with_lifecycle(
         seen_permissions: Arc::new(Mutex::new(HashMap::new())),
         decision_token,
         lifecycle,
+        wait_hook,
     });
 
     PromptControl::new(control).with_cancel(cancel)
@@ -2559,6 +2632,9 @@ impl PermissionPolicy for DaemonPermissionPolicy {
                 args: status.args.clone(),
             },
         );
+        if let Some(hook) = &self.wait_hook {
+            hook(Some((permission_id, tool_name, args)));
+        }
 
         let cancelled = || {
             (
@@ -2622,6 +2698,9 @@ impl PermissionPolicy for DaemonPermissionPolicy {
         {
             let mut permissions = self.permissions.write().await;
             permissions.remove(&permission_id);
+        }
+        if let Some(hook) = &self.wait_hook {
+            hook(None);
         }
 
         if matches!(decision, AgentPermissionDecision::Deny { .. }) && self.cancel.is_cancelled() {
@@ -2942,6 +3021,17 @@ fn room_routes() -> Router<AppState> {
         .route(
             "/v1/rooms/persistent/{key}/runs",
             get(persistent_rooms::room_agent_runs_list),
+        )
+        // Team-platform P4: owner approve/deny from the room card, and
+        // per-room agent overrides (local only).
+        .route(
+            "/v1/rooms/persistent/{key}/runs/{run_id}/permission",
+            post(persistent_rooms::room_agent_run_permission),
+        )
+        .route(
+            "/v1/rooms/persistent/{key}/agents/{agent_id}/settings",
+            get(persistent_rooms::room_agent_settings_get)
+                .put(persistent_rooms::room_agent_settings_put),
         )
         // Merged SSE: room_message + room_access frames, with durable replay
         // and access-projection tail (S2-P1).
@@ -14000,6 +14090,7 @@ mod tests {
             seen_permissions: Arc::new(Mutex::new(HashMap::new())),
             decision_token,
             lifecycle: None,
+            wait_hook: None,
         }
     }
 
@@ -25617,6 +25708,9 @@ mod tests {
             "POST /v1/rooms/persistent/{key}/artifacts/{artifact_id}/amend",
             "GET /v1/rooms/persistent/{key}/snapshot",
             "GET /v1/rooms/persistent/{key}/runs",
+            "POST /v1/rooms/persistent/{key}/runs/{run_id}/permission",
+            "GET /v1/rooms/persistent/{key}/agents/{agent_id}/settings",
+            "PUT /v1/rooms/persistent/{key}/agents/{agent_id}/settings",
             "POST /v1/rooms/{room_id}/livekit-token",
         ] {
             assert!(
@@ -25784,7 +25878,8 @@ mod tests {
             .filter(|route| {
                 let (_, path) = route.split_once(' ').unwrap();
                 path == "/v1/rooms/persistent/{key}/close"
-                    || path.starts_with("/v1/rooms/persistent/{key}/agents")
+                    || (path.starts_with("/v1/rooms/persistent/{key}/agents")
+                        && !path.ends_with("/settings"))
             })
             .cloned()
             .collect();
@@ -25807,7 +25902,7 @@ mod tests {
         assert_eq!(admission_routes, expected_admission_routes);
         assert_eq!(
             banner.len(),
-            122,
+            125,
             "route baseline changed; review the manifest"
         );
 

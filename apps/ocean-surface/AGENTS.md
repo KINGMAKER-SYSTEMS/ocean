@@ -376,8 +376,19 @@ Web surface session UI:
   message whose thread root convened it. Steps load only when opened, from the
   owner's agent session (`daemon::fetch_session_turns`, sliced by the
   `[#seq] ... «— mention` prompt marker) and render through the
-  transcript's own `AssistantTurn` (`detached`). Card colors come only from
+  own `AssistantTurn` (`detached`). Card colors come only from
   tokens (`styles/rooms-cards.css`).
+- In-room approvals (P4): a card in `awaiting_permission` with a
+  `pending_permission` shows the tool label plus Approve/Deny icon buttons,
+  which call `POST /v1/rooms/persistent/{key}/runs/{run_id}/permission`. Never
+  apply a decision optimistically; the next `room_agent_run` frame clears it.
+  Permission/settings mutations retain daemon header-only Room operator authority;
+  the ordinary proxy supplies no operator key and returns an explicit authority error.
+- The room header has exactly one primary action (Join when not joined) and
+  one overflow (`room_overflow.rs`): Share, Agents, Leave. Agents opens the
+  per-room agent settings panel (instructions overlay + model) over
+  `GET/PUT .../agents/{agent_id}/settings`; these settings are local to this
+  Ocean. New secondary room actions go into this overflow, not the header.
 - Owner responses publish only for the latest owner request at the current
   daemon origin. Origin changes clear the old owner and refresh `/v1/me`;
   an older response cannot overwrite a later owner read.
