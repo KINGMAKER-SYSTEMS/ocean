@@ -231,6 +231,18 @@ impl RunTracker {
         self.save();
     }
 
+    /// The turn's request settled `Cancelled` (an owner cancel, including a
+    /// late success the cancel won): the card ends `Cancelled`, not `Failed`.
+    pub(crate) fn finish_cancelled(&mut self) {
+        tokens().remove(&self.run.run_id);
+        if self.run.state.is_terminal() {
+            return;
+        }
+        self.run.pending_permission = None;
+        self.run.state = RoomAgentRunState::Cancelled;
+        self.save();
+    }
+
     pub(crate) fn finish_failed(&mut self, reason: &str) {
         tokens().remove(&self.run.run_id);
         if self.run.state.is_terminal() {

@@ -3487,10 +3487,16 @@ async fn spawn_room_agent_turn(
             Ok(guard) => guard.is_parked(),
             Err(poisoned) => poisoned.into_inner().is_parked(),
         };
-        if !result.ok {
-            with_tracker(&mut |t| t.finish_failed("turn_failed"));
-        }
-        if cancel.is_cancelled() {
+        // The card projects the request's authoritative terminal state: a
+        // request the registry settled `Cancelled` while its admission is
+        // still current was cancelled by its owner, not failed.
+        let request_cancelled = state
+            .requests
+            .read()
+            .await
+            .get(&request_id)
+            .is_some_and(|control| control.status.state == RequestState::Cancelled);
+        if cancel.is_cancelled() || request_cancelled {
             if room_agent_authority::append_remote_output_outcome(
                 &state,
                 &admission,
@@ -3501,8 +3507,17 @@ async fn spawn_room_agent_turn(
             {
                 tracing::warn!(%request_id, error_code = "room_turn_outcome_audit_failed", "Room cancellation audit unavailable");
             }
-            with_tracker(&mut |t| t.finish_failed("room_request_authority_changed"));
+            if request_cancelled
+                && room_agent_authority::admission_generation_is_current(&state, &admission)
+            {
+                with_tracker(&mut |t| t.finish_cancelled());
+            } else {
+                with_tracker(&mut |t| t.finish_failed("room_request_authority_changed"));
+            }
             return;
+        }
+        if !result.ok {
+            with_tracker(&mut |t| t.finish_failed("turn_failed"));
         }
         if result.ok {
             let body = clamp_room_message_body(result.stdout.trim());
@@ -9238,6 +9253,98 @@ env = { FIXTURE = "1" }
                 .len(),
             2
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn p3_owner_cancel_of_a_room_turn_ends_the_card_cancelled_not_failed() {
+        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _env = TestEnvRestore::capture(&[
+            "OCEAN_AUTH_FILE",
+            "OCEAN_CODEX_AUTH_FILE",
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+            "OCEAN_AGENTS_DIR",
+        ]);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state = crate::tests::isolated_room_fixture_state(&tmp);
+        let agents_root = tmp.path().join("agents");
+        write_agent_fixture(&agents_root, "helper", "model = \"fake-ok\"\n", None);
+        std::env::set_var("OCEAN_AGENTS_DIR", &agents_root);
+        let key = RoomKey::new("p3-cancel");
+        create_mention_room(&state, &key);
+        join_human(&state, &key);
+        let (status, _) = room_join(
+            State(state.clone()),
+            Path(key.as_str().to_string()),
+            Json(RoomJoinRequest {
+                id: "helper".into(),
+                display_name: "Helper".into(),
+                kind: RoomParticipantKind::Agent,
+                owner_id: Some("human".into()),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let generation = authorize_room_agent_fixture(
+            &state,
+            &key,
+            "helper",
+            ActivationPolicy::Mention,
+            ContextPolicy::InvocationOnly,
+        );
+        let (status, _) = room_post_message(
+            State(state.clone()),
+            Path(key.as_str().to_string()),
+            Json(RoomMessageRequest {
+                author_id: String::new(),
+                author_kind: RoomParticipantKind::Human,
+                body: "@helper fix the thing".into(),
+                thread_parent_seq: None,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        // The post returns once the turn is admitted and registered; the owner
+        // cancels it through the ordinary request route before it can finish.
+        let session = core_sid(authorized_room_agent_session_id(&key, "helper", generation));
+        let request_id = state
+            .requests
+            .read()
+            .await
+            .values()
+            .find(|control| control.status.session_id == Some(session))
+            .map(|control| control.status.request_id)
+            .expect("room turn request");
+        let Json(cancelled) = crate::cancel_request(State(state.clone()), Path(request_id)).await;
+        assert!(cancelled.ok, "{}", cancelled.message);
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        let run = loop {
+            let runs = with_rooms(&state, |store| store.room_agent_runs(&key, 10)).unwrap();
+            if let Some(run) = runs.into_iter().find(|r| r.state.is_terminal()) {
+                break run;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the cancelled turn never settled"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert_eq!(
+            state
+                .requests
+                .read()
+                .await
+                .get(&request_id)
+                .map(|control| control.status.state),
+            Some(RequestState::Cancelled),
+            "the request itself settled cancelled"
+        );
+        assert_eq!(run.state, ocean_core::RoomAgentRunState::Cancelled, "{run:?}");
+        assert_eq!(run.reply_seq, None, "a cancelled turn posts no reply");
     }
 
     #[tokio::test]
