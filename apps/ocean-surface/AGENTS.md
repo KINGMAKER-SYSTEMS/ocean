@@ -385,7 +385,7 @@ Web surface session UI:
   Permission/settings mutations retain daemon header-only Room operator authority;
   the ordinary proxy supplies no operator key and returns an explicit authority error.
 - The room header has exactly one primary action (Join when not joined) and
-  one overflow (`room_overflow.rs`): Share, Agents, Leave. Agents opens the
+  one overflow (`room_overflow.rs`): Share, Agents, Mute/Unmute, Leave. Agents opens the
   per-room agent settings panel (instructions overlay + model) over
   `GET/PUT .../agents/{agent_id}/settings`; these settings are local to this
   Ocean. New secondary room actions go into this overflow, not the header.
@@ -402,6 +402,15 @@ Web surface session UI:
   (`room_messages::is_convene_audit`) because the work card shows the
   convene; `auto-convene failed …` rows stay. System rows render as one quiet
   line; grouped rows keep the avatar gutter with the time revealed on intent.
+- Attention (P6, `room_attention.rs`, `styles/rooms-attention.css`): the
+  left-rail @ icon swaps the room list for the mentions inbox
+  (`GET /v1/rooms/persistent/inbox`; render the daemon's `author_name`);
+  picking an item opens its room and thread via an origin- and room-key-scoped `Rooms.focus_thread`, consumed only after that room record and root load. Inbox/search responses retire on newer reads, changed daemon origins, room admissions, query edits, and panel cleanup. Mute errors only publish into their originating room. The
+  header search icon opens room search in the right rail (thread > search >
+  members). Muted rooms (`GET/PUT .../prefs`) dim and drop the unread dot.
+  The line above the composer shows agents with a live run. Coworker typing
+  presence is not built: it would cross Bedrock and needs an operator
+  trust-boundary decision. Empty states carry no copy.
 - In `styles/rooms-workspace.css` the "Layout & depth (canonical)" section is
   the final say on geometry, density, and depth; change values there rather
   than adding another override layer. Colors only from `tokens.css`.

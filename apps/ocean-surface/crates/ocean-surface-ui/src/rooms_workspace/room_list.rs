@@ -62,6 +62,8 @@ pub(super) fn RoomListRail(
     on_close: Option<Callback<()>>,
 ) -> impl IntoView {
     let new_room_name = RwSignal::new(String::new());
+    // Team-platform P6: the mentions inbox replaces the list while open.
+    let inbox_open = RwSignal::new(false);
     let create_input_ref: NodeRef<leptos::html::Input> = NodeRef::new();
 
     Effect::new(move |_| {
@@ -141,7 +143,19 @@ pub(super) fn RoomListRail(
             aria-label="Room list"
         >
             <div class="rooms-workspace__left-head">
-                <h2 class="rooms-workspace__left-title">"Rooms"</h2>
+                <h2 class="rooms-workspace__left-title">
+                    {move || if inbox_open.get() { "Mentions" } else { "Rooms" }}
+                </h2>
+                <button
+                    class="rooms-workspace__left-inbox"
+                    class:is-on=move || inbox_open.get()
+                    type="button"
+                    aria-label="Mentions"
+                    aria-pressed=move || inbox_open.get().to_string()
+                    on:click=move |_| inbox_open.update(|o| *o = !*o)
+                >
+                    <crate::icons::AtSign />
+                </button>
                 // Close: on wide screens exits rooms entirely; on narrow
                 // the backdrop closes the drawer and this X remains the
                 // escape-hatch to close rooms.
@@ -167,6 +181,12 @@ pub(super) fn RoomListRail(
 
             // Room list — scrollable
             <div class="rooms-workspace__left-list">
+                <Show
+                    when=move || !inbox_open.get()
+                    fallback=move || view! {
+                        <crate::room_attention::RoomInboxPanel rooms=rooms open=inbox_open />
+                    }
+                >
                 {move || {
                     let list = rooms.list.get();
                     let error = rooms.rooms_error.get();
@@ -240,7 +260,7 @@ pub(super) fn RoomListRail(
                             >
                                 <For
                                     each=move || rooms.list.get()
-                                    key=|r: &Room| (r.id.clone(), r.participants.len(), r.updated_at.clone())
+                                    key=|r: &Room| (r.id.clone(), r.participants.len(), r.updated_at.clone(), r.muted)
                                     children=move |room: Room| {
                                         let key = room.id.clone();
                                         let key2 = key.clone();
@@ -263,8 +283,11 @@ pub(super) fn RoomListRail(
                                                 .as_deref()
                                                 == Some(&*key_tab)
                                         };
+                                        let muted = room.muted;
+                                        // Muted rooms stay quiet in the list;
+                                        // their mentions still reach the inbox.
                                         let unread = move || {
-                                            rooms.read_summaries.with(|summaries| {
+                                            !muted && rooms.read_summaries.with(|summaries| {
                                                 crate::rooms::room_has_durable_unread(
                                                     summaries.get(&key_unread),
                                                 )
@@ -274,6 +297,7 @@ pub(super) fn RoomListRail(
                                             <button
                                                 class="rooms-workspace__room"
                                                 class:is-active=active
+                                                class:is-muted=muted
                                                 type="button"
                                                 role="option"
                                                 id=room_option_dom_id(&room.id)
@@ -303,6 +327,7 @@ pub(super) fn RoomListRail(
                         }.into_any()
                     }
                 }}
+                </Show>
             </div>
 
             {move || {

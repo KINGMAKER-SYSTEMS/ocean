@@ -568,7 +568,7 @@ POST   /v1/permissions/{id}/decision      allow/deny a mutating-tool request
 # Rooms — persistent lifecycle (SQLite-backed; survives restarts)
 GET    /v1/me                             daemon owner identity { participant_id, display_name }; minted once from OCEAN_OWNER_NAME / USER
 PUT    /v1/me                             rename the owner { display_name } (1-64 chars); id is stable; renames the owner's Human roster rows
-GET    /v1/rooms/persistent               list persistent rooms
+GET    /v1/rooms/persistent               list persistent rooms (each room carries additive owner-local "muted")
 POST   /v1/rooms/persistent               create a room { key, name, trigger_policy?, workspace_root? }
 GET    /v1/rooms/persistent/{key}         room + transcript
 POST   /v1/rooms/persistent/{key}/close  soft-close; flush final marker and cancel this Room’s active turns
@@ -597,6 +597,10 @@ GET    /v1/rooms/persistent/{key}/runs                    recent agent work card
 POST   /v1/rooms/persistent/{key}/runs/{run_id}/permission  owner approve/deny for a run's pending tool permission ({decision: allow|allow_session|deny}); 409 when nothing is pending
 GET    /v1/rooms/persistent/{key}/agents/{agent_id}/settings  per-room agent overrides (instructions overlay, model); local only, never federated
 PUT    /v1/rooms/persistent/{key}/agents/{agent_id}/settings  replace per-room agent overrides; empty body fields clear them
+GET    /v1/rooms/persistent/{key}/search                  ?q=&limit= case-insensitive chat-message body search, newest first (q >= 2 chars, limit 1..50, default 20)
+GET    /v1/rooms/persistent/inbox                         ?limit= mentions of and thread replies to the local owner across open rooms, newest first (limit 1..100, default 30)
+GET    /v1/rooms/persistent/{key}/prefs                   per-room owner prefs {muted}; local only, never federated
+PUT    /v1/rooms/persistent/{key}/prefs                   replace per-room owner prefs ({"muted":bool})
 GET    /v1/rooms/persistent/{key}/events                  SSE: initial full room_access projection (no id) + id-bearing room_message frames via ?after_seq=N / Last-Event-ID replay, then post-commit access-update + message tail; open non-call rooms only
 GET    /v1/rooms/persistent/{key}/read-cursor             fetch the daemon-owned read cursor projection for Local/Live rooms; closed/pending/revoked return typed unsupported
 PATCH  /v1/rooms/persistent/{key}/read-cursor             advance the daemon-owned read cursor { read_seq }; Local/Live only, monotonic, publishes room_read_cursor wake on success

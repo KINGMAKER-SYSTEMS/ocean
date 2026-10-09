@@ -148,6 +148,14 @@ pub fn RoomsWorkspace(
     let composer = RwSignal::new(String::new());
     let thread_composer = RwSignal::new(String::new());
     let selected_thread_root_seq = RwSignal::new(None::<u64>);
+    // Team-platform P6: the right rail shows search when no thread is open.
+    let search_open = RwSignal::new(false);
+    // An inbox pick asks for a thread; open it once its root has loaded.
+    Effect::new(move |_| {
+        if let Some(root) = rooms.take_pending_thread_focus() {
+            selected_thread_root_seq.set(Some(root));
+        }
+    });
     let thread_send_in_flight = RwSignal::new(false);
     let copied_invite_link = RwSignal::new(None::<String>);
     let invite_copy_error = RwSignal::new(None::<(String, String)>);
@@ -612,17 +620,8 @@ pub fn RoomsWorkspace(
                     let open = rooms.open_room.get();
                     match open {
                         None => {
-                            // No room selected placeholder
-                            view! {
-                                <div class="rooms-workspace__join">
-                                    <div class="rooms-workspace__join-title">
-                                        "Select a room"
-                                    </div>
-                                    <div class="rooms-workspace__join-desc">
-                                        "Choose a room from the sidebar to start collaborating."
-                                    </div>
-                                </div>
-                            }.into_any()
+                            // No room open: the empty canvas carries no copy.
+                            view! { <div class="rooms-workspace__join"></div> }.into_any()
                         }
                         Some(ref room) => {
                             let joined = rooms.joined_open();
@@ -645,6 +644,16 @@ pub fn RoomsWorkspace(
                                                 "Join room"
                                             </button>
                                         })}
+                                        <button
+                                            class="rooms-workspace__center-search"
+                                            class:is-on=move || search_open.get()
+                                            type="button"
+                                            aria-label="Search"
+                                            aria-pressed=move || search_open.get().to_string()
+                                            on:click=move |_| search_open.update(|o| *o = !*o)
+                                        >
+                                            <crate::icons::Search />
+                                        </button>
                                         <crate::room_overflow::RoomOverflow rooms=rooms joined=joined />
                                         <button
                                             class="rooms-workspace__center-back"
@@ -895,6 +904,7 @@ pub fn RoomsWorkspace(
                                 // informational; only failed items can retry.
                                 <OutboxPanel rooms=rooms />
 
+                                <crate::room_attention::WorkingIndicator rooms=rooms />
                                 // Composer + status line
                                 <ChannelComposer
                                     rooms=rooms
@@ -916,10 +926,31 @@ pub fn RoomsWorkspace(
             >
                 <div class="rooms-workspace__right-head">
                     <h3 class="rooms-workspace__right-title">
-                        {move || if selected_thread_root_seq.get().is_some() { "Thread" } else { "Members" }}
+                        {move || if selected_thread_root_seq.get().is_some() {
+                            "Thread"
+                        } else if search_open.get() {
+                            "Search"
+                        } else {
+                            "Members"
+                        }}
                     </h3>
                     {move || {
-                        if selected_thread_root_seq.get().is_some() {
+                        if selected_thread_root_seq.get().is_none() && search_open.get() {
+                            view! {
+                                <button
+                                    class="rooms-workspace__right-close"
+                                    type="button"
+                                    aria-label="Close search"
+                                    on:click=move |_| search_open.set(false)
+                                >
+                                    <svg viewBox="0 0 16 16" width="14" height="14"
+                                        fill="none" stroke="currentColor" stroke-width="1.6"
+                                        stroke-linecap="round">
+                                        <path d="M3 3l10 10M13 3L3 13"/>
+                                    </svg>
+                                </button>
+                            }.into_any()
+                        } else if selected_thread_root_seq.get().is_some() {
                             view! {
                                 <button
                                     class="rooms-workspace__right-close"
@@ -952,6 +983,13 @@ pub fn RoomsWorkspace(
                                     thread_send_in_flight=thread_send_in_flight
                                     mention=thread_mention
                                     on_send=on_send_thread_reply
+                                />
+                            }.into_any()
+                        } else if search_open.get() {
+                            view! {
+                                <crate::room_attention::RoomSearchPanel
+                                    rooms=rooms
+                                    on_pick=Callback::new(move |root: u64| selected_thread_root_seq.set(Some(root)))
                                 />
                             }.into_any()
                         } else {

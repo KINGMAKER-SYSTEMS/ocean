@@ -1632,6 +1632,10 @@ fn banner_routes() -> &'static [&'static str] {
         "POST /v1/rooms/persistent/{key}/runs/{run_id}/permission",
         "GET /v1/rooms/persistent/{key}/agents/{agent_id}/settings",
         "PUT /v1/rooms/persistent/{key}/agents/{agent_id}/settings",
+        "GET /v1/rooms/persistent/{key}/search",
+        "GET /v1/rooms/persistent/inbox",
+        "GET /v1/rooms/persistent/{key}/prefs",
+        "PUT /v1/rooms/persistent/{key}/prefs",
         "GET /v1/rooms/persistent/{key}/events",
         "GET /v1/rooms/persistent/{key}/read-cursor",
         "PATCH /v1/rooms/persistent/{key}/read-cursor",
@@ -3032,6 +3036,21 @@ fn room_routes() -> Router<AppState> {
             "/v1/rooms/persistent/{key}/agents/{agent_id}/settings",
             get(persistent_rooms::room_agent_settings_get)
                 .put(persistent_rooms::room_agent_settings_put),
+        )
+        // Team-platform P6 (owner-local): message search, the cross-room
+        // mentions/replies inbox (static segment wins over `{key}`), and
+        // per-room mute prefs.
+        .route(
+            "/v1/rooms/persistent/{key}/search",
+            get(persistent_rooms::room_search),
+        )
+        .route(
+            "/v1/rooms/persistent/inbox",
+            get(persistent_rooms::room_inbox),
+        )
+        .route(
+            "/v1/rooms/persistent/{key}/prefs",
+            get(persistent_rooms::room_prefs_get).put(persistent_rooms::room_prefs_put),
         )
         // Merged SSE: room_message + room_access frames, with durable replay
         // and access-projection tail (S2-P1).
@@ -25711,6 +25730,10 @@ mod tests {
             "POST /v1/rooms/persistent/{key}/runs/{run_id}/permission",
             "GET /v1/rooms/persistent/{key}/agents/{agent_id}/settings",
             "PUT /v1/rooms/persistent/{key}/agents/{agent_id}/settings",
+            "GET /v1/rooms/persistent/{key}/search",
+            "GET /v1/rooms/persistent/inbox",
+            "GET /v1/rooms/persistent/{key}/prefs",
+            "PUT /v1/rooms/persistent/{key}/prefs",
             "POST /v1/rooms/{room_id}/livekit-token",
         ] {
             assert!(
@@ -25902,7 +25925,7 @@ mod tests {
         assert_eq!(admission_routes, expected_admission_routes);
         assert_eq!(
             banner.len(),
-            125,
+            129,
             "route baseline changed; review the manifest"
         );
 
@@ -26275,6 +26298,30 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("GET,HEAD")
         );
+
+        // Team-platform P6: the static `inbox` segment wins over `{key}`, so
+        // it answers with the inbox envelope rather than an unknown-room 404.
+        let inbox = app
+            .clone()
+            .oneshot(
+                Request::get("/v1/rooms/persistent/inbox")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            inbox.status(),
+            StatusCode::OK,
+            "the static inbox segment must win over the room-key route"
+        );
+        let inbox_body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(inbox.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(inbox_body, serde_json::json!({ "ok": true, "items": [] }));
 
         let livekit_control = app
             .oneshot(

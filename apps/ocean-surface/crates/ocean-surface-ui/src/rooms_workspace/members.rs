@@ -26,9 +26,7 @@ pub(super) fn MembersPanel(rooms: Rooms) -> impl IntoView {
     move || {
         match rooms.access.get() {
             None => view! {
-                <div class="rooms-workspace__right-empty">
-                    "Open a room to see members."
-                </div>
+                <div class="rooms-workspace__right-empty"></div>
             }
             .into_any(),
             Some(ref access) if access.state == RoomAccessState::Local => {
