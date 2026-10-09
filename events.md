@@ -1097,3 +1097,13 @@ Ported Rooms P2 through P4 on top of the shell port. P2 gives each daemon one pe
 
 Validation: in platform/ocean-os, `cargo fmt --all -- --check`, `cargo test` for ocean-core (63), ocean-store (282), ocean-agent (269) and ocean-daemon (918 passed, 2 failed: the alias-envelope fixtures that already fail on main and are fixed by open #58), `cargo check --workspace --tests`, and docs-check pass. In apps/ocean-surface, all six Surface gates plus proxy tests pass (857 unit tests). No live daemon, browser or desktop run.
 _________________________________________________________________________________
+time: [22:50] [08-10-26]
+agent: [claude] [claude code]
+worktree: [port/rooms-visual-attention] [/Users/risingtidesdev/dev/port-rooms]
+type: [feature-request]
+area: [frontend] [backend] [testing]
+
+Ported Rooms P5 and P6 on top of the P2-P4 port. P5 splits the Rooms workspace into a rooms_workspace module tree (access, banners, composer, format, members, mentions, read cursor, room list, threads) with the visual pass owned by the shared tokens, and hides the daemon's auto-convene audit rows behind the work card. P6 adds an owner-local mentions and replies inbox, bounded room search, per-room mute preferences and a compact working line, with inbox and search responses retired when origin, room admission, query or request ticket changes. Public main's copy of the old rooms_workspace.rs carried one extra caller-alias test, so the file was deleted by hand and that test moved into rooms_workspace/access.rs; the daemon route baseline is now 129.
+
+Validation: in apps/ocean-surface, fmt, `cargo test -p ocean-surface-ui` (865 unit tests plus integration suites), WASM clippy with warnings denied, WASM check, WASM test compilation, proxy check and proxy tests pass. In platform/ocean-os, fmt, ocean-core (63) and ocean-store (286) tests, `cargo check --workspace --tests` and docs-check pass; ocean-daemon is 920 passed, 3 failed, all three the persistent-room lifecycle fixtures that fail on main and are fixed by open #58. No live daemon, browser or desktop run.
+_________________________________________________________________________________
