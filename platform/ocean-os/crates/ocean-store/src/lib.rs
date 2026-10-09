@@ -890,23 +890,31 @@ fn normalize_owner_display_name(name: &str) -> Option<String> {
     (!trimmed.is_empty() && trimmed.chars().count() <= 64).then(|| trimmed.to_string())
 }
 
-/// The owner participant id for a configured team member id: the member id
-/// itself when it is already in the canonical participant alphabet
-/// (alphanumeric, `-`, `_`, `.`), so every reader of `member.toml` agrees on
-/// the same string; otherwise (e.g. an `@` address) the same normalization as
-/// [`owner_participant_id`] applied to the member id, never the login name.
+/// The owner participant id seeded from a configured team member id.
+///
+/// Exact mapping: the trimmed member id exactly as `GET /v1/identity` (#41)
+/// reports it, case kept and no length cap, except that every `@` becomes
+/// `-`. `@` is in the member-id alphabet (`[A-Za-z0-9._@-]`) but it starts a
+/// room mention, so an owner id containing it could never be mentioned. Any
+/// other character outside the participant alphabet (never present in a
+/// member id the daemon accepts) also becomes `-`; an empty id falls back to
+/// [`owner_participant_id`]. So `smaths` → `smaths`, `Jay.V` → `Jay.V`,
+/// `ec@kingmaker` → `ec-kingmaker`, `EC@Kingmaker` → `EC-Kingmaker`.
 pub fn owner_participant_id_for_member(member_id: &str) -> String {
     let member_id = member_id.trim();
-    let canonical = !member_id.is_empty()
-        && member_id.chars().count() <= 64
-        && member_id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
-    if canonical {
-        member_id.to_string()
-    } else {
-        owner_participant_id(member_id)
+    if member_id.is_empty() {
+        return owner_participant_id(member_id);
     }
+    member_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
 }
 
 /// Derive the stable owner participant id from a display name: lowercase,
@@ -15613,6 +15621,32 @@ mod tests {
         assert_eq!(owner_participant_id(""), "operator");
         let long = owner_participant_id(&"a".repeat(40));
         assert_eq!(long.len(), 32);
+    }
+
+    #[test]
+    fn owner_id_is_the_identity_member_id_with_at_signs_mapped() {
+        // Ids already in the participant alphabet are used exactly as the
+        // identity route reports them, case included.
+        for id in ["smaths", "Jay.V", "ec_from-the.DC", "A1"] {
+            assert_eq!(owner_participant_id_for_member(id), id);
+        }
+        // `@` (legal in a member id, but a mention boundary) maps to `-`;
+        // nothing else changes.
+        assert_eq!(
+            owner_participant_id_for_member("ec@kingmaker"),
+            "ec-kingmaker"
+        );
+        assert_eq!(
+            owner_participant_id_for_member("EC@Kingmaker.io"),
+            "EC-Kingmaker.io"
+        );
+        let long = format!("{}@x", "a".repeat(70));
+        assert_eq!(
+            owner_participant_id_for_member(&long),
+            format!("{}-x", "a".repeat(70))
+        );
+        assert_eq!(owner_participant_id_for_member("  smaths "), "smaths");
+        assert_eq!(owner_participant_id_for_member(""), "operator");
     }
 
     #[test]

@@ -59,9 +59,10 @@ participant retirement. One database file (`rooms.db`), one owning crate.
   `{participant_id, display_name}`. `owner_identity_as(member_id, default)`
   mints it once. The configured team member id only seeds a fresh install:
   with no owner row yet, the participant id is
-  `owner_participant_id_for_member(member_id)` (verbatim when already in the
-  canonical alphabet, else normalized from the member id, never the login
-  name). An owner already persisted in `rooms.db` is never re-keyed, whatever
+  `owner_participant_id_for_member(member_id)`: exactly the member id
+  `GET /v1/identity` (#41) reports, trimmed, case kept, no length cap, except
+  that each `@` (legal in a member id, but a mention boundary) becomes `-`
+  (`ec@kingmaker` → `ec-kingmaker`, `Jay.V` → `Jay.V`); never the login name. An owner already persisted in `rooms.db` is never re-keyed, whatever
   `member.toml` says now or later, so its roster rows and authored rows stay
   valid; moving it would be a separate explicit migration (not built).
   Without a member id the id is derived from the first display name

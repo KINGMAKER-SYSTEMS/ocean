@@ -6316,6 +6316,36 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn p2_owner_id_is_the_identity_member_id_with_at_signs_mapped() {
+        for (member, owner_id) in [
+            ("Jay.V", "Jay.V"),
+            ("smaths", "smaths"),
+            ("ec@kingmaker", "ec-kingmaker"),
+            ("EC@Kingmaker", "EC-Kingmaker"),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let state = fake_convene_state(&tmp);
+            unseed_owner(&state);
+            std::fs::write(
+                state.runtime.config_dir().join("member.toml"),
+                format!("member_id = \"{member}\"\n"),
+            )
+            .unwrap();
+            // The identity route's member id, as #41 resolves it.
+            let resolved = resolve_daemon_member(state.runtime.config_dir(), None)
+                .expect("member.toml names the member")
+                .member_id;
+            assert_eq!(resolved, member);
+            let (status, body) = me_get(State(state.clone())).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body.0["participant_id"], owner_id, "{member}");
+            if !member.contains('@') {
+                assert_eq!(body.0["participant_id"], resolved.as_str());
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn p2_persisted_owner_keeps_its_id_when_member_toml_appears() {
         let tmp = tempfile::tempdir().unwrap();
         let state = fake_convene_state(&tmp);
