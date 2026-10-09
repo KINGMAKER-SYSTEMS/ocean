@@ -57,11 +57,13 @@ participant retirement. One database file (`rooms.db`), one owning crate.
   every non-terminal run at startup.
 - `daemon_owner` — singleton team-platform P2 owner identity
   `{participant_id, display_name}`. `owner_identity_as(member_id, default)`
-  mints it once. With a configured team member id the participant id IS that
-  id (`owner_participant_id_for_member`: verbatim when already in the canonical
-  alphabet, else normalized from the member id, never the login name), and an
-  owner minted earlier under another id is re-keyed to it once, taking the
-  member's default display name; old-id roster rows stay and the owner rejoins.
+  mints it once. The configured team member id only seeds a fresh install:
+  with no owner row yet, the participant id is
+  `owner_participant_id_for_member(member_id)` (verbatim when already in the
+  canonical alphabet, else normalized from the member id, never the login
+  name). An owner already persisted in `rooms.db` is never re-keyed, whatever
+  `member.toml` says now or later, so its roster rows and authored rows stay
+  valid; moving it would be a separate explicit migration (not built).
   Without a member id the id is derived from the first display name
   (`owner_participant_id`) and never changes. `set_owner_display_name_as`
   renames the owner row and the owner's Human roster rows in one transaction.

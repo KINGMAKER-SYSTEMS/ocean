@@ -6074,6 +6074,13 @@ mod tests {
         .unwrap();
     }
 
+    /// A fresh install: no daemon owner minted yet (the fixture seeds one).
+    fn unseed_owner(state: &AppState) {
+        with_rooms(state, |store| {
+            *store = ocean_store::SqliteRoomStore::open_in_memory().expect("in-mem store");
+        });
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn p2_human_join_and_post_are_authored_by_the_daemon_owner() {
         let tmp = tempfile::tempdir().unwrap();
@@ -6273,8 +6280,8 @@ mod tests {
     async fn p2_owner_identity_is_the_configured_member_not_the_login_name() {
         let tmp = tempfile::tempdir().unwrap();
         let state = fake_convene_state(&tmp);
-        // Minted from the login name before member.toml existed.
-        seed_owner(&state, "loginname", "loginname");
+        // A fresh install with member.toml: the member id seeds the owner.
+        unseed_owner(&state);
         std::fs::write(
             state.runtime.config_dir().join("member.toml"),
             "member_id = \"smaths\"\ndisplay_name = \"John\"\n",
@@ -6306,6 +6313,66 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body.0["room"]["participants"][0]["id"], "smaths");
         assert_eq!(body.0["room"]["participants"][0]["display_name"], "John");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn p2_persisted_owner_keeps_its_id_when_member_toml_appears() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = fake_convene_state(&tmp);
+        // Minted from the login name before member.toml existed, and already
+        // on a room roster under that id.
+        seed_owner(&state, "loginname", "Login Name");
+        let key = RoomKey::new("p2-persisted-owner");
+        with_rooms(&state, |store| {
+            store.create(key.clone(), "P2", None, Utc::now())
+        })
+        .unwrap();
+        let join = || {
+            room_join(
+                State(state.clone()),
+                Path(key.as_str().to_string()),
+                Json(RoomJoinRequest {
+                    id: String::new(),
+                    display_name: String::new(),
+                    kind: RoomParticipantKind::Human,
+                    owner_id: None,
+                }),
+            )
+        };
+        let (status, _) = join().await;
+        assert_eq!(status, StatusCode::OK);
+
+        for member in ["smaths", "someone-else"] {
+            std::fs::write(
+                state.runtime.config_dir().join("member.toml"),
+                format!("member_id = \"{member}\"\ndisplay_name = \"John\"\n"),
+            )
+            .unwrap();
+            let (status, body) = me_get(State(state.clone())).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body.0["participant_id"], "loginname", "{member}");
+            assert_eq!(body.0["display_name"], "Login Name");
+            // The owner still posts under its roster id without rejoining.
+            let (status, body) = room_post_message(
+                State(state.clone()),
+                Path(key.as_str().to_string()),
+                Json(RoomMessageRequest {
+                    author_id: String::new(),
+                    author_kind: RoomParticipantKind::Human,
+                    body: format!("still me ({member})"),
+                    thread_parent_seq: None,
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{body:?}");
+            assert_eq!(body.0["message"]["author_id"], "loginname");
+        }
+        let roster = with_rooms(&state, |store| store.get(&key))
+            .unwrap()
+            .unwrap()
+            .room
+            .participants;
+        assert_eq!(roster.len(), 1, "no second owner row: {roster:?}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

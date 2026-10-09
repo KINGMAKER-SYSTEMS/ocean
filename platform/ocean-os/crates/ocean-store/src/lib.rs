@@ -5924,15 +5924,16 @@ impl SqliteRoomStore {
 
     /// Read the daemon owner for the configured team member id, if any.
     ///
-    /// With `member_id` (the daemon's `member.toml` / `OCEAN_MEMBER_ID`
-    /// identity), the owner's participant id IS that member id
-    /// ([`owner_participant_id_for_member`]): it is minted with it, and an
-    /// owner minted earlier under another id (e.g. from the login name) is
-    /// re-keyed to it once, taking `default_display_name` (the member's name)
-    /// so the login name leaves the wire. Rooms joined under the old id keep
-    /// that roster row; the owner rejoins as the member id. Without a member
-    /// id, the existing row stands, or one is minted from
-    /// `default_display_name`.
+    /// The member id (the daemon's `member.toml` / `OCEAN_MEMBER_ID`
+    /// identity) only SEEDS a fresh install: when no owner exists yet, the
+    /// owner is minted with participant id
+    /// [`owner_participant_id_for_member`]`(member_id)` and
+    /// `default_display_name`. An owner already persisted in `rooms.db` is
+    /// never re-keyed, whatever the member id says now or later: its roster
+    /// rows, mentions and authored history stay valid. Without a member id a
+    /// fresh owner is minted from `default_display_name`
+    /// ([`owner_participant_id`]). Moving an existing owner onto a member id
+    /// would be a separate, explicit migration.
     pub fn owner_identity_as(
         &mut self,
         member_id: Option<&str>,
@@ -5953,26 +5954,11 @@ impl SqliteRoomStore {
                 },
             )
             .optional()?;
-        let member_participant = member_id.map(owner_participant_id_for_member);
-        let owner = match (existing, member_participant) {
-            (Some(owner), None) => owner,
-            (Some(owner), Some(id)) if owner.participant_id == id => owner,
-            (Some(owner), Some(id)) => {
-                // One-time re-key: the old name may be the login name the old
-                // id came from, so it is replaced by the member's default too.
-                let display_name = normalize_owner_display_name(default_display_name)
-                    .unwrap_or(owner.display_name);
-                tx.execute(
-                    "UPDATE daemon_owner SET participant_id = ?1, display_name = ?2
-                     WHERE singleton = 1",
-                    params![id, display_name],
-                )?;
-                OwnerIdentity {
-                    participant_id: id,
-                    display_name,
-                }
-            }
-            (None, member_participant) => {
+        let owner = match existing {
+            // Persisted owners are never re-keyed.
+            Some(owner) => owner,
+            None => {
+                let member_participant = member_id.map(owner_participant_id_for_member);
                 let display_name = normalize_owner_display_name(default_display_name)
                     .unwrap_or_else(|| "Operator".to_string());
                 let owner = OwnerIdentity {
@@ -15590,30 +15576,32 @@ mod tests {
     }
 
     #[test]
-    fn member_id_owner_mints_and_rekeys_a_login_derived_owner() {
+    fn member_id_seeds_only_a_fresh_owner_and_never_rekeys_a_persisted_one() {
         let mut s = store();
         // Minted earlier from the login name, before member.toml existed.
         let login = s.owner_identity("jsmathers").unwrap();
         assert_eq!(login.participant_id, "jsmathers");
+        // member.toml appears: the persisted owner keeps its id and name.
         let owner = s.owner_identity_as(Some("smaths"), "John").unwrap();
-        assert_eq!(owner.participant_id, "smaths", "the member id wins");
-        assert_eq!(owner.display_name, "John", "the login name leaves too");
-        assert_eq!(s.owner_identity_as(Some("smaths"), "x").unwrap(), owner);
-        // Absent member id later: the stored owner stands.
-        assert_eq!(s.owner_identity("ignored").unwrap(), owner);
+        assert_eq!(owner, login, "a persisted owner is never re-keyed");
+        // And every later member.toml change leaves it alone too.
+        assert_eq!(s.owner_identity_as(Some("other"), "x").unwrap(), login);
+        assert_eq!(s.owner_identity("ignored").unwrap(), login);
         let renamed = s
             .set_owner_display_name_as(Some("smaths"), "x", "John")
             .unwrap()
             .unwrap();
-        assert_eq!(renamed.participant_id, "smaths");
+        assert_eq!(renamed.participant_id, "jsmathers");
+        assert_eq!(renamed.display_name, "John");
 
+        // A fresh install is seeded from the member id.
         let mut fresh = store();
         let minted = fresh.owner_identity_as(Some("Jay.V"), "Jay").unwrap();
         assert_eq!(minted.participant_id, "Jay.V");
         assert_eq!(minted.display_name, "Jay");
         assert_eq!(
-            owner_participant_id_for_member("ec@kingmaker"),
-            "ec-kingmaker"
+            fresh.owner_identity_as(Some("someone-else"), "x").unwrap(),
+            minted
         );
     }
 
