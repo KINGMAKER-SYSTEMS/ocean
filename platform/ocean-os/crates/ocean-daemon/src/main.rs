@@ -209,11 +209,12 @@ use model_catalog::{model_get, model_set, models_list};
 use model_roles::resolve_effective_model_id;
 use model_roles::{load_model_roles, resolve_advisor_alias, resolve_turn_model};
 use persistent_rooms::{
-    resolve_named_agent, room_create, room_create_invite, room_db_path, room_events, room_get,
-    room_get_read_cursor, room_inspect, room_join, room_leave, room_patch_read_cursor,
-    room_post_message, room_redeem_invite, room_register_agents, room_retry_outbox, room_snapshot,
-    room_transcript, rooms_list_persistent, run_federated_trigger_dispatcher, with_rooms,
-    with_rooms_handle, RoomAccessWakeBus, RoomReadCursorWakeBus, RoomStoreHandle, RoomWakeBus,
+    me_get, me_put, resolve_named_agent, room_create, room_create_invite, room_db_path,
+    room_events, room_get, room_get_read_cursor, room_inspect, room_join, room_leave,
+    room_patch_read_cursor, room_post_message, room_redeem_invite, room_register_agents,
+    room_retry_outbox, room_snapshot, room_transcript, rooms_list_persistent,
+    run_federated_trigger_dispatcher, with_rooms, with_rooms_handle, RoomAccessWakeBus,
+    RoomReadCursorWakeBus, RoomStoreHandle, RoomWakeBus,
 };
 use project_registry::{
     canonical_git_common_dir, discover_project_worktrees, project_create, project_delete,
@@ -1578,6 +1579,8 @@ fn banner_routes() -> &'static [&'static str] {
         "GET /v1/permissions",
         "POST /v1/permissions/{id}/decision",
         "POST /v1/rooms/{room_id}/livekit-token",
+        "GET /v1/me",
+        "PUT /v1/me",
         "GET /v1/rooms/persistent",
         "POST /v1/rooms/persistent",
         "GET /v1/rooms/persistent/{key}",
@@ -2832,6 +2835,8 @@ async fn agent_def(Path(name): Path<String>) -> Json<serde_json::Value> {
 /// projection paths stay unmounted without constructing the entire daemon.
 fn room_routes() -> Router<AppState> {
     Router::new()
+        // Team-platform P2: the daemon owner identity every room author derives from.
+        .route("/v1/me", get(me_get).put(me_put))
         .route(
             "/v1/rooms/persistent",
             get(rooms_list_persistent).post(room_create),
@@ -13004,7 +13009,16 @@ mod tests {
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _env = TestEnvRestore::capture(&["OCEAN_CONFIG_DIR", "OCEAN_MODEL", "OCEAN_YOLO"]);
         let tmp = tempfile::tempdir().unwrap();
-        let app = room_routes().with_state(fake_convene_state(&tmp));
+        let state = fake_convene_state(&tmp);
+        // Team-platform P2: the human join/post below is authored as the owner.
+        with_rooms(&state, |store| {
+            store.replace_owner_identity(&ocean_store::OwnerIdentity {
+                participant_id: "alice".into(),
+                display_name: "Alice".into(),
+            })
+        })
+        .unwrap();
+        let app = room_routes().with_state(state);
 
         let (status, content_type, raw) = persistent_room_http_request(
             app.clone(),
@@ -14201,7 +14215,15 @@ mod tests {
         let runtime = Arc::new(
             AgentRuntime::with_config_dir(tmp.path().to_path_buf()).expect("fake runtime"),
         );
-        let store = ocean_store::SqliteRoomStore::open_in_memory().expect("in-mem store");
+        let mut store = ocean_store::SqliteRoomStore::open_in_memory().expect("in-mem store");
+        // Team-platform P2: every local human join/post is authored as the
+        // daemon owner. Fixtures speak as "john" unless a test re-seeds it.
+        store
+            .replace_owner_identity(&ocean_store::OwnerIdentity {
+                participant_id: "john".into(),
+                display_name: "John".into(),
+            })
+            .expect("seed owner");
         let rooms = Arc::new(Mutex::new(store));
         let room_wakes = RoomWakeBus::default();
         let room_access_wakes = RoomAccessWakeBus::default();
@@ -16091,7 +16113,15 @@ mod tests {
         let runtime = Arc::new(
             AgentRuntime::with_config_dir(tmp.path().to_path_buf()).expect("fake runtime"),
         );
-        let store = ocean_store::SqliteRoomStore::open_in_memory().expect("in-mem store");
+        let mut store = ocean_store::SqliteRoomStore::open_in_memory().expect("in-mem store");
+        // Team-platform P2: every local human join/post is authored as the
+        // daemon owner. Fixtures speak as "john" unless a test re-seeds it.
+        store
+            .replace_owner_identity(&ocean_store::OwnerIdentity {
+                participant_id: "john".into(),
+                display_name: "John".into(),
+            })
+            .expect("seed owner");
         let rooms = Arc::new(Mutex::new(store));
         let room_wakes = RoomWakeBus::default();
         let room_access_wakes = RoomAccessWakeBus::default();
@@ -18549,7 +18579,15 @@ mod tests {
     fn escrow_state_with_titles_db(dir: &std::path::Path) -> AppState {
         std::env::set_var("OCEAN_MODEL", "fake-ok");
         let runtime = Arc::new(AgentRuntime::from_env().expect("fake runtime"));
-        let store = ocean_store::SqliteRoomStore::open_in_memory().expect("in-mem store");
+        let mut store = ocean_store::SqliteRoomStore::open_in_memory().expect("in-mem store");
+        // Team-platform P2: every local human join/post is authored as the
+        // daemon owner. Fixtures speak as "john" unless a test re-seeds it.
+        store
+            .replace_owner_identity(&ocean_store::OwnerIdentity {
+                participant_id: "john".into(),
+                display_name: "John".into(),
+            })
+            .expect("seed owner");
         let rooms = Arc::new(Mutex::new(store));
         let room_wakes = RoomWakeBus::default();
         let room_access_wakes = RoomAccessWakeBus::default();
@@ -25751,7 +25789,7 @@ mod tests {
         assert_eq!(admission_routes, expected_admission_routes);
         assert_eq!(
             banner.len(),
-            119,
+            121,
             "route baseline changed; review the manifest"
         );
 

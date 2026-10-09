@@ -4376,6 +4376,7 @@ mod tests {
         );
 
         let projection = RoomAccessProjection {
+            local_member_id: None,
             caller_member_id: None,
             state: RoomAccessState::Live,
             last_confirmed_global_sequence: Some(4),

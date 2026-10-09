@@ -1039,6 +1039,11 @@ pub struct RoomAccessProjection {
     /// `None` = no confirmed events yet. Distinguishable from `Some(0)`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_confirmed_global_sequence: Option<u64>,
+    /// The Bedrock member id this daemon's owner speaks as (the credential's
+    /// local human member). `None` for Local rooms and before a credential
+    /// exists. Lets a surface render "me" without minting identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_member_id: Option<String>,
     /// Federated members (daemon-projected, including remote peers).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub members: Vec<FederatedRoomMemberProjection>,
@@ -2320,6 +2325,7 @@ mod tests {
     #[test]
     fn room_access_local_projection_skips_empty_vecs() {
         let proj = RoomAccessProjection {
+            local_member_id: None,
             state: RoomAccessState::Local,
             caller_member_id: None,
             last_confirmed_global_sequence: None,
@@ -2346,6 +2352,7 @@ mod tests {
             local_binding_available: None,
         };
         let proj = RoomAccessProjection {
+            local_member_id: None,
             state: RoomAccessState::Live,
             last_confirmed_global_sequence: Some(5),
             caller_member_id: Some("mem-1".into()),
@@ -2387,6 +2394,7 @@ mod tests {
             local_binding_available: Some(true),
         };
         let proj = RoomAccessProjection {
+            local_member_id: None,
             state: RoomAccessState::Live,
             last_confirmed_global_sequence: Some(5),
             caller_member_id: None,

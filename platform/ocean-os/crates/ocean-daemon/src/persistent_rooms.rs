@@ -1447,11 +1447,81 @@ pub(super) async fn room_inspect(
     }
 }
 
+/// Display name the daemon owner is minted with on first use: the operator's
+/// explicit `OCEAN_OWNER_NAME`, else the login `USER`, else `Operator`. Only
+/// consulted while no owner row exists (`SqliteRoomStore::owner_identity`).
+pub(super) fn default_owner_display_name() -> String {
+    ["OCEAN_OWNER_NAME", "USER"]
+        .iter()
+        .filter_map(|var| std::env::var(var).ok())
+        .map(|v| v.trim().to_string())
+        .find(|v| !v.is_empty())
+        .unwrap_or_else(|| "Operator".to_string())
+}
+
+/// The one human this daemon belongs to (team-platform P2). Every local human
+/// join and post is authored as this identity; client-claimed human ids are
+/// never authority.
+pub(super) fn daemon_owner(
+    state: &AppState,
+) -> Result<ocean_store::OwnerIdentity, ocean_store::RoomStoreError> {
+    let default_name = default_owner_display_name();
+    with_rooms(state, |reg| reg.owner_identity(&default_name))
+}
+
+fn owner_json(owner: &ocean_store::OwnerIdentity) -> serde_json::Value {
+    json!({
+        "participant_id": owner.participant_id,
+        "display_name": owner.display_name,
+    })
+}
+
+/// `GET /v1/me` — the daemon owner identity every surface renders as "me".
+pub(super) async fn me_get(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
+    match daemon_owner(&state) {
+        Ok(owner) => (StatusCode::OK, Json(owner_json(&owner))),
+        Err(e) => room_store_error_response(e),
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct MeUpdateRequest {
+    display_name: String,
+}
+
+/// `PUT /v1/me` — rename the daemon owner. The participant id never changes;
+/// the owner's local Human roster rows are renamed in the same transaction.
+pub(super) async fn me_put(
+    State(state): State<AppState>,
+    Json(req): Json<MeUpdateRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let default_name = default_owner_display_name();
+    match with_rooms(&state, |reg| {
+        reg.set_owner_display_name(&default_name, &req.display_name)
+    }) {
+        Ok(Some(owner)) => (StatusCode::OK, Json(owner_json(&owner))),
+        Ok(None) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "ok": false,
+                "code": "invalid_display_name",
+                "error": "display_name must be 1-64 characters",
+            })),
+        ),
+        Err(e) => room_store_error_response(e),
+    }
+}
+
 #[derive(serde::Deserialize)]
 pub(super) struct RoomJoinRequest {
-    /// Stable participant id, unique within the room.
+    /// Stable participant id, unique within the room. Ignored for `human`
+    /// joins: a human joins as the daemon owner (team-platform P2).
+    #[serde(default)]
     pub(super) id: String,
-    /// Display name shown in the roster and transcript.
+    /// Display name shown in the roster and transcript. Ignored for `human`
+    /// joins, which take the owner's display name.
+    #[serde(default)]
     pub(super) display_name: String,
     /// What kind of actor is joining. Defaults to `human`.
     #[serde(default = "default_participant_kind")]
@@ -1472,9 +1542,21 @@ fn default_participant_kind() -> RoomParticipantKind {
 pub(super) async fn room_join(
     State(state): State<AppState>,
     Path(key): Path<String>,
-    Json(req): Json<RoomJoinRequest>,
+    Json(mut req): Json<RoomJoinRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let key = RoomKey::new(key.trim());
+    // Team-platform P2: a human joining through this daemon IS its owner.
+    // Every surface talking to this daemon belongs to that one person, so the
+    // body's id/display_name are ignored rather than trusted.
+    if matches!(req.kind, RoomParticipantKind::Human) {
+        match daemon_owner(&state) {
+            Ok(owner) => {
+                req.id = owner.participant_id;
+                req.display_name = owner.display_name;
+            }
+            Err(e) => return room_store_error_response(e),
+        }
+    }
     // `System` is the DAEMON'S OWN author identity. Every audit row it writes is
     // authored `("system", System)` — the auto-convene notice, the "not bound"
     // note, the turn-failure line. If a client may join as System, the
@@ -1818,7 +1900,10 @@ pub(super) async fn room_leave(
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RoomMessageRequest {
-    /// Author participant id (or a synthetic id like `"system"`).
+    /// Author participant id. Ignored for `human` posts, which are always
+    /// authored as the daemon owner (team-platform P2); still roster-gated for
+    /// `bot` posts.
+    #[serde(default)]
     pub(super) author_id: String,
     /// Author kind for attribution. Defaults to `human`.
     #[serde(default = "default_participant_kind")]
@@ -1954,6 +2039,7 @@ pub(super) async fn room_post_message(
     Json(req): Json<RoomMessageRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let key = RoomKey::new(key.trim());
+    let default_owner_name = default_owner_display_name();
     // Classification and the Local append share one store guard. Credential
     // installation can therefore linearize only before or after this commit,
     // never between a Local check and a later append.
@@ -1978,8 +2064,19 @@ pub(super) async fn room_post_message(
         // written, under the same guard as the append, so a roster change
         // cannot land between the decision and the row. The returned id is the
         // exact roster-owned canonical spelling used for persistence.
-        let canonical_author_id = classify_local_author(&roster, &req.author_id, req.author_kind)
-            .map_err(LocalPostError::Rejected)?;
+        //
+        // Team-platform P2: a human post is authored by the daemon owner, never
+        // by a client-claimed id. The owner must still be on the roster.
+        let owner_id;
+        let claimed_author_id = if matches!(req.author_kind, RoomParticipantKind::Human) {
+            owner_id = reg.owner_identity(&default_owner_name)?.participant_id;
+            owner_id.as_str()
+        } else {
+            req.author_id.as_str()
+        };
+        let canonical_author_id =
+            classify_local_author(&roster, claimed_author_id, req.author_kind)
+                .map_err(LocalPostError::Rejected)?;
         // Read the thread root's author before appending: the reply itself is
         // not a valid trigger source, and after the append the root is one row
         // further back. `None` for a top-level post or a vanished root.
@@ -5358,10 +5455,108 @@ mod tests {
         .is_err());
     }
 
+    /// Seed the daemon owner so tests can name the human every local join and
+    /// post is authored as (team-platform P2).
+    pub(crate) fn seed_owner(state: &AppState, id: &str, display_name: &str) {
+        with_rooms(state, |store| {
+            store.replace_owner_identity(&ocean_store::OwnerIdentity {
+                participant_id: id.into(),
+                display_name: display_name.into(),
+            })
+        })
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn p2_human_join_and_post_are_authored_by_the_daemon_owner() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = fake_convene_state(&tmp);
+        seed_owner(&state, "ada", "Ada");
+        let key = RoomKey::new("p2-owner");
+        with_rooms(&state, |store| {
+            store.create(key.clone(), "P2", None, Utc::now())
+        })
+        .unwrap();
+
+        // A post before the owner joined is refused and writes nothing.
+        let (status, body) = room_post_message(
+            State(state.clone()),
+            Path(key.as_str().to_string()),
+            Json(RoomMessageRequest {
+                author_id: String::new(),
+                author_kind: RoomParticipantKind::Human,
+                body: "too early".into(),
+                thread_parent_seq: None,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            body.0,
+            json!({"ok": false, "error": "author_not_in_roster"})
+        );
+
+        // A human join claiming another identity joins as the owner.
+        let (status, body) = room_join(
+            State(state.clone()),
+            Path(key.as_str().to_string()),
+            Json(RoomJoinRequest {
+                id: "mallory".into(),
+                display_name: "Mallory".into(),
+                kind: RoomParticipantKind::Human,
+                owner_id: None,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let roster = body.0["room"]["participants"].as_array().unwrap().clone();
+        assert_eq!(roster.len(), 1);
+        assert_eq!(roster[0]["id"], "ada");
+        assert_eq!(roster[0]["display_name"], "Ada");
+
+        // A post claiming another human id is authored by the owner.
+        let (status, body) = room_post_message(
+            State(state.clone()),
+            Path(key.as_str().to_string()),
+            Json(RoomMessageRequest {
+                author_id: "mallory".into(),
+                author_kind: RoomParticipantKind::Human,
+                body: "hello".into(),
+                thread_parent_seq: None,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(body.0["message"]["author_id"], "ada");
+
+        // Renaming the owner renames the roster row; the id is stable.
+        let (status, body) = me_put(
+            State(state.clone()),
+            Json(MeUpdateRequest {
+                display_name: "Ada King".into(),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body.0,
+            json!({"participant_id": "ada", "display_name": "Ada King"})
+        );
+        let (_, body) = me_get(State(state.clone())).await;
+        assert_eq!(body.0["display_name"], "Ada King");
+        let roster = with_rooms(&state, |store| store.get(&key))
+            .unwrap()
+            .unwrap()
+            .room
+            .participants;
+        assert_eq!(roster[0].display_name, "Ada King");
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn g3_local_post_enforces_author_and_thread_authority_without_writes() {
         let tmp = tempfile::tempdir().unwrap();
         let state = fake_convene_state(&tmp);
+        seed_owner(&state, "john", "John");
         let key = RoomKey::new("g3-authority");
         with_rooms(&state, |store| {
             store.create(key.clone(), "G3 Authority", None, Utc::now())?;
@@ -5390,15 +5585,13 @@ mod tests {
         let initial_len = with_rooms(&state, |store| store.transcript(&key, None))
             .unwrap()
             .len();
+        // Client-claimed human ids are ignored (P2: humans are the daemon
+        // owner), so only daemon-only kinds and off-roster bots are refusable.
         for (author_id, author_kind, expected_error) in [
             ("helper", RoomParticipantKind::Agent, "forged_author_kind"),
             ("system", RoomParticipantKind::System, "forged_author_kind"),
-            (
-                "unknown",
-                RoomParticipantKind::Human,
-                "author_not_in_roster",
-            ),
-            (" john ", RoomParticipantKind::Human, "author_not_in_roster"),
+            ("unknown", RoomParticipantKind::Bot, "author_not_in_roster"),
+            (" john ", RoomParticipantKind::Bot, "author_not_in_roster"),
         ] {
             let (status, body) = room_post_message(
                 State(state.clone()),
@@ -5426,7 +5619,7 @@ mod tests {
             State(state.clone()),
             Path(key.as_str().to_string()),
             Json(RoomMessageRequest {
-                author_id: "john".into(),
+                author_id: " john ".into(),
                 author_kind: RoomParticipantKind::Human,
                 body: "valid post".into(),
                 thread_parent_seq: None,
@@ -5434,7 +5627,10 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::CREATED);
-        assert_eq!(body.0["message"]["author_id"], "john");
+        assert_eq!(
+            body.0["message"]["author_id"], "john",
+            "a non-canonical client-claimed human id is replaced by the owner id"
+        );
         assert_eq!(body.0["message"]["session_id"], serde_json::Value::Null);
 
         let before_invalid_parent = with_rooms(&state, |store| store.transcript(&key, None))
@@ -6010,7 +6206,9 @@ mod tests {
         })
         .unwrap();
         // G3: the local branch only accepts an admitted author, so the race is
-        // still a race between a local commit and a federated hand-off.
+        // still a race between a local commit and a federated hand-off. P2: that
+        // author is the daemon owner.
+        seed_owner(&state, "claimed-human", "Claimed Human");
         join_participant(
             &state,
             &key,
@@ -6439,7 +6637,11 @@ mod tests {
     /// message is refused with 403 unless its `(id, kind)` pair is already on the
     /// roster. The join itself commits a `ParticipantJoined` row, so fixtures that
     /// assert on `seq` or on tail ordering account for it explicitly.
+    ///
+    /// Team-platform P2: local human posts are authored by the daemon owner, so
+    /// this fixture also seeds the owner as `human`.
     fn join_human(state: &AppState, key: &RoomKey) {
+        seed_owner(state, "human", "Human");
         join_participant(state, key, "human", RoomParticipantKind::Human, "Human");
     }
 
@@ -6677,6 +6879,7 @@ mod tests {
         ]);
         let tmp = tempfile::tempdir().expect("tempdir");
         let state = crate::tests::isolated_room_fixture_state(&tmp);
+        seed_owner(&state, "amy", "Amy");
         let plain = RoomKey::new("roster-live");
         create_plain_room(&state, &plain);
         let (mut roster_tail, release) = paused_tail(&state, &plain, None).await;
@@ -7038,6 +7241,8 @@ mod tests {
         let agents_root = tmp.path().join("agents");
         write_agent_fixture(&agents_root, "researcher", "model = \"fake-ok\"\n", None);
         std::env::set_var("OCEAN_AGENTS_DIR", &agents_root);
+        // P2: the human join below is authored as the daemon owner.
+        seed_owner(&state, "alice", "Alice");
         let key = RoomKey::new("owned-room");
         create_mention_room(&state, &key);
 
@@ -7251,6 +7456,8 @@ mod tests {
         let agents_root = tmp.path().join("agents");
         write_agent_fixture(&agents_root, "researcher", "model = \"fake-ok\"\n", None);
         std::env::set_var("OCEAN_AGENTS_DIR", &agents_root);
+        // P2: the human join below is authored as the daemon owner.
+        seed_owner(&state, "alice", "Alice");
         let key = RoomKey::new("forge-artifact");
         create_mention_room(&state, &key);
         for (id, name, kind) in [
@@ -7403,14 +7610,16 @@ mod tests {
         let key = RoomKey::new("untrimmed-join");
         create_mention_room(&state, &key);
 
-        for bad in [" john ", "", "   "] {
+        // Client-supplied ids are still validated for non-human kinds (a Bot
+        // posts under its roster id). Human ids are owner-derived (P2).
+        for bad in [" bot ", "", "   "] {
             let (status, Json(body)) = room_join(
                 State(state.clone()),
                 Path(key.as_str().to_string()),
                 Json(RoomJoinRequest {
                     id: bad.into(),
-                    display_name: "John".into(),
-                    kind: RoomParticipantKind::Human,
+                    display_name: "Bot".into(),
+                    kind: RoomParticipantKind::Bot,
                     owner_id: None,
                 }),
             )
@@ -7423,12 +7632,13 @@ mod tests {
             assert_eq!(body["code"], json!("invalid_participant_id"));
         }
 
-        // The canonical spelling still joins, and can therefore post.
+        // A human join with an untrimmed claimed id joins as the canonical
+        // owner id, and can therefore post.
         let (status, _) = room_join(
             State(state.clone()),
             Path(key.as_str().to_string()),
             Json(RoomJoinRequest {
-                id: "john".into(),
+                id: " john ".into(),
                 display_name: "John".into(),
                 kind: RoomParticipantKind::Human,
                 owner_id: None,
@@ -7465,13 +7675,31 @@ mod tests {
             Json(RoomJoinRequest {
                 id: "ghost".into(),
                 display_name: "   ".into(),
-                kind: RoomParticipantKind::Human,
+                kind: RoomParticipantKind::Bot,
                 owner_id: None,
             }),
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["code"], json!("invalid_display_name"));
+
+        // A human join ignores the client display name and takes the owner's.
+        let (status, Json(body)) = room_join(
+            State(state.clone()),
+            Path(key.as_str().to_string()),
+            Json(RoomJoinRequest {
+                id: "ghost".into(),
+                display_name: "   ".into(),
+                kind: RoomParticipantKind::Human,
+                owner_id: None,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["room"]["participants"][0]["display_name"],
+            json!("John")
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -7787,6 +8015,7 @@ env = { FIXTURE = "1" }
 
     fn local_access() -> RoomAccessProjection {
         RoomAccessProjection {
+            local_member_id: None,
             caller_member_id: None,
             state: RoomAccessState::Local,
             last_confirmed_global_sequence: None,
@@ -7983,6 +8212,10 @@ env = { FIXTURE = "1" }
         state.rooms = Arc::new(Mutex::new(
             ocean_store::SqliteRoomStore::open(&path).expect("reopen store"),
         ));
+        // Team-platform P2: local human joins and posts are authored as the
+        // daemon owner, so the retired-identity refusal is exercised by a
+        // daemon whose owner is the retired placeholder.
+        seed_owner(&state, "surface-operator", "Operator");
 
         let (status, Json(join_error)) = room_join(
             State(state.clone()),
@@ -8324,6 +8557,7 @@ env = { FIXTURE = "1" }
             &state,
             &key,
             RoomAccessProjection {
+                local_member_id: None,
                 caller_member_id: None,
                 state: RoomAccessState::Live,
                 last_confirmed_global_sequence: Some(1),
@@ -8515,6 +8749,7 @@ env = { FIXTURE = "1" }
 
     fn seed_live_with_failed_projection(client_event_id: &str) -> RoomAccessProjection {
         RoomAccessProjection {
+            local_member_id: None,
             caller_member_id: None,
             state: RoomAccessState::Live,
             last_confirmed_global_sequence: Some(1),
@@ -8638,6 +8873,7 @@ env = { FIXTURE = "1" }
         seed_live_with_failed(&state, &key, "evt-both");
 
         let expected_proj = RoomAccessProjection {
+            local_member_id: None,
             caller_member_id: None,
             state: RoomAccessState::Live,
             last_confirmed_global_sequence: Some(1),
@@ -8777,6 +9013,7 @@ env = { FIXTURE = "1" }
 
         // Seed initial: seq=0.
         let initial = RoomAccessProjection {
+            local_member_id: None,
             caller_member_id: None,
             state: RoomAccessState::Live,
             last_confirmed_global_sequence: Some(0),
@@ -8794,6 +9031,7 @@ env = { FIXTURE = "1" }
                 .replace_room_access(
                     &key,
                     &RoomAccessProjection {
+                        local_member_id: None,
                         caller_member_id: None,
                         state: RoomAccessState::Live,
                         last_confirmed_global_sequence: Some(42),
@@ -8895,6 +9133,7 @@ env = { FIXTURE = "1" }
             state,
             key,
             RoomAccessProjection {
+                local_member_id: None,
                 caller_member_id: None,
                 state: RoomAccessState::Live,
                 last_confirmed_global_sequence: Some(1),
@@ -8977,6 +9216,7 @@ env = { FIXTURE = "1" }
             &state,
             &key,
             RoomAccessProjection {
+                local_member_id: None,
                 caller_member_id: None,
                 state: RoomAccessState::Revoked,
                 last_confirmed_global_sequence: Some(1),
@@ -9150,6 +9390,7 @@ env = { FIXTURE = "1" }
 
         // Build expected from typed projection (matches serde serialization exactly).
         let expected_proj = RoomAccessProjection {
+            local_member_id: None,
             caller_member_id: None,
             state: RoomAccessState::Live,
             last_confirmed_global_sequence: Some(1),
@@ -9220,6 +9461,7 @@ env = { FIXTURE = "1" }
                 &state,
                 &key,
                 RoomAccessProjection {
+                    local_member_id: None,
                     caller_member_id: None,
                     state: RoomAccessState::Revoked,
                     last_confirmed_global_sequence: Some(1),
@@ -9507,6 +9749,7 @@ env = { FIXTURE = "1" }
         let tmp = tempfile::tempdir().unwrap();
         let state = crate::tests::isolated_room_fixture_state(&tmp);
         let key = RoomKey::new("close-route-room");
+        seed_owner(&state, "alice", "Alice");
         with_rooms(&state, |store| {
             store.create(key.clone(), "Close Route", None, Utc::now())
         })

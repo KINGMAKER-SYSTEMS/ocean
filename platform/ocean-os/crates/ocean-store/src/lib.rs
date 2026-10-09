@@ -868,6 +868,43 @@ impl From<ThreadAppendError> for RoomStoreError {
 
 type Result<T> = std::result::Result<T, RoomStoreError>;
 
+/// The one human this daemon belongs to (team-platform P2). Display data, not
+/// an authentication principal: it names who local human rows are authored by.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnerIdentity {
+    /// Stable participant id in the canonical alphabet (`[a-z0-9._-]`).
+    pub participant_id: String,
+    /// Operator-chosen display name.
+    pub display_name: String,
+}
+
+/// Trim a candidate owner display name; `None` when empty or over 64 chars.
+fn normalize_owner_display_name(name: &str) -> Option<String> {
+    let trimmed = name.trim();
+    (!trimmed.is_empty() && trimmed.chars().count() <= 64).then(|| trimmed.to_string())
+}
+
+/// Derive the stable owner participant id from a display name: lowercase,
+/// canonical mention alphabet, runs of other characters collapse to `-`.
+/// Falls back to `operator` when nothing usable remains.
+pub fn owner_participant_id(display_name: &str) -> String {
+    let mut id = String::new();
+    for c in display_name.trim().chars().flat_map(char::to_lowercase) {
+        if c.is_ascii_alphanumeric() || c == '_' || c == '.' {
+            id.push(c);
+        } else if !id.ends_with('-') {
+            id.push('-');
+        }
+    }
+    let id: String = id.trim_matches('-').chars().take(32).collect();
+    let id = id.trim_end_matches('-');
+    if id.is_empty() {
+        "operator".to_string()
+    } else {
+        id.to_string()
+    }
+}
+
 // ── Rooms Phase 1: room-agent authorization ───────────────────────────
 //
 // See `docs/specs/2026-08-25-ocean-rooms-phase1-room-agent-authorization-manifest.md`.
@@ -2056,6 +2093,16 @@ impl SqliteRoomStore {
             CREATE TABLE IF NOT EXISTS federation_instance (
                 singleton   INTEGER PRIMARY KEY CHECK (singleton = 1),
                 instance_id TEXT NOT NULL         -- one stable daemon UUID
+            );
+
+            -- The ONE human this daemon belongs to (team-platform P2). Every
+            -- coworker runs their own daemon, so every local human post and
+            -- join is authored as this identity; client-claimed human ids are
+            -- never authority. Display data only — it authorizes nothing.
+            CREATE TABLE IF NOT EXISTS daemon_owner (
+                singleton      INTEGER PRIMARY KEY CHECK (singleton = 1),
+                participant_id TEXT NOT NULL,     -- stable; canonical id alphabet
+                display_name   TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS room_federation (
@@ -5260,6 +5307,7 @@ impl SqliteRoomStore {
         let Some((state_str, seq_text, member_json, caller_member_id)) = row else {
             // Room exists but no access row → exact Local projection.
             return Ok(RoomAccessProjection {
+                local_member_id: None,
                 state: RoomAccessState::Local,
                 caller_member_id: None,
                 last_confirmed_global_sequence: None,
@@ -5277,13 +5325,16 @@ impl SqliteRoomStore {
         let members: Vec<FederatedRoomMemberProjection> = serde_json::from_str(&member_json)
             .map_err(|e| RoomStoreError::Encode(format!("bad member projection: {e}")))?;
         let outbox = self.load_outbox_for_room(key)?;
+        let caller_member_id = if state == RoomAccessState::Local {
+            None
+        } else {
+            caller_member_id
+        };
         Ok(RoomAccessProjection {
+            // Both surfaces describe the same captured credential identity.
+            local_member_id: caller_member_id.clone(),
             state,
-            caller_member_id: if state == RoomAccessState::Local {
-                None
-            } else {
-                caller_member_id
-            },
+            caller_member_id,
             last_confirmed_global_sequence: confirmed_sequence,
             members,
             outbox,
@@ -5813,6 +5864,96 @@ impl SqliteRoomStore {
             params![id],
         )?;
         Ok(id)
+    }
+
+    /// Read the daemon owner, minting it on first use (team-platform P2).
+    ///
+    /// `default_display_name` is used only when no owner exists yet. The
+    /// participant id is derived ONCE from that name ([`owner_participant_id`])
+    /// and never changes afterwards, so mentions and roster rows stay valid
+    /// across renames.
+    pub fn owner_identity(&mut self, default_display_name: &str) -> Result<OwnerIdentity> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing: Option<OwnerIdentity> = tx
+            .query_row(
+                "SELECT participant_id, display_name FROM daemon_owner WHERE singleton = 1",
+                [],
+                |r| {
+                    Ok(OwnerIdentity {
+                        participant_id: r.get(0)?,
+                        display_name: r.get(1)?,
+                    })
+                },
+            )
+            .optional()?;
+        let owner = match existing {
+            Some(owner) => owner,
+            None => {
+                let display_name = normalize_owner_display_name(default_display_name)
+                    .unwrap_or_else(|| "Operator".to_string());
+                let owner = OwnerIdentity {
+                    participant_id: owner_participant_id(&display_name),
+                    display_name,
+                };
+                tx.execute(
+                    "INSERT INTO daemon_owner (singleton, participant_id, display_name)
+                     VALUES (1, ?1, ?2)",
+                    params![owner.participant_id, owner.display_name],
+                )?;
+                owner
+            }
+        };
+        tx.commit()?;
+        Ok(owner)
+    }
+
+    /// Destructive test seeding only: replace the owner row outright (like
+    /// [`Self::replace_room_access`]). Production code mints through
+    /// [`Self::owner_identity`] and renames through
+    /// [`Self::set_owner_display_name`].
+    pub fn replace_owner_identity(&mut self, owner: &OwnerIdentity) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO daemon_owner (singleton, participant_id, display_name)
+             VALUES (1, ?1, ?2)
+             ON CONFLICT (singleton) DO UPDATE
+               SET participant_id = excluded.participant_id,
+                   display_name = excluded.display_name",
+            params![owner.participant_id, owner.display_name],
+        )?;
+        Ok(())
+    }
+
+    /// Rename the daemon owner. The participant id is stable; the new display
+    /// name is written to the owner row AND every Human roster row carrying the
+    /// owner's id in the same transaction, so rosters never show a stale name.
+    /// Returns `None` when the trimmed name is empty or over 64 characters.
+    pub fn set_owner_display_name(
+        &mut self,
+        default_display_name: &str,
+        display_name: &str,
+    ) -> Result<Option<OwnerIdentity>> {
+        let Some(display_name) = normalize_owner_display_name(display_name) else {
+            return Ok(None);
+        };
+        let owner = self.owner_identity(default_display_name)?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "UPDATE daemon_owner SET display_name = ?1 WHERE singleton = 1",
+            params![display_name],
+        )?;
+        tx.execute(
+            "UPDATE participants SET display_name = ?1 WHERE id = ?2 AND kind = 'human'",
+            params![display_name, owner.participant_id],
+        )?;
+        tx.commit()?;
+        Ok(Some(OwnerIdentity {
+            participant_id: owner.participant_id,
+            display_name,
+        }))
     }
 
     /// Install (or replace) the room's one federation credential (P2-A). The
@@ -13528,6 +13669,7 @@ mod tests {
         s.create(key.clone(), "Persist", None, now()).unwrap();
 
         let proj = RoomAccessProjection {
+            local_member_id: None,
             state: RoomAccessState::Live,
             last_confirmed_global_sequence: Some(u64::MAX),
             members: vec![member_proj("m1", "Alice")],
@@ -14206,6 +14348,7 @@ mod tests {
         s.create(key.clone(), "Reorder", None, now()).unwrap();
 
         let orig = RoomAccessProjection {
+            local_member_id: None,
             state: RoomAccessState::Live,
             last_confirmed_global_sequence: None,
             members: vec![],
@@ -14219,6 +14362,7 @@ mod tests {
         s.replace_room_access(&key, &orig).unwrap();
 
         let reordered = RoomAccessProjection {
+            local_member_id: None,
             state: RoomAccessState::Live,
             last_confirmed_global_sequence: None,
             members: vec![],
@@ -14253,6 +14397,7 @@ mod tests {
         s.create(key.clone(), "MultiRetry", None, now()).unwrap();
 
         let proj = RoomAccessProjection {
+            local_member_id: None,
             state: RoomAccessState::Live,
             last_confirmed_global_sequence: Some(7),
             members: vec![member_proj("m-a", "A"), member_proj("m-b", "B")],
@@ -14448,6 +14593,7 @@ mod tests {
         let mut s = store();
         let key = RoomKey::new("r-nonexistent");
         let proj = RoomAccessProjection {
+            local_member_id: None,
             state: RoomAccessState::Local,
             last_confirmed_global_sequence: None,
             members: vec![],
@@ -14531,6 +14677,7 @@ mod tests {
         let key = RoomKey::new("r-not-failed");
         s.create(key.clone(), "NotFailed", None, now()).unwrap();
         let proj = RoomAccessProjection {
+            local_member_id: None,
             state: RoomAccessState::Live,
             last_confirmed_global_sequence: None,
             members: vec![],
@@ -14561,6 +14708,7 @@ mod tests {
         .unwrap();
 
         let proj = RoomAccessProjection {
+            local_member_id: None,
             state: RoomAccessState::Live,
             last_confirmed_global_sequence: None,
             members: vec![],
@@ -14722,6 +14870,108 @@ mod tests {
         let _s = SqliteRoomStore::open(&path).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "reopen must repair a loosened mode");
+    }
+
+    #[test]
+    fn room_access_projects_local_member_id_without_the_bearer() {
+        let (mut s, key) = fed_store_with_room("fed-me");
+        seed_access_row(&s, &key, "live");
+        let access = s.room_access(&key).unwrap();
+        assert_eq!(access.local_member_id, None);
+        assert_eq!(access.caller_member_id, None);
+        s.install_room_credential(&key, "secret-bearer", "member-ada")
+            .unwrap();
+        let access = s.room_access(&key).unwrap();
+        assert_eq!(access.local_member_id.as_deref(), Some("member-ada"));
+        assert_eq!(access.caller_member_id, access.local_member_id);
+        let wire = serde_json::to_string(&access).unwrap();
+        assert!(wire.contains("\"local_member_id\":\"member-ada\""));
+        assert!(!wire.contains("secret-bearer"), "bearer never projected");
+        s.conn
+            .execute(
+                "UPDATE room_access SET state = 'local' WHERE room_id = ?1",
+                params![key.as_str()],
+            )
+            .unwrap();
+        let local = s.room_access(&key).unwrap();
+        assert_eq!(local.local_member_id, None);
+        assert_eq!(local.caller_member_id, None);
+    }
+
+    #[test]
+    fn owner_identity_mints_once_and_survives_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rooms.db");
+        let first = {
+            let mut s = SqliteRoomStore::open(&path).unwrap();
+            let a = s.owner_identity("John Smathers").unwrap();
+            let b = s.owner_identity("Someone Else").unwrap();
+            assert_eq!(a, b, "the default applies only when no owner exists");
+            a
+        };
+        assert_eq!(first.participant_id, "john-smathers");
+        assert_eq!(first.display_name, "John Smathers");
+        let mut s = SqliteRoomStore::open(&path).unwrap();
+        assert_eq!(s.owner_identity("ignored").unwrap(), first);
+    }
+
+    #[test]
+    fn owner_participant_id_uses_canonical_alphabet() {
+        assert_eq!(owner_participant_id("  Ada  Lovelace "), "ada-lovelace");
+        assert_eq!(owner_participant_id("o'brien.dev_1"), "o-brien.dev_1");
+        assert_eq!(owner_participant_id("!!!"), "operator");
+        assert_eq!(owner_participant_id(""), "operator");
+        let long = owner_participant_id(&"a".repeat(40));
+        assert_eq!(long.len(), 32);
+    }
+
+    #[test]
+    fn owner_rename_keeps_id_and_updates_only_owner_human_rows() {
+        let mut s = store();
+        let owner = s.owner_identity("Ada").unwrap();
+        let key = RoomKey::new("r");
+        s.create(key.clone(), "r", None, now()).unwrap();
+        for (id, kind, name) in [
+            (
+                owner.participant_id.as_str(),
+                RoomParticipantKind::Human,
+                "Ada",
+            ),
+            ("other", RoomParticipantKind::Human, "Other"),
+        ] {
+            s.add_participant_with_message(
+                &key,
+                RoomParticipant {
+                    id: id.into(),
+                    kind,
+                    display_name: name.into(),
+                },
+                now(),
+            )
+            .unwrap();
+        }
+        let renamed = s
+            .set_owner_display_name("Ada", "  Ada King ")
+            .unwrap()
+            .expect("valid name");
+        assert_eq!(renamed.participant_id, owner.participant_id, "id is stable");
+        assert_eq!(renamed.display_name, "Ada King");
+        let roster = s.get(&key).unwrap().unwrap().room.participants;
+        let name_of = |id: &str| {
+            roster
+                .iter()
+                .find(|p| p.id == id)
+                .map(|p| p.display_name.clone())
+                .unwrap()
+        };
+        assert_eq!(name_of(&owner.participant_id), "Ada King");
+        assert_eq!(name_of("other"), "Other", "other humans are untouched");
+        assert_eq!(s.owner_identity("x").unwrap(), renamed);
+        assert_eq!(s.set_owner_display_name("Ada", "   ").unwrap(), None);
+        assert_eq!(
+            s.set_owner_display_name("Ada", &"x".repeat(65)).unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -17242,6 +17492,7 @@ mod tests {
                 last_confirmed_global_sequence: None,
                 members: vec![],
                 caller_member_id: None,
+                local_member_id: None,
                 outbox: vec![],
             },
         )
@@ -17412,6 +17663,7 @@ mod tests {
         );
         let mut expected = first;
         expected.caller_member_id = Some("member-b".into());
+        expected.local_member_id = Some("member-b".into());
         assert_eq!(current, expected);
 
         drop(s);
@@ -17424,6 +17676,7 @@ mod tests {
             .update_room_access_safe(&key, Some(RoomAccessState::Local), None, None)
             .unwrap();
         assert_eq!(local.caller_member_id, None);
+        assert_eq!(local.local_member_id, None);
         reopened
             .update_room_access_safe(&key, Some(RoomAccessState::Live), None, None)
             .unwrap();
@@ -17433,6 +17686,7 @@ mod tests {
         let replaced = reopened.replace_room_access(&key, &forged).unwrap();
         assert_eq!(replaced.state, RoomAccessState::Live);
         assert_eq!(replaced.caller_member_id, None);
+        assert_eq!(replaced.local_member_id, None);
         assert_eq!(reopened.room_access(&key).unwrap(), replaced);
         assert!(reopened.room_credential(&key).unwrap().is_none());
     }

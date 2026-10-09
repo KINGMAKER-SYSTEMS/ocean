@@ -417,6 +417,9 @@ fn build_app(state: Arc<AppState>, dist: &std::path::Path) -> Router {
         // Agent identity picker (TASK-9/TASK-11): surfaces call GET /v1/agents
         // same-origin; the proxy forwards to the daemon and returns the JSON list.
         .route("/v1/agents", get(proxy_agents))
+        // Daemon owner identity (team-platform P2): every room author derives
+        // from it; the browser never mints an identity.
+        .route("/v1/me", get(proxy_me_get).put(proxy_me_put))
         .route("/v1/fs/dirs", get(proxy_fs_dirs))
         .route(
             "/v1/projects",
@@ -1075,10 +1078,20 @@ async fn proxy_get_json(state: &AppState, path: &str) -> Response {
 
 /// JSON POST passthrough helper for small daemon endpoints.
 async fn proxy_post_json(state: &AppState, path: &str, body: Bytes) -> Response {
+    proxy_send_json(state, reqwest::Method::POST, path, body).await
+}
+
+/// JSON body passthrough helper for small daemon endpoints (POST/PUT).
+async fn proxy_send_json(
+    state: &AppState,
+    method: reqwest::Method,
+    path: &str,
+    body: Bytes,
+) -> Response {
     let url = format!("{}{path}", state.daemon_url.trim_end_matches('/'));
     match state
         .http_json
-        .post(&url)
+        .request(method, &url)
         .header(header::CONTENT_TYPE, "application/json")
         .body(body.to_vec())
         .send()
@@ -1101,6 +1114,16 @@ async fn proxy_post_json(state: &AppState, path: &str, body: Bytes) -> Response 
 /// Reverse-proxy GET /v1/models (model picker catalogue).
 async fn proxy_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     proxy_get_json(&state, "/v1/models").await
+}
+
+/// Reverse-proxy GET /v1/me (the daemon owner identity rooms author as).
+async fn proxy_me_get(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    proxy_get_json(&state, "/v1/me").await
+}
+
+/// Reverse-proxy PUT /v1/me (rename the daemon owner).
+async fn proxy_me_put(State(state): State<Arc<AppState>>, body: Bytes) -> impl IntoResponse {
+    proxy_send_json(&state, reqwest::Method::PUT, "/v1/me", body).await
 }
 
 /// Reverse-proxy GET /v1/agents (named agent identity picker, TASK-9/TASK-11).

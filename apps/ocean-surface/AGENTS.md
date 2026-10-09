@@ -359,6 +359,18 @@ Web surface session UI:
 - One-level thread replies are writable only in Local rooms. Live federated
   rooms may render threads, but keep the reply composer disabled until the
   Bedrock message contract preserves `thread_parent_seq` end-to-end.
+- Identity is daemon-owned (team-platform P2). The surface never mints or
+  stores a room identity: it reads the owner from `GET /v1/me` (proxied),
+  human joins send only `{kind: human}`, and human posts send no `author_id` —
+  the daemon authors both as its owner. "Me" is the owner `participant_id` in
+  Local rooms and the daemon-projected `access.local_member_id` in federated
+  rooms (`rooms::local_speaker_id`). Names render through
+  `rooms::author_display_name` (roster, then federated member projection,
+  then raw id) and initials through `rooms::name_initials`, with the
+  deterministic `avatar_identity_class` hue on every avatar.
+- Owner responses publish only for the latest owner request at the current
+  daemon origin. Origin changes clear the old owner and refresh `/v1/me`;
+  an older response cannot overwrite a later owner read.
 - Agent participants are selected from daemon-owned `/v1/agents` identities
   and remain subject to daemon join validation. Free-text agent creation does
   not belong in the surface. Picker keys, values, and labels use the canonical

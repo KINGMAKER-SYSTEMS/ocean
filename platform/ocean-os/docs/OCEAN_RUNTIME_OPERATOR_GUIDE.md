@@ -566,6 +566,8 @@ GET    /v1/permissions                    list pending permission requests
 POST   /v1/permissions/{id}/decision      allow/deny a mutating-tool request
 
 # Rooms — persistent lifecycle (SQLite-backed; survives restarts)
+GET    /v1/me                             daemon owner identity { participant_id, display_name }; minted once from OCEAN_OWNER_NAME / USER
+PUT    /v1/me                             rename the owner { display_name } (1-64 chars); id is stable; renames the owner's Human roster rows
 GET    /v1/rooms/persistent               list persistent rooms
 POST   /v1/rooms/persistent               create a room { key, name, trigger_policy?, workspace_root? }
 GET    /v1/rooms/persistent/{key}         room + transcript
@@ -580,10 +582,10 @@ POST   /v1/rooms/persistent/{key}/agents/{agent_member_id}/suspend  suspend and 
 POST   /v1/rooms/persistent/{key}/agents/{agent_member_id}/resume  resume with a new generation; operator header required
 POST   /v1/rooms/persistent/{key}/agents/{agent_member_id}/revoke  revoke and cancel prior-generation requests; operator header required
 POST   /v1/rooms/persistent/{key}/agents/{agent_member_id}/invoke  invoke from an existing same-Room message authored by invoked_by
-POST   /v1/rooms/persistent/{key}/participants            join { id, display_name, kind? }
+POST   /v1/rooms/persistent/{key}/participants            join { kind?, id?, display_name?, owner_id? }; a human join is always the daemon owner (id/display_name ignored)
 DELETE /v1/rooms/persistent/{key}/participants/{participant_id}  leave
 POST   /v1/rooms/persistent/{key}/participants/{participant_id}/retire  merge a placeholder human into a real member (operator lane, replay-safe)
-POST   /v1/rooms/persistent/{key}/messages                post message { author_id, author_kind?, body }
+POST   /v1/rooms/persistent/{key}/messages                post message { author_kind?, author_id?, body, thread_parent_seq? }; a human post is always authored by the daemon owner (author_id ignored)
 GET    /v1/rooms/persistent/{key}/transcript              read transcript (?after_seq=N&limit=M)
 POST   /v1/rooms/persistent/{key}/artifacts               record what the room produced { id, kind: task|decision|note, title, body?, author_id }; 201 { artifact }. Author must be on the roster (403). Every create writes a System transcript line in the SAME transaction, so an artifact can never exist that the room's history does not explain.
 GET    /v1/rooms/persistent/{key}/artifacts               list this room's artifacts, most recently changed first

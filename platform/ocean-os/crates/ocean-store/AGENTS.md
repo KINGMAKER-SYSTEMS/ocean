@@ -49,6 +49,12 @@ participant retirement. One database file (`rooms.db`), one owning crate.
   upstream-mirrored read positions as canonical decimal u64 TEXT. Mirror writes
   use `RoomReadCursorMirrorCas`: callers supply the previously observed mirror;
   mismatches return `Stale` without writing, including stale clears.
+- `daemon_owner` — singleton team-platform P2 owner identity
+  `{participant_id, display_name}`. `owner_identity(default)` mints it once;
+  the id is derived from the first display name (`owner_participant_id`,
+  canonical mention alphabet) and never changes. `set_owner_display_name`
+  renames the owner row and the owner's Human roster rows in one transaction.
+  Display data only — never an authentication principal.
 - P2-A federation tables: `federation_instance` (singleton instance id),
   `room_federation` (bearer credential — PRIVATE), `room_member_bindings`
   (member→agent binding, `registration_key` PRIVATE, agent name unique per
@@ -120,9 +126,10 @@ participant retirement. One database file (`rooms.db`), one owning crate.
   the outbox and its cursor only advances. `replace_room_access` is
   destructive test seeding only.
 - **Caller projection follows credential custody.** Non-Local `room_access`
-  reads `caller_member_id` solely from `room_federation.local_human_member_id`
-  alongside access state; no credential means absent, and Local always means
-  absent. Projection replacement never installs caller identity or credentials.
+  reads `caller_member_id` and P2 speaker field `local_member_id` from one
+  `room_federation.local_human_member_id` snapshot alongside access state; no
+  credential means both are absent, and Local always means absent. Projection
+  replacement never installs caller identity or credentials.
 - **Mirrored cursor writes are compare-and-swap.** `set_room_read_cursor_mirror`
   evaluates the expected prior mirror and write under one IMMEDIATE transaction.
   `Applied` returns the durable projection; `Stale` never mutates the row. Callers

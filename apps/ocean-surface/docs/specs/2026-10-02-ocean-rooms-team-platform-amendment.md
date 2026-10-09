@@ -20,7 +20,7 @@ Topology is fixed and not reopened by this amendment:
 The federated-rooms design lists "a person/account entity in Bedrock" and "new identity/profile machinery inside ocean-os or ocean-surface" as non-goals. This amendment relaxes them only as follows:
 
 1. **Daemon owner profile (ocean-os).** Each daemon holds one local owner profile: `{ display_name }`, operator-set. It is display data, not an authentication principal, and authorizes nothing.
-2. **Bedrock member display name.** `longhouse.room_members.display_name` (already present) is the authoritative cross-machine name. Joining registers it from the owner profile. No new Bedrock table, column, or account entity.
+2. **Bedrock member display name.** `longhouse.room_members.display_name` (already present) is the authoritative cross-machine name. It stays derived from the authenticated principal's token name, which the inviter sets through the invite's `recipient_name` (the owner's comes from their Bedrock admin token). Members cannot choose their own federated name: Bedrock's self-join deliberately accepts no caller identity fields, and letting a member pick a name would reopen impersonation. No new Bedrock table, column, API field, or account entity.
 3. **Avatars are derived, not stored.** Avatar = initials of the display name + a stable color index derived from the opaque member/participant id. No upload, no blob, no Bedrock schema migration.
 
 Everything else in those non-goal lists stands.
@@ -57,7 +57,8 @@ Gate P1: web (`run-surface.sh`) and Tauri (`run-tauri.sh`) screenshots at the sa
 
 Interfaces:
 
-- **ocean-os** `GET /v1/me` → `{ participant_id, display_name, avatar_seed }`. `participant_id` is a stable daemon-minted owner id persisted with the daemon state; `display_name` comes from the owner profile (`PUT /v1/me { display_name }`, loopback/proxy-authenticated surfaces only).
+- **ocean-os** `GET /v1/me` → `{ participant_id, display_name }` (ocean-store `daemon_owner`). `participant_id` is derived once from the first display name (`OCEAN_OWNER_NAME`, else `USER`) and never changes; `PUT /v1/me { display_name }` renames the owner and its Local roster rows. The avatar seed is the participant/member id itself.
+- **ocean-core** `RoomAccessProjection.local_member_id` (additive, optional): the credential's local human member id, so a surface knows "me" in a federated room without minting identity.
 - **ocean-os** room writes derive authorship server-side:
   - Local rooms: human posts are authored by the daemon owner participant. `RoomMessageRequest.author_id/author_kind` become ignored-for-humans (accepted for wire compatibility, never trusted). Agent and system authorship remain daemon-internal only.
   - Federated rooms: human posts are authored by the daemon's `local_human_member_id`; display name comes from the Bedrock member row registered from the owner profile.
