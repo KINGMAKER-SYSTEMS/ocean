@@ -84,6 +84,10 @@ struct AppState {
     /// Mode-0600 boot-bound credential minted and rotated by ocean-daemon.
     /// Read immediately before each Observatory request; never sent to the browser.
     observer_token_path: PathBuf,
+    /// Mode-0600 Room operator key minted by ocean-daemon (`operator.key`).
+    /// Read immediately before each owner mutation the authenticated session
+    /// makes; never sent to the browser.
+    operator_key_path: PathBuf,
 }
 
 impl AppState {
@@ -199,30 +203,88 @@ fn derive_session_token(
 /// Read the daemon-minted observer token without following symlinks. The
 /// complete credential stays on the proxy side of the browser boundary.
 fn read_observer_token(path: &FsPath) -> Result<String, String> {
-    let link = std::fs::symlink_metadata(path)
-        .map_err(|error| format!("observer credential unavailable: {error}"))?;
+    read_local_credential(path, "observer credential")
+}
+
+/// Read a daemon-minted local credential file without following symlinks,
+/// requiring a non-empty mode-0600 regular file.
+fn read_local_credential(path: &FsPath, what: &str) -> Result<String, String> {
+    let link =
+        std::fs::symlink_metadata(path).map_err(|error| format!("{what} unavailable: {error}"))?;
     if link.file_type().is_symlink() || !link.is_file() {
-        return Err("observer credential must be a regular file".to_owned());
+        return Err(format!("{what} must be a regular file"));
     }
     let mut file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW)
         .open(path)
-        .map_err(|error| format!("observer credential unavailable: {error}"))?;
+        .map_err(|error| format!("{what} unavailable: {error}"))?;
     let metadata = file
         .metadata()
-        .map_err(|error| format!("observer credential unavailable: {error}"))?;
+        .map_err(|error| format!("{what} unavailable: {error}"))?;
     if !metadata.is_file() || metadata.mode() & 0o777 != 0o600 {
-        return Err("observer credential must be a mode-0600 regular file".to_owned());
+        return Err(format!("{what} must be a mode-0600 regular file"));
     }
     let mut token = String::new();
     file.read_to_string(&mut token)
-        .map_err(|error| format!("observer credential unavailable: {error}"))?;
+        .map_err(|error| format!("{what} unavailable: {error}"))?;
     let token = token.trim();
     if token.is_empty() {
-        return Err("observer credential is empty".to_owned());
+        return Err(format!("{what} is empty"));
     }
     Ok(token.to_owned())
+}
+
+/// Header the daemon reads the Room operator credential from.
+const OPERATOR_HEADER: &str = "x-ocean-operator";
+
+/// The daemon owner mutations the logged-in operator may make through this
+/// origin: rename the owner (`PUT /v1/me`), decide a room run's pending
+/// permission, and save a room agent's settings. Exact shapes only.
+fn is_owner_mutation(method: &axum::http::Method, path: &str) -> bool {
+    use axum::http::Method;
+    let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+    match segments.as_slice() {
+        ["v1", "me"] => method == Method::PUT,
+        ["v1", "rooms", "persistent", key, "runs", run, "permission"] => {
+            method == Method::POST && !key.is_empty() && !run.is_empty()
+        }
+        ["v1", "rooms", "persistent", key, "agents", agent, "settings"] => {
+            method == Method::PUT && !key.is_empty() && !agent.is_empty()
+        }
+        _ => false,
+    }
+}
+
+/// The Room operator credential to attach to an owner mutation. The session
+/// gate has already authenticated this request as the operator's login, so
+/// the proxy vouches for the owner exactly as it does for the Observatory.
+/// With login disabled (`OCEAN_SURFACE_AUTH=off`) it cannot tell the owner
+/// from any other client and attaches nothing: the daemon keeps refusing.
+fn owner_operator_key(state: &AppState) -> Result<Option<String>, OperatorKeyUnavailable> {
+    if state.basic_auth.is_none() {
+        return Ok(None);
+    }
+    read_local_credential(&state.operator_key_path, "operator credential")
+        .map(Some)
+        .map_err(|error| {
+            tracing::warn!(%error, path = %state.operator_key_path.display(), "operator credential unavailable");
+            OperatorKeyUnavailable
+        })
+}
+
+/// The operator key file could not be read; the owner mutation fails closed.
+struct OperatorKeyUnavailable;
+
+impl IntoResponse for OperatorKeyUnavailable {
+    fn into_response(self) -> Response {
+        // The read error carries the credential path; it is logged, never shipped.
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "operator credential unavailable",
+        )
+            .into_response()
+    }
 }
 
 #[tokio::main]
@@ -327,6 +389,9 @@ async fn main() -> anyhow::Result<()> {
     let observer_token_path = std::env::var_os("OCEAN_OBSERVER_TOKEN_FILE")
         .map(PathBuf::from)
         .unwrap_or_else(|| ocean_config_dir().join("observatory-token"));
+    let operator_key_path = std::env::var_os("OCEAN_OPERATOR_KEY_FILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| ocean_config_dir().join("operator.key"));
 
     let state = Arc::new(AppState {
         // TASK-71: never follow upstream redirects. A redirect-following
@@ -352,6 +417,7 @@ async fn main() -> anyhow::Result<()> {
         maps_key,
         maps_map_id,
         observer_token_path,
+        operator_key_path,
     });
 
     let app = build_app(state, &dist);
@@ -1093,15 +1159,28 @@ async fn proxy_send_json(
     path: &str,
     body: Bytes,
 ) -> Response {
+    proxy_send_json_as(state, method, path, body, None).await
+}
+
+/// [`proxy_send_json`], attaching the Room operator credential when the
+/// caller resolved one for an owner mutation.
+async fn proxy_send_json_as(
+    state: &AppState,
+    method: reqwest::Method,
+    path: &str,
+    body: Bytes,
+    operator_key: Option<String>,
+) -> Response {
     let url = format!("{}{path}", state.daemon_url.trim_end_matches('/'));
-    match state
+    let mut request = state
         .http_json
         .request(method, &url)
         .header(header::CONTENT_TYPE, "application/json")
-        .body(body.to_vec())
-        .send()
-        .await
-    {
+        .body(body.to_vec());
+    if let Some(key) = operator_key {
+        request = request.header(OPERATOR_HEADER, key);
+    }
+    match request.send().await {
         Ok(resp) => {
             let status = resp.status();
             let bytes = resp.bytes().await.unwrap_or_default();
@@ -1128,7 +1207,11 @@ async fn proxy_me_get(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 
 /// Reverse-proxy PUT /v1/me (rename the daemon owner).
 async fn proxy_me_put(State(state): State<Arc<AppState>>, body: Bytes) -> impl IntoResponse {
-    proxy_send_json(&state, reqwest::Method::PUT, "/v1/me", body).await
+    let operator_key = match owner_operator_key(&state) {
+        Ok(key) => key,
+        Err(unavailable) => return unavailable.into_response(),
+    };
+    proxy_send_json_as(&state, reqwest::Method::PUT, "/v1/me", body, operator_key).await
 }
 
 /// Reverse-proxy GET /v1/agents (named agent identity picker, TASK-9/TASK-11).
@@ -1610,6 +1693,14 @@ async fn proxy_rooms_persistent(
             return (StatusCode::PAYLOAD_TOO_LARGE, "request body too large").into_response();
         }
     };
+    let operator_key = if is_owner_mutation(&method, &path) {
+        match owner_operator_key(&state) {
+            Ok(key) => key,
+            Err(unavailable) => return unavailable.into_response(),
+        }
+    } else {
+        None
+    };
     let builder = if method == axum::http::Method::GET {
         state.http_json.get(&url)
     } else {
@@ -1618,6 +1709,10 @@ async fn proxy_rooms_persistent(
             .request(method, &url)
             .header(header::CONTENT_TYPE, "application/json")
             .body(body.to_vec())
+    };
+    let builder = match operator_key {
+        Some(key) => builder.header(OPERATOR_HEADER, key),
+        None => builder,
     };
     match builder.send().await {
         Ok(resp) => {
@@ -2009,6 +2104,7 @@ mod tests {
             session_token: "test-session".to_string(),
             secure_cookie: true,
             observer_token_path: PathBuf::from("/not-used-in-auth-tests"),
+            operator_key_path: PathBuf::from("/not-used-operator-key"),
         })
     }
 
@@ -2021,6 +2117,7 @@ mod tests {
 
     struct RequestStatusFixture {
         app: Router,
+        address: std::net::SocketAddr,
         received: Arc<Mutex<Vec<ForwardedRequest>>>,
         upstream: tokio::task::JoinHandle<()>,
         _dist: tempfile::TempDir,
@@ -2075,10 +2172,123 @@ mod tests {
         fixture_state.observer_token_path = dist.path().join("absent-fixture-observer-token");
         RequestStatusFixture {
             app: build_app(state, dist.path()),
+            address,
             received,
             upstream,
             _dist: dist,
         }
+    }
+
+    /// Owner mutations through the authenticated proxy carry the daemon's Room
+    /// operator key from its mode-0600 file; nothing else does, a browser
+    /// cannot supply its own, and a proxy without login attaches nothing.
+    #[tokio::test]
+    async fn owner_mutations_carry_the_operator_key_only_for_the_logged_in_session() {
+        for login in [true, false] {
+            let fixture = request_status_fixture(StatusCode::OK, "{}").await;
+            let mut state = auth_test_state();
+            let fixture_state = Arc::get_mut(&mut state).unwrap();
+            let key_path = fixture._dist.path().join("operator.key");
+            std::fs::write(&key_path, "fixture-operator-key\n").unwrap();
+            std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            fixture_state.operator_key_path = key_path;
+            fixture_state.daemon_url = format!("http://{}/", fixture.address);
+            fixture_state.http_json = reqwest::Client::builder()
+                .no_proxy()
+                .timeout(std::time::Duration::from_secs(2))
+                .build()
+                .unwrap();
+            if !login {
+                fixture_state.basic_auth = None;
+            }
+            let app = build_app(state, fixture._dist.path());
+            let cases = [
+                (Method::PUT, "/v1/me", true),
+                (
+                    Method::POST,
+                    "/v1/rooms/persistent/r1/runs/run-1/permission",
+                    true,
+                ),
+                (
+                    Method::PUT,
+                    "/v1/rooms/persistent/r1/agents/helper/settings",
+                    true,
+                ),
+                (Method::POST, "/v1/rooms/persistent/r1/messages", false),
+                (
+                    Method::POST,
+                    "/v1/rooms/persistent/r1/runs/run-1/cancel",
+                    false,
+                ),
+                (
+                    Method::GET,
+                    "/v1/rooms/persistent/r1/agents/helper/settings",
+                    false,
+                ),
+            ];
+            for (method, uri, owner) in cases {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method(method.clone())
+                            .uri(uri)
+                            .header(header::COOKIE, "ocean_session=test-session")
+                            .header("x-ocean-operator", "browser-forged-key")
+                            .header(header::CONTENT_TYPE, "application/json")
+                            .body(Body::from("{}"))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK, "{method} {uri}");
+                let received = fixture.received.lock().unwrap().pop().expect("forwarded");
+                assert_eq!(received.uri.path(), uri);
+                let forwarded = received
+                    .headers
+                    .get("x-ocean-operator")
+                    .map(|v| v.to_str().unwrap().to_owned());
+                let expected = (owner && login).then(|| "fixture-operator-key".to_owned());
+                assert_eq!(forwarded, expected, "login={login} {method} {uri}");
+                assert!(!received.headers.contains_key("cookie"));
+            }
+        }
+
+        // Without a valid session nothing reaches the daemon.
+        let fixture = request_status_fixture(StatusCode::OK, "{}").await;
+        let response = fixture
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/v1/me")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(fixture.received.lock().unwrap().is_empty());
+
+        // An unreadable key fails closed before forwarding.
+        let response = fixture
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/v1/me")
+                    .header(header::COOKIE, "ocean_session=test-session")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(fixture.received.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -2555,6 +2765,7 @@ mod tests {
             session_token: "test-session".to_string(),
             secure_cookie: false,
             observer_token_path: PathBuf::from("/not-used-in-config-tests"),
+            operator_key_path: PathBuf::from("/not-used-operator-key"),
         };
 
         let payload = config_payload(&state);
@@ -2634,6 +2845,7 @@ mod tests {
             session_token: "test-session".to_string(),
             secure_cookie: false,
             observer_token_path: PathBuf::from("/not-used"),
+            operator_key_path: PathBuf::from("/not-used-operator-key"),
         });
         let app = build_app(state, dist.path());
 
@@ -2714,6 +2926,7 @@ mod tests {
             session_token: "test-session".to_string(),
             secure_cookie: false,
             observer_token_path: PathBuf::from("/not-used"),
+            operator_key_path: PathBuf::from("/not-used-operator-key"),
         });
         let app = build_app(state, dist.path());
 
@@ -2851,6 +3064,7 @@ mod tests {
             session_token: "test-session".to_string(),
             secure_cookie: false,
             observer_token_path: PathBuf::from("/not-used"),
+            operator_key_path: PathBuf::from("/not-used-operator-key"),
         });
         let app = build_app(state, dist.path());
 
@@ -2943,6 +3157,7 @@ mod tests {
             session_token: "test-session".to_string(),
             secure_cookie: false,
             observer_token_path: PathBuf::from("/not-used"),
+            operator_key_path: PathBuf::from("/not-used-operator-key"),
         });
         let app = build_app(state, dist.path());
 
@@ -3087,6 +3302,7 @@ mod tests {
             session_token: "test-session".to_string(),
             secure_cookie: false,
             observer_token_path: PathBuf::from("/not-used"),
+            operator_key_path: PathBuf::from("/not-used-operator-key"),
         });
         let app = build_app(state, dist.path());
 

@@ -566,8 +566,8 @@ GET    /v1/permissions                    list pending permission requests
 POST   /v1/permissions/{id}/decision      allow/deny a mutating-tool request
 
 # Rooms — persistent lifecycle (SQLite-backed; survives restarts)
-GET    /v1/me                             daemon owner identity { participant_id, display_name }; minted once from OCEAN_OWNER_NAME / USER
-PUT    /v1/me                             rename the owner { display_name } (1-64 chars); id is stable; renames the owner's Human roster rows
+GET    /v1/me                             daemon owner identity { participant_id, display_name }; id = member.toml / OCEAN_MEMBER_ID member id, else minted once from OCEAN_OWNER_NAME / USER
+PUT    /v1/me                             rename the owner { display_name } (1-64 chars); requires X-Ocean-Operator; id is stable; renames the owner's Human roster rows
 GET    /v1/rooms/persistent               list persistent rooms (each room carries additive owner-local "muted")
 POST   /v1/rooms/persistent               create a room { key, name, trigger_policy?, workspace_root? }
 GET    /v1/rooms/persistent/{key}         room + transcript
@@ -594,7 +594,7 @@ POST   /v1/rooms/persistent/{key}/artifacts/{artifact_id}/amend   rewrite in pla
 GET    /v1/rooms/persistent/{key}/snapshot                hydrate: room+participants+transcript+last_seq+next_seq+has_more (?after_seq=N&limit=M)
 GET    /v1/rooms/persistent/{key}/inspect                 bounded read-only room identity + local owner + aliases (no transcript/workspace data)
 GET    /v1/rooms/persistent/{key}/runs                    recent agent work cards (RoomAgentRun, oldest first, max 50); live updates arrive as room_agent_run SSE frames
-POST   /v1/rooms/persistent/{key}/runs/{run_id}/permission  owner approve/deny for a run's pending tool permission ({decision: allow|allow_session|deny}); 409 when nothing is pending
+POST   /v1/rooms/persistent/{key}/runs/{run_id}/permission  owner approve/deny for the run's pending tool permission ({permission_id, tool?, decision: allow|allow_session|deny}); requires X-Ocean-Operator; 409 unless permission_id is the one pending now
 GET    /v1/rooms/persistent/{key}/agents/{agent_id}/settings  per-room agent overrides (instructions overlay, model); local only, never federated
 PUT    /v1/rooms/persistent/{key}/agents/{agent_id}/settings  replace per-room agent overrides; empty body fields clear them
 GET    /v1/rooms/persistent/{key}/search                  ?q=&limit= case-insensitive chat-message body search, newest first (q 2..200 chars, else 400 query_too_short / query_too_long; limit 1..50, default 20)

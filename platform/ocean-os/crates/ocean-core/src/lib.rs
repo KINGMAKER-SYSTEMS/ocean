@@ -1136,12 +1136,23 @@ pub struct RoomAgentRun {
     /// Owner-local: a short tool label only, never raw tool arguments.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_permission: Option<RoomRunPermission>,
+    /// The thread answer that has claimed this parked (`AwaitingReply`) run
+    /// (team-platform P4). Set by an atomic claim before the successor turn
+    /// is admitted; the run closes `Done` only once that turn is admitted, and
+    /// the claim is released (run still parked) when admission fails.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer_seq: Option<u64>,
 }
 
 /// A pending tool approval projected onto a run card (team-platform P4).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoomRunPermission {
     pub permission_id: String,
+    /// Tool name of the pending call. A room decision names it back with the
+    /// `permission_id`, so a stale or retried decision cannot approve a later,
+    /// different request.
+    #[serde(default)]
+    pub tool: String,
     /// Short, path-relative description of the tool call awaiting approval.
     pub tool_label: String,
 }
@@ -2921,6 +2932,7 @@ mod tests {
             tool_count: 2,
             reply_seq: None,
             pending_permission: None,
+            answer_seq: None,
         };
         let wire = serde_json::to_value(&run).unwrap();
         assert_eq!(wire["state"], "running_tool");

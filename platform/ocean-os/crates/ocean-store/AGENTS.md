@@ -50,7 +50,7 @@ participant retirement. One database file (`rooms.db`), one owning crate.
   use `RoomReadCursorMirrorCas`: callers supply the previously observed mirror;
   mismatches return `Stale` without writing, including stale clears.
 - `room_agent_runs` — team-platform P3 mutable work-card projections
-- `room_agent_settings` (team-platform P4) keys per-room agent overrides by `(room_id, agent_id)` with a JSON `RoomAgentSettings` body that cascades with the room; writing empty settings deletes the row. `AwaitingReply` runs are parked, not open: `interrupt_open_room_agent_runs` leaves them, and `parked_room_agent_runs(key, thread_root_seq)` finds them for resume.
+- `room_agent_settings` (team-platform P4) keys per-room agent overrides by `(room_id, agent_id)` with a JSON `RoomAgentSettings` body that cascades with the room; writing empty settings deletes the row. `AwaitingReply` runs are parked, not open: `interrupt_open_room_agent_runs` leaves them parked, and `parked_room_agent_runs(key, thread_root_seq)` finds them for resume. Resumption is a two-step compare-and-swap under immediate transactions: `claim_parked_room_agent_run(run, answer_seq)` succeeds for exactly one answer while the run is parked and unclaimed; `settle_room_agent_run_answer(run, answer_seq, resumed)` then closes it `Done` (successor admitted) or releases the claim (still parked), and touches nothing claimed by another answer. At startup an outstanding claim settles `Done` only when a run triggered by that answer exists for the same room and agent; otherwise it is released.
   `{run_id, room_id, started_at, body JSON RoomAgentRun}` (cascade with the
   room). Not a transcript: `put_room_agent_run` upserts, `room_agent_runs`
   returns the newest N oldest-first, `interrupt_open_room_agent_runs` fails
@@ -62,9 +62,14 @@ participant retirement. One database file (`rooms.db`), one owning crate.
   `open_room_names`, and `recent_room_messages_with_parent_author` (newest N
   rows paired with the thread parent's author for inbox classification).
 - `daemon_owner` — singleton team-platform P2 owner identity
-  `{participant_id, display_name}`. `owner_identity(default)` mints it once;
-  the id is derived from the first display name (`owner_participant_id`,
-  canonical mention alphabet) and never changes. `set_owner_display_name`
+  `{participant_id, display_name}`. `owner_identity_as(member_id, default)`
+  mints it once. With a configured team member id the participant id IS that
+  id (`owner_participant_id_for_member`: verbatim when already in the canonical
+  alphabet, else normalized from the member id, never the login name), and an
+  owner minted earlier under another id is re-keyed to it once, taking the
+  member's default display name; old-id roster rows stay and the owner rejoins.
+  Without a member id the id is derived from the first display name
+  (`owner_participant_id`) and never changes. `set_owner_display_name_as`
   renames the owner row and the owner's Human roster rows in one transaction.
   Display data only — never an authentication principal.
 - P2-A federation tables: `federation_instance` (singleton instance id),

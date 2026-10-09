@@ -1097,6 +1097,16 @@ Ported Rooms P2 through P4 on top of the shell port. P2 gives each daemon one pe
 
 Validation: in platform/ocean-os, `cargo fmt --all -- --check`, `cargo test` for ocean-core (63), ocean-store (282), ocean-agent (269) and ocean-daemon (918 passed, 2 failed: the alias-envelope fixtures that already fail on main and are fixed by open #58), `cargo check --workspace --tests`, and docs-check pass. In apps/ocean-surface, all six Surface gates plus proxy tests pass (857 unit tests). No live daemon, browser or desktop run.
 _________________________________________________________________________________
+time: [23:24] [08-10-26]
+agent: [claude] [claude code]
+worktree: [port/rooms-identity-cards-agents] [/Users/risingtidesdev/dev/fix-pr68]
+type: [bug report]
+area: [backend] [frontend] [testing]
+
+Fixed the review defects in the Rooms P2-P4 port (#68), inherited from private issues #91 and #92. The in-room permission route now needs the pending permission_id (and the card's tool name when the client has it) and returns 409 for anything but the request pending now, so a retried Allow or AllowSession can never approve a later request; Surface sends both. A thread answer claims a parked room_ask run with a store compare-and-swap before admission, only an admitted successor closes it Done, a refused admission leaves it parked, a losing concurrent reply starts nothing, and startup settles an outstanding claim from durable evidence without replaying. An owner-cancelled room turn now ends Cancelled instead of Failed "turn_failed". The daemon owner id now comes from member.toml, then OCEAN_MEMBER_ID, with the same precedence and strict parsing as the #41 identity route, re-keying a login-derived owner once; USER is only the fallback. PUT /v1/me requires the room operator. The logged-in Surface web proxy now attaches the daemon's mode-0600 operator key to exactly PUT /v1/me, run permission and agent settings, so in-room approval works from the browser; with login off it attaches nothing, and the daemon gate is unchanged for every other caller.
+
+Validation: in platform/ocean-os, `cargo fmt --all -- --check`, `cargo test -p ocean-daemon --locked room` (269 passed, 2 failed: the alias-envelope fixtures that already fail on main, issue #42), `cargo test -p ocean-store --locked` (285), `cargo check --workspace --tests`, and docs-check pass. In apps/ocean-surface, `cargo test -p ocean-surface-ui` (858 unit), WASM clippy with warnings denied, and proxy tests (31) plus proxy clippy pass. New tests: bound permission decisions, single-claim and refused-admission resume, restart claim settlement, owner cancel ends Cancelled (fails without the fix), member-id owner, operator-gated rename, proxy operator key. No live daemon, browser or desktop run.
+_________________________________________________________________________________
 time: [22:50] [08-10-26]
 agent: [claude] [claude code]
 worktree: [port/rooms-visual-attention] [/Users/risingtidesdev/dev/port-rooms]

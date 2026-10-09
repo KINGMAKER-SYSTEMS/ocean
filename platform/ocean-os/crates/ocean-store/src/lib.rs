@@ -873,7 +873,8 @@ type Result<T> = std::result::Result<T, RoomStoreError>;
 /// an authentication principal: it names who local human rows are authored by.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnerIdentity {
-    /// Stable participant id in the canonical alphabet (`[a-z0-9._-]`).
+    /// Stable participant id in the canonical alphabet (alphanumeric, `.`,
+    /// `_`, `-`): the configured team member id, else derived from a name.
     pub participant_id: String,
     /// Operator-chosen display name.
     pub display_name: String,
@@ -887,6 +888,25 @@ fn decode_agent_run(body: &str) -> Result<RoomAgentRun> {
 fn normalize_owner_display_name(name: &str) -> Option<String> {
     let trimmed = name.trim();
     (!trimmed.is_empty() && trimmed.chars().count() <= 64).then(|| trimmed.to_string())
+}
+
+/// The owner participant id for a configured team member id: the member id
+/// itself when it is already in the canonical participant alphabet
+/// (alphanumeric, `-`, `_`, `.`), so every reader of `member.toml` agrees on
+/// the same string; otherwise (e.g. an `@` address) the same normalization as
+/// [`owner_participant_id`] applied to the member id, never the login name.
+pub fn owner_participant_id_for_member(member_id: &str) -> String {
+    let member_id = member_id.trim();
+    let canonical = !member_id.is_empty()
+        && member_id.chars().count() <= 64
+        && member_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    if canonical {
+        member_id.to_string()
+    } else {
+        owner_participant_id(member_id)
+    }
 }
 
 /// Derive the stable owner participant id from a display name: lowercase,
@@ -5902,8 +5922,28 @@ impl SqliteRoomStore {
     /// `default_display_name` is used only when no owner exists yet. The
     /// participant id is derived ONCE from that name ([`owner_participant_id`])
     /// and never changes afterwards, so mentions and roster rows stay valid
-    /// across renames.
+    /// across renames. Equivalent to [`Self::owner_identity_as`] with no
+    /// configured member id.
     pub fn owner_identity(&mut self, default_display_name: &str) -> Result<OwnerIdentity> {
+        self.owner_identity_as(None, default_display_name)
+    }
+
+    /// Read the daemon owner for the configured team member id, if any.
+    ///
+    /// With `member_id` (the daemon's `member.toml` / `OCEAN_MEMBER_ID`
+    /// identity), the owner's participant id IS that member id
+    /// ([`owner_participant_id_for_member`]): it is minted with it, and an
+    /// owner minted earlier under another id (e.g. from the login name) is
+    /// re-keyed to it once, taking `default_display_name` (the member's name)
+    /// so the login name leaves the wire. Rooms joined under the old id keep
+    /// that roster row; the owner rejoins as the member id. Without a member
+    /// id, the existing row stands, or one is minted from
+    /// `default_display_name`.
+    pub fn owner_identity_as(
+        &mut self,
+        member_id: Option<&str>,
+        default_display_name: &str,
+    ) -> Result<OwnerIdentity> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -5919,13 +5959,31 @@ impl SqliteRoomStore {
                 },
             )
             .optional()?;
-        let owner = match existing {
-            Some(owner) => owner,
-            None => {
+        let member_participant = member_id.map(owner_participant_id_for_member);
+        let owner = match (existing, member_participant) {
+            (Some(owner), None) => owner,
+            (Some(owner), Some(id)) if owner.participant_id == id => owner,
+            (Some(owner), Some(id)) => {
+                // One-time re-key: the old name may be the login name the old
+                // id came from, so it is replaced by the member's default too.
+                let display_name = normalize_owner_display_name(default_display_name)
+                    .unwrap_or(owner.display_name);
+                tx.execute(
+                    "UPDATE daemon_owner SET participant_id = ?1, display_name = ?2
+                     WHERE singleton = 1",
+                    params![id, display_name],
+                )?;
+                OwnerIdentity {
+                    participant_id: id,
+                    display_name,
+                }
+            }
+            (None, member_participant) => {
                 let display_name = normalize_owner_display_name(default_display_name)
                     .unwrap_or_else(|| "Operator".to_string());
                 let owner = OwnerIdentity {
-                    participant_id: owner_participant_id(&display_name),
+                    participant_id: member_participant
+                        .unwrap_or_else(|| owner_participant_id(&display_name)),
                     display_name,
                 };
                 tx.execute(
@@ -6006,6 +6064,89 @@ impl SqliteRoomStore {
             .into_iter()
             .filter(|run| run.state.is_parked() && run.thread_root_seq == thread_root_seq)
             .collect())
+    }
+
+    /// Rewrite one run inside an immediate transaction when `update` accepts
+    /// the current row (returns `true` after changing it). The row is read and
+    /// written under the same write lock, so concurrent callers compare and
+    /// swap rather than overwrite each other.
+    fn update_room_agent_run_if(
+        &mut self,
+        run_id: &str,
+        update: impl FnOnce(&mut RoomAgentRun) -> bool,
+    ) -> Result<Option<RoomAgentRun>> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let body: Option<String> = tx
+            .query_row(
+                "SELECT body FROM room_agent_runs WHERE run_id = ?1",
+                params![run_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(body) = body else {
+            return Ok(None);
+        };
+        let mut run = decode_agent_run(&body)?;
+        if !update(&mut run) {
+            return Ok(None);
+        }
+        let body = serde_json::to_string(&run)
+            .map_err(|e| RoomStoreError::Encode(format!("agent run: {e}")))?;
+        tx.execute(
+            "UPDATE room_agent_runs SET body = ?1 WHERE run_id = ?2",
+            params![body, run_id],
+        )?;
+        tx.commit()?;
+        Ok(Some(run))
+    }
+
+    /// Claim a parked `room_ask` run for the thread answer at `answer_seq`
+    /// (team-platform P4). Compare-and-swap: only a run that is still
+    /// `AwaitingReply` with no outstanding claim takes the answer, so of two
+    /// concurrent replies exactly one gets `Some`. The run stays parked, with
+    /// the answer recorded, until [`Self::settle_room_agent_run_answer`].
+    pub fn claim_parked_room_agent_run(
+        &mut self,
+        run_id: &str,
+        answer_seq: u64,
+        now: DateTime<Utc>,
+    ) -> Result<Option<RoomAgentRun>> {
+        self.update_room_agent_run_if(run_id, |run| {
+            if !run.state.is_parked() || run.answer_seq.is_some() {
+                return false;
+            }
+            run.answer_seq = Some(answer_seq);
+            run.updated_at = now;
+            true
+        })
+    }
+
+    /// Settle the claim `answer_seq` holds on a parked run. `resumed` (the
+    /// successor turn was admitted) closes the run `Done`; otherwise the claim
+    /// is released and the run stays parked, so the answer is still in the
+    /// thread and the next reply can resume it. Any other claim or state is
+    /// left untouched (`None`).
+    pub fn settle_room_agent_run_answer(
+        &mut self,
+        run_id: &str,
+        answer_seq: u64,
+        resumed: bool,
+        now: DateTime<Utc>,
+    ) -> Result<Option<RoomAgentRun>> {
+        self.update_room_agent_run_if(run_id, |run| {
+            if !run.state.is_parked() || run.answer_seq != Some(answer_seq) {
+                return false;
+            }
+            if resumed {
+                run.state = RoomAgentRunState::Done;
+            } else {
+                run.answer_seq = None;
+            }
+            run.updated_at = now;
+            true
+        })
     }
 
     /// One agent's per-room settings; default (empty) when never set.
@@ -6189,23 +6330,43 @@ impl SqliteRoomStore {
     }
 
     /// Restart recovery: every non-terminal run belonged to a turn that died
-    /// with the previous daemon. Mark each `Failed` so no card spins forever,
-    /// and return the rewritten runs.
+    /// with the previous daemon. Mark each `Failed` so no card spins forever.
+    /// A parked run whose answer claim was still outstanding settles from
+    /// durable evidence: a successor run convened by that answer closes it
+    /// `Done`; otherwise the claim is released and the run stays parked for
+    /// the next reply (the ambiguous dispatch is never replayed). Returns the
+    /// rewritten runs.
     pub fn interrupt_open_room_agent_runs(
         &mut self,
         now: DateTime<Utc>,
     ) -> Result<Vec<RoomAgentRun>> {
-        let open: Vec<RoomAgentRun> = {
+        let all: Vec<RoomAgentRun> = {
             let mut stmt = self.conn.prepare("SELECT body FROM room_agent_runs")?;
             let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
             rows.map(|row| decode_agent_run(&row?))
                 .collect::<Result<Vec<_>>>()?
-                .into_iter()
-                .filter(|run| !run.state.is_terminal() && !run.state.is_parked())
-                .collect()
         };
-        let mut out = Vec::with_capacity(open.len());
-        for mut run in open {
+        let mut out = Vec::new();
+        for run in &all {
+            let Some(answer_seq) = run.answer_seq.filter(|_| run.state.is_parked()) else {
+                continue;
+            };
+            let resumed = all.iter().any(|other| {
+                other.run_id != run.run_id
+                    && other.room_id == run.room_id
+                    && other.agent_id == run.agent_id
+                    && other.trigger_seq == answer_seq
+            });
+            if let Some(settled) =
+                self.settle_room_agent_run_answer(&run.run_id, answer_seq, resumed, now)?
+            {
+                out.push(settled);
+            }
+        }
+        for mut run in all
+            .into_iter()
+            .filter(|run| !run.state.is_terminal() && !run.state.is_parked())
+        {
             run.state = RoomAgentRunState::Failed {
                 reason: "interrupted by daemon restart".into(),
             };
@@ -6241,10 +6402,21 @@ impl SqliteRoomStore {
         default_display_name: &str,
         display_name: &str,
     ) -> Result<Option<OwnerIdentity>> {
+        self.set_owner_display_name_as(None, default_display_name, display_name)
+    }
+
+    /// [`Self::set_owner_display_name`] for the configured team member id
+    /// (see [`Self::owner_identity_as`]).
+    pub fn set_owner_display_name_as(
+        &mut self,
+        member_id: Option<&str>,
+        default_display_name: &str,
+        display_name: &str,
+    ) -> Result<Option<OwnerIdentity>> {
         let Some(display_name) = normalize_owner_display_name(display_name) else {
             return Ok(None);
         };
-        let owner = self.owner_identity(default_display_name)?;
+        let owner = self.owner_identity_as(member_id, default_display_name)?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -15195,7 +15367,99 @@ mod tests {
             tool_count: 0,
             reply_seq: None,
             pending_permission: None,
+            answer_seq: None,
         }
+    }
+
+    #[test]
+    fn parked_answer_claim_is_single_and_settles_only_its_own_claim() {
+        let mut s = store();
+        let key = RoomKey::new("claims");
+        s.create(key.clone(), "claims", None, now()).unwrap();
+        let mut asked = agent_run(&key, "ask", now());
+        asked.state = RoomAgentRunState::AwaitingReply;
+        s.put_room_agent_run(&asked).unwrap();
+
+        // Two replies race for one parked run: exactly one claim wins.
+        let won = s.claim_parked_room_agent_run("ask", 10, now()).unwrap();
+        assert_eq!(won.as_ref().and_then(|r| r.answer_seq), Some(10));
+        assert!(s
+            .claim_parked_room_agent_run("ask", 11, now())
+            .unwrap()
+            .is_none());
+        // The loser cannot settle the winner's claim.
+        assert!(s
+            .settle_room_agent_run_answer("ask", 11, true, now())
+            .unwrap()
+            .is_none());
+        let claimed = s.room_agent_run("ask").unwrap().unwrap();
+        assert!(claimed.state.is_parked(), "claimed, not yet closed");
+        assert_eq!(claimed.answer_seq, Some(10));
+
+        // A refused admission releases the claim: still parked, answerable.
+        let released = s
+            .settle_room_agent_run_answer("ask", 10, false, now())
+            .unwrap()
+            .unwrap();
+        assert!(released.state.is_parked());
+        assert_eq!(released.answer_seq, None);
+        assert_eq!(s.parked_room_agent_runs(&key, 1).unwrap().len(), 1);
+
+        // The next answer claims it and an admitted successor closes it.
+        assert!(s
+            .claim_parked_room_agent_run("ask", 12, now())
+            .unwrap()
+            .is_some());
+        let closed = s
+            .settle_room_agent_run_answer("ask", 12, true, now())
+            .unwrap()
+            .unwrap();
+        assert_eq!(closed.state, RoomAgentRunState::Done);
+        assert!(s
+            .claim_parked_room_agent_run("ask", 13, now())
+            .unwrap()
+            .is_none());
+        assert!(s.parked_room_agent_runs(&key, 1).unwrap().is_empty());
+        assert!(s
+            .claim_parked_room_agent_run("missing", 1, now())
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn restart_settles_outstanding_answer_claims_from_durable_successors() {
+        let mut s = store();
+        let key = RoomKey::new("claim-restart");
+        s.create(key.clone(), "claim-restart", None, now()).unwrap();
+        // Died after admission: the successor convened by answer 20 exists.
+        let mut resumed = agent_run(&key, "resumed", now());
+        resumed.state = RoomAgentRunState::AwaitingReply;
+        resumed.answer_seq = Some(20);
+        s.put_room_agent_run(&resumed).unwrap();
+        let mut successor = agent_run(&key, "successor", now());
+        successor.trigger_seq = 20;
+        successor.state = RoomAgentRunState::Thinking;
+        s.put_room_agent_run(&successor).unwrap();
+        // Died between the claim and admission: no successor for answer 30.
+        let mut orphaned = agent_run(&key, "orphaned", now());
+        orphaned.state = RoomAgentRunState::AwaitingReply;
+        orphaned.answer_seq = Some(30);
+        s.put_room_agent_run(&orphaned).unwrap();
+
+        let rewritten = s.interrupt_open_room_agent_runs(now()).unwrap();
+        assert_eq!(rewritten.len(), 3);
+        assert_eq!(
+            s.room_agent_run("resumed").unwrap().unwrap().state,
+            RoomAgentRunState::Done
+        );
+        assert!(matches!(
+            s.room_agent_run("successor").unwrap().unwrap().state,
+            RoomAgentRunState::Failed { .. }
+        ));
+        let orphaned = s.room_agent_run("orphaned").unwrap().unwrap();
+        assert!(orphaned.state.is_parked(), "the obligation is not lost");
+        assert_eq!(orphaned.answer_seq, None, "and the next reply can claim it");
+        assert!(s.interrupt_open_room_agent_runs(now()).unwrap().is_empty());
     }
 
     #[test]
@@ -15452,6 +15716,34 @@ mod tests {
         assert_eq!(first.display_name, "John Smathers");
         let mut s = SqliteRoomStore::open(&path).unwrap();
         assert_eq!(s.owner_identity("ignored").unwrap(), first);
+    }
+
+    #[test]
+    fn member_id_owner_mints_and_rekeys_a_login_derived_owner() {
+        let mut s = store();
+        // Minted earlier from the login name, before member.toml existed.
+        let login = s.owner_identity("jsmathers").unwrap();
+        assert_eq!(login.participant_id, "jsmathers");
+        let owner = s.owner_identity_as(Some("smaths"), "John").unwrap();
+        assert_eq!(owner.participant_id, "smaths", "the member id wins");
+        assert_eq!(owner.display_name, "John", "the login name leaves too");
+        assert_eq!(s.owner_identity_as(Some("smaths"), "x").unwrap(), owner);
+        // Absent member id later: the stored owner stands.
+        assert_eq!(s.owner_identity("ignored").unwrap(), owner);
+        let renamed = s
+            .set_owner_display_name_as(Some("smaths"), "x", "John")
+            .unwrap()
+            .unwrap();
+        assert_eq!(renamed.participant_id, "smaths");
+
+        let mut fresh = store();
+        let minted = fresh.owner_identity_as(Some("Jay.V"), "Jay").unwrap();
+        assert_eq!(minted.participant_id, "Jay.V");
+        assert_eq!(minted.display_name, "Jay");
+        assert_eq!(
+            owner_participant_id_for_member("ec@kingmaker"),
+            "ec-kingmaker"
+        );
     }
 
     #[test]

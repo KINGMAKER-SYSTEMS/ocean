@@ -146,7 +146,7 @@ pub fn RoomWorkCard(run_id: String, rooms: Rooms, daemon: StoredValue<Daemon>) -
     // Nothing is applied optimistically; the next run frame clears the row.
     let deciding = RwSignal::new(false);
     let decide_error = RwSignal::new(None::<String>);
-    let decide = move |allow: bool| {
+    let decide = move |permission: crate::rooms::RoomRunPermission, allow: bool| {
         if deciding.get_untracked() {
             return;
         }
@@ -158,7 +158,8 @@ pub fn RoomWorkCard(run_id: String, rooms: Rooms, daemon: StoredValue<Daemon>) -
         deciding.set(true);
         decide_error.set(None);
         spawn_local(async move {
-            let result = crate::rooms::decide_run_permission(&base, &key, &id, allow).await;
+            let result =
+                crate::rooms::decide_run_permission(&base, &key, &id, &permission, allow).await;
             deciding.set(false);
             if let Err(e) = result {
                 decide_error.set(Some(e));
@@ -217,7 +218,10 @@ pub fn RoomWorkCard(run_id: String, rooms: Rooms, daemon: StoredValue<Daemon>) -
                             <crate::icons::ChevronDown />
                         </span>
                     </button>
-                    {pending.map(|p| view! {
+                    {pending.map(|p| {
+                        let allow_p = p.clone();
+                        let deny_p = p.clone();
+                        view! {
                         <div class="room-card__approval" role="group" aria-label="Permission request">
                             <span class="room-card__approval-tool">{p.tool_label}</span>
                             <button
@@ -226,7 +230,7 @@ pub fn RoomWorkCard(run_id: String, rooms: Rooms, daemon: StoredValue<Daemon>) -
                                 aria-label="Approve"
                                 title="Approve"
                                 disabled=move || deciding.get()
-                                on:click=move |_| decide(true)
+                                on:click=move |_| decide(allow_p.clone(), true)
                             >
                                 <crate::icons::Check />
                             </button>
@@ -236,11 +240,12 @@ pub fn RoomWorkCard(run_id: String, rooms: Rooms, daemon: StoredValue<Daemon>) -
                                 aria-label="Deny"
                                 title="Deny"
                                 disabled=move || deciding.get()
-                                on:click=move |_| decide(false)
+                                on:click=move |_| decide(deny_p.clone(), false)
                             >
                                 <crate::icons::Close />
                             </button>
                         </div>
+                        }
                     })}
                     {move || decide_error.get().map(|e| view! {
                         <div class="room-card__error room-card__error--decide" role="alert">{e}</div>
