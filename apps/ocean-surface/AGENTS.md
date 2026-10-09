@@ -385,8 +385,16 @@ Web surface session UI:
   a stale click is a daemon 409 ("Already decided."), never a decision on a
   later request. Never apply a decision optimistically; the next
   `room_agent_run` frame clears it.
-  Permission/settings mutations retain daemon header-only Room operator authority;
-  the ordinary proxy supplies no operator key and returns an explicit authority error.
+  Permission/settings mutations and the owner rename keep daemon header-only
+  Room operator authority. The web proxy attaches the daemon's mode-0600
+  `operator.key` (`OCEAN_OPERATOR_KEY_FILE` overrides the path), read just
+  before forwarding, to exactly `PUT /v1/me`,
+  `POST .../runs/{run_id}/permission` and `PUT .../agents/{agent_id}/settings`,
+  and only when its operator login is on and the session gate has admitted the
+  request; browser-supplied operator headers are never forwarded, an
+  unreadable key is a 503 before forwarding, and with `OCEAN_SURFACE_AUTH=off`
+  it attaches nothing, so the daemon keeps refusing. Direct-daemon clients
+  (Tauri, extension) still need their own operator credential.
 - The room header has exactly one primary action (Join when not joined) and
   one overflow (`room_overflow.rs`): Share, Agents, Leave. Agents opens the
   per-room agent settings panel (instructions overlay + model) over
