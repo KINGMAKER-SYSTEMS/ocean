@@ -10,12 +10,11 @@
   margin-top: 2px;
 }
 
+/* Grouped rows keep the avatar gutter so text stays on one column. */
 .rooms-workspace__msg--grouped .rooms-workspace__msg-avatar {
-  opacity: 0;
-  width: 0;
-  min-width: 0;
-  margin-right: 0;
-  overflow: hidden;
+  visibility: hidden;
+  height: 0;
+  margin-top: 0;
   pointer-events: none;
 }
 
@@ -29,10 +28,25 @@
   white-space: nowrap;
 }
 
+/* Grouped rows put their timestamp in the avatar gutter (revealed on
+   intent) so it never takes a line of its own. */
+.rooms-workspace__msg--grouped {
+  position: relative;
+}
+
+.rooms-workspace__msg--grouped .rooms-workspace__msg-author {
+  position: absolute;
+  top: 8px;
+  left: 6px;
+  width: 42px;
+  margin: 0;
+  justify-content: center;
+}
+
 .rooms-workspace__msg--grouped .rooms-workspace__msg-time {
-  margin-left: auto;
   color: var(--fg-4);
-  opacity: 0.68;
+  font-size: 9px;
+  opacity: 0;
   transition: opacity var(--dur-fast) var(--ease);
 }
 
@@ -265,15 +279,6 @@
   white-space: nowrap;
 }
 
-.rooms-workspace__room-unread {
-  flex: 0 0 auto;
-  height: 6px;
-  width: 6px;
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 6px var(--accent-soft);
-}
-
 .rooms-workspace__left-empty {
   padding: 32px 16px;
   color: var(--fg-3);
@@ -345,7 +350,6 @@
   gap: 6px;
 }
 
-.rooms-workspace__share-btn,
 .rooms-workspace__invite-button {
   appearance: none;
   min-height: var(--ctl-h-sm);
@@ -359,15 +363,9 @@
   cursor: pointer;
 }
 
-.rooms-workspace__share-btn:hover:not(:disabled),
 .rooms-workspace__invite-button:hover:not(:disabled) {
   border-color: var(--border-strong);
   color: var(--fg);
-}
-
-.rooms-workspace__share-btn:disabled {
-  cursor: wait;
-  opacity: 0.65;
 }
 
 .rooms-workspace__invite,
@@ -413,7 +411,7 @@
 }
 
 .rooms-workspace__invite--error {
-  color: var(--danger);
+  color: var(--err);
 }
 
 .rooms-workspace__invite-copy {
@@ -954,22 +952,6 @@
 
 /* ── Room policy summary (access info, below roster) ──────────────── */
 
-.rooms-workspace__policy {
-  flex: 0 0 auto;
-  padding: 10px 12px;
-  border-top: 1px solid var(--border-subtle);
-  font-size: 11px;
-  color: var(--fg-3);
-  line-height: 1.45;
-}
-
-.rooms-workspace__policy-label {
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  margin-bottom: 2px;
-}
-
 /* ── Responsive collapse ──────────────────────────────────────────── */
 
 @media (max-width: 900px) {
@@ -1231,9 +1213,11 @@
   box-shadow: var(--focus-ring);
 }
 
-/* ── Product polish pass ─────────────────────────────────────────────
-   Keep the workspace quiet and spatially clear: aligned rail headers,
-   bounded reading width, stronger active context, and an inset composer. */
+/* ── Layout & depth (canonical) ──────────────────────────────────────
+   The final say on rail geometry, density, and depth (team-platform P5).
+   Dark-first on the OCEAN depth ramp: a faint ocean glow at the top of the
+   timeline, raised active context, squircle avatars, quiet one-line system
+   rows, and a single elevated composer card. Tokens only. */
 
 .rooms-workspace__left {
   flex-basis: 252px;
@@ -1272,7 +1256,12 @@
 }
 
 .rooms-workspace__room.is-active {
-  box-shadow: inset 2px 0 0 var(--accent);
+  background: var(--bg-elevated);
+  box-shadow: inset 2px 0 0 var(--accent), var(--elev-1);
+}
+
+.rooms-workspace__room.is-active .rooms-workspace__room-name {
+  font-weight: 600;
 }
 
 .rooms-workspace__left-create {
@@ -1290,6 +1279,15 @@
 
 .rooms-workspace__center {
   isolation: isolate;
+  background:
+    radial-gradient(120% 70% at 50% -20%,
+      color-mix(in srgb, var(--water-lo) 30%, transparent), transparent 62%),
+    var(--bg);
+}
+
+.rooms-workspace__center-head {
+  background: color-mix(in srgb, var(--bg-raised) 88%, transparent);
+  backdrop-filter: blur(8px);
 }
 
 .rooms-workspace__center-head {
@@ -1306,52 +1304,131 @@
   /* Full-bleed left-aligned rows (Slack/Discord). A centered max-width
      column reads as a floating chat box — banned by the layout ruling;
      readable measure comes from the timeline's padding, not centering. */
-  padding: 6px 10px;
+  padding: 5px 10px;
   border-radius: var(--radius);
   transition: background var(--dur-fast) var(--ease);
 }
 
 .rooms-workspace__msg:hover {
-  background: var(--bg-hover);
+  background: color-mix(in srgb, var(--bg-hover) 65%, transparent);
 }
 
 .rooms-workspace__msg-avatar,
 .rooms-workspace__member-avatar {
-  border: 1px solid var(--border-subtle);
-  border-radius: 50%;
+  border: none;
+  box-shadow: inset 0 1px 0 var(--specular-soft);
 }
 
 .rooms-workspace__msg-avatar {
   width: 34px;
   height: 34px;
   margin-top: 1px;
+  border-radius: 10px;
   font-size: 11px;
+  letter-spacing: 0.02em;
+}
+
+.rooms-workspace__member-avatar {
+  border-radius: var(--radius-sm);
+}
+
+.rooms-workspace__msg-name {
+  font-size: 14px;
 }
 
 .rooms-workspace__msg-text {
-  line-height: 1.62;
+  color: var(--fg-2);
+  font-size: 14px;
+  line-height: 1.55;
   white-space: pre-wrap;
 }
 
-.rooms-workspace__composer {
-  padding: 12px clamp(18px, 3vw, 42px) 14px;
-  box-shadow: 0 -8px 24px var(--bg);
+/* System rows: one quiet line aligned to the text column — joins, leaves,
+   and audit notes must not compete with conversation. */
+.rooms-workspace__msg--system {
+  align-items: center;
+  padding-top: 1px;
+  padding-bottom: 1px;
 }
 
-/* Composer + status follow the timeline: full-width, no centered column. */
+.rooms-workspace__msg--system .rooms-workspace__msg-avatar {
+  width: 34px;
+  height: 18px;
+  margin-top: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--fg-4);
+  font-size: 12px;
+}
 
-.rooms-workspace__composer-input {
-  height: 40px;
-  padding: 0 14px;
-  background: var(--bg);
-  border-radius: var(--radius);
-  box-shadow: var(--well);
-  line-height: 40px;
+.rooms-workspace__msg--system .rooms-workspace__msg-body {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.rooms-workspace__msg--system .rooms-workspace__msg-author {
+  margin: 0;
+}
+
+.rooms-workspace__msg--system .rooms-workspace__msg-name,
+.rooms-workspace__msg--system .rooms-workspace__msg-text {
+  font-size: 12px;
+  font-style: normal;
+  color: var(--fg-4);
+}
+
+.rooms-workspace__msg--system .rooms-workspace__msg-name {
+  display: none;
+}
+
+.rooms-workspace__msg--system .rooms-workspace__msg-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Composer: one elevated card; the input is borderless inside it. */
+.rooms-workspace__composer {
+  padding: 10px clamp(18px, 3vw, 42px) 14px;
+  background: transparent;
+  border-top: none;
+}
+
+.rooms-workspace__composer-row {
+  gap: 6px;
+  padding: 4px 4px 4px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--bg-elevated);
+  box-shadow: var(--elev-1);
+  transition: border-color var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__composer-row:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border-subtle));
+  box-shadow: var(--elev-1), var(--focus-ring);
+}
+
+.rooms-workspace__composer-input,
+.rooms-workspace__composer-input:hover:not(:disabled),
+.rooms-workspace__composer-input:focus:not(:disabled),
+.rooms-workspace__composer-input:focus-visible {
+  height: 36px;
+  padding: 0 4px;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  font-size: 14px;
+  line-height: 36px;
 }
 
 .rooms-workspace__composer-send {
-  height: 40px;
-  padding: 0 18px;
+  height: 34px;
+  padding: 0 14px;
+  border-radius: var(--radius);
 }
 
 .rooms-workspace__status {
@@ -1425,7 +1502,11 @@
   }
 
   .rooms-workspace__composer {
-    padding: 10px 12px max(10px, env(safe-area-inset-bottom));
+    padding: 8px 10px max(10px, env(safe-area-inset-bottom));
+  }
+
+  .rooms-workspace__msg--system .rooms-workspace__msg-avatar {
+    width: 28px;
   }
 }
 

@@ -685,7 +685,7 @@ impl Rooms {
     /// signals. Async tail work checks it before any non-frame state write;
     /// decoded frames pass through `accept_room_tail_frame` below.
     ///
-    /// `pub(crate)` so sibling modules (`rooms_workspace.rs`) holding a
+    /// `pub(crate)` so sibling modules (`rooms_workspace/`) holding a
     /// previously-captured `(generation, key)` pair — e.g. a pending
     /// read-advance request built while a room was open — can re-validate it
     /// before dispatching a mutating request. A same-key close/reopen bumps
@@ -901,7 +901,7 @@ impl Rooms {
     /// the room list so a server-created room is discoverable.
     ///
     /// Callers should gate dispatch on `pending_create` to prevent concurrent
-    /// attempts — the closure in `rooms_workspace.rs` does this.
+    /// attempts — the closure in `rooms_workspace/` does this.
     pub fn create_room(&self, name: String, policy: Option<RoomTriggerPolicy>) -> u64 {
         let name = name.trim().to_string();
         if name.is_empty() {
@@ -2721,7 +2721,7 @@ fn show_no_agents(agents_loaded: bool, agent_count: usize) -> bool {
 }
 
 /// Pure predicate: is `expected_generation`/`expected_key` still the current
-/// room admission? `pub(crate)` so sibling modules (`rooms_workspace.rs`) can
+/// room admission? `pub(crate)` so sibling modules (`rooms_workspace/`) can
 /// unit-test the exact rejection logic behind [`Rooms::room_is_current`]
 /// without needing a live `Rooms` handle (which requires a browser runtime).
 pub(crate) fn room_request_is_current(
@@ -3329,7 +3329,7 @@ mod tests {
     /// which bumps the generation to N+1 without changing `open_key`. Key
     /// equality alone (the pre-fix guard) would wrongly admit this stale
     /// request; `room_request_is_current` — the exact predicate backing the
-    /// pub(crate) `Rooms::room_is_current` exposed for `rooms_workspace.rs` —
+    /// pub(crate) `Rooms::room_is_current` exposed for `rooms_workspace/` —
     /// must reject it.
     #[test]
     fn room_request_is_current_rejects_stale_generation_across_same_key_close_reopen() {

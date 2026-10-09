@@ -389,6 +389,22 @@ Web surface session UI:
   per-room agent settings panel (instructions overlay + model) over
   `GET/PUT .../agents/{agent_id}/settings`; these settings are local to this
   Ocean. New secondary room actions go into this overflow, not the header.
+- Rooms UI lives in `src/rooms_workspace/` (team-platform P5): `mod.rs`
+  owns `RoomsWorkspace`, its shared signals, and the transcript; child
+  components are `RoomListRail` (`room_list.rs`), `ChannelComposer`
+  (`composer.rs`), `ThreadPanel` (`threads.rs`), `MembersPanel`
+  (`members.rs`), and the notice banners (`banners.rs`); pure helpers live
+  in `read_cursor.rs`, `mentions.rs` (one `MentionState` drives both
+  composers), `format.rs`, and `access.rs`, each with its own tests. Drafts,
+  send latches, and mention state stay owned by `RoomsWorkspace` because the
+  center and right rails re-render on room state.
+- The timeline hides the daemon's `auto-convene: …` audit rows
+  (`room_messages::is_convene_audit`) because the work card shows the
+  convene; `auto-convene failed …` rows stay. System rows render as one quiet
+  line; grouped rows keep the avatar gutter with the time revealed on intent.
+- In `styles/rooms-workspace.css` the "Layout & depth (canonical)" section is
+  the final say on geometry, density, and depth; change values there rather
+  than adding another override layer. Colors only from `tokens.css`.
 - Owner responses publish only for the latest owner request at the current
   daemon origin. Origin changes clear the old owner and refresh `/v1/me`;
   an older response cannot overwrite a later owner read.
