@@ -386,15 +386,31 @@ Web surface session UI:
   later request. Never apply a decision optimistically; the next
   `room_agent_run` frame clears it.
   Permission/settings mutations and the owner rename keep daemon header-only
-  Room operator authority. The web proxy attaches the daemon's mode-0600
-  `operator.key` (`OCEAN_OPERATOR_KEY_FILE` overrides the path), read just
-  before forwarding, to exactly `PUT /v1/me`,
-  `POST .../runs/{run_id}/permission` and `PUT .../agents/{agent_id}/settings`,
-  and only when its operator login is on and the session gate has admitted the
-  request; browser-supplied operator headers are never forwarded, an
-  unreadable key is a 503 before forwarding, and with `OCEAN_SURFACE_AUTH=off`
-  it attaches nothing, so the daemon keeps refusing. Direct-daemon clients
-  (Tauri, extension) still need their own operator credential.
+  Room operator authority. Operator decision (2026-10-08): any first-party
+  Ocean surface the operator is signed into may act as the Room operator for
+  exactly `PUT /v1/me`, `POST .../runs/{run_id}/permission` and
+  `PUT .../agents/{agent_id}/settings`; every other operator-gated route is
+  unchanged, and a client-supplied operator header is never forwarded.
+  - Web: the proxy attaches the daemon's mode-0600 `operator.key`
+    (`OCEAN_OPERATOR_KEY_FILE` overrides the path), read just before
+    forwarding, to exactly those routes, and only when its operator login is
+    on and the session gate has admitted the request; an unreadable key is a
+    503 before forwarding, and with `OCEAN_SURFACE_AUTH=off` it attaches
+    nothing, so the daemon keeps refusing.
+  - Tauri desktop: the page calls the `room_owner_mutation` command with a
+    fixed `kind` (`rename_owner`, `run_permission`, `agent_settings`) and the
+    ids (`rooms.rs` `OwnerRoute` → `host::room_owner_mutation`). The shell
+    (`crates/ocean-tauri/src/owner_mutation.rs`) builds the fixed method and
+    path itself, reads the same key file just before each request (regular,
+    non-symlink, mode 0600), sends it only to a loopback daemon with no
+    `Origin`/`Cookie`, never caches, logs or returns it, and relays only the
+    daemon's status and body.
+  - Chrome extension: not covered. The side panel talks to the daemon
+    directly from `chrome-extension://`, cannot read the key file, has no
+    proxy session, and its origin is refused by the daemon's operator origin
+    check by design; doing this safely needs a native-messaging host or an
+    extension proxy login, so these actions keep the daemon's authority error
+    there.
 - The room header has exactly one primary action (Join when not joined) and
   one overflow (`room_overflow.rs`): Share, Agents, Leave. Agents opens the
   per-room agent settings panel (instructions overlay + model) over
