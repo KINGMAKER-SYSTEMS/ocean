@@ -15244,7 +15244,10 @@ mod tests {
         // Two replies race for one parked run: exactly one claim wins.
         let won = s.claim_parked_room_agent_run("ask", 10, now()).unwrap();
         assert_eq!(won.as_ref().and_then(|r| r.answer_seq), Some(10));
-        assert!(s.claim_parked_room_agent_run("ask", 11, now()).unwrap().is_none());
+        assert!(s
+            .claim_parked_room_agent_run("ask", 11, now())
+            .unwrap()
+            .is_none());
         // The loser cannot settle the winner's claim.
         assert!(s
             .settle_room_agent_run_answer("ask", 11, true, now())
@@ -15264,15 +15267,24 @@ mod tests {
         assert_eq!(s.parked_room_agent_runs(&key, 1).unwrap().len(), 1);
 
         // The next answer claims it and an admitted successor closes it.
-        assert!(s.claim_parked_room_agent_run("ask", 12, now()).unwrap().is_some());
+        assert!(s
+            .claim_parked_room_agent_run("ask", 12, now())
+            .unwrap()
+            .is_some());
         let closed = s
             .settle_room_agent_run_answer("ask", 12, true, now())
             .unwrap()
             .unwrap();
         assert_eq!(closed.state, RoomAgentRunState::Done);
-        assert!(s.claim_parked_room_agent_run("ask", 13, now()).unwrap().is_none());
+        assert!(s
+            .claim_parked_room_agent_run("ask", 13, now())
+            .unwrap()
+            .is_none());
         assert!(s.parked_room_agent_runs(&key, 1).unwrap().is_empty());
-        assert!(s.claim_parked_room_agent_run("missing", 1, now()).unwrap().is_none());
+        assert!(s
+            .claim_parked_room_agent_run("missing", 1, now())
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -15473,7 +15485,10 @@ mod tests {
         let minted = fresh.owner_identity_as(Some("Jay.V"), "Jay").unwrap();
         assert_eq!(minted.participant_id, "Jay.V");
         assert_eq!(minted.display_name, "Jay");
-        assert_eq!(owner_participant_id_for_member("ec@kingmaker"), "ec-kingmaker");
+        assert_eq!(
+            owner_participant_id_for_member("ec@kingmaker"),
+            "ec-kingmaker"
+        );
     }
 
     #[test]

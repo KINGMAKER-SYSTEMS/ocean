@@ -209,8 +209,8 @@ fn read_observer_token(path: &FsPath) -> Result<String, String> {
 /// Read a daemon-minted local credential file without following symlinks,
 /// requiring a non-empty mode-0600 regular file.
 fn read_local_credential(path: &FsPath, what: &str) -> Result<String, String> {
-    let link = std::fs::symlink_metadata(path)
-        .map_err(|error| format!("{what} unavailable: {error}"))?;
+    let link =
+        std::fs::symlink_metadata(path).map_err(|error| format!("{what} unavailable: {error}"))?;
     if link.file_type().is_symlink() || !link.is_file() {
         return Err(format!("{what} must be a regular file"));
     }
@@ -261,21 +261,29 @@ fn is_owner_mutation(method: &axum::http::Method, path: &str) -> bool {
 /// the proxy vouches for the owner exactly as it does for the Observatory.
 /// With login disabled (`OCEAN_SURFACE_AUTH=off`) it cannot tell the owner
 /// from any other client and attaches nothing: the daemon keeps refusing.
-fn owner_operator_key(state: &AppState) -> Result<Option<String>, Response> {
+fn owner_operator_key(state: &AppState) -> Result<Option<String>, OperatorKeyUnavailable> {
     if state.basic_auth.is_none() {
         return Ok(None);
     }
-    match read_local_credential(&state.operator_key_path, "operator credential") {
-        Ok(key) => Ok(Some(key)),
-        Err(error) => {
+    read_local_credential(&state.operator_key_path, "operator credential")
+        .map(Some)
+        .map_err(|error| {
             tracing::warn!(%error, path = %state.operator_key_path.display(), "operator credential unavailable");
-            // The error carries the credential path; log it, never ship it.
-            Err((
-                StatusCode::SERVICE_UNAVAILABLE,
-                "operator credential unavailable",
-            )
-                .into_response())
-        }
+            OperatorKeyUnavailable
+        })
+}
+
+/// The operator key file could not be read; the owner mutation fails closed.
+struct OperatorKeyUnavailable;
+
+impl IntoResponse for OperatorKeyUnavailable {
+    fn into_response(self) -> Response {
+        // The read error carries the credential path; it is logged, never shipped.
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "operator credential unavailable",
+        )
+            .into_response()
     }
 }
 
@@ -1168,8 +1176,7 @@ async fn proxy_send_json_as(
     if let Some(key) = operator_key {
         request = request.header(OPERATOR_HEADER, key);
     }
-    match request.send().await
-    {
+    match request.send().await {
         Ok(resp) => {
             let status = resp.status();
             let bytes = resp.bytes().await.unwrap_or_default();
@@ -1198,7 +1205,7 @@ async fn proxy_me_get(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 async fn proxy_me_put(State(state): State<Arc<AppState>>, body: Bytes) -> impl IntoResponse {
     let operator_key = match owner_operator_key(&state) {
         Ok(key) => key,
-        Err(response) => return response,
+        Err(unavailable) => return unavailable.into_response(),
     };
     proxy_send_json_as(&state, reqwest::Method::PUT, "/v1/me", body, operator_key).await
 }
@@ -1685,7 +1692,7 @@ async fn proxy_rooms_persistent(
     let operator_key = if is_owner_mutation(&method, &path) {
         match owner_operator_key(&state) {
             Ok(key) => key,
-            Err(response) => return response,
+            Err(unavailable) => return unavailable.into_response(),
         }
     } else {
         None
@@ -2193,11 +2200,27 @@ mod tests {
             let app = build_app(state, fixture._dist.path());
             let cases = [
                 (Method::PUT, "/v1/me", true),
-                (Method::POST, "/v1/rooms/persistent/r1/runs/run-1/permission", true),
-                (Method::PUT, "/v1/rooms/persistent/r1/agents/helper/settings", true),
+                (
+                    Method::POST,
+                    "/v1/rooms/persistent/r1/runs/run-1/permission",
+                    true,
+                ),
+                (
+                    Method::PUT,
+                    "/v1/rooms/persistent/r1/agents/helper/settings",
+                    true,
+                ),
                 (Method::POST, "/v1/rooms/persistent/r1/messages", false),
-                (Method::POST, "/v1/rooms/persistent/r1/runs/run-1/cancel", false),
-                (Method::GET, "/v1/rooms/persistent/r1/agents/helper/settings", false),
+                (
+                    Method::POST,
+                    "/v1/rooms/persistent/r1/runs/run-1/cancel",
+                    false,
+                ),
+                (
+                    Method::GET,
+                    "/v1/rooms/persistent/r1/agents/helper/settings",
+                    false,
+                ),
             ];
             for (method, uri, owner) in cases {
                 let response = app

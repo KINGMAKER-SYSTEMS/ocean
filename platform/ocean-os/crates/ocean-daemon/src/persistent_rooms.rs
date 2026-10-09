@@ -6158,7 +6158,10 @@ mod tests {
         let state = fake_convene_state(&tmp);
         seed_owner(&state, "ada", "Ada");
         let mut wrong = HeaderMap::new();
-        wrong.insert(crate::room_operator::OPERATOR_HEADER, "wrong".parse().unwrap());
+        wrong.insert(
+            crate::room_operator::OPERATOR_HEADER,
+            "wrong".parse().unwrap(),
+        );
         let mut cookie = operator_headers();
         cookie.insert("cookie", "ambient=1".parse().unwrap());
         for (headers, expected) in [
@@ -6268,7 +6271,10 @@ mod tests {
         assert_eq!(body.0["display_name"], "John");
         // Human posts are authored as that member id.
         let key = RoomKey::new("p2-member");
-        with_rooms(&state, |store| store.create(key.clone(), "P2", None, Utc::now())).unwrap();
+        with_rooms(&state, |store| {
+            store.create(key.clone(), "P2", None, Utc::now())
+        })
+        .unwrap();
         let (status, body) = room_join(
             State(state.clone()),
             Path(key.as_str().to_string()),
@@ -8873,10 +8879,10 @@ env = { FIXTURE = "1" }
                 path(),
                 headers.clone(),
                 Ok(Json(run_decision(
-                PermissionId::new_v4(),
-                None,
-                PermissionDecisionBody::Allow,
-            ))),
+                    PermissionId::new_v4(),
+                    None,
+                    PermissionDecisionBody::Allow,
+                ))),
             )
             .await;
             assert_eq!(status, expected);
@@ -9052,7 +9058,11 @@ env = { FIXTURE = "1" }
             State(state.clone()),
             Path((key.as_str().to_string(), run.run_id.clone())),
             HeaderMap::new(),
-            Ok(Json(run_decision(third, Some("bash"), PermissionDecisionBody::Allow))),
+            Ok(Json(run_decision(
+                third,
+                Some("bash"),
+                PermissionDecisionBody::Allow,
+            ))),
         )
         .await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
@@ -9458,10 +9468,15 @@ env = { FIXTURE = "1" }
         // Another answer holds the claim (a concurrent reply in flight): this
         // reply is refused and starts nothing.
         write_agent_fixture(&agents_root, "asker", "model = \"fake-ok\"\n", None);
-        assert!(with_rooms(&state, |store| store
-            .claim_parked_room_agent_run(&parked_id, 9_999, Utc::now()))
-        .unwrap()
-        .is_some());
+        assert!(
+            with_rooms(&state, |store| store.claim_parked_room_agent_run(
+                &parked_id,
+                9_999,
+                Utc::now()
+            ))
+            .unwrap()
+            .is_some()
+        );
         let (status, _) = reply("green").await;
         assert_eq!(status, StatusCode::CREATED);
         assert_eq!(run(&parked_id).answer_seq, Some(9_999));
@@ -9583,7 +9598,11 @@ env = { FIXTURE = "1" }
             Some(RequestState::Cancelled),
             "the request itself settled cancelled"
         );
-        assert_eq!(run.state, ocean_core::RoomAgentRunState::Cancelled, "{run:?}");
+        assert_eq!(
+            run.state,
+            ocean_core::RoomAgentRunState::Cancelled,
+            "{run:?}"
+        );
         assert_eq!(run.reply_seq, None, "a cancelled turn posts no reply");
     }
 
