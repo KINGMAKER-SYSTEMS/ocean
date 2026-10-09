@@ -49,6 +49,11 @@ participant retirement. One database file (`rooms.db`), one owning crate.
   upstream-mirrored read positions as canonical decimal u64 TEXT. Mirror writes
   use `RoomReadCursorMirrorCas`: callers supply the previously observed mirror;
   mismatches return `Stale` without writing, including stale clears.
+- `room_agent_runs` — team-platform P3 mutable work-card projections
+  `{run_id, room_id, started_at, body JSON RoomAgentRun}` (cascade with the
+  room). Not a transcript: `put_room_agent_run` upserts, `room_agent_runs`
+  returns the newest N oldest-first, `interrupt_open_room_agent_runs` fails
+  every non-terminal run at startup.
 - `daemon_owner` — singleton team-platform P2 owner identity
   `{participant_id, display_name}`. `owner_identity(default)` mints it once;
   the id is derived from the first display name (`owner_participant_id`,

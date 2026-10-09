@@ -8017,6 +8017,29 @@ fn should_restore_session<'a>(persisted: Option<&'a str>, active: Option<&str>) 
     }
 }
 
+/// Load a session's turns for read-only display (room work cards). The
+/// session belongs to this daemon's owner; nothing here crosses federation.
+pub async fn fetch_session_turns(base: &str, session_id: &str) -> Result<Vec<Turn>, String> {
+    let url = format!(
+        "{}/v1/sessions/{}",
+        base.trim_end_matches('/'),
+        encode_path_segment(session_id)
+    );
+    let resp = Request::get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("session fetch error: {e}"))?;
+    let body = resp
+        .json::<SessionDetailResponse>()
+        .await
+        .map_err(|e| format!("session decode error: {e}"))?;
+    let detail = body
+        .session
+        .filter(|_| body.ok)
+        .ok_or_else(|| body.error.unwrap_or_else(|| "session unavailable".into()))?;
+    Ok(turns_from_session_transcript(detail.transcript, &detail.tool_context).0)
+}
+
 /// Pre-flight fetch to verify a persisted session exists on the daemon, then
 /// restore via [`Daemon::switch_session`]. On failure (non-200, decode error,
 /// missing session) the persisted key is cleared and `Missing` is returned so

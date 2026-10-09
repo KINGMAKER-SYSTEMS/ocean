@@ -556,6 +556,8 @@ pub struct Rooms {
     pub open_room: RwSignal<Option<Room>>,
     /// The open room's transcript, ascending by `seq`.
     pub transcript: RwSignal<Vec<RoomMessage>>,
+    /// The open room's agent work cards (team-platform P3), start-ordered.
+    pub runs: RwSignal<Vec<RoomAgentRun>>,
     /// Free-form status line (errors, in-flight notices).
     pub status: RwSignal<String>,
     /// Monotonic generation: bumped when the open room changes so a stale
@@ -643,6 +645,7 @@ impl Rooms {
             open_key: RwSignal::new(None),
             open_room: RwSignal::new(None),
             transcript: RwSignal::new(Vec::new()),
+            runs: RwSignal::new(Vec::new()),
             status: RwSignal::new(String::new()),
             generation: RwSignal::new(0),
             identity_id: RwSignal::new(""),
@@ -712,6 +715,7 @@ impl Rooms {
     fn reset_room_state(&self) {
         self.open_room.set(None);
         self.transcript.set(Vec::new());
+        self.runs.set(Vec::new());
         self.access.set(None);
         self.open_read_cursor.set(None);
         self.read_cursor_in_flight.set(None);
@@ -1665,9 +1669,18 @@ impl Rooms {
                         gloo_net::eventsource::State::Closed => TailState::Reconnecting,
                     });
                 }
+                let run_sub = match es.subscribe("room_agent_run") {
+                    Ok(s) => s
+                        .map(|event| event.map(|msg| ("room_agent_run", msg)))
+                        .boxed_local(),
+                    Err(_) => {
+                        gloo_timers::future::TimeoutFuture::new(2_000).await;
+                        continue;
+                    }
+                };
                 let mut stream = futures_util::stream::select(
                     futures_util::stream::select(message_sub, access_sub),
-                    read_cursor_sub,
+                    futures_util::stream::select(read_cursor_sub, run_sub),
                 );
                 // Race stream.next() against a 2 s timeout so room close/switch
                 // can cancel a stalled connection (blame: gloo EventSource errors
@@ -1727,6 +1740,9 @@ impl Rooms {
                     };
                     tail_state.set(TailState::Live);
                     match frame {
+                        RoomTailFrame::Run(run) => {
+                            me.runs.update(|runs| upsert_run(runs, run));
+                        }
                         RoomTailFrame::Access(access) => {
                             apply_access_projection(&me.access, access.clone());
                             update_open_summary_from_open_room(
@@ -1982,6 +1998,77 @@ enum RoomTailFrame {
     Message(RoomMessage),
     Access(RoomAccessProjection),
     ReadCursor(RoomReadCursorProjection),
+    Run(RoomAgentRun),
+}
+
+/// Live lifecycle of one room-convened agent turn (team-platform P3), mirror
+/// of `ocean_core::RoomAgentRunState`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum RoomAgentRunState {
+    Queued,
+    Thinking,
+    RunningTool {
+        label: String,
+    },
+    AwaitingPermission,
+    AwaitingReply,
+    Done,
+    Failed {
+        reason: String,
+    },
+    Cancelled,
+    /// A state this build does not know yet renders as idle work.
+    #[serde(other)]
+    Unknown,
+}
+
+impl RoomAgentRunState {
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Done | Self::Failed { .. } | Self::Cancelled)
+    }
+}
+
+/// One agent turn in a room: the work card's daemon-owned projection.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct RoomAgentRun {
+    pub run_id: String,
+    pub room_id: String,
+    pub agent_id: String,
+    pub session_id: String,
+    pub trigger_seq: u64,
+    pub thread_root_seq: u64,
+    #[serde(flatten)]
+    pub state: RoomAgentRunState,
+    pub started_at: String,
+    pub updated_at: String,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub files_changed: Vec<String>,
+    #[serde(default)]
+    pub tool_count: u32,
+    #[serde(default)]
+    pub reply_seq: Option<u64>,
+}
+
+/// Ids of the runs whose card attaches under thread root `root_seq`.
+pub(crate) fn run_ids_for_root(runs: &[RoomAgentRun], root_seq: u64) -> Vec<String> {
+    runs.iter()
+        .filter(|r| r.thread_root_seq == root_seq)
+        .map(|r| r.run_id.clone())
+        .collect()
+}
+
+/// Insert or replace a run by id, keeping start order.
+pub(crate) fn upsert_run(runs: &mut Vec<RoomAgentRun>, run: RoomAgentRun) {
+    match runs.iter_mut().find(|r| r.run_id == run.run_id) {
+        Some(existing) => *existing = run,
+        None => {
+            runs.push(run);
+            runs.sort_by(|a, b| a.started_at.cmp(&b.started_at));
+        }
+    }
 }
 
 fn decode_room_tail_frame(
@@ -2006,6 +2093,11 @@ fn decode_room_tail_frame(
                 .ok()
             })
             .map(RoomTailFrame::ReadCursor),
+        // Run frames carry their room identity; drop any that name another.
+        "room_agent_run" => serde_json::from_str::<RoomAgentRun>(data)
+            .ok()
+            .filter(|run| run.room_id == expected_room_key)
+            .map(RoomTailFrame::Run),
         _ => None,
     }
 }
@@ -2991,10 +3083,69 @@ mod tests {
         .unwrap();
         match frame {
             RoomTailFrame::Message(message) => assert_eq!(message.seq, 8),
-            RoomTailFrame::Access(_) => panic!("message frame decoded as access"),
-            RoomTailFrame::ReadCursor(_) => panic!("message frame decoded as read cursor"),
+            other => panic!("message frame decoded as {other:?}"),
         }
         assert!(decode_room_tail_frame("unknown", "{}", "room-1").is_none());
+    }
+
+    fn run_wire(run_id: &str, room: &str, state: &str, started: &str) -> String {
+        format!(
+            r#"{{"run_id":"{run_id}","room_id":"{room}","agent_id":"helper","session_id":"s","trigger_seq":4,"thread_root_seq":4,"state":"{state}","label":"bash cargo test","started_at":"{started}","updated_at":"{started}","tool_count":2}}"#
+        )
+    }
+
+    #[test]
+    fn run_frames_decode_only_for_the_open_room() {
+        let wire = run_wire("r1", "room-1", "running_tool", "2026-10-03T10:00:00Z");
+        let Some(RoomTailFrame::Run(run)) =
+            decode_room_tail_frame("room_agent_run", &wire, "room-1")
+        else {
+            panic!("run frame must decode");
+        };
+        assert_eq!(
+            run.state,
+            RoomAgentRunState::RunningTool {
+                label: "bash cargo test".into()
+            }
+        );
+        assert_eq!(run.tool_count, 2);
+        assert!(run.files_changed.is_empty());
+        assert!(
+            decode_room_tail_frame("room_agent_run", &wire, "room-2").is_none(),
+            "a run naming another room is dropped"
+        );
+        let future = run_wire("r2", "room-1", "some_future_state", "2026-10-03T10:00:00Z");
+        let Some(RoomTailFrame::Run(run)) =
+            decode_room_tail_frame("room_agent_run", &future, "room-1")
+        else {
+            panic!("unknown states still decode");
+        };
+        assert_eq!(run.state, RoomAgentRunState::Unknown);
+    }
+
+    #[test]
+    fn upsert_run_replaces_by_id_and_keeps_start_order() {
+        let decode = |w: String| serde_json::from_str::<RoomAgentRun>(&w).unwrap();
+        let mut runs = Vec::new();
+        upsert_run(
+            &mut runs,
+            decode(run_wire("b", "r", "queued", "2026-10-03T10:00:05Z")),
+        );
+        upsert_run(
+            &mut runs,
+            decode(run_wire("a", "r", "queued", "2026-10-03T10:00:00Z")),
+        );
+        upsert_run(
+            &mut runs,
+            decode(run_wire("b", "r", "done", "2026-10-03T10:00:05Z")),
+        );
+        assert_eq!(
+            runs.iter().map(|r| r.run_id.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+        assert_eq!(runs[1].state, RoomAgentRunState::Done);
+        assert_eq!(run_ids_for_root(&runs, 4), vec!["a", "b"]);
+        assert!(run_ids_for_root(&runs, 5).is_empty());
     }
 
     #[test]

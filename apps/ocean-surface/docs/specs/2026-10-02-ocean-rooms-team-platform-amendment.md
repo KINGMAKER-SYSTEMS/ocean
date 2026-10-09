@@ -83,6 +83,13 @@ Interfaces:
 
 Gate P3: `@agent fix X` in a room shows live state progression and a changed-files/diff card to the owner, a truthful state-only card to a remote member, and the final reply threaded under the request.
 
+P3 as landed (narrowing, owner-local):
+
+- Linkage runs from the run to the reply (`RoomAgentRun.reply_seq`), and cards attach by `thread_root_seq`; `RoomMessage` gains no `run_id`.
+- The `room.agent_run` ledger publication is deferred, so remote members do not yet see cards. It ships with P4 under the payload limits above.
+- The card shows changed files plus the edit/write tool steps through the transcript's tool groups; a dedicated diff renderer is P5 work.
+- Runs open at daemon restart close as `Failed { reason: "interrupted by daemon restart" }`.
+
 ## P4 — Agents act inside the conversation
 
 Interfaces:

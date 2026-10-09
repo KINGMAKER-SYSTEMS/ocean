@@ -90,9 +90,10 @@ use std::{path::Path, time::Duration};
 use chrono::{DateTime, Utc};
 use ocean_core::{
     bounded_prose, FederatedMessageMeta, FederatedRoomMemberProjection, OutboxItemState, Room,
-    RoomAccessProjection, RoomAccessState, RoomArtifact, RoomArtifactKind, RoomArtifactState,
-    RoomAttachment, RoomKey, RoomMessage, RoomMessageKind, RoomOutboxItem, RoomParticipant,
-    RoomParticipantKind, RoomReadCursorProjection, RoomReadCursorUpdateRequest, RoomTriggerPolicy,
+    RoomAccessProjection, RoomAccessState, RoomAgentRun, RoomAgentRunState, RoomArtifact,
+    RoomArtifactKind, RoomArtifactState, RoomAttachment, RoomKey, RoomMessage, RoomMessageKind,
+    RoomOutboxItem, RoomParticipant, RoomParticipantKind, RoomReadCursorProjection,
+    RoomReadCursorUpdateRequest, RoomTriggerPolicy,
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
@@ -876,6 +877,10 @@ pub struct OwnerIdentity {
     pub participant_id: String,
     /// Operator-chosen display name.
     pub display_name: String,
+}
+
+fn decode_agent_run(body: &str) -> Result<RoomAgentRun> {
+    serde_json::from_str(body).map_err(|e| RoomStoreError::Encode(format!("bad agent run: {e}")))
 }
 
 /// Trim a candidate owner display name; `None` when empty or over 64 chars.
@@ -2099,6 +2104,18 @@ impl SqliteRoomStore {
             -- coworker runs their own daemon, so every local human post and
             -- join is authored as this identity; client-claimed human ids are
             -- never authority. Display data only — it authorizes nothing.
+            -- One row per room-convened agent turn (team-platform P3): the
+            -- mutable work-card projection over that turn's agent session. It
+            -- is NOT a transcript; transcript rows stay append-only.
+            CREATE TABLE IF NOT EXISTS room_agent_runs (
+                run_id     TEXT PRIMARY KEY,
+                room_id    TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+                started_at TEXT NOT NULL,      -- RFC3339, ordering key
+                body       TEXT NOT NULL       -- JSON RoomAgentRun
+            );
+            CREATE INDEX IF NOT EXISTS room_agent_runs_room_started
+                ON room_agent_runs (room_id, started_at);
+
             CREATE TABLE IF NOT EXISTS daemon_owner (
                 singleton      INTEGER PRIMARY KEY CHECK (singleton = 1),
                 participant_id TEXT NOT NULL,     -- stable; canonical id alphabet
@@ -5907,6 +5924,88 @@ impl SqliteRoomStore {
         };
         tx.commit()?;
         Ok(owner)
+    }
+
+    /// Insert or replace one agent-run projection (team-platform P3). The room
+    /// must exist; the row cascades away with it.
+    pub fn put_room_agent_run(&mut self, run: &RoomAgentRun) -> Result<()> {
+        if !self.room_exists(&run.room_id)? {
+            return Err(RoomStoreError::UnknownRoom(run.room_id.clone()));
+        }
+        let body = serde_json::to_string(run)
+            .map_err(|e| RoomStoreError::Encode(format!("agent run: {e}")))?;
+        self.conn.execute(
+            "INSERT INTO room_agent_runs (run_id, room_id, started_at, body)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (run_id) DO UPDATE SET body = excluded.body",
+            params![
+                run.run_id,
+                run.room_id.as_str(),
+                run.started_at.to_rfc3339(),
+                body
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// One agent run by id, if it exists.
+    pub fn room_agent_run(&self, run_id: &str) -> Result<Option<RoomAgentRun>> {
+        let body: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT body FROM room_agent_runs WHERE run_id = ?1",
+                params![run_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        body.map(|b| decode_agent_run(&b)).transpose()
+    }
+
+    /// The room's most recent agent runs, oldest first, at most `limit`.
+    pub fn room_agent_runs(&self, key: &RoomKey, limit: usize) -> Result<Vec<RoomAgentRun>> {
+        if !self.room_exists(key)? {
+            return Err(RoomStoreError::UnknownRoom(key.clone()));
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT body FROM room_agent_runs WHERE room_id = ?1
+             ORDER BY started_at DESC, run_id DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![key.as_str(), limit as i64], |r| {
+            r.get::<_, String>(0)
+        })?;
+        let mut runs = rows
+            .map(|row| decode_agent_run(&row?))
+            .collect::<Result<Vec<_>>>()?;
+        runs.reverse();
+        Ok(runs)
+    }
+
+    /// Restart recovery: every non-terminal run belonged to a turn that died
+    /// with the previous daemon. Mark each `Failed` so no card spins forever,
+    /// and return the rewritten runs.
+    pub fn interrupt_open_room_agent_runs(
+        &mut self,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<RoomAgentRun>> {
+        let open: Vec<RoomAgentRun> = {
+            let mut stmt = self.conn.prepare("SELECT body FROM room_agent_runs")?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            rows.map(|row| decode_agent_run(&row?))
+                .collect::<Result<Vec<_>>>()?
+                .into_iter()
+                .filter(|run| !run.state.is_terminal())
+                .collect()
+        };
+        let mut out = Vec::with_capacity(open.len());
+        for mut run in open {
+            run.state = RoomAgentRunState::Failed {
+                reason: "interrupted by daemon restart".into(),
+            };
+            run.updated_at = now;
+            self.put_room_agent_run(&run)?;
+            out.push(run);
+        }
+        Ok(out)
     }
 
     /// Destructive test seeding only: replace the owner row outright (like
@@ -14870,6 +14969,70 @@ mod tests {
         let _s = SqliteRoomStore::open(&path).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "reopen must repair a loosened mode");
+    }
+
+    fn agent_run(room: &RoomKey, id: &str, started: DateTime<Utc>) -> RoomAgentRun {
+        RoomAgentRun {
+            run_id: id.into(),
+            room_id: room.clone(),
+            agent_id: "helper".into(),
+            session_id: format!("s-{id}"),
+            trigger_seq: 1,
+            thread_root_seq: 1,
+            state: RoomAgentRunState::Queued,
+            started_at: started,
+            updated_at: started,
+            summary: None,
+            files_changed: Vec::new(),
+            tool_count: 0,
+            reply_seq: None,
+        }
+    }
+
+    #[test]
+    fn room_agent_runs_upsert_order_and_restart_recovery() {
+        let mut s = store();
+        let key = RoomKey::new("runs");
+        s.create(key.clone(), "runs", None, now()).unwrap();
+        let t0 = now();
+        let mut first = agent_run(&key, "a", t0);
+        s.put_room_agent_run(&first).unwrap();
+        let mut second = agent_run(&key, "b", t0 + chrono::Duration::seconds(5));
+        second.state = RoomAgentRunState::Done;
+        s.put_room_agent_run(&second).unwrap();
+
+        first.state = RoomAgentRunState::RunningTool {
+            label: "bash".into(),
+        };
+        first.tool_count = 1;
+        s.put_room_agent_run(&first).unwrap();
+        assert_eq!(s.room_agent_run("a").unwrap(), Some(first.clone()));
+
+        let runs = s.room_agent_runs(&key, 10).unwrap();
+        assert_eq!(
+            runs.iter().map(|r| r.run_id.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b"],
+            "oldest first"
+        );
+        assert_eq!(
+            s.room_agent_runs(&key, 1).unwrap()[0].run_id,
+            "b",
+            "limit keeps newest"
+        );
+
+        let interrupted = s.interrupt_open_room_agent_runs(now()).unwrap();
+        assert_eq!(interrupted.len(), 1, "only the non-terminal run");
+        assert!(matches!(
+            s.room_agent_run("a").unwrap().unwrap().state,
+            RoomAgentRunState::Failed { .. }
+        ));
+        assert_eq!(
+            s.room_agent_run("b").unwrap().unwrap().state,
+            RoomAgentRunState::Done
+        );
+
+        let missing = RoomKey::new("nope");
+        assert!(s.put_room_agent_run(&agent_run(&missing, "c", t0)).is_err());
     }
 
     #[test]

@@ -780,12 +780,16 @@ fn is_thread_open(selected_thread_root_seq: Option<u64>, root_seq: u64) -> bool 
 #[component]
 pub fn RoomsWorkspace(
     rooms: Rooms,
+    /// The owner's daemon handle; work cards render agent-session steps with
+    /// the session transcript's own components.
+    daemon: crate::daemon::Daemon,
     /// Called when the user wants to leave the Rooms workspace entirely
     /// (e.g. switch to Direct Messages). If `None` the close button is
     /// hidden.
     #[prop(optional)]
     on_close: Option<Callback<()>>,
 ) -> impl IntoView {
+    let daemon_sv = StoredValue::new(daemon);
     // ── Left-rail: create form signals ────────────────────────────────
     let new_room_name = RwSignal::new(String::new());
 
@@ -2041,6 +2045,19 @@ pub fn RoomsWorkspace(
                                                                 ().into_any()
                                                             }
                                                         }}
+                                                        // Team-platform P3: live agent work cards for turns
+                                                        // this message convened.
+                                                        <For
+                                                            each=move || rooms.runs.with(|runs| crate::rooms::run_ids_for_root(runs, root_seq))
+                                                            key=|id: &String| id.clone()
+                                                            children=move |id: String| view! {
+                                                                <crate::room_work_card::RoomWorkCard
+                                                                    run_id=id
+                                                                    rooms=rooms
+                                                                    daemon=daemon_sv
+                                                                />
+                                                            }
+                                                        />
                                                     </div>
                                                 </div>
                                             }
@@ -2776,9 +2793,7 @@ pub fn RoomsWorkspace(
                                                                         .get()
                                                                         .map(|r| r.participants.into_iter().map(|p| p.id).collect())
                                                                         .unwrap_or_default();
-                                                                    rooms.available_agents.get().into_iter()
-                                                                        .filter(|agent| !present.contains(&agent.name))
-                                                                        .collect::<Vec<_>>()
+                                                                    rooms.available_agents.get().into_iter().filter(|agent| !present.contains(&agent.name)).collect::<Vec<AgentSummary>>()
                                                                 }
                                                                 key=|agent: &AgentSummary| agent.name.clone()
                                                                 children=move |agent: AgentSummary| {

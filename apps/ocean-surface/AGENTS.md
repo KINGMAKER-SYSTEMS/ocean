@@ -368,6 +368,16 @@ Web surface session UI:
   `rooms::author_display_name` (roster, then federated member projection,
   then raw id) and initials through `rooms::name_initials`, with the
   deterministic `avatar_identity_class` hue on every avatar.
+- Agent work cards (team-platform P3) are daemon projections, not
+  transcript rows. The room SSE also carries `room_agent_run` frames (projection
+  replace by `run_id`, no sequence, same generation+room admission as
+  `room_access`); the daemon replays recent runs on connect, so the surface
+  never polls `/runs`. `room_work_card.rs` renders one card per run under the
+  message whose thread root convened it. Steps load only when opened, from the
+  owner's agent session (`daemon::fetch_session_turns`, sliced by the
+  `[#seq] ... «— mention` prompt marker) and render through the
+  transcript's own `AssistantTurn` (`detached`). Card colors come only from
+  tokens (`styles/rooms-cards.css`).
 - Owner responses publish only for the latest owner request at the current
   daemon origin. Origin changes clear the old owner and refresh `/v1/me`;
   an older response cannot overwrite a later owner read.

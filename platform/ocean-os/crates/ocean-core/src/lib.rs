@@ -1067,6 +1067,67 @@ pub enum RoomAccessState {
     Revoked,
 }
 
+/// Live lifecycle of one room-convened agent turn (team-platform P3). A
+/// projection over the agent session's own events — never a second transcript.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum RoomAgentRunState {
+    /// Convened; waiting for the session lane.
+    Queued,
+    /// The model is reasoning or writing.
+    Thinking,
+    /// A tool is executing. `label` is a short, path-free description.
+    RunningTool { label: String },
+    /// Blocked on a permission decision by the agent's owner.
+    AwaitingPermission,
+    /// The agent asked the room a question and is waiting for a thread reply.
+    AwaitingReply,
+    /// Finished and replied.
+    Done,
+    /// Ended without a reply. `reason` is sanitized, never raw provider output.
+    Failed { reason: String },
+    /// Cancelled before completion.
+    Cancelled,
+}
+
+impl RoomAgentRunState {
+    /// Terminal states never change again.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Done | Self::Failed { .. } | Self::Cancelled)
+    }
+}
+
+/// One agent turn in a room, rendered as a single live work card.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomAgentRun {
+    pub run_id: String,
+    pub room_id: RoomKey,
+    pub agent_id: String,
+    /// The agent session that executes the turn. Owner surfaces read tool
+    /// steps and diffs from it; it never crosses federation.
+    pub session_id: String,
+    /// Transcript row that convened the agent.
+    pub trigger_seq: u64,
+    /// Thread root the card and reply attach to.
+    pub thread_root_seq: u64,
+    #[serde(flatten)]
+    pub state: RoomAgentRunState,
+    pub started_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    /// Short summary of the outcome (first part of the reply).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    /// Workspace-relative paths the turn wrote or edited.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files_changed: Vec<String>,
+    /// Number of tool calls so far.
+    #[serde(default)]
+    pub tool_count: u32,
+    /// Transcript row of the agent's reply, once posted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_seq: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoomReadCursorProjection {
     #[serde(default)]
@@ -2796,6 +2857,37 @@ mod tests {
             out["members"][0].get("owner_principal_token_id").is_none(),
             "owner_principal_token_id in nested member MUST NOT survive"
         );
+    }
+
+    #[test]
+    fn room_agent_run_state_is_flattened_and_roundtrips() {
+        let now = chrono::Utc::now();
+        let run = RoomAgentRun {
+            run_id: "r1".into(),
+            room_id: RoomKey::new("room"),
+            agent_id: "helper".into(),
+            session_id: "s1".into(),
+            trigger_seq: 4,
+            thread_root_seq: 4,
+            state: RoomAgentRunState::RunningTool {
+                label: "edit".into(),
+            },
+            started_at: now,
+            updated_at: now,
+            summary: None,
+            files_changed: vec!["src/lib.rs".into()],
+            tool_count: 2,
+            reply_seq: None,
+        };
+        let wire = serde_json::to_value(&run).unwrap();
+        assert_eq!(wire["state"], "running_tool");
+        assert_eq!(wire["label"], "edit");
+        assert!(wire.get("summary").is_none());
+        let back: RoomAgentRun = serde_json::from_value(wire).unwrap();
+        assert_eq!(back, run);
+        assert!(!run.state.is_terminal());
+        assert!(RoomAgentRunState::Done.is_terminal());
+        assert!(RoomAgentRunState::Failed { reason: "x".into() }.is_terminal());
     }
 
     /// The anti-drift pin, and the reason this pair moved into `ocean-core`

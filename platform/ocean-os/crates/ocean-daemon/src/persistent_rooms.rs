@@ -15,9 +15,9 @@ use chrono::Utc;
 use ocean_agent_sdk::{AgentSessionId, AgentTurnEvent};
 use ocean_core::{
     evaluate_trigger_policy, PermissionMode, PromptRequest, PublicAgentDescriptor, RequestState,
-    RoomAccessProjection, RoomAccessState, RoomArtifactKind, RoomArtifactState, RoomKey,
-    RoomMessage, RoomMessageKind, RoomParticipant, RoomParticipantKind, RoomReadCursorProjection,
-    RoomReadCursorUpdateRequest, RoomTriggerEvent, RoomTriggerPolicy,
+    RoomAccessProjection, RoomAccessState, RoomAgentRun, RoomArtifactKind, RoomArtifactState,
+    RoomKey, RoomMessage, RoomMessageKind, RoomParticipant, RoomParticipantKind,
+    RoomReadCursorProjection, RoomReadCursorUpdateRequest, RoomTriggerEvent, RoomTriggerPolicy,
 };
 #[cfg(test)]
 use ocean_core::{OutboxItemState, RoomOutboxItem};
@@ -3268,6 +3268,44 @@ async fn spawn_room_agent_turn(
             Some(instructions) => super::compose_folder_agent_prompt(instructions, &prompt),
             None => prompt,
         };
+
+        // G3: the card and the reply attach to the ROOT of the line that
+        // convened the agent. When the trigger row is itself a thread reply,
+        // its own `thread_parent_seq` is the root; a top-level trigger is its
+        // own root.
+        let thread_root = with_rooms(&state, |store| {
+            room_message_at_seq(store, &room, triggered_by_seq)
+        })
+        .and_then(|m| m.thread_parent_seq)
+        .unwrap_or(triggered_by_seq);
+
+        // Team-platform P3: one live work card per agent turn, folded from the
+        // turn's own session events. Subscribe before the turn can emit.
+        let tracker = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::room_agent_runs::RunTracker::start(
+                state.clone(),
+                room.clone(),
+                &agent.id,
+                session_id,
+                triggered_by_seq,
+                thread_root,
+                prompt_req.cwd.clone(),
+            ),
+        ));
+        // Room turns have no product SSE bridge; use this turn's runtime sink.
+        let (run_sink, run_events) = mpsc::unbounded_channel();
+        let run_watch = tokio::spawn(crate::room_agent_runs::watch_runtime_events(
+            tracker.clone(),
+            run_events,
+        ));
+        let with_tracker = |f: &mut dyn FnMut(&mut crate::room_agent_runs::RunTracker)| {
+            let mut guard = match tracker.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            f(&mut guard);
+        };
+
         let control = build_prompt_control(
             &state,
             request_id,
@@ -3275,7 +3313,8 @@ async fn spawn_room_agent_turn(
             permission_mode,
             cancel.clone(),
             prompt_req.decision_token.clone(),
-        );
+        )
+        .with_event_sink(run_sink);
         let control = room_agent_authority::apply_admission_to_control(control, &admission);
         let control = room_agent_authority::attach_operation_authority(
             control,
@@ -3308,7 +3347,13 @@ async fn spawn_room_agent_turn(
         record_prompt_result(&state, request_id, &result, None, None).await;
         terminal.disarm();
         emit_session_changed(&state.agent_events, session_id);
+        // The turn dropped its sink; drain the watcher before the terminal
+        // write so no step is lost and no trailing event lands after it.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), run_watch).await;
 
+        if !result.ok {
+            with_tracker(&mut |t| t.finish_failed("turn_failed"));
+        }
         if cancel.is_cancelled() {
             if room_agent_authority::append_remote_output_outcome(
                 &state,
@@ -3320,10 +3365,12 @@ async fn spawn_room_agent_turn(
             {
                 tracing::warn!(%request_id, error_code = "room_turn_outcome_audit_failed", "Room cancellation audit unavailable");
             }
+            with_tracker(&mut |t| t.finish_failed("room_request_authority_changed"));
             return;
         }
         if result.ok {
             let body = clamp_room_message_body(result.stdout.trim());
+            let mut reply_seq = None;
             if !body.is_empty() {
                 if let Some(member_id) = federated_member_id.as_deref() {
                     if state
@@ -3357,32 +3404,31 @@ async fn spawn_room_agent_turn(
                             "federated agent reply enqueue failed");
                     }
                 } else {
-                    let thread_root = with_rooms(&state, |store| {
-                        room_message_at_seq(store, &room, triggered_by_seq)
-                    })
-                    .and_then(|message| message.thread_parent_seq)
-                    .unwrap_or(triggered_by_seq);
-                    if append_authorized_room_agent_reply(
+                    match append_authorized_room_agent_reply(
                         &state,
                         &admission,
                         body.as_ref(),
                         Some(thread_root),
                         session_id,
                         &cancel,
-                    )
-                    .is_err()
-                        && room_agent_authority::append_remote_output_outcome(
-                            &state,
-                            &admission,
-                            "refused",
-                            "authority_changed_before_local_output",
-                        )
-                        .is_err()
-                    {
-                        tracing::warn!(%request_id, error_code = "room_turn_outcome_audit_failed", "Room output refusal audit unavailable");
+                    ) {
+                        Ok(message) => reply_seq = Some(message.seq),
+                        Err(_) => {
+                            if room_agent_authority::append_remote_output_outcome(
+                                &state,
+                                &admission,
+                                "refused",
+                                "authority_changed_before_local_output",
+                            )
+                            .is_err()
+                            {
+                                tracing::warn!(%request_id, error_code = "room_turn_outcome_audit_failed", "Room output refusal audit unavailable");
+                            }
+                        }
                     }
                 }
             }
+            with_tracker(&mut |t| t.finish_done(body.as_ref(), reply_seq));
         } else if federated_member_id.is_none() {
             if append_authorized_room_agent_failure(&state, &admission, session_id, &cancel)
                 .is_err()
@@ -4035,6 +4081,9 @@ pub(super) async fn room_events(
     let access_hints = state.room_access_wakes.subscribe();
     let cursor_access_hints = state.room_access_wakes.subscribe();
     let cursor_hints = state.room_read_cursor_wakes.subscribe();
+    // Team-platform P3: agent-run cards ride the access wake bus (a run write
+    // publishes an access wake; the access tail dedups unchanged projections).
+    let run_hints = state.room_access_wakes.subscribe();
 
     // Verify room exists (open rooms only) and read initial access snapshot.
     //
@@ -4142,11 +4191,91 @@ pub(super) async fn room_events(
         .into_iter();
     let cursor_events: Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>> =
         Box::pin(tokio_stream::iter(cursor_init).chain(cursor_stream));
+
+    // Agent-run tail: recent runs first, then every changed run.
+    let (run_tx, run_rx) = mpsc::channel::<RoomAgentRun>(32);
+    tokio::spawn(run_room_agent_run_tail(
+        state.clone(),
+        room.clone(),
+        run_hints,
+        run_tx,
+    ));
+    let run_stream = ReceiverStream::new(run_rx).map(|run| -> Result<Event, Infallible> {
+        let data = serde_json::to_string(&run).expect("RoomAgentRun serializable");
+        Ok(Event::default().event("room_agent_run").data(data))
+    });
+
     let merged = tokio_stream::once(init_event)
         .chain(msg_stream.merge(acc_stream))
-        .merge(cursor_events);
+        .merge(cursor_events)
+        .merge(run_stream);
     let stream = sse_until_shutdown(merged, state.shutdown.clone());
     Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(SSE_KEEPALIVE_INTERVAL)))
+}
+
+// ── Team-platform P3 agent-run SSE tail ──────────────────────────────────────
+
+/// Agent-run tail: send the room's recent runs, then on every access wake (or
+/// lag) re-read them and send each run whose projection changed. Selects
+/// `tx.closed()` while idle so client disconnect cleans up.
+async fn run_room_agent_run_tail(
+    state: AppState,
+    room: RoomKey,
+    mut hints: broadcast::Receiver<RoomAccessWakeHint>,
+    tx: mpsc::Sender<RoomAgentRun>,
+) {
+    let mut seen: std::collections::HashMap<String, RoomAgentRun> =
+        std::collections::HashMap::new();
+    let mut first = true;
+    loop {
+        if !first {
+            let should_read = tokio::select! {
+                _ = tx.closed() => return,
+                res = hints.recv() => match res {
+                    Ok(hint) => hint.room == room,
+                    Err(broadcast::error::RecvError::Lagged(_)) => true,
+                    Err(broadcast::error::RecvError::Closed) => return,
+                },
+            };
+            if !should_read {
+                continue;
+            }
+        }
+        first = false;
+        let runs = match with_rooms(&state, |store| {
+            store.room_agent_runs(&room, crate::room_agent_runs::ROOM_RUNS_LIMIT)
+        }) {
+            Ok(runs) => runs,
+            Err(e) => {
+                tracing::warn!(room = %room, %e, "room agent run tail read failed");
+                return;
+            }
+        };
+        for run in runs {
+            if seen.get(&run.run_id) == Some(&run) {
+                continue;
+            }
+            seen.insert(run.run_id.clone(), run.clone());
+            if tx.send(run).await.is_err() {
+                return;
+            }
+        }
+    }
+}
+
+/// `GET /v1/rooms/persistent/{key}/runs` — the room's recent agent work
+/// cards, oldest first (team-platform P3).
+pub(super) async fn room_agent_runs_list(
+    State(state): State<AppState>,
+    Path(key): Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let key = RoomKey::new(key.trim());
+    match with_rooms(&state, |store| {
+        store.room_agent_runs(&key, crate::room_agent_runs::ROOM_RUNS_LIMIT)
+    }) {
+        Ok(runs) => (StatusCode::OK, Json(json!({ "ok": true, "runs": runs }))),
+        Err(e) => room_store_error_response(e),
+    }
 }
 
 // ── S2-P1 access projection SSE tail ─────────────────────────────────────────
@@ -7997,6 +8126,175 @@ env = { FIXTURE = "1" }
         }));
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn p3_mention_produces_one_agent_run_that_ends_done_with_reply() {
+        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _env = TestEnvRestore::capture(&[
+            "OCEAN_AUTH_FILE",
+            "OCEAN_CODEX_AUTH_FILE",
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+            "OCEAN_AGENTS_DIR",
+        ]);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state = crate::tests::isolated_room_fixture_state(&tmp);
+        let agents_root = tmp.path().join("agents");
+        write_agent_fixture(&agents_root, "helper", "model = \"fake-ok\"\n", None);
+        std::env::set_var("OCEAN_AGENTS_DIR", &agents_root);
+        let key = RoomKey::new("p3-card");
+        create_mention_room(&state, &key);
+        join_human(&state, &key);
+        let (status, _) = room_join(
+            State(state.clone()),
+            Path(key.as_str().to_string()),
+            Json(RoomJoinRequest {
+                id: "helper".into(),
+                display_name: "Helper".into(),
+                kind: RoomParticipantKind::Agent,
+                owner_id: Some("human".into()),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let generation = authorize_room_agent_fixture(
+            &state,
+            &key,
+            "helper",
+            ActivationPolicy::Mention,
+            ContextPolicy::InvocationOnly,
+        );
+        let (status, body) = room_post_message(
+            State(state.clone()),
+            Path(key.as_str().to_string()),
+            Json(RoomMessageRequest {
+                author_id: String::new(),
+                author_kind: RoomParticipantKind::Human,
+                body: "@helper fix the thing".into(),
+                thread_parent_seq: None,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let trigger_seq = body.0["message"]["seq"].as_u64().expect("trigger seq");
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        let run = loop {
+            let runs = with_rooms(&state, |store| store.room_agent_runs(&key, 10)).unwrap();
+            if let Some(run) = runs.into_iter().find(|r| r.state.is_terminal()) {
+                break run;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "agent run never reached a terminal state"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+        assert_eq!(run.agent_id, "helper");
+        assert_eq!(run.trigger_seq, trigger_seq);
+        assert_eq!(run.thread_root_seq, trigger_seq);
+        assert_eq!(
+            run.session_id,
+            authorized_room_agent_session_id(&key, "helper", generation).to_string()
+        );
+        assert_eq!(run.state, ocean_core::RoomAgentRunState::Done, "{run:?}");
+        let reply_seq = run.reply_seq.expect("done run links its reply");
+        let reply = with_rooms(&state, |store| store.transcript(&key, None))
+            .unwrap()
+            .into_iter()
+            .find(|m| m.seq == reply_seq)
+            .expect("reply row exists");
+        assert_eq!(reply.author_id, "helper");
+        assert_eq!(reply.thread_parent_seq, Some(trigger_seq));
+        assert!(run.summary.is_some());
+        assert_eq!(
+            with_rooms(&state, |store| store.room_agent_runs(&key, 10))
+                .unwrap()
+                .len(),
+            1,
+            "one card per convened turn"
+        );
+
+        let (status, Json(listed)) =
+            room_agent_runs_list(State(state.clone()), Path(key.as_str().to_string())).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(listed["runs"][0]["run_id"], run.run_id);
+        assert_eq!(listed["runs"][0]["state"], "done");
+    }
+
+    #[tokio::test]
+    async fn p3_runtime_sink_persists_tool_progress_and_keeps_finished_card_terminal() {
+        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _env = TestEnvRestore::capture(&[
+            "OCEAN_AUTH_FILE",
+            "OCEAN_CODEX_AUTH_FILE",
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+        ]);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state = crate::tests::isolated_room_fixture_state(&tmp);
+        let key = RoomKey::new("p3-runtime-sink");
+        create_mention_room(&state, &key);
+        let tracker = Arc::new(Mutex::new(crate::room_agent_runs::RunTracker::start(
+            state.clone(),
+            key.clone(),
+            "helper",
+            AgentSessionId::new_v4(),
+            1,
+            1,
+            "/repo".into(),
+        )));
+        let (sink, events) = mpsc::unbounded_channel();
+        let watch = tokio::spawn(crate::room_agent_runs::watch_runtime_events(
+            tracker.clone(),
+            events,
+        ));
+        sink.send(ocean_runtime::AgentEvent::ToolExecutionStart {
+            session_id: None,
+            tool_call_id: "call-1".into(),
+            tool_name: "write".into(),
+            args: json!({"path": "/repo/src/lib.rs"}),
+        })
+        .unwrap();
+        drop(sink);
+        tokio::time::timeout(Duration::from_secs(2), watch)
+            .await
+            .unwrap()
+            .unwrap();
+        let run = with_rooms(&state, |store| store.room_agent_runs(&key, 10))
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(
+            run.state,
+            ocean_core::RoomAgentRunState::RunningTool {
+                label: "write src/lib.rs".into()
+            }
+        );
+        assert_eq!(run.tool_count, 1);
+        assert_eq!(run.files_changed, vec!["src/lib.rs"]);
+        tracker.lock().unwrap().finish_done("Finished", Some(2));
+        let (sink, events) = mpsc::unbounded_channel();
+        sink.send(ocean_runtime::AgentEvent::TextDelta {
+            session_id: None,
+            delta: "late".into(),
+        })
+        .unwrap();
+        drop(sink);
+        crate::room_agent_runs::watch_runtime_events(tracker, events).await;
+        let run = with_rooms(&state, |store| store.room_agent_runs(&key, 10))
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(run.state, ocean_core::RoomAgentRunState::Done);
+        assert_eq!(run.reply_seq, Some(2));
+        assert_eq!(run.tool_count, 1);
+    }
+
     // ── S2-P1: snapshot access, merged SSE via router, outbox/retry ──────────
 
     use super::super::room_routes;
@@ -9097,11 +9395,12 @@ env = { FIXTURE = "1" }
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(state.room_wakes.receiver_count(), 1);
-        // Two independent subscriptions: one for the access-projection tail
-        // and one dedicated to the cursor tail (so an access wake alone can
-        // make the cursor tail re-check on a federated Connecting/Recovering
-        // -> Live transition; see `run_room_read_cursor_tail`).
-        assert_eq!(state.room_access_wakes.receiver_count(), 2);
+        // Three independent subscriptions: the access-projection tail, one
+        // dedicated to the cursor tail (so an access wake alone can make the
+        // cursor tail re-check on a federated Connecting/Recovering -> Live
+        // transition; see `run_room_read_cursor_tail`), and the agent-run tail
+        // (team-platform P3; see `run_room_agent_run_tail`).
+        assert_eq!(state.room_access_wakes.receiver_count(), 3);
 
         drop(resp);
 

@@ -157,6 +157,8 @@ mod recall_registry;
 /// In-memory request and permission control records plus bounded lifecycle mutations.
 mod request_control;
 mod room_agent_authority;
+/// Room agent work cards: per-turn run projections over agent-session events.
+mod room_agent_runs;
 /// Restart-safe outbound Bedrock room client and per-room supervisor (S2 P2-B).
 mod room_federation;
 mod room_operator;
@@ -980,8 +982,17 @@ async fn main() -> anyhow::Result<()> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating rooms DB directory {}", parent.display()))?;
     }
-    let room_store = ocean_store::SqliteRoomStore::open(&rooms_db_path)
+    let mut room_store = ocean_store::SqliteRoomStore::open(&rooms_db_path)
         .with_context(|| format!("opening rooms DB at {}", rooms_db_path.display()))?;
+    // Team-platform P3: agent-run cards whose turn died with the previous
+    // daemon end as Failed instead of spinning forever.
+    match room_store.interrupt_open_room_agent_runs(chrono::Utc::now()) {
+        Ok(runs) if !runs.is_empty() => {
+            tracing::info!(count = runs.len(), "interrupted open room agent runs");
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!(%e, "room agent run recovery failed"),
+    }
     tracing::info!(path = %rooms_db_path.display(), "persistent rooms store ready");
 
     // Persisted Longhouse title registry (OCEAN-246/272): open the durable escrow
@@ -1609,6 +1620,7 @@ fn banner_routes() -> &'static [&'static str] {
         "GET /v1/rooms/persistent/{key}/artifacts/{artifact_id}",
         "POST /v1/rooms/persistent/{key}/artifacts/{artifact_id}/amend",
         "GET /v1/rooms/persistent/{key}/snapshot",
+        "GET /v1/rooms/persistent/{key}/runs",
         "GET /v1/rooms/persistent/{key}/events",
         "GET /v1/rooms/persistent/{key}/read-cursor",
         "PATCH /v1/rooms/persistent/{key}/read-cursor",
@@ -2926,6 +2938,11 @@ fn room_routes() -> Router<AppState> {
             post(persistent_rooms::room_amend_artifact),
         )
         .route("/v1/rooms/persistent/{key}/snapshot", get(room_snapshot))
+        // Team-platform P3: the room's agent work cards.
+        .route(
+            "/v1/rooms/persistent/{key}/runs",
+            get(persistent_rooms::room_agent_runs_list),
+        )
         // Merged SSE: room_message + room_access frames, with durable replay
         // and access-projection tail (S2-P1).
         .route("/v1/rooms/persistent/{key}/events", get(room_events))
@@ -25599,6 +25616,7 @@ mod tests {
             "GET /v1/rooms/persistent/{key}/artifacts/{artifact_id}",
             "POST /v1/rooms/persistent/{key}/artifacts/{artifact_id}/amend",
             "GET /v1/rooms/persistent/{key}/snapshot",
+            "GET /v1/rooms/persistent/{key}/runs",
             "POST /v1/rooms/{room_id}/livekit-token",
         ] {
             assert!(
@@ -25789,7 +25807,7 @@ mod tests {
         assert_eq!(admission_routes, expected_admission_routes);
         assert_eq!(
             banner.len(),
-            121,
+            122,
             "route baseline changed; review the manifest"
         );
 
