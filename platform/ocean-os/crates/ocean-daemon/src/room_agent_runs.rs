@@ -52,32 +52,79 @@ pub(crate) fn run_decision_token(run_id: &str) -> Option<String> {
     tokens().get(run_id).cloned()
 }
 
-/// Atomically claim a parked `room_ask` run for the thread answer at
-/// `answer_seq`. `None` when the run is no longer parked or another answer
-/// already holds it, so of concurrent replies exactly one resumes the run.
-pub(crate) fn claim_answer(state: &AppState, run: &RoomAgentRun, answer_seq: u64) -> bool {
-    match with_rooms(state, |store| {
-        store.claim_parked_room_agent_run(&run.run_id, answer_seq, Utc::now())
-    }) {
-        Ok(Some(_)) => true,
-        Ok(None) => false,
-        Err(e) => {
-            tracing::warn!(room = %run.room_id, %e, "room agent run claim failed");
-            false
+/// One thread answer's durable claim on a parked `room_ask` run.
+///
+/// The claim is taken before the successor is admitted and must always be
+/// settled, even when the posting request's future is dropped mid-way (a
+/// client disconnect cancels the handler at its next await). Settling
+/// explicitly with [`AnswerClaim::settle`] reports the admission outcome; a
+/// claim dropped unsettled settles from durable evidence instead, exactly as
+/// restart recovery does: a successor run triggered by this answer closes the
+/// run `Done`, otherwise the claim is released and the run stays parked, so
+/// the next reply can claim it.
+pub(crate) struct AnswerClaim {
+    state: AppState,
+    run: RoomAgentRun,
+    answer_seq: u64,
+    settled: bool,
+}
+
+impl AnswerClaim {
+    /// Atomically claim `run` for the thread answer at `answer_seq`. `None`
+    /// when the run is no longer parked or another answer already holds it,
+    /// so of concurrent replies exactly one resumes the run.
+    pub(crate) fn take(state: &AppState, run: &RoomAgentRun, answer_seq: u64) -> Option<Self> {
+        match with_rooms(state, |store| {
+            store.claim_parked_room_agent_run(&run.run_id, answer_seq, Utc::now())
+        }) {
+            Ok(Some(_)) => Some(Self {
+                state: state.clone(),
+                run: run.clone(),
+                answer_seq,
+                settled: false,
+            }),
+            Ok(None) => None,
+            Err(e) => {
+                tracing::warn!(room = %run.room_id, %e, "room agent run claim failed");
+                None
+            }
+        }
+    }
+
+    /// Settle the claim. `resumed` (the successor turn was admitted) closes
+    /// the run `Done`; otherwise the claim is released and the run stays
+    /// parked with the answer still in its thread.
+    pub(crate) fn settle(mut self, resumed: bool) {
+        self.settled = true;
+        let (run_id, answer_seq) = (self.run.run_id.clone(), self.answer_seq);
+        self.finish(|store| {
+            store.settle_room_agent_run_answer(&run_id, answer_seq, resumed, Utc::now())
+        });
+    }
+
+    fn finish(
+        &self,
+        settle: impl FnOnce(
+            &mut ocean_store::SqliteRoomStore,
+        ) -> Result<Option<RoomAgentRun>, ocean_store::RoomStoreError>,
+    ) {
+        match with_rooms(&self.state, settle) {
+            Ok(Some(_)) => publish_room_access_wake(&self.state, &self.run.room_id),
+            Ok(None) => {}
+            Err(e) => tracing::warn!(room = %self.run.room_id, %e, "room agent run settle failed"),
         }
     }
 }
 
-/// Settle a claim made by [`claim_answer`]. `resumed` (the successor turn was
-/// admitted) closes the run `Done`; otherwise the claim is released and the
-/// run stays parked with the answer still in its thread.
-pub(crate) fn settle_answer(state: &AppState, run: &RoomAgentRun, answer_seq: u64, resumed: bool) {
-    match with_rooms(state, |store| {
-        store.settle_room_agent_run_answer(&run.run_id, answer_seq, resumed, Utc::now())
-    }) {
-        Ok(Some(_)) => publish_room_access_wake(state, &run.room_id),
-        Ok(None) => {}
-        Err(e) => tracing::warn!(room = %run.room_id, %e, "room agent run settle failed"),
+impl Drop for AnswerClaim {
+    fn drop(&mut self) {
+        if self.settled {
+            return;
+        }
+        let (run_id, answer_seq) = (self.run.run_id.clone(), self.answer_seq);
+        self.finish(|store| {
+            store.settle_room_agent_run_answer_from_evidence(&run_id, answer_seq, Utc::now())
+        });
     }
 }
 

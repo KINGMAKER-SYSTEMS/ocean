@@ -6143,6 +6143,41 @@ impl SqliteRoomStore {
         })
     }
 
+    /// Settle an answer claim whose holder can no longer report the outcome
+    /// (its request future was dropped, or the daemon restarted), from durable
+    /// evidence only: a run of the same room and agent triggered by that answer
+    /// is its successor and closes the claimed run `Done`; with none, the claim
+    /// is released and the run stays parked for the next reply. Nothing is
+    /// replayed. Same compare-and-swap as [`Self::settle_room_agent_run_answer`].
+    pub fn settle_room_agent_run_answer_from_evidence(
+        &mut self,
+        run_id: &str,
+        answer_seq: u64,
+        now: DateTime<Utc>,
+    ) -> Result<Option<RoomAgentRun>> {
+        let Some(run) = self.room_agent_run(run_id)? else {
+            return Ok(None);
+        };
+        let resumed = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT body FROM room_agent_runs WHERE room_id = ?1 AND run_id <> ?2")?;
+            let rows = stmt.query_map(params![run.room_id.as_str(), run_id], |r| {
+                r.get::<_, String>(0)
+            })?;
+            let mut resumed = false;
+            for row in rows {
+                let other = decode_agent_run(&row?)?;
+                if other.agent_id == run.agent_id && other.trigger_seq == answer_seq {
+                    resumed = true;
+                    break;
+                }
+            }
+            resumed
+        };
+        self.settle_room_agent_run_answer(run_id, answer_seq, resumed, now)
+    }
+
     /// One agent's per-room settings; default (empty) when never set.
     pub fn room_agent_settings(&self, key: &RoomKey, agent_id: &str) -> Result<RoomAgentSettings> {
         if !self.room_exists(key)? {
@@ -6212,14 +6247,8 @@ impl SqliteRoomStore {
             let Some(answer_seq) = run.answer_seq.filter(|_| run.state.is_parked()) else {
                 continue;
             };
-            let resumed = all.iter().any(|other| {
-                other.run_id != run.run_id
-                    && other.room_id == run.room_id
-                    && other.agent_id == run.agent_id
-                    && other.trigger_seq == answer_seq
-            });
             if let Some(settled) =
-                self.settle_room_agent_run_answer(&run.run_id, answer_seq, resumed, now)?
+                self.settle_room_agent_run_answer_from_evidence(&run.run_id, answer_seq, now)?
             {
                 out.push(settled);
             }

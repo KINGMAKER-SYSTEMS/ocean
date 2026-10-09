@@ -2367,9 +2367,12 @@ pub(super) async fn room_post_message(
             let parked = with_rooms(&state, |store| store.parked_room_agent_runs(&key, root))
                 .unwrap_or_default();
             for run in parked {
-                if !crate::room_agent_runs::claim_answer(&state, &run, msg.seq) {
+                // Held across the admission awaits below: if this request is
+                // dropped mid-way the claim settles on drop, never leaks.
+                let Some(claim) = crate::room_agent_runs::AnswerClaim::take(&state, &run, msg.seq)
+                else {
                     continue;
-                }
+                };
                 let agent_id = run.agent_id.clone();
                 let resumed = if admitted.contains(&agent_id) {
                     true
@@ -2383,7 +2386,7 @@ pub(super) async fn room_post_message(
                     }
                     started
                 };
-                crate::room_agent_runs::settle_answer(&state, &run, msg.seq, resumed);
+                claim.settle(resumed);
             }
         }
     }
@@ -9508,6 +9511,128 @@ env = { FIXTURE = "1" }
                 .len(),
             2
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn p4_answer_claim_settles_when_the_posting_request_is_dropped() {
+        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _env = TestEnvRestore::capture(&[
+            "OCEAN_AUTH_FILE",
+            "OCEAN_CODEX_AUTH_FILE",
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+            "OCEAN_AGENTS_DIR",
+        ]);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state = crate::tests::isolated_room_fixture_state(&tmp);
+        let agents_root = tmp.path().join("agents");
+        write_agent_fixture(&agents_root, "asker", "model = \"fake-ok\"\n", None);
+        std::env::set_var("OCEAN_AGENTS_DIR", &agents_root);
+        let key = RoomKey::new("p4-answer-drop");
+        create_mention_room(&state, &key);
+        join_human(&state, &key);
+        let (status, _) = room_join(
+            State(state.clone()),
+            Path(key.as_str().to_string()),
+            Json(RoomJoinRequest {
+                id: "asker".into(),
+                display_name: "Asker".into(),
+                kind: RoomParticipantKind::Agent,
+                owner_id: Some("human".into()),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let generation = authorize_room_agent_fixture(
+            &state,
+            &key,
+            "asker",
+            ActivationPolicy::TaskAndThread,
+            ContextPolicy::InvocationOnly,
+        );
+        let root = append_room_message(
+            &state,
+            &key,
+            "human",
+            RoomParticipantKind::Human,
+            RoomMessageKind::Message,
+            "paint the shed",
+        )
+        .unwrap()
+        .seq;
+        let mut tracker = crate::room_agent_runs::RunTracker::start(
+            state.clone(),
+            key.clone(),
+            "asker",
+            authorized_room_agent_session_id(&key, "asker", generation),
+            root,
+            root,
+            tmp.path().display().to_string(),
+        );
+        tracker.awaiting_reply("Which colour?", None);
+        drop(tracker);
+        let parked_id = with_rooms(&state, |store| store.parked_room_agent_runs(&key, root))
+            .unwrap()
+            .pop()
+            .expect("parked run")
+            .run_id;
+        let run = |id: &str| {
+            with_rooms(&state, |store| store.room_agent_run(id))
+                .unwrap()
+                .unwrap()
+        };
+        let reply = |body: &str| {
+            room_post_message(
+                State(state.clone()),
+                Path(key.as_str().to_string()),
+                Json(RoomMessageRequest {
+                    author_id: String::new(),
+                    author_kind: RoomParticipantKind::Human,
+                    body: body.into(),
+                    thread_parent_seq: Some(root),
+                }),
+            )
+        };
+
+        // Hold the request registry so the successor's registration waits:
+        // the handler is then suspended after the claim, before the settle.
+        let registry = state.requests.write().await;
+        let mut post = Box::pin(reply("blue"));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), post.as_mut())
+                .await
+                .is_err(),
+            "the reply is suspended inside the successor's admission"
+        );
+        assert!(
+            run(&parked_id).answer_seq.is_some(),
+            "suspended after the answer claimed the run"
+        );
+        // The client disconnects: the handler future is dropped mid-way.
+        drop(post);
+        drop(registry);
+        let released = run(&parked_id);
+        assert!(released.state.is_parked(), "{released:?}");
+        assert_eq!(released.answer_seq, None, "the dropped claim is released");
+        assert_eq!(
+            with_rooms(&state, |store| store.room_agent_runs(&key, 10))
+                .unwrap()
+                .len(),
+            1,
+            "no successor was started"
+        );
+
+        // The run is claimable again: the next answer resumes it.
+        let (status, body) = reply("blue, again").await;
+        assert_eq!(status, StatusCode::CREATED);
+        let answer_seq = body.0["message"]["seq"].as_u64().unwrap();
+        let closed = run(&parked_id);
+        assert_eq!(closed.state, ocean_core::RoomAgentRunState::Done);
+        assert_eq!(closed.answer_seq, Some(answer_seq));
+        let runs = wait_for_runs(&state, &key, 2).await;
+        assert!(runs.iter().any(|r| r.trigger_seq == answer_seq));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
