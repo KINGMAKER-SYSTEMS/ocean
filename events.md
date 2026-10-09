@@ -1087,3 +1087,13 @@ Ported the Rooms team-platform P0/P1 shell onto public main: the spec amendment 
 
 Validation: in apps/ocean-surface, `cargo fmt --all -- --check`, `cargo test -p ocean-surface-ui` (847 unit plus integration suites), WASM clippy with warnings denied, WASM check, WASM test compilation, `cargo check -p ocean-surface-proxy`, and `git diff --check` pass. No live browser or desktop run.
 _________________________________________________________________________________
+time: [22:43] [08-10-26]
+agent: [claude] [claude code]
+worktree: [port/rooms-identity-cards-agents] [/Users/risingtidesdev/dev/port-rooms]
+type: [feature-request]
+area: [frontend] [backend] [testing]
+
+Ported Rooms P2 through P4 on top of the shell port. P2 gives each daemon one persisted owner identity (GET/PUT /v1/me, proxied for the PWA); local human joins and posts are authored as that owner whatever id the client claims, and Surface renders real names and initials from the roster or federated member projection instead of minting a browser identity. P3 adds live agent work cards (GET /v1/rooms/persistent/{key}/runs plus room_agent_run SSE frames, interrupted on restart). P4 lets room agents post progress and ask questions through two reserved room tools, with operator-gated run permission and per-room agent settings routes. Reconciled against public main's participant retirement and room inspect routes (import lists, operator guide, route baseline now 125), the endpoint_ready gate on the Rooms workspace, and one retirement test that claimed a retired human id: it now seeds the daemon owner as the retired placeholder, which still gets 409 on join and 403 on post.
+
+Validation: in platform/ocean-os, `cargo fmt --all -- --check`, `cargo test` for ocean-core (63), ocean-store (282), ocean-agent (269) and ocean-daemon (918 passed, 2 failed: the alias-envelope fixtures that already fail on main and are fixed by open #58), `cargo check --workspace --tests`, and docs-check pass. In apps/ocean-surface, all six Surface gates plus proxy tests pass (857 unit tests). No live daemon, browser or desktop run.
+_________________________________________________________________________________
