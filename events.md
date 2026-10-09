@@ -1077,3 +1077,13 @@ ChatGPT sign-in: gpt-6.1-sol, glm-5.3 and deepseek-v4-pro each ran a bash tool
 call and answered; session model = requested, no reroute. ocean-protocol codex
 tests 36/36, ocean-providers 67/67.
 _________________________________________________________________________________
+time: [22:24] [08-10-26]
+agent: [claude] [claude code]
+worktree: [port/rooms-shell] [/Users/risingtidesdev/dev/port-rooms]
+type: [feature-request]
+area: [frontend] [backend] [testing]
+
+Ported the Rooms team-platform P0/P1 shell onto public main: the spec amendment (each coworker owns their daemon, shared Rooms federate), one full-bleed shell on every host with the Dynamic Island as the Sessions entry and WorkspacePane as the only Files/Repo/Browser surface, and the retired web-only deck and Sessions button. Native Tauri keeps Cmd/Ctrl+P for Sessions while web/PWA leaves it to browser Print. Reconciled against public main's newer token-footprint import, compact model-control selectors, the sessions_chrome.rs test rename, and its earlier removal of the unused Rooms search helpers (so the helper-removal port is an empty commit). The P1 host-gating test now skips the documented shortcut seam, which the original Print fix tripped.
+
+Validation: in apps/ocean-surface, `cargo fmt --all -- --check`, `cargo test -p ocean-surface-ui` (847 unit plus integration suites), WASM clippy with warnings denied, WASM check, WASM test compilation, `cargo check -p ocean-surface-proxy`, and `git diff --check` pass. No live browser or desktop run.
+_________________________________________________________________________________
