@@ -1142,6 +1142,11 @@ pub struct RoomAgentRun {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoomRunPermission {
     pub permission_id: String,
+    /// Tool name of the pending call. A room decision names it back with the
+    /// `permission_id`, so a stale or retried decision cannot approve a later,
+    /// different request.
+    #[serde(default)]
+    pub tool: String,
     /// Short, path-relative description of the tool call awaiting approval.
     pub tool_label: String,
 }

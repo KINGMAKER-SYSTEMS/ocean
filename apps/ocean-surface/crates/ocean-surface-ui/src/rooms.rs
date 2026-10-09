@@ -2059,6 +2059,9 @@ pub struct RoomAgentRun {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct RoomRunPermission {
     pub permission_id: String,
+    /// Tool name of the pending call; the decision names it back.
+    #[serde(default)]
+    pub tool: String,
     pub tool_label: String,
 }
 
@@ -2084,12 +2087,27 @@ struct RoomErrorEnvelope {
 
 const UNREACHABLE: &str = "Ocean could not reach the room service.";
 
+/// The decision body for one pending permission. It names the exact request
+/// the owner saw (`permission_id` + `tool`), so the daemon refuses it with 409
+/// once that request is stale instead of applying it to a later one.
+pub fn run_permission_body(permission: &RoomRunPermission, allow: bool) -> String {
+    let mut body = serde_json::json!({
+        "permission_id": permission.permission_id,
+        "decision": if allow { "allow" } else { "deny" },
+    });
+    if !permission.tool.is_empty() {
+        body["tool"] = serde_json::Value::String(permission.tool.clone());
+    }
+    body.to_string()
+}
+
 /// Owner approve/deny for a run's pending tool permission. The card updates
 /// from the next `room_agent_run` frame; nothing is applied optimistically.
 pub async fn decide_run_permission(
     base: &str,
     key: &str,
     run_id: &str,
+    permission: &RoomRunPermission,
     allow: bool,
 ) -> Result<(), String> {
     let url = format!(
@@ -2097,14 +2115,9 @@ pub async fn decide_run_permission(
         encode(key),
         encode(run_id)
     );
-    let body = if allow {
-        r#"{"decision":"allow"}"#
-    } else {
-        r#"{"decision":"deny"}"#
-    };
     let request = Request::post(&url)
         .header("content-type", "application/json")
-        .body(body)
+        .body(run_permission_body(permission, allow))
         .map_err(|_| UNREACHABLE.to_string())?;
     match request.send().await {
         Ok(r) if r.ok() => Ok(()),
@@ -2862,6 +2875,39 @@ pub(crate) fn livekit_token_path_for_room(key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_permission_body_names_the_request_the_owner_saw() {
+        let permission = RoomRunPermission {
+            permission_id: "7c1d2f9e-1111-4222-8333-944445555666".into(),
+            tool: "bash".into(),
+            tool_label: "bash cargo test".into(),
+        };
+        let allow: serde_json::Value =
+            serde_json::from_str(&run_permission_body(&permission, true)).unwrap();
+        assert_eq!(
+            allow,
+            serde_json::json!({
+                "permission_id": "7c1d2f9e-1111-4222-8333-944445555666",
+                "tool": "bash",
+                "decision": "allow",
+            })
+        );
+        let deny: serde_json::Value =
+            serde_json::from_str(&run_permission_body(&permission, false)).unwrap();
+        assert_eq!(deny["decision"], "deny");
+        assert_eq!(deny["permission_id"], permission.permission_id.as_str());
+        // A card from an older daemon carries no tool name; the id still binds.
+        let legacy: RoomRunPermission = serde_json::from_value(serde_json::json!({
+            "permission_id": "p1",
+            "tool_label": "write a.rs",
+        }))
+        .unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(&run_permission_body(&legacy, true)).unwrap();
+        assert_eq!(body["permission_id"], "p1");
+        assert!(body.get("tool").is_none());
+    }
 
     #[test]
     fn redeem_response_uses_daemon_authoritative_room_key() {

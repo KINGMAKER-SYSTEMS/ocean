@@ -128,6 +128,7 @@ impl RunTracker {
         }
         self.run.pending_permission = Some(RoomRunPermission {
             permission_id,
+            tool: tool.to_string(),
             tool_label: tool_label(tool, args, &self.cwd),
         });
         self.run.state = RoomAgentRunState::AwaitingPermission;

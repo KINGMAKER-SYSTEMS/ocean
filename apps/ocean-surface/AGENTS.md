@@ -380,8 +380,11 @@ Web surface session UI:
   tokens (`styles/rooms-cards.css`).
 - In-room approvals (P4): a card in `awaiting_permission` with a
   `pending_permission` shows the tool label plus Approve/Deny icon buttons,
-  which call `POST /v1/rooms/persistent/{key}/runs/{run_id}/permission`. Never
-  apply a decision optimistically; the next `room_agent_run` frame clears it.
+  which call `POST /v1/rooms/persistent/{key}/runs/{run_id}/permission` with
+  the rendered request's `permission_id` and `tool` (`run_permission_body`), so
+  a stale click is a daemon 409 ("Already decided."), never a decision on a
+  later request. Never apply a decision optimistically; the next
+  `room_agent_run` frame clears it.
   Permission/settings mutations retain daemon header-only Room operator authority;
   the ordinary proxy supplies no operator key and returns an explicit authority error.
 - The room header has exactly one primary action (Join when not joined) and

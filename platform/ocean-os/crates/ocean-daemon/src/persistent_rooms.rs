@@ -4379,22 +4379,53 @@ pub(super) async fn room_agent_runs_list(
     }
 }
 
+/// Body for `POST /v1/rooms/persistent/{key}/runs/{run_id}/permission`. The
+/// decision is bound to the exact pending request the owner saw: its
+/// `permission_id` (required, like the body of `/v1/permissions/{id}/decision`)
+/// and, when the client has it, the pending `tool` name.
+#[derive(Debug, Deserialize)]
+pub(super) struct RoomRunPermissionDecisionBody {
+    pub(super) permission_id: String,
+    #[serde(default)]
+    pub(super) tool: Option<String>,
+    #[serde(flatten)]
+    pub(super) decision: PermissionDecisionBody,
+}
+
+fn stale_permission(error: &'static str) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::CONFLICT,
+        Json(json!({ "ok": false, "error": error })),
+    )
+}
+
 /// `POST /v1/rooms/persistent/{key}/runs/{run_id}/permission` — the owner's
 /// in-room approve/deny for a run's pending tool permission (team-platform
-/// P4). The existing header-only Room operator authorizes the decision;
-/// the run's daemon-held token then binds it to the pending waiter
-/// through the same authority as `/v1/permissions/{id}/decision`.
+/// P4). The existing header-only Room operator authorizes the decision; the
+/// body names the exact pending request (`permission_id`, optional `tool`).
+/// Anything but the run's current pending request (stale, already decided,
+/// another tool) is a 409 that leaves every waiter untouched, so a retried or
+/// double-clicked Allow can never approve a later request and AllowSession only
+/// applies to the request the owner saw. The run's daemon-held token then binds
+/// the decision to that waiter through the same authority as
+/// `/v1/permissions/{id}/decision`.
 pub(super) async fn room_agent_run_permission(
     State(state): State<AppState>,
     Path((key, run_id)): Path<(String, String)>,
     headers: HeaderMap,
-    body: Result<Json<PermissionDecisionBody>, JsonRejection>,
+    body: Result<Json<RoomRunPermissionDecisionBody>, JsonRejection>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     if let Err(error) = room_agent_authority::operator(&state, &headers) {
         return error.response();
     }
 
-    let Ok(Json(decision)) = body else {
+    let Ok(Json(body)) = body else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": "invalid_request" })),
+        );
+    };
+    let Ok(permission_id) = body.permission_id.trim().parse::<PermissionId>() else {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "ok": false, "error": "invalid_request" })),
@@ -4411,21 +4442,36 @@ pub(super) async fn room_agent_run_permission(
         }
         Err(e) => return room_store_error_response(e),
     };
-    let pending = run
-        .pending_permission
-        .as_ref()
-        .and_then(|p| p.permission_id.parse::<PermissionId>().ok());
-    let (Some(permission_id), Some(token)) = (
-        pending,
-        crate::room_agent_runs::run_decision_token(&run.run_id),
-    ) else {
-        return (
-            StatusCode::CONFLICT,
-            Json(json!({ "ok": false, "error": "no_pending_permission" })),
-        );
+    let Some(pending) = run.pending_permission.as_ref() else {
+        return stale_permission("no_pending_permission");
     };
+    if pending.permission_id.parse::<PermissionId>().ok() != Some(permission_id) {
+        return stale_permission("stale_permission");
+    }
+    if body
+        .tool
+        .as_deref()
+        .is_some_and(|tool| tool.trim() != pending.tool)
+    {
+        return stale_permission("permission_tool_mismatch");
+    }
+    let Some(token) = crate::room_agent_runs::run_decision_token(&run.run_id) else {
+        return stale_permission("no_pending_permission");
+    };
+    // The live waiter must be the same call the card projects.
+    match state.permissions.read().await.get(&permission_id) {
+        None => return stale_permission("permission_already_decided"),
+        Some(waiter) if waiter.status.tool != pending.tool => {
+            return stale_permission("permission_tool_mismatch")
+        }
+        Some(_) => {}
+    }
     let (status, resp) =
-        resolve_permission_waiter(&state, permission_id, decision, Some(&token)).await;
+        resolve_permission_waiter(&state, permission_id, body.decision, Some(&token)).await;
+    if status == StatusCode::NOT_FOUND {
+        // Lost a race with another decision or a cancellation.
+        return stale_permission("permission_already_decided");
+    }
     (
         status,
         Json(json!({ "ok": resp.ok, "message": resp.message })),
@@ -8535,7 +8581,11 @@ env = { FIXTURE = "1" }
                 State(state.clone()),
                 path(),
                 headers.clone(),
-                Ok(Json(PermissionDecisionBody::Allow)),
+                Ok(Json(run_decision(
+                PermissionId::new_v4(),
+                None,
+                PermissionDecisionBody::Allow,
+            ))),
             )
             .await;
             assert_eq!(status, expected);
@@ -8548,6 +8598,175 @@ env = { FIXTURE = "1" }
             .await;
             assert_eq!(status, expected);
         }
+    }
+
+    fn run_decision(
+        permission_id: PermissionId,
+        tool: Option<&str>,
+        decision: PermissionDecisionBody,
+    ) -> RoomRunPermissionDecisionBody {
+        RoomRunPermissionDecisionBody {
+            permission_id: permission_id.to_string(),
+            tool: tool.map(str::to_string),
+            decision,
+        }
+    }
+
+    /// A pending waiter bound to `token`, as the policy registers it.
+    async fn register_room_waiter(
+        state: &AppState,
+        tool: &str,
+        token: &str,
+    ) -> (
+        PermissionId,
+        oneshot::Receiver<ocean_runtime::PermissionDecision>,
+    ) {
+        let permission_id = PermissionId::new_v4();
+        let (tx, rx) = oneshot::channel();
+        state.permissions.write().await.insert(
+            permission_id,
+            crate::request_control::PermissionWaiter {
+                status: ocean_core::PermissionStatus {
+                    permission_id,
+                    request_id: Uuid::new_v4(),
+                    session_id: None,
+                    tool: tool.into(),
+                    reason: format!("permission required for {tool}"),
+                    args: json!({}),
+                    created_at: Utc::now(),
+                },
+                sender: Some(tx),
+                decision_token: Some(token.into()),
+            },
+        );
+        (permission_id, rx)
+    }
+
+    fn project_pending(state: &AppState, run: &mut RoomAgentRun, id: PermissionId, tool: &str) {
+        run.state = ocean_core::RoomAgentRunState::AwaitingPermission;
+        run.pending_permission = Some(ocean_core::RoomRunPermission {
+            permission_id: id.to_string(),
+            tool: tool.into(),
+            tool_label: tool.into(),
+        });
+        with_rooms(state, |store| store.put_room_agent_run(run)).unwrap();
+    }
+
+    #[tokio::test]
+    async fn p4_room_permission_decision_is_bound_to_the_exact_pending_request() {
+        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _env = TestEnvRestore::capture(&[
+            "OCEAN_AUTH_FILE",
+            "OCEAN_CODEX_AUTH_FILE",
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let state = crate::tests::isolated_room_fixture_state(&tmp);
+        let key = RoomKey::new("p4-bound-decision");
+        create_mention_room(&state, &key);
+        let mut operator = HeaderMap::new();
+        operator.insert(
+            crate::room_operator::OPERATOR_HEADER,
+            "test-room-operator".parse().unwrap(),
+        );
+        let tracker = crate::room_agent_runs::RunTracker::start(
+            state.clone(),
+            key.clone(),
+            "helper",
+            AgentSessionId::new_v4(),
+            1,
+            1,
+            "/repo".into(),
+        );
+        let token = tracker.mint_decision_token();
+        let mut run = with_rooms(&state, |store| store.room_agent_runs(&key, 10))
+            .unwrap()
+            .pop()
+            .unwrap();
+        let run_id = run.run_id.clone();
+        let decide = |body: RoomRunPermissionDecisionBody| {
+            room_agent_run_permission(
+                State(state.clone()),
+                Path((key.as_str().to_string(), run_id.clone())),
+                operator.clone(),
+                Ok(Json(body)),
+            )
+        };
+
+        // The owner sees the first request: a write.
+        let (first, mut first_rx) = register_room_waiter(&state, "write", &token).await;
+        project_pending(&state, &mut run, first, "write");
+
+        // A decision naming no request does not decode at all.
+        assert!(serde_json::from_value::<RoomRunPermissionDecisionBody>(
+            json!({ "decision": "allow" })
+        )
+        .is_err());
+        // Another id, or the right id with another tool, is refused untouched.
+        for body in [
+            run_decision(PermissionId::new_v4(), None, PermissionDecisionBody::Allow),
+            run_decision(first, Some("bash"), PermissionDecisionBody::Allow),
+        ] {
+            let (status, _) = decide(body).await;
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert!(state.permissions.read().await.contains_key(&first));
+            assert!(first_rx.try_recv().is_err());
+        }
+
+        // That request is cancelled and the turn asks for something else.
+        state.permissions.write().await.remove(&first);
+        let (second, mut second_rx) = register_room_waiter(&state, "bash", &token).await;
+        project_pending(&state, &mut run, second, "bash");
+
+        // A retried Allow (or AllowSession) for the first request must never
+        // approve the second.
+        for decision in [
+            PermissionDecisionBody::Allow,
+            PermissionDecisionBody::AllowSession,
+        ] {
+            let (status, _) = decide(run_decision(first, Some("write"), decision)).await;
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert!(state.permissions.read().await.contains_key(&second));
+            assert!(second_rx.try_recv().is_err());
+        }
+
+        // The decision the owner actually saw resolves exactly that waiter.
+        let (status, _) = decide(run_decision(
+            second,
+            Some("bash"),
+            PermissionDecisionBody::AllowSession,
+        ))
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(matches!(
+            second_rx.try_recv(),
+            Ok(ocean_runtime::PermissionDecision::AllowSession)
+        ));
+        // A double click replays nothing.
+        let (status, _) = decide(run_decision(
+            second,
+            Some("bash"),
+            PermissionDecisionBody::Allow,
+        ))
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+
+        // Without the operator credential nothing is even looked up.
+        let (third, mut third_rx) = register_room_waiter(&state, "bash", &token).await;
+        project_pending(&state, &mut run, third, "bash");
+        let (status, _) = room_agent_run_permission(
+            State(state.clone()),
+            Path((key.as_str().to_string(), run.run_id.clone())),
+            HeaderMap::new(),
+            Ok(Json(run_decision(third, Some("bash"), PermissionDecisionBody::Allow))),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(third_rx.try_recv().is_err());
+        assert!(state.permissions.read().await.contains_key(&third));
     }
 
     #[tokio::test]
@@ -8789,7 +9008,11 @@ env = { FIXTURE = "1" }
             State(state.clone()),
             Path((key.as_str().to_string(), first.run_id.clone())),
             operator_headers.clone(),
-            Ok(Json(PermissionDecisionBody::Allow)),
+            Ok(Json(run_decision(
+                PermissionId::new_v4(),
+                None,
+                PermissionDecisionBody::Allow,
+            ))),
         )
         .await;
         assert_eq!(status, StatusCode::CONFLICT);
@@ -8797,7 +9020,11 @@ env = { FIXTURE = "1" }
             State(state.clone()),
             Path((key.as_str().to_string(), "no-such-run".into())),
             operator_headers.clone(),
-            Ok(Json(PermissionDecisionBody::Allow)),
+            Ok(Json(run_decision(
+                PermissionId::new_v4(),
+                None,
+                PermissionDecisionBody::Allow,
+            ))),
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
