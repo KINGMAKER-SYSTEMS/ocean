@@ -39,11 +39,13 @@ Capability Matrix). The load-bearing rules:
 - One shell on every host (team-platform amendment P1,
   `docs/specs/2026-10-02-ocean-rooms-team-platform-amendment.md`): full-bleed
   frame, header spanning it, reading surfaces on the `--content-rail` token;
-  the Dynamic Island is the Sessions entry (⌘P) everywhere; `WorkspacePane` is
+  the Dynamic Island is the Sessions entry everywhere; `WorkspacePane` is
   the only Files/Repo/Browser surface, docked at ≥900px and overlaying below
-  (width-driven, never host-driven). `in_tauri` may gate only native titlebar
-  chrome (`is-titlebar` inset, drag region) — never layout, panels, or
-  navigation. Do not reintroduce a web-only deck or per-host panel markup.
+  (width-driven, never host-driven). `in_tauri` may gate native titlebar chrome
+  (`is-titlebar` inset, drag region) and keyboard bindings that conflict with
+  browser commands (Cmd/Ctrl+P must leave web/PWA Print available) — never
+  layout, panels, or navigation. Do not reintroduce a web-only deck or per-host
+  panel markup.
 - Shared-file discipline (`app.rs`): smallest hunks, committed promptly;
   NEVER reference an uncommitted module from a shared file — `mod x;` +
   usage lands only when `x` compiles with passing tests.

@@ -338,6 +338,16 @@ fn should_submit_composer_key(key: &str, shift: bool, is_composing: bool) -> boo
     key == "Enter" && !shift && !is_composing
 }
 
+fn should_handle_sessions_shortcut(
+    in_tauri: bool,
+    command: bool,
+    shift: bool,
+    alt: bool,
+    key: &str,
+) -> bool {
+    in_tauri && command && !shift && !alt && key.eq_ignore_ascii_case("p")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SurfaceVoiceLayout {
     center_stage: bool,
@@ -2162,10 +2172,9 @@ pub fn App() -> impl IntoView {
     });
     on_cleanup(move || _pointer_light.remove());
 
-    // Desktop Island shortcuts. Cmd/Ctrl+P opens the dedicated session
-    // switcher; Cmd/Ctrl+Shift+F opens transcript Recall. Both are Tauri-only,
-    // preserving browser/PWA Print and Find. Cmd/Ctrl+K closes the Island before
-    // PaletteView handles the same event.
+    // Cmd/Ctrl+P opens the dedicated session switcher only on Tauri, preserving
+    // the browser/PWA Print command. Cmd/Ctrl+Shift+F opens transcript Recall;
+    // Cmd/Ctrl+K closes the Island before PaletteView handles the same event.
     let _island_shortcut = window_event_listener(ev::keydown, move |e: ev::KeyboardEvent| {
         if e.is_composing() {
             return;
@@ -2179,7 +2188,8 @@ pub fn App() -> impl IntoView {
         {
             island_mode.set(IslandMode::Closed);
         }
-        if command && !e.shift_key() && !e.alt_key() && e.key().eq_ignore_ascii_case("p") {
+        if should_handle_sessions_shortcut(in_tauri, command, e.shift_key(), e.alt_key(), &e.key())
+        {
             e.prevent_default();
             e.stop_propagation();
             open_island.run(IslandMode::Sessions);
@@ -2478,11 +2488,12 @@ pub fn App() -> impl IntoView {
                         </span>
                     </div>
                 </div>
-                // The Island is the one Sessions entry on every host (⌘P);
-                // the registry `/sessions` command remains the deep-browse
-                // fallback.
+                // The Island is the one Sessions entry on every host; native
+                // Tauri also opens it with ⌘P. `/sessions` remains the
+                // deep-browse fallback.
                 <DynamicIsland
                     daemon=daemon_for_island.get_value()
+                    in_tauri=in_tauri
                     mode=island_mode
                     focus_request=island_focus_request
                     on_open=open_island
@@ -3242,11 +3253,12 @@ mod tests {
         append_dictation, apply_slash_input, competing_reveal_open, composer_height_px,
         composer_overflow_y, council_open_visibility, execute_planner_workflow, first_word,
         initial_planner_context, island_open_visibility, parse_deep_link, planner_candidates,
-        run_slash, selected_planner_context, should_submit_composer_key, slash_takes_arguments,
-        thinking_arg, thinking_usage_hint, token_footprint_chip, token_usage_label, topmost_reveal,
-        window_escape_should_handle, DeepLinkAction, PlannerAction, PlannerContext,
-        PlannerWorkflowFailureStage, PlannerWorkflowOps, PlannerWorkflowRequest, RevealSurface,
-        RevealVisibility, ThinkingArg, COMPOSER_MAX_HEIGHT_PX, COMPOSER_MIN_HEIGHT_PX,
+        run_slash, selected_planner_context, should_handle_sessions_shortcut,
+        should_submit_composer_key, slash_takes_arguments, thinking_arg, thinking_usage_hint,
+        token_footprint_chip, token_usage_label, topmost_reveal, window_escape_should_handle,
+        DeepLinkAction, PlannerAction, PlannerContext, PlannerWorkflowFailureStage,
+        PlannerWorkflowOps, PlannerWorkflowRequest, RevealSurface, RevealVisibility, ThinkingArg,
+        COMPOSER_MAX_HEIGHT_PX, COMPOSER_MIN_HEIGHT_PX,
     };
     use crate::daemon::{Daemon, ProjectInfo, TokenStats, WorktreeInfo};
     use crate::palette::{Command, CommandRegistry, CommandScope};
@@ -4023,6 +4035,25 @@ mod tests {
         assert!(!should_submit_composer_key("Enter", true, false));
         assert!(!should_submit_composer_key("Enter", false, true));
         assert!(!should_submit_composer_key("a", false, false));
+    }
+
+    #[test]
+    fn sessions_shortcut_keeps_browser_print_available() {
+        assert!(!should_handle_sessions_shortcut(
+            false, true, false, false, "p"
+        ));
+        assert!(should_handle_sessions_shortcut(
+            true, true, false, false, "P"
+        ));
+        assert!(!should_handle_sessions_shortcut(
+            true, false, false, false, "p"
+        ));
+        assert!(!should_handle_sessions_shortcut(
+            true, true, true, false, "p"
+        ));
+        assert!(!should_handle_sessions_shortcut(
+            true, true, false, true, "p"
+        ));
     }
 
     #[test]

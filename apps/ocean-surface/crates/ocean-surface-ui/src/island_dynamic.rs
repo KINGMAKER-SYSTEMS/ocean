@@ -355,6 +355,7 @@ fn AgentStage(
 #[component]
 pub fn DynamicIsland(
     daemon: Daemon,
+    in_tauri: bool,
     mode: RwSignal<IslandMode>,
     focus_request: RwSignal<u64>,
     on_open: Callback<IslandMode>,
@@ -750,7 +751,9 @@ pub fn DynamicIsland(
                                     <span class="island-stage__eyebrow">"Sessions"</span>
                                     <strong>"Switch focus"</strong>
                                 </div>
-                                <span class="island-stage__hint">"⌘P"</span>
+                                <Show when=move || in_tauri>
+                                    <span class="island-stage__hint">"⌘P"</span>
+                                </Show>
                             </header>
                             <div class="island-search">
                                 <input

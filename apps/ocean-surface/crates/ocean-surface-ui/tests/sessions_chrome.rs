@@ -80,9 +80,35 @@ fn island_mounts_in_header_on_every_host() {
     );
 }
 
+/// `app.rs` without the body of `should_handle_sessions_shortcut`: the one
+/// documented keyboard exception (native Cmd/Ctrl+P, so web/PWA keeps browser
+/// Print) is allowed to read `in_tauri`.
+fn app_rs_without_shortcut_seam() -> String {
+    let src = app_rs();
+    let Some(at) = src.find("fn should_handle_sessions_shortcut") else {
+        return src;
+    };
+    let open = at + src[at..].find('{').expect("shortcut helper has a body");
+    let mut depth = 0usize;
+    for (i, ch) in src[open..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    let close = open + i + 1;
+                    return format!("{}{}", &src[..at], &src[close..]);
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("unbalanced braces in should_handle_sessions_shortcut");
+}
+
 #[test]
 fn host_detection_never_gates_layout_or_panels() {
-    let src = app_rs();
+    let src = app_rs_without_shortcut_seam();
     for forbidden in ["in_tauri &&", "&& in_tauri", "!in_tauri", "DeckPanel"] {
         assert!(
             !src.contains(forbidden),

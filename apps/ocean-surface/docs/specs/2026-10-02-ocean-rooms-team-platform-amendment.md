@@ -47,9 +47,9 @@ Both hosts already load one bundle and one stylesheet set. Divergence comes from
 Contract:
 
 - **One shell geometry.** The shell is full-bleed on both hosts and the header spans it. Reading surfaces (transcript, permissions, composer) ride one centered `--content-rail` (tokens.css; replaces `--shell-max`). Tauri's only geometric difference is `--titlebar-inset` padding on the header.
-- **One Sessions entry point.** The header Dynamic Island is the Sessions entry on every host (⌘P; ⌘⇧F Recall). The web-only "Sessions" text button is removed; the `/sessions` registry command remains the deep-browse fallback.
+- **One Sessions entry point.** The header Dynamic Island is the Sessions entry on every host. Native Tauri opens its Sessions stage with Cmd/Ctrl+P; web/PWA leaves Cmd/Ctrl+P to browser Print and opens Sessions by selecting the Island. The native-only shortcut hint is hidden on web. The web-only "Sessions" text button is removed; the `/sessions` registry command remains the deep-browse fallback.
 - **One panel system.** Files, Repo, and Browser render only through `WorkspacePane` on every host. The web deck rail, its Files panel, and the action-log Browser cockpit are retired; the pane's live screencast is the Browser surface everywhere. Posture is width-driven (docked split ≥900px, overlay below; default open only when the viewport can dock it), never host-driven.
-- **Tauri-only chrome** is limited to the traffic-light inset and the drag region. Every other host difference is a capability mounted through `host.rs` (native folder pick, path watch, daemon lifecycle), absent rather than erroring off-host.
+- **Tauri-only chrome** is limited to the traffic-light inset and the drag region. Cmd/Ctrl+P is also native-only because the browser owns Print; this must not split the shared Sessions entry point. Every other host difference is a capability mounted through `host.rs` (native folder pick, path watch, daemon lifecycle), absent rather than erroring off-host.
 
 Gate P1: web (`run-surface.sh`) and Tauri (`run-tauri.sh`) screenshots at the same window width read as the same product on the Rooms and session views.
 
