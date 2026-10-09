@@ -6014,6 +6014,57 @@ impl SqliteRoomStore {
         Ok(())
     }
 
+    /// Write the running turn's own projection of its run (team-platform P3)
+    /// without regressing what other writers own. Under one immediate
+    /// transaction: a missing row is inserted; a stored terminal run (closed
+    /// `Done` by an answer settle, or failed by restart recovery) is never
+    /// rewritten; otherwise the turn's fields replace the row but the answer
+    /// claim (`answer_seq`) is kept from the stored row, because only
+    /// [`Self::claim_parked_room_agent_run`] and
+    /// [`Self::settle_room_agent_run_answer`] own it. Returns the stored row
+    /// after the call and whether this write landed.
+    pub fn put_room_agent_run_from_turn(
+        &mut self,
+        run: &RoomAgentRun,
+    ) -> Result<(RoomAgentRun, bool)> {
+        if !self.room_exists(&run.room_id)? {
+            return Err(RoomStoreError::UnknownRoom(run.room_id.clone()));
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let stored: Option<String> = tx
+            .query_row(
+                "SELECT body FROM room_agent_runs WHERE run_id = ?1",
+                params![run.run_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let mut merged = run.clone();
+        if let Some(stored) = stored {
+            let stored = decode_agent_run(&stored)?;
+            if stored.state.is_terminal() {
+                return Ok((stored, false));
+            }
+            merged.answer_seq = stored.answer_seq;
+        }
+        let body = serde_json::to_string(&merged)
+            .map_err(|e| RoomStoreError::Encode(format!("agent run: {e}")))?;
+        tx.execute(
+            "INSERT INTO room_agent_runs (run_id, room_id, started_at, body)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (run_id) DO UPDATE SET body = excluded.body",
+            params![
+                merged.run_id,
+                merged.room_id.as_str(),
+                merged.started_at.to_rfc3339(),
+                body
+            ],
+        )?;
+        tx.commit()?;
+        Ok((merged, true))
+    }
+
     /// One agent run by id, if it exists.
     pub fn room_agent_run(&self, run_id: &str) -> Result<Option<RoomAgentRun>> {
         let body: Option<String> = self
@@ -15259,6 +15310,52 @@ mod tests {
             pending_permission: None,
             answer_seq: None,
         }
+    }
+
+    #[test]
+    fn turn_writes_keep_the_answer_claim_and_never_reopen_a_closed_run() {
+        let mut s = store();
+        let key = RoomKey::new("turn-writes");
+        s.create(key.clone(), "turn-writes", None, now()).unwrap();
+        // The asking turn's in-memory copy: parked, and it never sees claims.
+        let mut turn = agent_run(&key, "ask", now());
+        turn.state = RoomAgentRunState::AwaitingReply;
+        let (_, landed) = s.put_room_agent_run_from_turn(&turn).unwrap();
+        assert!(landed, "a missing row is inserted");
+        s.claim_parked_room_agent_run("ask", 10, now())
+            .unwrap()
+            .unwrap();
+
+        // A late progress line from the asking turn keeps the claim.
+        turn.summary = Some("still working".into());
+        let (stored, landed) = s.put_room_agent_run_from_turn(&turn).unwrap();
+        assert!(landed);
+        assert_eq!(stored.answer_seq, Some(10));
+        assert_eq!(stored.summary.as_deref(), Some("still working"));
+        assert!(
+            s.claim_parked_room_agent_run("ask", 11, now())
+                .unwrap()
+                .is_none(),
+            "a second answer cannot claim the run"
+        );
+
+        // Once settled Done, a late turn write cannot rewrite or reopen it.
+        s.settle_room_agent_run_answer("ask", 10, true, now())
+            .unwrap()
+            .unwrap();
+        turn.state = RoomAgentRunState::Failed {
+            reason: "turn_failed".into(),
+        };
+        let (stored, landed) = s.put_room_agent_run_from_turn(&turn).unwrap();
+        assert!(!landed);
+        assert_eq!(stored.state, RoomAgentRunState::Done);
+        turn.state = RoomAgentRunState::AwaitingReply;
+        assert!(!s.put_room_agent_run_from_turn(&turn).unwrap().1);
+        assert!(s.parked_room_agent_runs(&key, 1).unwrap().is_empty());
+        assert!(s
+            .claim_parked_room_agent_run("ask", 12, now())
+            .unwrap()
+            .is_none());
     }
 
     #[test]

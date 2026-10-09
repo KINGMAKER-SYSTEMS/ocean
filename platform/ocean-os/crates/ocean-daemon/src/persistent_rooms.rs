@@ -9802,6 +9802,60 @@ env = { FIXTURE = "1" }
         assert_eq!(run.tool_count, 1);
     }
 
+    #[tokio::test]
+    async fn p4_late_asking_turn_writes_never_reopen_an_answer_claim() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state = crate::tests::isolated_room_fixture_state(&tmp);
+        let key = RoomKey::new("p4-late-turn-write");
+        create_mention_room(&state, &key);
+        let mut tracker = crate::room_agent_runs::RunTracker::start(
+            state.clone(),
+            key.clone(),
+            "asker",
+            AgentSessionId::new_v4(),
+            1,
+            1,
+            "/repo".into(),
+        );
+        tracker.awaiting_reply("Which colour?", Some(2));
+        let run_id = with_rooms(&state, |store| store.parked_room_agent_runs(&key, 1))
+            .unwrap()
+            .pop()
+            .expect("parked run")
+            .run_id;
+        let stored = || {
+            with_rooms(&state, |store| store.room_agent_run(&run_id))
+                .unwrap()
+                .unwrap()
+        };
+        let claim = |seq: u64| {
+            with_rooms(&state, |store| {
+                store.claim_parked_room_agent_run(&run_id, seq, Utc::now())
+            })
+            .unwrap()
+            .is_some()
+        };
+        assert!(claim(3), "the answer claims the parked run");
+
+        // The asking turn reports progress after the answer claimed its run.
+        tracker.posted_update("still looking");
+        assert_eq!(stored().answer_seq, Some(3), "the claim survives");
+        assert_eq!(stored().summary.as_deref(), Some("still looking"));
+        assert!(!claim(4), "a second answer cannot claim the run");
+
+        // The answer's successor closes it; late writes cannot reopen it.
+        with_rooms(&state, |store| {
+            store.settle_room_agent_run_answer(&run_id, 3, true, Utc::now())
+        })
+        .unwrap()
+        .unwrap();
+        tracker.posted_update("late line");
+        tracker.finish_failed("turn_failed");
+        tracker.finish_cancelled();
+        assert_eq!(stored().state, ocean_core::RoomAgentRunState::Done);
+        assert!(!claim(5));
+    }
+
     // ── S2-P1: snapshot access, merged SSE via router, outbox/retry ──────────
 
     use super::super::room_routes;

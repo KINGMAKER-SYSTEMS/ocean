@@ -229,14 +229,25 @@ impl RunTracker {
         self.save();
     }
 
+    /// Persist this turn's projection. The write never regresses state the
+    /// turn does not own: a run another writer already closed stays closed
+    /// (and this copy adopts it, so the turn stops writing), and the answer
+    /// claim is kept from the stored row, so a late progress line or finish
+    /// from the asking turn can never reopen a claimed or settled answer.
     fn save(&mut self) {
         self.run.updated_at = Utc::now();
         let run = self.run.clone();
-        if let Err(e) = with_rooms(&self.state, |store| store.put_room_agent_run(&run)) {
-            tracing::warn!(room = %run.room_id, %e, "room agent run write failed");
-            return;
+        match with_rooms(&self.state, |store| {
+            store.put_room_agent_run_from_turn(&run)
+        }) {
+            Ok((stored, landed)) => {
+                self.run = stored;
+                if landed {
+                    publish_room_access_wake(&self.state, &run.room_id);
+                }
+            }
+            Err(e) => tracing::warn!(room = %run.room_id, %e, "room agent run write failed"),
         }
-        publish_room_access_wake(&self.state, &run.room_id);
     }
 
     /// Move to `next` unless the run is already terminal or unchanged.
