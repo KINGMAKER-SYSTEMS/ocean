@@ -27327,6 +27327,666 @@ prunable gitdir file points to non-existent location
         (status, serde_json::from_slice(&bytes).unwrap())
     }
 
+    // Callers own the environment locks and restore the fixture overrides.
+    #[cfg(unix)]
+    async fn reviewed_digest_fixture(tmp: &tempfile::TempDir) -> (AppState, Router, RoomKey) {
+        let agents = tmp.path().join("agents");
+        write_agent_fixture(
+            &agents,
+            "builder",
+            "description = 'Builder'\n",
+            Some("reviewed v1"),
+        );
+        std::env::set_var("OCEAN_AGENTS_DIR", agents);
+        let state = isolated_room_fixture_state(tmp);
+        let key = RoomKey::new("reviewed-consent");
+        with_rooms(&state, |store| {
+            store.create(key.clone(), "Reviewed Consent", None, Utc::now())?;
+            store.add_participant(
+                &key,
+                RoomParticipant {
+                    id: "human-1".into(),
+                    kind: RoomParticipantKind::Human,
+                    display_name: "Human One".into(),
+                },
+                Utc::now(),
+            )?;
+            Ok::<_, ocean_store::RoomStoreError>(())
+        })
+        .unwrap();
+        let app = room_routes().with_state(state.clone());
+        let (status, _) = operator_room_http_request(
+            app.clone(),
+            axum::http::Method::POST,
+            "/v1/rooms/persistent/reviewed-consent/agents/bootstrap",
+            Some(json!({"owner_member_id":"human-1", "agent_package_id":"builder"})),
+            &[("x-ocean-operator", "test-room-operator")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        (state, app, key)
+    }
+
+    #[cfg(unix)]
+    async fn reviewed_digest_preview(app: Router) -> String {
+        let (status, body) = operator_room_http_request(
+            app,
+            axum::http::Method::GET,
+            "/v1/rooms/persistent/reviewed-consent/agents/preview/builder",
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["owner_eligible"], true);
+        body["definition_digest"].as_str().unwrap().to_string()
+    }
+
+    #[cfg(unix)]
+    fn reviewed_digest_authorize_body(decision: &str) -> serde_json::Value {
+        json!({
+            "agent_member_id":"builder", "agent_package_id":"builder",
+            "owner_member_id":"human-1", "decision_id":decision,
+        })
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn room_reviewed_digest_authorize_refuses_changed_preview_without_side_effects() {
+        let _yolo_guard = yolo_env_guard_async().await;
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _env = TestEnvRestore::capture(&[
+            "OCEAN_AUTH_FILE",
+            "OCEAN_CODEX_AUTH_FILE",
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+            "OCEAN_AGENTS_DIR",
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, app, key) = reviewed_digest_fixture(&tmp).await;
+        let reviewed = reviewed_digest_preview(app.clone()).await;
+        let decision = Uuid::new_v4().to_string();
+        let mut request = reviewed_digest_authorize_body(&decision);
+        request["expected_definition_digest"] = json!(reviewed);
+        let transcript = with_rooms(&state, |store| store.transcript(&key, None)).unwrap();
+        let request_id = RequestId::new_v4();
+        let control = status(request_id, RequestState::Running);
+        let cancel = control.cancel.clone();
+        state.requests.write().await.insert(request_id, control);
+        let requests = requests_snapshot(&state.requests).await;
+        std::fs::write(
+            tmp.path().join("agents/builder/instructions.md"),
+            "changed v2",
+        )
+        .unwrap();
+
+        let (status, body) = operator_room_http_request(
+            app.clone(),
+            axum::http::Method::POST,
+            "/v1/rooms/persistent/reviewed-consent/agents",
+            Some(request.clone()),
+            &[("x-ocean-operator", "test-room-operator")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(
+            body,
+            json!({"ok":false, "error":"definition_digest_mismatch"})
+        );
+        assert!(
+            with_rooms(&state, |store| store.room_agent_binding(&key, "builder"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            with_rooms(&state, |store| store.room_agent_decision(&key, &decision))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            with_rooms(&state, |store| store.transcript(&key, None)).unwrap(),
+            transcript
+        );
+        assert_eq!(requests_snapshot(&state.requests).await, requests);
+        assert!(!cancel.is_cancelled());
+
+        let fresh = reviewed_digest_preview(app.clone()).await;
+        assert_ne!(fresh, reviewed);
+        request["expected_definition_digest"] = json!(fresh);
+        let (status, authorized) = operator_room_http_request(
+            app.clone(),
+            axum::http::Method::POST,
+            "/v1/rooms/persistent/reviewed-consent/agents",
+            Some(request.clone()),
+            &[("x-ocean-operator", "test-room-operator")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(authorized["binding"]["agent_definition_digest"], fresh);
+        assert_eq!(authorized["binding"]["generation"], "1");
+        let after = with_rooms(&state, |store| store.transcript(&key, None)).unwrap();
+        assert_eq!(after.len(), transcript.len() + 1);
+
+        // The precondition is not part of the decision hash: an omitted-field
+        // replay of a guarded decision remains the same idempotent decision.
+        for expected in [Some(json!(fresh)), None] {
+            let mut replay = request.clone();
+            replay
+                .as_object_mut()
+                .unwrap()
+                .remove("expected_definition_digest");
+            if let Some(expected) = expected {
+                replay["expected_definition_digest"] = expected;
+            }
+            let (status, body) = operator_room_http_request(
+                app.clone(),
+                axum::http::Method::POST,
+                "/v1/rooms/persistent/reviewed-consent/agents",
+                Some(replay),
+                &[("x-ocean-operator", "test-room-operator")],
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["created"], false);
+            assert_eq!(body["binding"], authorized["binding"]);
+        }
+        // A supplied stale precondition refuses even an already-used decision.
+        for (mut conflicting, code) in [
+            (request.clone(), "agent_binding_exists"),
+            (request.clone(), "decision_replay_mismatch"),
+            (request.clone(), "definition_digest_mismatch"),
+        ] {
+            match code {
+                "agent_binding_exists" => {
+                    conflicting["decision_id"] = json!(Uuid::new_v4().to_string())
+                }
+                "decision_replay_mismatch" => conflicting["memory_scope"] = json!("room"),
+                _ => conflicting["expected_definition_digest"] = json!(reviewed),
+            }
+            let (status, body) = operator_room_http_request(
+                app.clone(),
+                axum::http::Method::POST,
+                "/v1/rooms/persistent/reviewed-consent/agents",
+                Some(conflicting.clone()),
+                &[("x-ocean-operator", "test-room-operator")],
+            )
+            .await;
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert_eq!(body, json!({"ok":false, "error":code}));
+            if code == "agent_binding_exists" {
+                assert!(with_rooms(&state, |store| store
+                    .room_agent_decision(&key, conflicting["decision_id"].as_str().unwrap()))
+                .unwrap()
+                .is_none());
+            }
+        }
+        assert_eq!(
+            with_rooms(&state, |store| store.transcript(&key, None)).unwrap(),
+            after
+        );
+        assert_eq!(requests_snapshot(&state.requests).await, requests);
+        assert!(!cancel.is_cancelled());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn room_reviewed_digest_reauthorize_preserves_live_generation_until_fresh_consent() {
+        let _yolo_guard = yolo_env_guard_async().await;
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _env = TestEnvRestore::capture(&[
+            "OCEAN_AUTH_FILE",
+            "OCEAN_CODEX_AUTH_FILE",
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+            "OCEAN_AGENTS_DIR",
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, app, key) = reviewed_digest_fixture(&tmp).await;
+        let reviewed = reviewed_digest_preview(app.clone()).await;
+        let initial_decision = Uuid::new_v4().to_string();
+        let (authorization_status, _) = operator_room_http_request(
+            app.clone(),
+            axum::http::Method::POST,
+            "/v1/rooms/persistent/reviewed-consent/agents",
+            Some(reviewed_digest_authorize_body(&initial_decision)),
+            &[("x-ocean-operator", "test-room-operator")],
+        )
+        .await;
+        assert_eq!(authorization_status, StatusCode::CREATED);
+        let binding = with_rooms(&state, |store| store.room_agent_binding(&key, "builder"))
+            .unwrap()
+            .unwrap();
+        let transcript = with_rooms(&state, |store| store.transcript(&key, None)).unwrap();
+        let request_id = RequestId::new_v4();
+        let mut control = status(request_id, RequestState::Running);
+        control.room_agent_authority = Some(request_control::RoomAgentRequestAuthority {
+            room: key.clone(),
+            agent_member_id: "builder".into(),
+            generation: binding.generation,
+            admission_id: Uuid::new_v4().to_string(),
+            decision_id: binding.decision_id.clone(),
+            approved_definition_digest: binding.agent_definition_digest.clone(),
+            session_id: core_sid(persistent_rooms::authorized_room_agent_session_id(
+                &key,
+                "builder",
+                binding.generation,
+            )),
+        });
+        let cancel = control.cancel.clone();
+        state.requests.write().await.insert(request_id, control);
+        let requests = requests_snapshot(&state.requests).await;
+        std::fs::write(
+            tmp.path().join("agents/builder/instructions.md"),
+            "changed v2",
+        )
+        .unwrap();
+        let decision = Uuid::new_v4().to_string();
+        let mut request = json!({"decision_id":decision, "expected_definition_digest":reviewed});
+        let path = "/v1/rooms/persistent/reviewed-consent/agents/builder/reauthorize";
+        let fresh = reviewed_digest_preview(app.clone()).await;
+        assert_ne!(fresh, reviewed);
+        for (body, code) in [
+            (request.clone(), "definition_digest_mismatch"),
+            (
+                json!({"decision_id":initial_decision, "expected_definition_digest":reviewed}),
+                "definition_digest_mismatch",
+            ),
+            (
+                json!({"decision_id":initial_decision, "expected_definition_digest":fresh}),
+                "decision_replay_mismatch",
+            ),
+        ] {
+            let (status, body) = operator_room_http_request(
+                app.clone(),
+                axum::http::Method::POST,
+                path,
+                Some(body),
+                &[("x-ocean-operator", "test-room-operator")],
+            )
+            .await;
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert_eq!(body, json!({"ok":false, "error":code}));
+            assert_eq!(
+                with_rooms(&state, |store| store.room_agent_binding(&key, "builder"))
+                    .unwrap()
+                    .unwrap(),
+                binding
+            );
+            assert!(
+                with_rooms(&state, |store| store.room_agent_decision(&key, &decision))
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(
+                with_rooms(&state, |store| store.transcript(&key, None)).unwrap(),
+                transcript
+            );
+            assert_eq!(requests_snapshot(&state.requests).await, requests);
+            assert!(!cancel.is_cancelled());
+        }
+        request["expected_definition_digest"] = json!(fresh);
+        let (status, authorized) = operator_room_http_request(
+            app.clone(),
+            axum::http::Method::POST,
+            path,
+            Some(request.clone()),
+            &[("x-ocean-operator", "test-room-operator")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(authorized["applied"], true);
+        assert_eq!(authorized["previous_definition_digest"], reviewed);
+        assert_eq!(authorized["definition_changed"], true);
+        assert_eq!(authorized["binding"]["agent_definition_digest"], fresh);
+        assert_eq!(authorized["binding"]["generation"], "2");
+        assert!(
+            cancel.is_cancelled(),
+            "successful new generation cancels its predecessor"
+        );
+        assert_eq!(
+            state.requests.read().await[&request_id].status.state,
+            RequestState::Cancelling
+        );
+        let after = with_rooms(&state, |store| store.transcript(&key, None)).unwrap();
+        let (status, replay) = operator_room_http_request(
+            app,
+            axum::http::Method::POST,
+            path,
+            Some(request),
+            &[("x-ocean-operator", "test-room-operator")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(replay["applied"], false);
+        assert_eq!(replay["binding"], authorized["binding"]);
+        assert_eq!(
+            with_rooms(&state, |store| store.transcript(&key, None)).unwrap(),
+            after
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn room_reviewed_digest_legacy_null_exact_strings_and_strict_json() {
+        use http_body_util::BodyExt as _;
+        use tower::ServiceExt as _;
+
+        let _yolo_guard = yolo_env_guard_async().await;
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _env = TestEnvRestore::capture(&[
+            "OCEAN_AUTH_FILE",
+            "OCEAN_CODEX_AUTH_FILE",
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+            "OCEAN_AGENTS_DIR",
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, app, key) = reviewed_digest_fixture(&tmp).await;
+        let digest = reviewed_digest_preview(app.clone()).await;
+        let decision = Uuid::new_v4().to_string();
+        let authorize_path = "/v1/rooms/persistent/reviewed-consent/agents";
+        let reauthorize_path = "/v1/rooms/persistent/reviewed-consent/agents/builder/reauthorize";
+        let baseline = with_rooms(&state, |store| store.transcript(&key, None)).unwrap();
+        for expected in [
+            String::new(),
+            format!(" {digest}"),
+            format!("{digest} "),
+            digest.to_ascii_uppercase(),
+        ] {
+            assert_ne!(expected, digest);
+            let mut body = reviewed_digest_authorize_body(&decision);
+            body["expected_definition_digest"] = json!(expected);
+            let (status, body) = operator_room_http_request(
+                app.clone(),
+                axum::http::Method::POST,
+                authorize_path,
+                Some(body),
+                &[("x-ocean-operator", "test-room-operator")],
+            )
+            .await;
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert_eq!(
+                body,
+                json!({"ok":false, "error":"definition_digest_mismatch"})
+            );
+        }
+        assert!(
+            with_rooms(&state, |store| store.room_agent_decision(&key, &decision))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            with_rooms(&state, |store| store.transcript(&key, None)).unwrap(),
+            baseline
+        );
+
+        let mut legacy = reviewed_digest_authorize_body(&decision);
+        legacy["expected_definition_digest"] = serde_json::Value::Null;
+        let (status, authorized) = operator_room_http_request(
+            app.clone(),
+            axum::http::Method::POST,
+            authorize_path,
+            Some(legacy.clone()),
+            &[("x-ocean-operator", "test-room-operator")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        // Adding the digest to a legacy decision does not change its hash.
+        legacy["expected_definition_digest"] = json!(digest);
+        let (status, replay) = operator_room_http_request(
+            app.clone(),
+            axum::http::Method::POST,
+            authorize_path,
+            Some(legacy),
+            &[("x-ocean-operator", "test-room-operator")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(replay["binding"], authorized["binding"]);
+        for expected in [None, Some(serde_json::Value::Null)] {
+            let mut body = json!({"decision_id":Uuid::new_v4().to_string()});
+            if let Some(expected) = expected {
+                body["expected_definition_digest"] = expected;
+            }
+            let (status, body) = operator_room_http_request(
+                app.clone(),
+                axum::http::Method::POST,
+                reauthorize_path,
+                Some(body),
+                &[("x-ocean-operator", "test-room-operator")],
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["applied"], true);
+        }
+        let binding =
+            with_rooms(&state, |store| store.room_agent_binding(&key, "builder")).unwrap();
+        let transcript = with_rooms(&state, |store| store.transcript(&key, None)).unwrap();
+        let consumed_decision =
+            with_rooms(&state, |store| store.room_agent_decision(&key, &decision)).unwrap();
+        let current = binding.as_ref().unwrap();
+        let request_id = RequestId::new_v4();
+        let mut control = self::status(request_id, RequestState::Running);
+        control.room_agent_authority = Some(request_control::RoomAgentRequestAuthority {
+            room: key.clone(),
+            agent_member_id: "builder".into(),
+            generation: current.generation,
+            admission_id: Uuid::new_v4().to_string(),
+            decision_id: current.decision_id.clone(),
+            approved_definition_digest: current.agent_definition_digest.clone(),
+            session_id: core_sid(persistent_rooms::authorized_room_agent_session_id(
+                &key,
+                "builder",
+                current.generation,
+            )),
+        });
+        let cancel = control.cancel.clone();
+        state.requests.write().await.insert(request_id, control);
+        let requests = requests_snapshot(&state.requests).await;
+        let refused_reauthorization_decision = Uuid::new_v4().to_string();
+        for path in [authorize_path, reauthorize_path] {
+            let malformed_decision = if path == reauthorize_path {
+                refused_reauthorization_decision.clone()
+            } else {
+                Uuid::new_v4().to_string()
+            };
+            let base = if path == authorize_path {
+                reviewed_digest_authorize_body(&malformed_decision)
+            } else {
+                json!({"decision_id":malformed_decision})
+            };
+            // These are full, shape-correct serde positional forms. Without
+            // object-only decoding, authorize replays a valid decision and
+            // reauthorize bumps this live generation and cancels its request.
+            let positional = if path == authorize_path {
+                json!([
+                    "builder",
+                    "builder",
+                    "human-1",
+                    decision,
+                    null,
+                    "explicit_only",
+                    "invocation_only",
+                    "none",
+                    []
+                ])
+            } else {
+                json!([
+                    malformed_decision,
+                    null,
+                    "explicit_only",
+                    "invocation_only",
+                    "none",
+                    []
+                ])
+            };
+            let (status, body) = operator_room_http_request(
+                app.clone(),
+                axum::http::Method::POST,
+                path,
+                Some(positional),
+                &[("x-ocean-operator", "test-room-operator")],
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(body, json!({"ok":false, "error":"invalid_request"}));
+            assert_eq!(
+                with_rooms(&state, |store| store.room_agent_binding(&key, "builder")).unwrap(),
+                binding
+            );
+            assert_eq!(
+                with_rooms(&state, |store| store.room_agent_decision(&key, &decision)).unwrap(),
+                consumed_decision
+            );
+            assert!(with_rooms(&state, |store| store
+                .room_agent_decision(&key, &malformed_decision))
+            .unwrap()
+            .is_none());
+            assert_eq!(
+                with_rooms(&state, |store| store.transcript(&key, None)).unwrap(),
+                transcript
+            );
+            assert_eq!(requests_snapshot(&state.requests).await, requests);
+            assert!(!cancel.is_cancelled());
+            for expected in [json!(1), json!(false), json!([]), json!({})] {
+                let mut body = base.clone();
+                body["expected_definition_digest"] = expected;
+                let (status, body) = operator_room_http_request(
+                    app.clone(),
+                    axum::http::Method::POST,
+                    path,
+                    Some(body),
+                    &[("x-ocean-operator", "test-room-operator")],
+                )
+                .await;
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+                assert_eq!(body, json!({"ok":false, "error":"invalid_request"}));
+            }
+            let mut unknown = base.clone();
+            unknown["unexpected"] = json!(true);
+            for malformed in [unknown, json!(null), json!("not an object")] {
+                let (status, body) = operator_room_http_request(
+                    app.clone(),
+                    axum::http::Method::POST,
+                    path,
+                    Some(malformed),
+                    &[("x-ocean-operator", "test-room-operator")],
+                )
+                .await;
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+                assert_eq!(body, json!({"ok":false, "error":"invalid_request"}));
+            }
+            // Values cannot represent duplicate keys: send the actual strict
+            // JSON body through the registered router instead of a DTO helper.
+            let raw = base.to_string();
+            let raw = format!(
+                "{},\"expected_definition_digest\":null,\"expected_definition_digest\":\"{}\"}}",
+                &raw[..raw.len() - 1],
+                digest
+            );
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method(axum::http::Method::POST)
+                        .uri(path)
+                        .header(axum::http::header::CONTENT_TYPE, "application/json")
+                        .header("x-ocean-operator", "test-room-operator")
+                        .body(axum::body::Body::from(raw))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+                json!({"ok":false, "error":"invalid_request"})
+            );
+            assert!(with_rooms(&state, |store| store
+                .room_agent_decision(&key, &malformed_decision))
+            .unwrap()
+            .is_none());
+        }
+        assert_eq!(
+            with_rooms(&state, |store| store.room_agent_binding(&key, "builder")).unwrap(),
+            binding
+        );
+        assert_eq!(
+            with_rooms(&state, |store| store.transcript(&key, None)).unwrap(),
+            transcript
+        );
+        assert_eq!(requests_snapshot(&state.requests).await, requests);
+        assert!(!cancel.is_cancelled());
+
+        // Equivalent object controls prove the positional refusals are not
+        // owner, package, policy, or decision refusals. Reusing the previously
+        // refused new decision also proves that no array consumed it.
+        let (status, replay) = operator_room_http_request(
+            app.clone(),
+            axum::http::Method::POST,
+            authorize_path,
+            Some(json!({
+                "agent_member_id":"builder", "agent_package_id":"builder",
+                "owner_member_id":"human-1", "decision_id":decision,
+                "expected_definition_digest":null, "activation_policy":"explicit_only",
+                "context_policy":"invocation_only", "memory_scope":"none",
+                "room_capability_grants":[],
+            })),
+            &[("x-ocean-operator", "test-room-operator")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(replay["created"], false);
+        assert_eq!(
+            replay["binding"]["generation"],
+            current.generation.to_string()
+        );
+        assert_eq!(
+            with_rooms(&state, |store| store.transcript(&key, None)).unwrap(),
+            transcript
+        );
+        assert_eq!(requests_snapshot(&state.requests).await, requests);
+        assert!(!cancel.is_cancelled());
+        let (status, applied) = operator_room_http_request(
+            app,
+            axum::http::Method::POST,
+            reauthorize_path,
+            Some(json!({
+                "decision_id":refused_reauthorization_decision,
+                "expected_definition_digest":null, "activation_policy":"explicit_only",
+                "context_policy":"invocation_only", "memory_scope":"none",
+                "room_capability_grants":[],
+            })),
+            &[("x-ocean-operator", "test-room-operator")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(applied["applied"], true);
+        assert_eq!(
+            applied["binding"]["generation"],
+            (current.generation + 1).to_string()
+        );
+        assert!(with_rooms(&state, |store| store
+            .room_agent_decision(&key, &refused_reauthorization_decision))
+        .unwrap()
+        .is_some());
+        assert_eq!(
+            with_rooms(&state, |store| store.transcript(&key, None))
+                .unwrap()
+                .len(),
+            transcript.len() + 1
+        );
+        assert!(cancel.is_cancelled());
+        assert_eq!(
+            state.requests.read().await[&request_id].status.state,
+            RequestState::Cancelling
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn local_room_agent_bootstrap_is_authenticated_previewable_and_non_authorizing() {
         let _yolo_guard = yolo_env_guard_async().await;

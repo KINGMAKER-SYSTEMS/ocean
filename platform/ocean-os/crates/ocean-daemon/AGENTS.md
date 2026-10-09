@@ -275,6 +275,39 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   scheduling, Unknown build execution and CI orchestration. Keep #22/#48 holds;
   automated CI remains only Build Ocean and Build Surface.
 
+### Reviewed package consent manifest (ocean-private #55)
+
+- Base: ocean-private main `a4f24a4145ffeea60bd4fab75c11661fc00f0785`, which
+  precedes this monorepo's publication snapshot; ported here from
+  ocean-private #59. Targets are only `src/room_agent_authority.rs`, registered-route fixtures in
+  `src/main.rs`, and this contract. This additive consent boundary follows #33;
+  it does not complete client onboarding or lift #22/#48 deployment holds.
+- Strict authorize/reauthorize bodies accept optional
+  `expected_definition_digest`; omission and JSON null preserve legacy callers.
+  Both routes require a JSON object through a map-only decoder that passes the
+  original map directly to the strict DTO deserializer. Reject positional arrays
+  and all other non-objects without collapsing duplicate keys into a Value.
+  A supplied string must exactly match the single immutable package capture
+  used for decision hashing and binding persistence. Never trim, reopen, or
+  independently recapture to check it. Refuse mismatches with fixed, content-free
+  `409 definition_digest_mismatch` before decision consumption, binding/audit
+  mutation, or request cancellation; retain existing operator and owner policy.
+- Registered production-route fixtures preview then modify disposable package
+  bytes, proving stale authorize/reauthorize leave bindings, generations,
+  decisions, transcript, requests and cancellation unchanged. Fresh preview
+  succeeds; exact replay, conflicting decisions, legacy omission/null and strict
+  malformed bodies retain their existing behavior. Future reviewed-consent
+  clients must send the digest rather than falling back to legacy submission.
+- Object-only repair (the second ocean-private #59 revision): the same three
+  targets remain owned. Shape-correct positional-array fixtures must refuse with fixed
+  `400 invalid_request`, preserving binding/generation/decision/transcript and
+  a live request's cancellation state. Equivalent object controls must succeed;
+  retain duplicate/unknown rejection and all same-capture/replay invariants.
+- Root runs locked focused/full daemon tests, all-target denied-warning Clippy
+  and workspace test compilation with both auth paths and config/XDG pinned to
+  disposable absolute paths, unchanged HOME. Independent exact-head review is
+  required; no store/schema, client, dependency, route or permission expansion.
+
 ### Rooms persistence migration boundary
 
 - Preserve the accepted store/core foundation and #14–19 repairs. The scoped
@@ -404,6 +437,7 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
 - `cargo test -p ocean-daemon persistent_room_http_ -- --nocapture`
 - `cargo test -p ocean-daemon room_read_cursor_ --locked -- --nocapture`
 - `cargo test -p ocean-daemon room_ -- --nocapture`
+- `cargo test -p ocean-daemon room_reviewed_digest_ --locked -- --nocapture --test-threads=1`
 - `cargo test -p ocean-daemon at_mention_queues_turn_and_posts_reply_back -- --nocapture`
 - `cargo test -p ocean-daemon closed_persistent_room_preserves_audit_http_asymmetry -- --nocapture`
 - `cargo test -p ocean-daemon workspace_policy::tests:: -- --nocapture`

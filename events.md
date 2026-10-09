@@ -1077,3 +1077,13 @@ ChatGPT sign-in: gpt-6.1-sol, glm-5.3 and deepseek-v4-pro each ran a bash tool
 call and answered; session model = requested, no reroute. ocean-protocol codex
 tests 36/36, ocean-providers 67/67.
 _________________________________________________________________________________
+time: [22:20] [08-10-26]
+agent: [claude] [claude code]
+worktree: [port/room-agent-consent] [/Users/risingtidesdev/dev/port-misc]
+type: [refactor]
+area: [backend] [testing]
+
+Ported the daemon half of ocean-private #59 so Room-agent consent can no longer bind a package that changed after it was previewed. The authorize and reauthorize routes accept an optional expected_definition_digest, compared against the same immutable package capture used for decision hashing and the binding; a mismatch returns a fixed 409 definition_digest_mismatch before any decision is consumed, binding or audit row written, or live request cancelled. Omitting it or sending null keeps today's callers working. Both routes now take only JSON objects through a map-only decoder that still hands every original key to the strict body type, so positional arrays are refused with 400 invalid_request while duplicate and unknown fields stay rejected. The source diff applied three-way without conflict; the only adaptation is the ocean-daemon contract text, which names ocean-private #55/#59 instead of private-repo-relative numbers and drops the private frozen-base hash.
+
+Validation: `cargo test -p ocean-daemon room_reviewed_digest_ --locked -- --test-threads=1` (3 passed) on this commit; full gates are recorded with the follow-up #66 port entry.
+_________________________________________________________________________________
