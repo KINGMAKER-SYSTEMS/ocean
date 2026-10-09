@@ -1077,3 +1077,13 @@ ChatGPT sign-in: gpt-6.1-sol, glm-5.3 and deepseek-v4-pro each ran a bash tool
 call and answered; session model = requested, no reroute. ocean-protocol codex
 tests 36/36, ocean-providers 67/67.
 _________________________________________________________________________________
+time: [22:26] [08-10-26]
+agent: [claude] [claude code]
+worktree: [port/rooms-pwa-browser] [/Users/risingtidesdev/dev/port-rooms]
+type: [feature-request]
+area: [frontend] [backend] [testing]
+
+Ported the PWA browser-pane forwarding onto public main. The Surface proxy now relays exactly the daemon's GET /v1/browser/screencast SSE stream and POST /v1/browser/input JSON route behind the existing session cookie, so the WorkspacePane browser works on the PWA origin the way Tauri already reaches the daemon directly. Screencast bytes use the untimed SSE client and the shared no-buffer response; input uses the bounded JSON client. No client cookies, authorization, origin or operator headers are forwarded, and there is no wildcard forwarder. Clean three-way apply; only the contract heading was renamed to cite the private issue.
+
+Validation: in apps/ocean-surface, `cargo fmt --all -- --check`, `cargo test -p ocean-surface-proxy` (32 passed, including loopback fixtures for refusal without a session, input passthrough without credential headers, and a screencast frame received before upstream EOF), proxy clippy with warnings denied, `cargo test -p ocean-surface-ui`, WASM clippy with warnings denied, WASM check, WASM test compilation, and `cargo check -p ocean-surface-proxy` pass. No live PWA run.
+_________________________________________________________________________________
