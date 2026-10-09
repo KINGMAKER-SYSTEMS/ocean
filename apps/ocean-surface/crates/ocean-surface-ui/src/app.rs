@@ -10,10 +10,6 @@ use wasm_bindgen_futures::JsFuture;
 
 use crate::components::{PermissionPrompts, PinnedRail};
 use crate::daemon::{daemon_url_from_env, Daemon, ProjectInfo, TokenStats, TurnImage};
-use crate::deck::browser::BrowserCockpit;
-use crate::deck::files::FilesPanel;
-use crate::deck::repo::RepoPanel;
-use crate::deck::DeckPanel;
 use crate::host::DaemonStatus;
 use crate::island_dynamic::{DynamicIsland, IslandMode};
 use crate::model::{Block, Role, Turn};
@@ -355,7 +351,6 @@ struct RevealVisibility {
     rooms: bool,
     sessions: bool,
     floor: bool,
-    deck: bool,
     phone_dialer: bool,
     livekit: bool,
 }
@@ -367,7 +362,6 @@ enum RevealSurface {
     Rooms,
     Sessions,
     Floor,
-    Deck,
     PhoneDialer,
     LiveKit,
 }
@@ -380,8 +374,8 @@ fn council_open_visibility() -> RevealVisibility {
     }
 }
 
-/// Island is the desktop workspace surface: opening it closes every competing
-/// reveal (Council, Rooms, Sessions, Floor, deck, phone, LiveKit). The reverse
+/// Island is the header's session surface on every host: opening it closes
+/// every competing reveal (Council, Rooms, Sessions, Floor, phone, LiveKit). The reverse
 /// is also true — every peer reveal open closes the Island via the app-level
 /// Effect guard.
 fn island_open_visibility() -> RevealVisibility {
@@ -400,7 +394,6 @@ fn competing_reveal_open(visibility: RevealVisibility) -> bool {
         || visibility.rooms
         || visibility.sessions
         || visibility.floor
-        || visibility.deck
         || visibility.phone_dialer
         || visibility.livekit
 }
@@ -418,8 +411,6 @@ fn topmost_reveal(visibility: RevealVisibility) -> Option<RevealSurface> {
         Some(RevealSurface::Sessions)
     } else if visibility.floor {
         Some(RevealSurface::Floor)
-    } else if visibility.deck {
-        Some(RevealSurface::Deck)
     } else if visibility.phone_dialer {
         Some(RevealSurface::PhoneDialer)
     } else if visibility.livekit {
@@ -1487,33 +1478,14 @@ fn VoicePlannerCard(
     }
 }
 
-/// Producer decision for a preview_file_intent read.
-/// Shared by the production Effect and its unit tests.
-#[derive(Debug, PartialEq, Eq)]
-enum PreviewProducerAction {
-    /// No pending intent.
-    Idle,
-    /// Tauri: workspace opened, focus set, then cleared.
-    TauriClear { path: String, generation: u64 },
-    /// Web: deck toggled (Files), focus set, intent left for consumer.
-    WebRetain { path: String, generation: u64 },
-}
-
-fn producer_decide(intent: Option<(String, u64)>, in_tauri: bool) -> PreviewProducerAction {
-    let (path, gen) = match intent {
-        Some(p) => p,
-        None => return PreviewProducerAction::Idle,
-    };
-    if in_tauri {
-        PreviewProducerAction::TauriClear {
-            path,
-            generation: gen,
-        }
-    } else {
-        PreviewProducerAction::WebRetain {
-            path,
-            generation: gen,
-        }
+/// The workspace pane starts open when the operator never chose otherwise and
+/// the viewport is wide enough to dock it beside the transcript (the 900px
+/// split breakpoint in styles/workspace.css). Narrow hosts start collapsed so
+/// the overlaying pane never covers the first screen.
+fn workspace_default_open(stored: Option<&str>, viewport_w: f64) -> bool {
+    match stored {
+        Some(v) => v != "0",
+        None => viewport_w >= 900.0,
     }
 }
 
@@ -1672,16 +1644,6 @@ pub fn App() -> impl IntoView {
     };
     let rooms = Rooms::new(&daemon);
 
-    // Context deck (north star): the WEB/EXTENSION reveal rail. At most ONE
-    // panel revealed at a time, reveal-on-intent via ⌘K commands, never
-    // permanent chrome. On Tauri the deck never mounts (the Show gate below
-    // hard-gates it on !in_tauri) — the desktop shell's persistent surfaces
-    // live in the workspace pane instead, so the toggle-* commands route
-    // there on Tauri and here on every other host.
-    let deck_panel: RwSignal<Option<DeckPanel>> = RwSignal::new(None);
-    let toggle_deck = move |p: DeckPanel| {
-        deck_panel.update(|cur| *cur = if *cur == Some(p) { None } else { Some(p) })
-    };
     let open_council = Callback::new(move |()| {
         let next = council_open_visibility();
         show_council.set(next.council);
@@ -1691,25 +1653,17 @@ pub fn App() -> impl IntoView {
         show_rooms.set(next.rooms);
         show_sessions.set(next.sessions);
         show_floor.set(next.floor);
-        if !next.deck {
-            deck_panel.set(None);
-        }
         show_phone_dialer.set(next.phone_dialer);
         show_livekit_controls.set(next.livekit);
     });
-    // Panels mount inside a reactive match arm that re-runs on panel switch,
-    // so the Daemon clone lives in a StoredValue (same pattern as
-    // daemon_for_perms below).
-    let daemon_for_deck = StoredValue::new(daemon.clone());
 
-    // Workspace pane (north star desktop shell): THE right-side surface on
-    // Tauri — permanent, tabbed (Files · previews · Browser · Repo). One
-    // command layer routes per-host: toggle-* commands open+focus a tab here
-    // on Tauri and reveal the deck on web/extension. `workspace_open` is the
-    // shared collapse state for the header toggle, the ⌘K `workspace-toggle`
-    // command, and the pane itself; persisted to localStorage so a relaunch
-    // restores it, defaulting open when the key is absent. Off-Tauri the pane
-    // never mounts, so this is inert there.
+    // Workspace pane: THE right-side surface on every host — tabbed
+    // (Files · previews · Browser · Repo). toggle-* commands open + focus a
+    // tab. `workspace_open` is the shared collapse state for the header
+    // toggle, the ⌘K `workspace-toggle` command, and the pane itself;
+    // persisted to localStorage so a relaunch restores it. Host posture
+    // (docked split vs overlay) is decided by viewport width in CSS, never by
+    // host. `in_tauri` survives only for native titlebar chrome.
     let in_tauri = crate::host::running_in_tauri();
     let daemon_for_island = StoredValue::new(daemon.clone());
     let palette_open = RwSignal::new(false);
@@ -1723,7 +1677,6 @@ pub fn App() -> impl IntoView {
         let r = show_rooms;
         let s = show_sessions;
         let f = show_floor;
-        let d = deck_panel;
         let p = show_phone_dialer;
         let l = show_livekit_controls;
         move |vis: RevealVisibility| {
@@ -1731,9 +1684,6 @@ pub fn App() -> impl IntoView {
             r.set(vis.rooms);
             s.set(vis.sessions);
             f.set(vis.floor);
-            // deck is a DeckPanel enum — the only production caller
-            // (island_open_visibility) sets deck:false so we always clear it.
-            d.set(None);
             p.set(vis.phone_dialer);
             l.set(vis.livekit);
         }
@@ -1757,7 +1707,6 @@ pub fn App() -> impl IntoView {
             rooms: show_rooms.get(),
             sessions: show_sessions.get(),
             floor: show_floor.get(),
-            deck: deck_panel.get().is_some(),
             phone_dialer: show_phone_dialer.get(),
             livekit: show_livekit_controls.get(),
         };
@@ -1765,12 +1714,15 @@ pub fn App() -> impl IntoView {
             island_mode.set(IslandMode::Closed);
         }
     });
-    let workspace_open: RwSignal<bool> = RwSignal::new(
-        // Default OPEN when the key is absent; only an explicit "0" starts
-        // collapsed (the pane is the shell's primary surface).
-        ls_get(WORKSPACE_OPEN_KEY).map(|s| s != "0").unwrap_or(true),
-    );
-    // One-shot focus intent from the toggle-* commands (Tauri path): the pane
+    let workspace_open: RwSignal<bool> = RwSignal::new(workspace_default_open(
+        ls_get(WORKSPACE_OPEN_KEY).as_deref(),
+        window()
+            .inner_width()
+            .ok()
+            .and_then(|w| w.as_f64())
+            .unwrap_or(0.0),
+    ));
+    // One-shot focus intent from the toggle-* commands: the pane
     // watches this and opens/focuses the matching tab, then resets to None.
     let workspace_focus: RwSignal<Option<WorkspaceFocus>> = RwSignal::new(None);
     let daemon_for_workspace = StoredValue::new(daemon.clone());
@@ -1788,25 +1740,13 @@ pub fn App() -> impl IntoView {
         );
     });
 
-    // File-preview deep-link from host (Tauri file-open, future transcript
-    // path-click). Opens the workspace → Files tab so the FilesPanel can
-    // consume the intent. Routes through the shared producer_decide helper
-    // so the decision table is unit-testable.
+    // File-preview deep-link (host file-open, transcript path-click): open the
+    // workspace, focus a Preview tab, and consume the one-shot intent.
     Effect::new(move |_| {
-        let action = producer_decide(daemon.preview_file_intent.get(), in_tauri);
-        match action {
-            PreviewProducerAction::Idle => {}
-            PreviewProducerAction::TauriClear { path, generation } => {
-                workspace_open.set(true);
-                workspace_focus.set(Some(WorkspaceFocus::Preview { path, generation }));
-                daemon.preview_file_intent.set(None);
-            }
-            PreviewProducerAction::WebRetain { path, generation } => {
-                toggle_deck(DeckPanel::Files);
-                workspace_focus.set(Some(WorkspaceFocus::Preview { path, generation }));
-                // Web: do NOT clear — the FilesPanel consumer Effect
-                // (deck/files.rs) is the sole clearing point on web.
-            }
+        if let Some((path, generation)) = daemon.preview_file_intent.get() {
+            workspace_open.set(true);
+            workspace_focus.set(Some(WorkspaceFocus::Preview { path, generation }));
+            daemon.preview_file_intent.set(None);
         }
     });
 
@@ -1845,12 +1785,8 @@ pub fn App() -> impl IntoView {
             slash: Some("/files"),
             enabled: always,
             run: Callback::new(move |_| {
-                if in_tauri {
-                    workspace_open.set(true);
-                    workspace_focus.set(Some(WorkspaceFocus::Files));
-                } else {
-                    toggle_deck(DeckPanel::Files);
-                }
+                workspace_open.set(true);
+                workspace_focus.set(Some(WorkspaceFocus::Files));
             }),
         });
         registry.register(Command {
@@ -1861,28 +1797,20 @@ pub fn App() -> impl IntoView {
             slash: Some("/repo"),
             enabled: always,
             run: Callback::new(move |_| {
-                if in_tauri {
-                    workspace_open.set(true);
-                    workspace_focus.set(Some(WorkspaceFocus::Repo));
-                } else {
-                    toggle_deck(DeckPanel::Repo);
-                }
+                workspace_open.set(true);
+                workspace_focus.set(Some(WorkspaceFocus::Repo));
             }),
         });
         registry.register(Command {
             id: "toggle-browser",
-            title: "Toggle Browser Cockpit".into(),
+            title: "Toggle Browser".into(),
             hint: None,
             scope: CommandScope::Browser,
             slash: Some("/browser"),
             enabled: always,
             run: Callback::new(move |_| {
-                if in_tauri {
-                    workspace_open.set(true);
-                    workspace_focus.set(Some(WorkspaceFocus::Browser));
-                } else {
-                    toggle_deck(DeckPanel::Browser);
-                }
+                workspace_open.set(true);
+                workspace_focus.set(Some(WorkspaceFocus::Browser));
             }),
         });
         registry.register(Command {
@@ -1900,7 +1828,7 @@ pub fn App() -> impl IntoView {
             hint: Some("⌘P".into()),
             scope: CommandScope::App,
             slash: None,
-            enabled: Signal::derive(move || in_tauri),
+            enabled: always,
             run: Callback::new(move |_| open_island.run(IslandMode::Sessions)),
         });
         registry.register(Command {
@@ -1909,7 +1837,7 @@ pub fn App() -> impl IntoView {
             hint: Some("⌘⇧F".into()),
             scope: CommandScope::App,
             slash: None,
-            enabled: Signal::derive(move || in_tauri),
+            enabled: always,
             run: Callback::new(move |_| open_island.run(IslandMode::Recall)),
         });
         registry.register(Command {
@@ -1961,17 +1889,16 @@ pub fn App() -> impl IntoView {
                 });
             }),
         });
-        // Workspace pane toggle (Tauri shell only). The id matches the native
-        // app-menu "Toggle Workspace" MenuItem — the orchestrator wires that
-        // item afterward (no lib.rs edit here); on_menu_command above routes
-        // the id back to this registry entry.
+        // Workspace pane toggle. The id matches the native app-menu "Toggle
+        // Workspace" MenuItem; on_menu_command above routes the id back to
+        // this registry entry.
         registry.register(Command {
             id: "workspace-toggle",
             title: "Toggle Workspace".into(),
-            hint: Some("native shell only".into()),
+            hint: None,
             scope: CommandScope::App,
             slash: Some("/workspace"),
-            enabled: Signal::derive(move || in_tauri),
+            enabled: always,
             run: Callback::new(move |_| workspace_open.update(|v| *v = !*v)),
         });
         // Composer `/` commands — Session-scoped, wired. The `run` callbacks
@@ -2252,21 +2179,11 @@ pub fn App() -> impl IntoView {
         {
             island_mode.set(IslandMode::Closed);
         }
-        if in_tauri
-            && command
-            && !e.shift_key()
-            && !e.alt_key()
-            && e.key().eq_ignore_ascii_case("p")
-        {
+        if command && !e.shift_key() && !e.alt_key() && e.key().eq_ignore_ascii_case("p") {
             e.prevent_default();
             e.stop_propagation();
             open_island.run(IslandMode::Sessions);
-        } else if in_tauri
-            && command
-            && e.shift_key()
-            && !e.alt_key()
-            && e.key().eq_ignore_ascii_case("f")
-        {
+        } else if command && e.shift_key() && !e.alt_key() && e.key().eq_ignore_ascii_case("f") {
             e.prevent_default();
             e.stop_propagation();
             open_island.run(IslandMode::Recall);
@@ -2275,8 +2192,8 @@ pub fn App() -> impl IntoView {
     on_cleanup(move || _island_shortcut.remove());
 
     // Window-level Escape closes exactly one topmost reveal. Priority follows
-    // visual layering: council > Island > browse overlays > Floor > deck >
-    // inline call reveals. Palette/slash Escape stops propagation before
+    // visual layering: council > Island > browse overlays > Floor > inline
+    // call reveals. Palette/slash Escape stops propagation before
     // reaching this rail.
     let _overlay_escape = window_event_listener(ev::keydown, move |e: ev::KeyboardEvent| {
         if !window_escape_should_handle(&e.key(), e.default_prevented()) {
@@ -2288,7 +2205,6 @@ pub fn App() -> impl IntoView {
             rooms: show_rooms.get(),
             sessions: show_sessions.get(),
             floor: show_floor.get(),
-            deck: deck_panel.get().is_some(),
             phone_dialer: show_phone_dialer.get(),
             livekit: show_livekit_controls.get(),
         });
@@ -2298,7 +2214,6 @@ pub fn App() -> impl IntoView {
             Some(RevealSurface::Rooms) => show_rooms.set(false),
             Some(RevealSurface::Sessions) => show_sessions.set(false),
             Some(RevealSurface::Floor) => show_floor.set(false),
-            Some(RevealSurface::Deck) => deck_panel.set(None),
             Some(RevealSurface::PhoneDialer) => show_phone_dialer.set(false),
             Some(RevealSurface::LiveKit) => show_livekit_controls.set(false),
             None => {}
@@ -2543,7 +2458,7 @@ pub fn App() -> impl IntoView {
     view! {
         <main
             class=root_class
-            class:has-workspace-open=move || in_tauri && workspace_open.get() && !show_rooms.get()
+            class:has-workspace-open=move || workspace_open.get() && !show_rooms.get()
             // Desktop-only: the header doubles as the window titlebar (Tauri
             // overlay traffic lights float over it) — pads the brand clear.
             class:is-titlebar=in_tauri
@@ -2563,29 +2478,16 @@ pub fn App() -> impl IntoView {
                         </span>
                     </div>
                 </div>
-                <Show when=move || in_tauri>
-                    <DynamicIsland
-                        daemon=daemon_for_island.get_value()
-                        mode=island_mode
-                        focus_request=island_focus_request
-                        on_open=open_island
-                    />
-                </Show>
+                // The Island is the one Sessions entry on every host (⌘P);
+                // the registry `/sessions` command remains the deep-browse
+                // fallback.
+                <DynamicIsland
+                    daemon=daemon_for_island.get_value()
+                    mode=island_mode
+                    focus_request=island_focus_request
+                    on_open=open_island
+                />
                 <div class="ocean-header__right">
-                    // Web and extension keep the existing Sessions modal entry;
-                    // Tauri uses the centered Island while the registry command
-                    // remains the deep-browse fallback on every host.
-                    <Show when=move || !in_tauri>
-                        <button
-                            class="ocean-sessions-trigger"
-                            type="button"
-                            aria-label="sessions"
-                            title="Sessions"
-                            on:click=move |_| toggle_sessions()
-                        >
-                            "Sessions"
-                        </button>
-                    </Show>
                     // Ambient runtime readouts — token usage, the browser-driving
                     // cue, and connection status — grouped into one demoted cluster
                     // so they read as secondary telemetry, not equal-weight peers
@@ -2775,12 +2677,13 @@ pub fn App() -> impl IntoView {
                             </Show>
                         </div>
                     </details>
-                    // Workspace pane collapse toggle (Tauri shell only). Slim
-                    // chevron at the header's right edge — the pane docks right,
-                    // so the toggle sits at the boundary. Chevrons point toward
-                    // the edge the pane slides to: open shows "›" (collapse to
-                    // the right), collapsed shows "‹" (reveal from the right).
-                    <Show when=move || in_tauri>
+                    // Workspace pane collapse toggle. Slim chevron at the
+                    // header's right edge — the pane docks right, so the toggle
+                    // sits at the boundary. Chevrons point toward the edge the
+                    // pane slides to: open shows "›" (collapse to the right),
+                    // collapsed shows "‹" (reveal from the right). Absent while
+                    // Rooms owns the stage, since the pane is not mounted then.
+                    <Show when=move || !show_rooms.get()>
                         <button
                             class="ocean-workspace-toggle"
                             type="button"
@@ -3171,52 +3074,13 @@ pub fn App() -> impl IntoView {
 
             <SessionsPanel daemon=daemon_for_panel open=show_sessions />
 
-
-            // Context deck (north star): the web/extension reveal rail. On
-            // Tauri it can never mount (hard-gated on !in_tauri) — the desktop
-            // shell's surfaces live in the workspace pane below.
-            <Show when=move || deck_panel.get().is_some() && !in_tauri>
-                <aside class="deck ocean-lit" role="complementary" aria-label="Context deck">
-                    <div class="deck__bar">
-                        <span class="deck__title">
-                            {move || deck_panel.get().map(|p| p.title()).unwrap_or("")}
-                        </span>
-                        <button
-                            class="deck__close"
-                            type="button"
-                            aria-label="close deck"
-                            title="Close"
-                            on:click=move |_| deck_panel.set(None)
-                        >
-                            "✕"
-                        </button>
-                    </div>
-                    <div class="deck__body">
-                        {move || match deck_panel.get() {
-                            Some(DeckPanel::Files) => {
-                                view! { <FilesPanel daemon=daemon_for_deck.get_value() /> }.into_any()
-                            }
-                            Some(DeckPanel::Repo) => {
-                                view! { <RepoPanel daemon=daemon_for_deck.get_value() /> }.into_any()
-                            }
-                            Some(DeckPanel::Browser) => {
-                                view! { <BrowserCockpit daemon=daemon_for_deck.get_value() /> }.into_any()
-                            }
-                            None => ().into_any(),
-                        }}
-                    </div>
-                </aside>
-            </Show>
-
-            // Workspace pane (north star desktop shell): THE right-side
-            // surface on Tauri, permanent + tabbed (Files · previews · Browser
-            // · Repo). position:fixed (see styles/workspace.css) so DOM order
-            // is flexible; it docks right of the transcript via the shell's
-            // `has-workspace-open` gutter on wide viewports. The web/extension
-            // layout is untouched — the pane never mounts there.
-            // `focus_intent` carries one-shot tab-focus intents from the
-            // toggle-* commands.
-            <Show when=move || in_tauri && !show_rooms.get()>
+            // Workspace pane: THE right-side surface on every host, tabbed
+            // (Files · previews · Browser · Repo). position:fixed (see
+            // styles/workspace.css) so DOM order is flexible; it docks right
+            // of the transcript via the shell's `has-workspace-open` gutter on
+            // wide viewports and overlays below 900px. `focus_intent` carries
+            // one-shot tab-focus intents from the toggle-* commands.
+            <Show when=move || !show_rooms.get()>
                 <crate::workspace::WorkspacePane
                     daemon=daemon_for_workspace.get_value()
                     open=workspace_open
@@ -3910,7 +3774,6 @@ mod tests {
         assert!(!vis.rooms, "Rooms must be false");
         assert!(!vis.sessions, "Sessions must be false");
         assert!(!vis.floor, "Floor must be false");
-        assert!(!vis.deck, "Deck must be false");
         assert!(!vis.phone_dialer, "Phone must be false");
         assert!(!vis.livekit, "LiveKit must be false");
     }
@@ -3946,13 +3809,6 @@ mod tests {
                 ..RevealVisibility::default()
             }),
             "Floor must be detected"
-        );
-        assert!(
-            competing_reveal_open(RevealVisibility {
-                deck: true,
-                ..RevealVisibility::default()
-            }),
-            "Deck must be detected"
         );
         assert!(
             competing_reveal_open(RevealVisibility {
@@ -3995,7 +3851,6 @@ mod tests {
             rooms: true,
             sessions: true,
             floor: true,
-            deck: true,
             phone_dialer: true,
             livekit: true,
         };
@@ -4043,18 +3898,6 @@ mod tests {
                 floor: false,
                 ..all
             }),
-            Some(RevealSurface::Deck)
-        );
-        assert_eq!(
-            topmost_reveal(RevealVisibility {
-                council: false,
-                island: false,
-                rooms: false,
-                sessions: false,
-                floor: false,
-                deck: false,
-                ..all
-            }),
             Some(RevealSurface::PhoneDialer)
         );
         assert_eq!(
@@ -4064,7 +3907,6 @@ mod tests {
                 rooms: false,
                 sessions: false,
                 floor: false,
-                deck: false,
                 phone_dialer: false,
                 ..all
             }),
@@ -4341,65 +4183,18 @@ mod tests {
         assert_eq!(parse_deep_link(""), None);
     }
 
-    // -- Preview-intent producer decision table -- tests call the same
-    //    file-scope producer_decide that the production Effect calls.
-
     #[test]
-    fn producer_idle_when_no_intent_tauri() {
-        assert_eq!(
-            super::producer_decide(None, true),
-            super::PreviewProducerAction::Idle
-        );
+    fn workspace_default_open_honors_stored_choice_on_any_width() {
+        assert!(super::workspace_default_open(Some("1"), 390.0));
+        assert!(!super::workspace_default_open(Some("0"), 1920.0));
     }
 
     #[test]
-    fn producer_idle_when_no_intent_web() {
-        assert_eq!(
-            super::producer_decide(None, false),
-            super::PreviewProducerAction::Idle
-        );
-    }
-
-    #[test]
-    fn producer_tauri_clears_after_dispatch() {
-        let action = super::producer_decide(Some(("/a/b.rs".into(), 3)), true);
-        assert_eq!(
-            action,
-            super::PreviewProducerAction::TauriClear {
-                path: "/a/b.rs".into(),
-                generation: 3
-            }
-        );
-    }
-
-    #[test]
-    fn producer_web_retains_for_consumer() {
-        let action = super::producer_decide(Some(("/x/y.rs".into(), 7)), false);
-        assert_eq!(
-            action,
-            super::PreviewProducerAction::WebRetain {
-                path: "/x/y.rs".into(),
-                generation: 7
-            }
-        );
-    }
-
-    #[test]
-    fn producer_web_never_produces_clear() {
-        let action = super::producer_decide(Some(("/any".into(), 0)), false);
-        assert!(matches!(
-            action,
-            super::PreviewProducerAction::WebRetain { .. }
-        ));
-    }
-
-    #[test]
-    fn producer_tauri_never_produces_retain() {
-        let action = super::producer_decide(Some(("/any".into(), 0)), true);
-        assert!(matches!(
-            action,
-            super::PreviewProducerAction::TauriClear { .. }
-        ));
+    fn workspace_default_open_follows_split_breakpoint_when_unset() {
+        assert!(super::workspace_default_open(None, 900.0));
+        assert!(super::workspace_default_open(None, 1280.0));
+        assert!(!super::workspace_default_open(None, 899.0));
+        assert!(!super::workspace_default_open(None, 390.0));
     }
 
     #[test]

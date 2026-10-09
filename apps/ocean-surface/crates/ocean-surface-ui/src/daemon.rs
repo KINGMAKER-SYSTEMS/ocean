@@ -6225,9 +6225,9 @@ fn apply_session_projection(
 /// Build the `args_preview` stored on a `ToolCall` block.
 ///
 /// Non-browser tools are truncated to 60 chars for a compact raw-args glance
-/// (a bash/write call can carry huge args). Browser tools are kept WHOLE: the
-/// cockpit's `deck::browser::summary_from_args` PARSES this string as JSON to
-/// extract `url`/`selector`/`text`, and a mid-JSON truncation makes it
+/// (a bash/write call can carry huge args). Browser tools are kept WHOLE:
+/// browser-action summaries PARSE this string as JSON to extract
+/// `url`/`selector`/`text`, and a mid-JSON truncation makes it
 /// unparseable — degrading every real browser action (a full URL or
 /// selector+text easily exceeds 60 chars) to a useless `"?"` (TASK-98). Browser
 /// args are small and structured, so storing them whole is cheap and keeps the
@@ -7398,7 +7398,7 @@ fn turns_from_session_transcript(
     // TASK-99: index every tool CALL's arguments by tool_call_id so a rebuilt
     // tool block can recover its `args_preview` (the live SSE reducer stores it,
     // but the transcript rebuild dropped it to empty — so a RELOADED session lost
-    // every browser-action summary, which `deck::browser::summary_from_args`
+    // every browser-action summary, which the transcript
     // derives by parsing that preview).
     let call_args: std::collections::HashMap<&str, &SessionToolContext> = tool_context
         .iter()

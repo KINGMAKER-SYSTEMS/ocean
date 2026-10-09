@@ -206,18 +206,6 @@ pub fn open_external_link_click(event: web_sys::MouseEvent) {
     }
 }
 
-/// Open the native folder picker. `None` on non-Tauri hosts or user cancel.
-pub async fn pick_folder() -> Option<String> {
-    if !running_in_tauri() {
-        return None;
-    }
-    match tauri_invoke("pick_folder", &JsValue::NULL).await {
-        Ok(val) if val.is_null() || val.is_undefined() => None,
-        Ok(val) => val.as_string(),
-        Err(_) => None,
-    }
-}
-
 /// One requested path the native watcher could not admit, mirroring the
 /// shell's `WatchFailure`. `error` is a human-readable canonicalize/create/
 /// watch reason; it is surfaced only through a quiet `log::warn!`, never as UI
@@ -305,20 +293,6 @@ pub async fn watch_paths(paths: &[String]) -> WatchAdmission {
         );
     }
     admission
-}
-
-/// Stop watching `paths`. Returns false on non-Tauri hosts.
-pub async fn unwatch_paths(paths: &[String]) -> bool {
-    if !running_in_tauri() {
-        return false;
-    }
-    let args = Object::new();
-    let arr = Array::new();
-    for p in paths {
-        arr.push(&JsValue::from_str(p));
-    }
-    let _ = Reflect::set(&args, &JsValue::from_str("paths"), &arr);
-    tauri_invoke("unwatch_paths", &args).await.is_ok()
 }
 
 /// Subscribe to shell `path-changed` events. No-op on non-Tauri hosts.

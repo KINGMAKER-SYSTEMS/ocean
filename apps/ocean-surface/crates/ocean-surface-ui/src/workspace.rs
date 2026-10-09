@@ -1,18 +1,15 @@
-//! Workspace pane — the permanent RIGHT-side desktop shell pane (Tauri only).
+//! Workspace pane — the permanent RIGHT-side shell pane on every host.
 //!
 //! Codex-desktop-style: a tab strip (Files empty-state · Preview tabs · Browser
-//! slot) over a body that splits into an active-tab content region and a
-//! docked, always-visible file tree. The tree lists the session cwd (same
-//! `daemon.cwd` source the deck files panel uses), lazy-expands folders via
-//! `GET /v1/fs/dirs?path=..&files=1`, and opens a file's contents in a Preview
-//! tab via `GET /v1/fs/file?path=..`.
+//! · Repo) over a body that splits into an active-tab content region and a
+//! docked, always-visible file tree. The tree lists the session cwd
+//! (`daemon.cwd`), lazy-expands folders via `GET /v1/fs/dirs?path=..&files=1`,
+//! and opens a file's contents in a Preview tab via `GET /v1/fs/file?path=..`.
 //!
-//! Mounting is integrator-owned (app.rs) and gated on
-//! [`crate::host::running_in_tauri`]; on the browser PWA and Chrome extension
-//! this component never mounts, so the transcript-first layout is untouched.
-//! The Browser tab is a STUB only — it renders `<div id="workspace-browser-slot">`
-//! and a sibling agent (BrowserPaneTab) fills that slot; this module builds no
-//! browser UI of its own.
+//! Mounting is integrator-owned (app.rs). Native-only capabilities (path
+//! watching, open-externally) go through `crate::host`, which no-ops off
+//! Tauri, so the pane renders identically on the PWA, extension, and desktop.
+//! The Browser tab mounts `crate::workspace_browser::WorkspaceBrowser`.
 //!
 //! Pure helpers (`name_matches`, `sort_files`, `open_or_focus`, `close_tab`,
 //! `format_kib`) are unit-testable without WASM.
@@ -30,9 +27,8 @@ use crate::daemon::{
     fetch_fs_dirs_with_files, fetch_fs_file, Daemon, FsDirEntry, FsDirsResponse, FsFileEntry,
     FsFileResponse,
 };
-// Reuse the deck files panel's shared helpers rather than forking the
-// sorting / refresh / basename logic — single source of truth for the
-// session-cwd tree contract.
+// Shared file-tree helpers — single source of truth for the session-cwd tree
+// contract.
 use crate::deck::files::{basename, browsable_root, is_secret_file, refresh_target, sort_entries};
 
 // ---------------------------------------------------------------------------
@@ -50,9 +46,9 @@ pub enum TabKind {
     Files,
     /// A preview of one file, keyed by its absolute path. Closable.
     Preview(String),
-    /// Persistent stub tab — renders the slot a sibling agent fills.
+    /// Persistent live browser tab (`WorkspaceBrowser`).
     Browser,
-    /// Persistent repo-state tab — mounts the deck's RepoPanel. Never closable;
+    /// Persistent repo-state tab — mounts RepoPanel. Never closable;
     /// sits last in the strip (after Browser).
     Repo,
 }
@@ -68,8 +64,7 @@ pub struct WorkspaceTab {
 
 /// A one-shot intent to focus a specific workspace surface. Set on the pane's
 /// `focus_intent` prop by the command layer (app.rs) when a toggle-* command
-/// fires on Tauri — where Files/Browser/Repo live in THIS pane, not the deck.
-/// The pane's Effect opens or focuses the matching persistent tab, makes it
+/// fires. The pane's Effect opens or focuses the matching persistent tab, makes it
 /// active, then resets the signal to `None` so a repeat of the same intent
 /// re-fires.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -78,8 +73,8 @@ pub enum WorkspaceFocus {
     Browser,
     Repo,
     /// File-preview intent from a file-tree click or host deep-link. The
-    /// workspace rail opens the deck, selects the Files tab, and the
-    /// FilesPanel picks up the preview from the daemon's intent signal.
+    /// pane opens (or focuses) a Preview tab for `path`, fetching on cache
+    /// miss.
     Preview {
         path: String,
         generation: u64,
@@ -101,7 +96,7 @@ pub(crate) fn name_matches(name: &str, filter: &str) -> bool {
 }
 
 /// Sort file entries alphabetically by name (case-insensitive). Directories
-/// keep the deck's repo-first ordering via [`sort_entries`]; files are a flat
+/// keep the repo-first ordering via [`sort_entries`]; files are a flat
 /// alphabetical run beneath them.
 pub(crate) fn sort_files(files: &mut [FsFileEntry]) {
     files.sort_by_key(|a| a.name.to_lowercase());
@@ -304,19 +299,19 @@ fn workspace_focus_tab_kind(focus: &WorkspaceFocus) -> TabKind {
     }
 }
 
-/// The permanent right-side desktop pane. `open` is the shared collapse state
+/// The permanent right-side pane. `open` is the shared collapse state
 /// owned by the app shell (header toggle + ⌘K command flip the same signal);
 /// the pane renders `is-collapsed` from it and the shell adjusts its layout
 /// gutter to match. `focus_intent` is a one-shot set by the command layer
-/// (app.rs) to surface a specific tab when a toggle-* command fires on Tauri —
-/// the Effect below opens/focuses the matching tab and resets it to `None`.
+/// (app.rs) to surface a specific tab when a toggle-* command fires — the
+/// Effect below opens/focuses the matching tab and resets it to `None`.
 #[component]
 pub fn WorkspacePane(
     daemon: Daemon,
     open: RwSignal<bool>,
     focus_intent: RwSignal<Option<WorkspaceFocus>>,
 ) -> impl IntoView {
-    // Root = session cwd, the same source the deck files panel reads. A
+    // Root = session cwd. A
     // non-browsable cwd (unset, "/", or the projectless-chat /tmp pin)
     // leaves the tree empty until a real project session lands.
     let tree_root: RwSignal<Option<String>> =
@@ -344,7 +339,7 @@ pub fn WorkspacePane(
     ]);
     let active_tab: RwSignal<usize> = RwSignal::new(0);
 
-    // Tree state — mirrors the deck files panel exactly.
+    // Tree state.
     let dir_cache: RwSignal<HashMap<String, FsDirsResponse>> = RwSignal::new(HashMap::new());
     let loading_path: RwSignal<Option<String>> = RwSignal::new(None);
     let load_error: RwSignal<Option<String>> = RwSignal::new(None);
@@ -385,7 +380,7 @@ pub fn WorkspacePane(
         });
     }
 
-    // ---- Tree load / expand / collapse (mirror deck::files::FilesPanel) ----
+    // ---- Tree load / expand / collapse ----
 
     let load_dir: DirCallback = {
         Arc::new(move |path: String| {
@@ -495,7 +490,7 @@ pub fn WorkspacePane(
 
         let fetch_file_content = Arc::clone(&fetch_file_content);
         crate::host::on_path_changed(move |ev| {
-            // Tree: re-list the parent of the changed path (the deck pattern).
+            // Tree: re-list the parent of the changed path.
             if let Some(root) = tree_root.get() {
                 match refresh_target(&root, &ev.path, &ev.kind) {
                     Some(dir) => load_dir(dir),
@@ -519,7 +514,7 @@ pub fn WorkspacePane(
         });
     }
 
-    // ---- Initial root load + session-cwd follow (mirror deck) ----
+    // ---- Initial root load + session-cwd follow ----
 
     {
         let load_dir = Arc::clone(&load_dir);
@@ -576,8 +571,7 @@ pub fn WorkspacePane(
     }
 
     // ---- Command-layer focus intent (one-shot) ----
-    // app.rs sets focus_intent when a toggle-* command fires on Tauri (where
-    // the Files/Browser/Repo surfaces live in THIS pane, not the deck).
+    // app.rs sets focus_intent when a toggle-* command fires.
     // Routes through workspace_focus_tab_kind (shared helper) so the
     // WorkspaceFocus → TabKind mapping is unit-testable.
     Effect::new({
@@ -619,8 +613,7 @@ pub fn WorkspacePane(
     let tab_entries = move || tabs.get().into_iter().enumerate().collect::<Vec<_>>();
     // Dedicated clones for the tab-content closures below (FnMut, re-runs):
     // the Browser tab renders the sibling module's live screencast component,
-    // and the Repo tab mounts the deck's RepoPanel (same component the deck
-    // uses — the workspace is its home on Tauri).
+    // and the Repo tab mounts RepoPanel.
     let daemon_browser = daemon.clone();
     let daemon_repo = daemon.clone();
 
@@ -902,9 +895,7 @@ pub fn WorkspacePane(
                         .into_any(),
                         TabKind::Repo => view! {
                             <div class="workspace-repo">
-                                // Repo state (branch, dirty/staged, commits) —
-                                // the same RepoPanel the deck mounts; the
-                                // workspace is its home on Tauri.
+                                // Repo state (branch, dirty/staged, commits).
                                 <crate::deck::repo::RepoPanel daemon=daemon_repo.clone() />
                             </div>
                         }

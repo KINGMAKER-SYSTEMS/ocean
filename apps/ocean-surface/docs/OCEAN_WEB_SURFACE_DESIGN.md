@@ -137,7 +137,7 @@ Motion
 Controls & layout
 - `--ctl-h: 34px` standard control height; `--ctl-h-sm: 28px` compact chips
 - `--focus-ring: 0 0 0 2px var(--accent-ring)`
-- `--shell-max: 1120px` desktop shell width
+- `--content-rail: 860px` centered reading rail inside the full-bleed shell
 
 ## 3. Control recipes (the ONE vocabulary — every domain uses these verbatim)
 
@@ -260,11 +260,15 @@ CARVED → inset well). The names and recipes travel; only the renderer changes.
 
 ## 4. Layout
 
-- Shell: `max-width: var(--shell-max)` desktop, full-bleed below 960px.
+- Shell: full-bleed on every host (web, extension, Tauri); the header spans
+  it. Transcript, permissions, and composer ride the centered
+  `--content-rail` at ≥900px. An open workspace pane carves its gutter from
+  the shell at ≥900px and overlays below.
 - Header: 56px raised bar (`--bg-raised`, bottom `--border-subtle`), OCEAN
   ramp wordmark left, controls right, 8px gaps, all controls `--ctl-h-sm`.
-  Visible header controls are capped: context (project/session), ONE nav icon
-  (sessions), text metadata (tokens/status), and ONE `⋯` overflow holding
+  Visible header controls are capped: the centered Dynamic Island (session
+  context + Sessions entry), text metadata (tokens/status), the workspace
+  chevron, and ONE `⋯` overflow holding
   everything else (council, rooms, mute, capture).
 - Transcript prose measure: `max-width: 72ch` for text blocks.
 - Spacing scale: 4/8/12/16/24/32/48. Vary rhythm; don't pad everything 12px.

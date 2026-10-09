@@ -162,8 +162,12 @@ The key desktop rule is:
 
 ### The Right Workbench (desktop-native work surface)
 
-The right side is a real workbench on Tauri and a reveal-on-intent deck on the
-web/extension. Same conceptual modules, different host posture.
+The right side is one workbench (`WorkspacePane`) on every host. Posture is
+width-driven — docked split at ≥900px, overlay below — never host-driven;
+native-only capabilities inside it (folder pick, path watch, open externally)
+mount through `host.rs` and are simply absent off Tauri. (Amended 2026-10-02:
+the web reveal deck is retired; see
+`docs/specs/2026-10-02-ocean-rooms-team-platform-amendment.md` P1.)
 
 1. **Files** — persistent explorer for the session cwd. Native root pick
    (`pick_folder`), live updates (`watch_paths` → `path-changed`), collapsible

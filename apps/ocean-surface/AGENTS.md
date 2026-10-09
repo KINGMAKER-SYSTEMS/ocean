@@ -36,6 +36,14 @@ Capability Matrix). The load-bearing rules:
 - The web core is the bones of the mobile app (Tauri 2 iOS/Android; PWA is
   mobile v0; `compact.css` is the mobile stylesheet; no hover-only
   affordances).
+- One shell on every host (team-platform amendment P1,
+  `docs/specs/2026-10-02-ocean-rooms-team-platform-amendment.md`): full-bleed
+  frame, header spanning it, reading surfaces on the `--content-rail` token;
+  the Dynamic Island is the Sessions entry (⌘P) everywhere; `WorkspacePane` is
+  the only Files/Repo/Browser surface, docked at ≥900px and overlaying below
+  (width-driven, never host-driven). `in_tauri` may gate only native titlebar
+  chrome (`is-titlebar` inset, drag region) — never layout, panels, or
+  navigation. Do not reintroduce a web-only deck or per-host panel markup.
 - Shared-file discipline (`app.rs`): smallest hunks, committed promptly;
   NEVER reference an uncommitted module from a shared file — `mod x;` +
   usage lands only when `x` compiles with passing tests.
@@ -308,10 +316,10 @@ Web surface session UI:
   new-project name), not container elements.
 - Reveal lifecycle is deterministic: opening Council closes every competing
   reveal; opening the Island closes every non-Island reveal; every peer reveal
-  open (Council, Rooms, Sessions, Floor, deck, phone dialer, LiveKit controls)
+  open (Council, Rooms, Sessions, Floor, phone dialer, LiveKit controls)
   closes the Island. Window Escape closes exactly one topmost surface in visual
-  z-order: Council → Island → Rooms → Sessions → Floor → deck → phone dialer →
-  LiveKit.
+  z-order: Council → Island → Rooms → Sessions → Floor → phone dialer →
+  LiveKit. The workspace pane is permanent furniture, not a reveal.
 
 ## Rooms Contract
 - The operator-authorized post-G3 product-depth program is governed by
@@ -517,12 +525,10 @@ The daemon must be running from `../ocean-os` for live agent behavior.
 **Contract:** FileTreeView captures `daemon.cwd` at mount, creates an
 `on_file_click` callback that calls `resolve_file_tree_path` (unified resolver
 with explicit-vs-absent provenance branch), and sets `preview_file_intent`. The
-app producer Effect reads the intent and dispatches `WorkspaceFocus::Preview`:
-on Tauri it clears the intent after dispatch (FilesPanel never mounts); on web
-it leaves the intent set for the FilesPanel consumer. The consumer (web-only)
-re-reads intent, resolves the path, fetches on cache miss, and clears. On Tauri
-the workspace receives `WorkspaceFocus::Preview` and routes through `open_file`
-→ `open_or_focus` → Preview tab + fetch-on-cache-miss.
+app producer Effect reads the intent on every host, opens the workspace,
+dispatches `WorkspaceFocus::Preview`, and clears the intent. The workspace
+routes it through `open_file` → `open_or_focus` → Preview tab +
+fetch-on-cache-miss.
 
 **Resolver:** `resolve_file_tree_path(entry_path, ancestor_prefix, name,
 workspace_root, cwd)` — explicit absolute/home-relative passthrough; explicit
@@ -531,8 +537,8 @@ resolved-root + ancestor + name where relative roots resolve against cwd.
 `resolve_file_path` exists for non-file_tree callers and follows the same
 cwd-authoritative rule.
 
-**Files:** daemon.rs, app.rs, workspace.rs, components.rs, deck/files.rs,
-styles/deck.css.
+**Files:** daemon.rs, app.rs, workspace.rs, components.rs, deck/files.rs
+(shared tree helpers), styles/workspace.css.
 
 **Frozen gates:** `cargo fmt --check`, `cargo clippy -p ocean-surface-ui
 --target wasm32-unknown-unknown -- -D warnings`, `cargo check -p

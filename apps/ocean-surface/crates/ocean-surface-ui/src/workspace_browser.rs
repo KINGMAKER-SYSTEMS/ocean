@@ -2,10 +2,9 @@
 //! `GET /v1/browser/screencast` SSE endpoint (web_sys::EventSource) and forwards
 //! pointer/keyboard input back through `POST /v1/browser/input`.
 //!
-//! Tauri-only affordance: the WorkspacePane mounts this inside its Browser tab,
-//! and the pane itself is gated on `host::running_in_tauri()`. The component is
-//! host-agnostic (the daemon URL is absolute, same as every other daemon fetch)
-//! — the desktop is simply the only host where a permanent browser pane fits.
+//! The WorkspacePane mounts this inside its Browser tab on every host. The
+//! component is host-agnostic (the daemon URL is absolute, same as every other
+//! daemon fetch).
 //!
 //! ## Screencast contract (daemon side)
 //! The SSE stream emits named events:

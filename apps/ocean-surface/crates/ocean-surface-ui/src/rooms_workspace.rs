@@ -1618,7 +1618,6 @@ pub fn RoomsWorkspace(
                         }
                         disabled=move || pending_create.get()
                     />
-                    />
                 </div>
             </div>
 
@@ -2752,12 +2751,23 @@ pub fn RoomsWorkspace(
                                                                 "-- pick an agent --"
                                                             </option>
                                                             <For
-                                                                each=move || rooms.available_agents.get()
+                                                                each=move || {
+                                                                    let present: Vec<String> = rooms
+                                                                        .open_room
+                                                                        .get()
+                                                                        .map(|r| r.participants.into_iter().map(|p| p.id).collect())
+                                                                        .unwrap_or_default();
+                                                                    rooms.available_agents.get().into_iter()
+                                                                        .filter(|agent| !present.contains(&agent.name))
+                                                                        .collect::<Vec<_>>()
+                                                                }
                                                                 key=|agent: &AgentSummary| agent.name.clone()
                                                                 children=move |agent: AgentSummary| {
+                                                                    // Unresolvable folders stay visible but not addable.
+                                                                    let disabled = agent.error.is_some();
                                                                     let v = agent.name.clone();
                                                                     view! {
-                                                                        <option value=v disabled=agent.error.is_some()>{agent.name}</option>
+                                                                        <option value=v disabled=disabled>{agent.name}</option>
                                                                     }
                                                                 }
                                                             />
