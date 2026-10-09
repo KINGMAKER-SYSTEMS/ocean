@@ -2101,6 +2101,90 @@ pub fn run_permission_body(permission: &RoomRunPermission, allow: bool) -> Strin
     body.to_string()
 }
 
+/// A Room owner mutation that needs daemon Room operator authority. Exactly
+/// the routes a first-party surface may make as the operator (decision
+/// 2026-10-08): the web proxy attaches the key for its logged-in session, the
+/// Tauri shell attaches it natively (`host::room_owner_mutation`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OwnerRoute<'a> {
+    RunPermission { key: &'a str, run_id: &'a str },
+    AgentSettings { key: &'a str, agent_id: &'a str },
+}
+
+impl OwnerRoute<'_> {
+    fn method(self) -> &'static str {
+        match self {
+            Self::RunPermission { .. } => "POST",
+            Self::AgentSettings { .. } => "PUT",
+        }
+    }
+
+    fn url(self, base: &str) -> String {
+        match self {
+            Self::RunPermission { key, run_id } => format!(
+                "{base}/v1/rooms/persistent/{}/runs/{}/permission",
+                encode(key),
+                encode(run_id)
+            ),
+            Self::AgentSettings { key, agent_id } => agent_settings_url(base, key, agent_id),
+        }
+    }
+
+    /// The native shell's invoke arguments: one of its fixed kinds plus the
+    /// raw ids (the shell encodes them into its own fixed path).
+    fn ids(self) -> (&'static str, String, String) {
+        match self {
+            Self::RunPermission { key, run_id } => {
+                ("run_permission", key.to_string(), run_id.to_string())
+            }
+            Self::AgentSettings { key, agent_id } => {
+                ("agent_settings", key.to_string(), agent_id.to_string())
+            }
+        }
+    }
+}
+
+/// Status and body of an owner mutation, from either transport.
+struct OwnerReply {
+    status: u16,
+    body: String,
+}
+
+/// Send an owner mutation: through the native shell on Tauri (it attaches the
+/// operator key), else as an ordinary request to `base` (the web proxy
+/// attaches the key for its logged-in session; a direct daemon refuses).
+async fn send_owner_mutation(
+    base: &str,
+    route: OwnerRoute<'_>,
+    body: String,
+) -> Result<OwnerReply, ()> {
+    let (kind, room, target) = route.ids();
+    if let Some(reply) =
+        crate::host::room_owner_mutation(kind, Some(&room), Some(&target), &body).await
+    {
+        return reply
+            .map(|r| OwnerReply {
+                status: r.status,
+                body: r.body,
+            })
+            .map_err(|_| ());
+    }
+    let url = route.url(base);
+    let builder = match route.method() {
+        "POST" => Request::post(&url),
+        _ => Request::put(&url),
+    };
+    let request = builder
+        .header("content-type", "application/json")
+        .body(body)
+        .map_err(|_| ())?;
+    let response = request.send().await.map_err(|_| ())?;
+    Ok(OwnerReply {
+        status: response.status(),
+        body: response.text().await.unwrap_or_default(),
+    })
+}
+
 /// Owner approve/deny for a run's pending tool permission. The card updates
 /// from the next `room_agent_run` frame; nothing is applied optimistically.
 pub async fn decide_run_permission(
@@ -2110,20 +2194,12 @@ pub async fn decide_run_permission(
     permission: &RoomRunPermission,
     allow: bool,
 ) -> Result<(), String> {
-    let url = format!(
-        "{base}/v1/rooms/persistent/{}/runs/{}/permission",
-        encode(key),
-        encode(run_id)
-    );
-    let request = Request::post(&url)
-        .header("content-type", "application/json")
-        .body(run_permission_body(permission, allow))
-        .map_err(|_| UNREACHABLE.to_string())?;
-    match request.send().await {
-        Ok(r) if r.ok() => Ok(()),
-        Ok(r) if r.status() == 409 || r.status() == 404 => Err("Already decided.".into()),
+    let route = OwnerRoute::RunPermission { key, run_id };
+    match send_owner_mutation(base, route, run_permission_body(permission, allow)).await {
+        Ok(r) if (200..300).contains(&r.status) => Ok(()),
+        Ok(r) if r.status == 409 || r.status == 404 => Err("Already decided.".into()),
         Ok(_) => Err("Ocean could not record the decision.".into()),
-        Err(_) => Err(UNREACHABLE.into()),
+        Err(()) => Err(UNREACHABLE.into()),
     }
 }
 
@@ -2161,26 +2237,21 @@ pub async fn save_agent_settings(
     settings: &RoomAgentSettings,
 ) -> Result<RoomAgentSettings, String> {
     let body = serde_json::to_string(settings).map_err(|_| UNREACHABLE.to_string())?;
-    let request = Request::put(&agent_settings_url(base, key, agent_id))
-        .header("content-type", "application/json")
-        .body(body)
-        .map_err(|_| UNREACHABLE.to_string())?;
-    match request.send().await {
-        Ok(r) if r.ok() => r
-            .json::<RoomAgentSettingsEnvelope>()
-            .await
-            .map(|e| e.settings)
-            .map_err(|_| "Ocean returned invalid agent settings.".into()),
-        Ok(r) if r.status() == 400 => {
-            let code = r
-                .json::<RoomErrorEnvelope>()
-                .await
+    let route = OwnerRoute::AgentSettings { key, agent_id };
+    match send_owner_mutation(base, route, body).await {
+        Ok(r) if (200..300).contains(&r.status) => {
+            serde_json::from_str::<RoomAgentSettingsEnvelope>(&r.body)
+                .map(|e| e.settings)
+                .map_err(|_| "Ocean returned invalid agent settings.".into())
+        }
+        Ok(r) if r.status == 400 => {
+            let code = serde_json::from_str::<RoomErrorEnvelope>(&r.body)
                 .map(|e| e.error)
                 .unwrap_or_default();
             Err(settings_error_message(&code).into())
         }
         Ok(_) => Err("Ocean could not save agent settings.".into()),
-        Err(_) => Err(UNREACHABLE.into()),
+        Err(()) => Err(UNREACHABLE.into()),
     }
 }
 
@@ -2875,6 +2946,41 @@ pub(crate) fn livekit_token_path_for_room(key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owner_routes_map_to_the_shell_kinds_and_the_daemon_paths() {
+        let base = "http://127.0.0.1:4780";
+        let decision = OwnerRoute::RunPermission {
+            key: "team room",
+            run_id: "run-1",
+        };
+        assert_eq!(
+            decision.ids(),
+            (
+                "run_permission",
+                "team room".to_string(),
+                "run-1".to_string()
+            )
+        );
+        assert_eq!(decision.method(), "POST");
+        assert_eq!(
+            decision.url(base),
+            format!(
+                "{base}/v1/rooms/persistent/{}/runs/run-1/permission",
+                encode("team room")
+            )
+        );
+        let settings = OwnerRoute::AgentSettings {
+            key: "k",
+            agent_id: "helper",
+        };
+        assert_eq!(
+            settings.ids(),
+            ("agent_settings", "k".to_string(), "helper".to_string())
+        );
+        assert_eq!(settings.method(), "PUT");
+        assert_eq!(settings.url(base), agent_settings_url(base, "k", "helper"));
+    }
 
     #[test]
     fn run_permission_body_names_the_request_the_owner_saw() {
