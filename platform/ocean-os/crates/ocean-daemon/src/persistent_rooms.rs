@@ -1450,9 +1450,10 @@ pub(super) async fn room_inspect(
     }
 }
 
-/// Display name the daemon owner is minted with on first use: the operator's
-/// explicit `OCEAN_OWNER_NAME`, else the login `USER`, else `Operator`. Only
-/// consulted while no owner row exists (`SqliteRoomStore::owner_identity`).
+/// Display name the daemon owner is minted with on first use when no team
+/// member id is configured: the operator's explicit `OCEAN_OWNER_NAME`, else
+/// the login `USER`, else `Operator`. Only consulted while no owner row exists
+/// (`SqliteRoomStore::owner_identity_as`).
 pub(super) fn default_owner_display_name() -> String {
     ["OCEAN_OWNER_NAME", "USER"]
         .iter()
@@ -1462,14 +1463,95 @@ pub(super) fn default_owner_display_name() -> String {
         .unwrap_or_else(|| "Operator".to_string())
 }
 
+/// The team member this daemon's human is, as `GET /v1/identity` (#41) and
+/// `ocean-mcp` resolve it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct DaemonMember {
+    pub(super) member_id: String,
+    pub(super) display_name: Option<String>,
+}
+
+/// The same precedence and strict parsing as the daemon identity resolver:
+/// `<config_dir>/member.toml` (`member_id`, optional `display_name`; unknown
+/// fields, duplicate keys, nested tables or a malformed id are treated as
+/// absent), then `OCEAN_MEMBER_ID`. `None` when neither names anyone; never
+/// the process user.
+pub(super) fn resolve_daemon_member(
+    config_dir: &std::path::Path,
+    env_member: Option<&str>,
+) -> Option<DaemonMember> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct MemberToml {
+        member_id: String,
+        display_name: Option<String>,
+    }
+    fn valid_member_id(value: &str) -> bool {
+        !value.is_empty()
+            && value
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '@'))
+    }
+    let from_file = std::fs::read_to_string(config_dir.join("member.toml"))
+        .ok()
+        .and_then(|raw| toml::from_str::<MemberToml>(&raw).ok())
+        .filter(|parsed| valid_member_id(&parsed.member_id))
+        .map(|parsed| DaemonMember {
+            member_id: parsed.member_id,
+            display_name: parsed.display_name.filter(|name| {
+                !name.is_empty()
+                    && name.chars().count() <= 80
+                    && !name.chars().any(char::is_control)
+            }),
+        });
+    from_file.or_else(|| {
+        env_member
+            .map(str::trim)
+            .filter(|member| valid_member_id(member))
+            .map(|member_id| DaemonMember {
+                member_id: member_id.to_string(),
+                display_name: None,
+            })
+    })
+}
+
+/// Owner seed: the configured member id (if any) and the display name to mint
+/// with. With a member id the default name comes from `member.toml`, then
+/// `OCEAN_OWNER_NAME`, then the member id itself; the login name is used only
+/// when no member id exists.
+/// The config dir is the runtime's own (`OCEAN_CONFIG_DIR`,
+/// `XDG_CONFIG_HOME/ocean-rs`, then `~/.config/ocean-rs` in production), the
+/// directory `operator.key` and `rooms.db` live in.
+fn owner_seed(state: &AppState) -> (Option<String>, String) {
+    let env_member = std::env::var("OCEAN_MEMBER_ID").ok();
+    match resolve_daemon_member(state.runtime.config_dir(), env_member.as_deref()) {
+        Some(member) => {
+            let name = member
+                .display_name
+                .or_else(|| {
+                    std::env::var("OCEAN_OWNER_NAME")
+                        .ok()
+                        .map(|v| v.trim().to_string())
+                        .filter(|v| !v.is_empty())
+                })
+                .unwrap_or_else(|| member.member_id.clone());
+            (Some(member.member_id), name)
+        }
+        None => (None, default_owner_display_name()),
+    }
+}
+
 /// The one human this daemon belongs to (team-platform P2). Every local human
 /// join and post is authored as this identity; client-claimed human ids are
 /// never authority.
 pub(super) fn daemon_owner(
     state: &AppState,
 ) -> Result<ocean_store::OwnerIdentity, ocean_store::RoomStoreError> {
-    let default_name = default_owner_display_name();
-    with_rooms(state, |reg| reg.owner_identity(&default_name))
+    // Read member.toml before taking the store guard.
+    let (member_id, default_name) = owner_seed(state);
+    with_rooms(state, |reg| {
+        reg.owner_identity_as(member_id.as_deref(), &default_name)
+    })
 }
 
 fn owner_json(owner: &ocean_store::OwnerIdentity) -> serde_json::Value {
@@ -1499,9 +1581,9 @@ pub(super) async fn me_put(
     State(state): State<AppState>,
     Json(req): Json<MeUpdateRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let default_name = default_owner_display_name();
+    let (member_id, default_name) = owner_seed(&state);
     match with_rooms(&state, |reg| {
-        reg.set_owner_display_name(&default_name, &req.display_name)
+        reg.set_owner_display_name_as(member_id.as_deref(), &default_name, &req.display_name)
     }) {
         Ok(Some(owner)) => (StatusCode::OK, Json(owner_json(&owner))),
         Ok(None) => (
@@ -2042,7 +2124,7 @@ pub(super) async fn room_post_message(
     Json(req): Json<RoomMessageRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let key = RoomKey::new(key.trim());
-    let default_owner_name = default_owner_display_name();
+    let (owner_member_id, default_owner_name) = owner_seed(&state);
     // Classification and the Local append share one store guard. Credential
     // installation can therefore linearize only before or after this commit,
     // never between a Local check and a later append.
@@ -2072,7 +2154,9 @@ pub(super) async fn room_post_message(
         // by a client-claimed id. The owner must still be on the roster.
         let owner_id;
         let claimed_author_id = if matches!(req.author_kind, RoomParticipantKind::Human) {
-            owner_id = reg.owner_identity(&default_owner_name)?.participant_id;
+            owner_id = reg
+                .owner_identity_as(owner_member_id.as_deref(), &default_owner_name)?
+                .participant_id;
             owner_id.as_str()
         } else {
             req.author_id.as_str()
@@ -6043,6 +6127,87 @@ mod tests {
             .room
             .participants;
         assert_eq!(roster[0].display_name, "Ada King");
+    }
+
+    #[test]
+    fn daemon_member_resolves_like_the_identity_route() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("member.toml");
+        // Neither set: nobody, never the process user.
+        assert_eq!(resolve_daemon_member(tmp.path(), None), None);
+        // Env alone, trimmed and validated.
+        assert_eq!(
+            resolve_daemon_member(tmp.path(), Some("  jay  ")),
+            Some(DaemonMember {
+                member_id: "jay".into(),
+                display_name: None
+            })
+        );
+        assert_eq!(resolve_daemon_member(tmp.path(), Some("not an id")), None);
+        // member.toml wins over the env and carries its display name.
+        std::fs::write(
+            &file,
+            "# who this box is\nmember_id = \"smaths\"\ndisplay_name = \"John\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_daemon_member(tmp.path(), Some("jay")),
+            Some(DaemonMember {
+                member_id: "smaths".into(),
+                display_name: Some("John".into())
+            })
+        );
+        // Malformed, unknown-field, duplicate or nested files are absent.
+        for bad in [
+            "member_id = jay",
+            "member_id = \"first\"\nmember_id = \"second\"",
+            "[section]\nmember_id = \"nested\"",
+            "member_id = \"jay\"\nextra = 1",
+            "member_id = \"not a member id\"",
+        ] {
+            std::fs::write(&file, bad).unwrap();
+            assert_eq!(
+                resolve_daemon_member(tmp.path(), Some("fallback")).map(|m| m.member_id),
+                Some("fallback".into()),
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn p2_owner_identity_is_the_configured_member_not_the_login_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = fake_convene_state(&tmp);
+        // Minted from the login name before member.toml existed.
+        seed_owner(&state, "loginname", "loginname");
+        std::fs::write(
+            state.runtime.config_dir().join("member.toml"),
+            "member_id = \"smaths\"\ndisplay_name = \"John\"\n",
+        )
+        .unwrap();
+        let (status, body) = me_get(State(state.clone())).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body.0["participant_id"], "smaths");
+        assert_ne!(body.0["participant_id"], "loginname");
+
+        assert_eq!(body.0["display_name"], "John");
+        // Human posts are authored as that member id.
+        let key = RoomKey::new("p2-member");
+        with_rooms(&state, |store| store.create(key.clone(), "P2", None, Utc::now())).unwrap();
+        let (status, body) = room_join(
+            State(state.clone()),
+            Path(key.as_str().to_string()),
+            Json(RoomJoinRequest {
+                id: String::new(),
+                display_name: String::new(),
+                kind: RoomParticipantKind::Human,
+                owner_id: None,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body.0["room"]["participants"][0]["id"], "smaths");
+        assert_eq!(body.0["room"]["participants"][0]["display_name"], "John");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

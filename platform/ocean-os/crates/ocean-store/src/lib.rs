@@ -873,7 +873,8 @@ type Result<T> = std::result::Result<T, RoomStoreError>;
 /// an authentication principal: it names who local human rows are authored by.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnerIdentity {
-    /// Stable participant id in the canonical alphabet (`[a-z0-9._-]`).
+    /// Stable participant id in the canonical alphabet (alphanumeric, `.`,
+    /// `_`, `-`): the configured team member id, else derived from a name.
     pub participant_id: String,
     /// Operator-chosen display name.
     pub display_name: String,
@@ -887,6 +888,25 @@ fn decode_agent_run(body: &str) -> Result<RoomAgentRun> {
 fn normalize_owner_display_name(name: &str) -> Option<String> {
     let trimmed = name.trim();
     (!trimmed.is_empty() && trimmed.chars().count() <= 64).then(|| trimmed.to_string())
+}
+
+/// The owner participant id for a configured team member id: the member id
+/// itself when it is already in the canonical participant alphabet
+/// (alphanumeric, `-`, `_`, `.`), so every reader of `member.toml` agrees on
+/// the same string; otherwise (e.g. an `@` address) the same normalization as
+/// [`owner_participant_id`] applied to the member id, never the login name.
+pub fn owner_participant_id_for_member(member_id: &str) -> String {
+    let member_id = member_id.trim();
+    let canonical = !member_id.is_empty()
+        && member_id.chars().count() <= 64
+        && member_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    if canonical {
+        member_id.to_string()
+    } else {
+        owner_participant_id(member_id)
+    }
 }
 
 /// Derive the stable owner participant id from a display name: lowercase,
@@ -5896,8 +5916,28 @@ impl SqliteRoomStore {
     /// `default_display_name` is used only when no owner exists yet. The
     /// participant id is derived ONCE from that name ([`owner_participant_id`])
     /// and never changes afterwards, so mentions and roster rows stay valid
-    /// across renames.
+    /// across renames. Equivalent to [`Self::owner_identity_as`] with no
+    /// configured member id.
     pub fn owner_identity(&mut self, default_display_name: &str) -> Result<OwnerIdentity> {
+        self.owner_identity_as(None, default_display_name)
+    }
+
+    /// Read the daemon owner for the configured team member id, if any.
+    ///
+    /// With `member_id` (the daemon's `member.toml` / `OCEAN_MEMBER_ID`
+    /// identity), the owner's participant id IS that member id
+    /// ([`owner_participant_id_for_member`]): it is minted with it, and an
+    /// owner minted earlier under another id (e.g. from the login name) is
+    /// re-keyed to it once, taking `default_display_name` (the member's name)
+    /// so the login name leaves the wire. Rooms joined under the old id keep
+    /// that roster row; the owner rejoins as the member id. Without a member
+    /// id, the existing row stands, or one is minted from
+    /// `default_display_name`.
+    pub fn owner_identity_as(
+        &mut self,
+        member_id: Option<&str>,
+        default_display_name: &str,
+    ) -> Result<OwnerIdentity> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -5913,13 +5953,31 @@ impl SqliteRoomStore {
                 },
             )
             .optional()?;
-        let owner = match existing {
-            Some(owner) => owner,
-            None => {
+        let member_participant = member_id.map(owner_participant_id_for_member);
+        let owner = match (existing, member_participant) {
+            (Some(owner), None) => owner,
+            (Some(owner), Some(id)) if owner.participant_id == id => owner,
+            (Some(owner), Some(id)) => {
+                // One-time re-key: the old name may be the login name the old
+                // id came from, so it is replaced by the member's default too.
+                let display_name = normalize_owner_display_name(default_display_name)
+                    .unwrap_or(owner.display_name);
+                tx.execute(
+                    "UPDATE daemon_owner SET participant_id = ?1, display_name = ?2
+                     WHERE singleton = 1",
+                    params![id, display_name],
+                )?;
+                OwnerIdentity {
+                    participant_id: id,
+                    display_name,
+                }
+            }
+            (None, member_participant) => {
                 let display_name = normalize_owner_display_name(default_display_name)
                     .unwrap_or_else(|| "Operator".to_string());
                 let owner = OwnerIdentity {
-                    participant_id: owner_participant_id(&display_name),
+                    participant_id: member_participant
+                        .unwrap_or_else(|| owner_participant_id(&display_name)),
                     display_name,
                 };
                 tx.execute(
@@ -6205,10 +6263,21 @@ impl SqliteRoomStore {
         default_display_name: &str,
         display_name: &str,
     ) -> Result<Option<OwnerIdentity>> {
+        self.set_owner_display_name_as(None, default_display_name, display_name)
+    }
+
+    /// [`Self::set_owner_display_name`] for the configured team member id
+    /// (see [`Self::owner_identity_as`]).
+    pub fn set_owner_display_name_as(
+        &mut self,
+        member_id: Option<&str>,
+        default_display_name: &str,
+        display_name: &str,
+    ) -> Result<Option<OwnerIdentity>> {
         let Some(display_name) = normalize_owner_display_name(display_name) else {
             return Ok(None);
         };
-        let owner = self.owner_identity(default_display_name)?;
+        let owner = self.owner_identity_as(member_id, default_display_name)?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -15380,6 +15449,31 @@ mod tests {
         assert_eq!(first.display_name, "John Smathers");
         let mut s = SqliteRoomStore::open(&path).unwrap();
         assert_eq!(s.owner_identity("ignored").unwrap(), first);
+    }
+
+    #[test]
+    fn member_id_owner_mints_and_rekeys_a_login_derived_owner() {
+        let mut s = store();
+        // Minted earlier from the login name, before member.toml existed.
+        let login = s.owner_identity("jsmathers").unwrap();
+        assert_eq!(login.participant_id, "jsmathers");
+        let owner = s.owner_identity_as(Some("smaths"), "John").unwrap();
+        assert_eq!(owner.participant_id, "smaths", "the member id wins");
+        assert_eq!(owner.display_name, "John", "the login name leaves too");
+        assert_eq!(s.owner_identity_as(Some("smaths"), "x").unwrap(), owner);
+        // Absent member id later: the stored owner stands.
+        assert_eq!(s.owner_identity("ignored").unwrap(), owner);
+        let renamed = s
+            .set_owner_display_name_as(Some("smaths"), "x", "John")
+            .unwrap()
+            .unwrap();
+        assert_eq!(renamed.participant_id, "smaths");
+
+        let mut fresh = store();
+        let minted = fresh.owner_identity_as(Some("Jay.V"), "Jay").unwrap();
+        assert_eq!(minted.participant_id, "Jay.V");
+        assert_eq!(minted.display_name, "Jay");
+        assert_eq!(owner_participant_id_for_member("ec@kingmaker"), "ec-kingmaker");
     }
 
     #[test]

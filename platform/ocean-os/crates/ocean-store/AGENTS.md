@@ -56,9 +56,14 @@ participant retirement. One database file (`rooms.db`), one owning crate.
   returns the newest N oldest-first, `interrupt_open_room_agent_runs` fails
   every non-terminal run at startup.
 - `daemon_owner` — singleton team-platform P2 owner identity
-  `{participant_id, display_name}`. `owner_identity(default)` mints it once;
-  the id is derived from the first display name (`owner_participant_id`,
-  canonical mention alphabet) and never changes. `set_owner_display_name`
+  `{participant_id, display_name}`. `owner_identity_as(member_id, default)`
+  mints it once. With a configured team member id the participant id IS that
+  id (`owner_participant_id_for_member`: verbatim when already in the canonical
+  alphabet, else normalized from the member id, never the login name), and an
+  owner minted earlier under another id is re-keyed to it once, taking the
+  member's default display name; old-id roster rows stay and the owner rejoins.
+  Without a member id the id is derived from the first display name
+  (`owner_participant_id`) and never changes. `set_owner_display_name_as`
   renames the owner row and the owner's Human roster rows in one transaction.
   Display data only — never an authentication principal.
 - P2-A federation tables: `federation_instance` (singleton instance id),
