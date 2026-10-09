@@ -293,7 +293,7 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   mentions from prose or replay legacy unknown metadata without exact confirmed
   event equality. Preserve the cursor operation/admission/generation guards.
 
-- P4 room permissions and per-room settings mutations require the existing header-only Room operator; daemon reachability never identifies the owner. Per-room model/instructions are immutable admission snapshots, checked again during registration and applied only through that admission. Progress and question tools write through the current admitted generation and session; parked replies re-enter that same admission before resuming. The Surface proxy does not inject an operator key, so these controls retain an explicit authority error until separately authorized client wiring exists.
+- P4 room permissions, per-room settings mutations and the owner rename (`PUT /v1/me`) require the existing header-only Room operator before the body is read; daemon reachability never identifies the owner. Per-room model/instructions are immutable admission snapshots, checked again during registration and applied only through that admission. Progress and question tools write through the current admitted generation and session; parked replies re-enter that same admission before resuming. The Surface proxy does not inject an operator key, so these controls retain an explicit authority error until separately authorized client wiring exists.
 
 ## Work Guidance
 

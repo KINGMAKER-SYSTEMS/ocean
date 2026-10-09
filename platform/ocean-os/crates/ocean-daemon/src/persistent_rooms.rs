@@ -1577,10 +1577,23 @@ pub(super) struct MeUpdateRequest {
 
 /// `PUT /v1/me` — rename the daemon owner. The participant id never changes;
 /// the owner's local Human roster rows are renamed in the same transaction.
+/// A mutating owner route: it requires the header-only Room operator before
+/// the body is read, like the other owner mutations (daemon reachability,
+/// including through the Surface proxy, never identifies the owner).
 pub(super) async fn me_put(
     State(state): State<AppState>,
-    Json(req): Json<MeUpdateRequest>,
+    headers: HeaderMap,
+    body: Result<Json<MeUpdateRequest>, JsonRejection>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(error) = room_agent_authority::operator(&state, &headers) {
+        return error.response();
+    }
+    let Ok(Json(req)) = body else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": "invalid_request" })),
+        );
+    };
     let (member_id, default_name) = owner_seed(&state);
     match with_rooms(&state, |reg| {
         reg.set_owner_display_name_as(member_id.as_deref(), &default_name, &req.display_name)
@@ -6109,9 +6122,10 @@ mod tests {
         // Renaming the owner renames the roster row; the id is stable.
         let (status, body) = me_put(
             State(state.clone()),
-            Json(MeUpdateRequest {
+            operator_headers(),
+            Ok(Json(MeUpdateRequest {
                 display_name: "Ada King".into(),
-            }),
+            })),
         )
         .await;
         assert_eq!(status, StatusCode::OK);
@@ -6127,6 +6141,67 @@ mod tests {
             .room
             .participants;
         assert_eq!(roster[0].display_name, "Ada King");
+    }
+
+    fn operator_headers() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            crate::room_operator::OPERATOR_HEADER,
+            "test-room-operator".parse().unwrap(),
+        );
+        headers
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn p2_owner_rename_requires_the_room_operator_before_the_body() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = fake_convene_state(&tmp);
+        seed_owner(&state, "ada", "Ada");
+        let mut wrong = HeaderMap::new();
+        wrong.insert(crate::room_operator::OPERATOR_HEADER, "wrong".parse().unwrap());
+        let mut cookie = operator_headers();
+        cookie.insert("cookie", "ambient=1".parse().unwrap());
+        for (headers, expected) in [
+            (HeaderMap::new(), StatusCode::SERVICE_UNAVAILABLE),
+            (wrong, StatusCode::FORBIDDEN),
+            (cookie, StatusCode::FORBIDDEN),
+        ] {
+            let (status, _) = me_put(
+                State(state.clone()),
+                headers,
+                Ok(Json(MeUpdateRequest {
+                    display_name: "Mallory".into(),
+                })),
+            )
+            .await;
+            assert_eq!(status, expected);
+            let (_, body) = me_get(State(state.clone())).await;
+            assert_eq!(body.0["display_name"], "Ada", "nothing renamed");
+        }
+        // Through the registered router as well: no header, no rename.
+        let response = room_routes()
+            .with_state(state.clone())
+            .oneshot(
+                axum::http::Request::put("/v1/me")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"display_name":"Mallory"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(response.status(), StatusCode::OK);
+        let (_, body) = me_get(State(state.clone())).await;
+        assert_eq!(body.0["display_name"], "Ada");
+        let (status, body) = me_put(
+            State(state.clone()),
+            operator_headers(),
+            Ok(Json(MeUpdateRequest {
+                display_name: "Ada King".into(),
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body.0["display_name"], "Ada King");
     }
 
     #[test]
