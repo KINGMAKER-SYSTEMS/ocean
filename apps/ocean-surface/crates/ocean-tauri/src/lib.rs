@@ -24,6 +24,8 @@ use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
+mod owner_mutation;
+
 /// One surfaced filesystem change, serialized to the webview as `path-changed`.
 ///
 /// `kind` is created/modified/removed. notify surfaces a rename as a
@@ -997,6 +999,34 @@ fn spawn_daemon_poller(app: AppHandle, daemon: Arc<DaemonSup>) {
     });
 }
 
+/// One of the three Room owner mutations (`PUT /v1/me`, run permission
+/// decision, room agent settings), sent to the loopback daemon with the
+/// operator key read on the Rust side (operator decision 2026-10-08; see
+/// `owner_mutation.rs`). The page picks a fixed `kind` and the ids; it never
+/// supplies a method, path or header, and never sees the key.
+#[tauri::command]
+async fn room_owner_mutation(
+    state: State<'_, AppState>,
+    kind: String,
+    room: Option<String>,
+    target: Option<String>,
+    body: String,
+) -> Result<owner_mutation::OwnerMutationReply, String> {
+    let mutation = owner_mutation::OwnerMutation::parse(&kind, room.as_deref(), target.as_deref())?;
+    let (host, port) = (state.daemon.host.clone(), state.daemon.port);
+    tauri::async_runtime::spawn_blocking(move || {
+        owner_mutation::send(
+            &host,
+            port,
+            &owner_mutation::operator_key_path(),
+            &mutation,
+            &body,
+        )
+    })
+    .await
+    .map_err(|_| "owner mutation failed".to_string())?
+}
+
 /// Current daemon supervision state (cached from the poller). The wasm side
 /// reads this on mount to seed its indicator before the first on-change event.
 #[tauri::command]
@@ -1190,7 +1220,10 @@ mod tests {
             ));
         }
         assert_eq!(bridge.pending.len(), MAX_PENDING_DEEP_LINKS);
-        assert_eq!(bridge.pending.first().map(String::as_str), Some("ocean://session/2"));
+        assert_eq!(
+            bridge.pending.first().map(String::as_str),
+            Some("ocean://session/2")
+        );
         assert_eq!(
             bridge.pending.last().map(String::as_str),
             Some("ocean://session/17")
@@ -1203,7 +1236,10 @@ mod tests {
             ready: false,
             pending: Vec::new(),
         };
-        assert!(!enqueue_deep_link(&mut bridge, "https://example.com".into()));
+        assert!(!enqueue_deep_link(
+            &mut bridge,
+            "https://example.com".into()
+        ));
         assert!(!enqueue_deep_link(
             &mut bridge,
             format!("ocean://{}", "a".repeat(MAX_DEEP_LINK_BYTES))
@@ -1921,7 +1957,8 @@ pub fn run() {
             ui_ready,
             deep_link_ready,
             ui_debug_resize,
-            open_external_url
+            open_external_url,
+            room_owner_mutation
         ])
         .run(tauri::generate_context!())
         .expect("error while running ocean-tauri");

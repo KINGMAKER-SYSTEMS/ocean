@@ -1107,6 +1107,16 @@ Fixed the review defects in the Rooms P2-P4 port (#68), inherited from private i
 
 Validation: in platform/ocean-os, `cargo fmt --all -- --check`, `cargo test -p ocean-daemon --locked room` (269 passed, 2 failed: the alias-envelope fixtures that already fail on main, issue #42), `cargo test -p ocean-store --locked` (285), `cargo check --workspace --tests`, and docs-check pass. In apps/ocean-surface, `cargo test -p ocean-surface-ui` (858 unit), WASM clippy with warnings denied, and proxy tests (31) plus proxy clippy pass. New tests: bound permission decisions, single-claim and refused-admission resume, restart claim settlement, owner cancel ends Cancelled (fails without the fix), member-id owner, operator-gated rename, proxy operator key. No live daemon, browser or desktop run.
 _________________________________________________________________________________
+time: [11:51] [09-10-26]
+agent: [claude] [claude code]
+worktree: [port/rooms-identity-cards-agents] [/Users/risingtidesdev/dev/fix-pr68b]
+type: [bug report]
+area: [backend] [testing]
+
+Fixed the second-round review findings on the Rooms P2-P4 port (#68) and recorded the operator's decision on owner mutations. A thread answer's claim on a parked room_ask run is now a guard that settles from durable evidence if the posting request is dropped mid-admission, so a client disconnect no longer leaves the run claimed until restart. The running turn writes its work card through a store call that never rewrites a closed run and keeps the stored answer claim, so a late progress line or finish from the asking turn cannot reopen an answer. The successor's work card is written before the turn start returns, so settling an answer Done always has a durable successor. The member id now only seeds a fresh owner: an owner already in rooms.db is never re-keyed, and the seeded id is the identity member id as is, with each @ mapped to - because @ starts a mention. The operator decided on 2026-10-08 that any first-party surface he is signed into may make exactly PUT /v1/me, run permission decisions and room agent settings as the Room operator; the contracts say so, and the Tauri shell now does it natively (reads operator.key on the Rust side, fixed routes only, loopback only, key never reaches the page). The Chrome extension is not covered (no key access, no proxy session, origin refused by design) and the TUI makes none of these calls.
+
+Validation: in platform/ocean-os, `cargo fmt --all -- --check`, `cargo test -p ocean-daemon --locked room` (274 passed, 2 failed: the alias-envelope fixtures that fail on main, #42), `cargo test -p ocean-store --locked` (287), `cargo check --workspace --tests` and docs-check pass. In apps/ocean-surface, fmt, `cargo test -p ocean-surface-ui` (859 unit plus integration suites), `cargo test -p ocean-surface-proxy` (31) and WASM clippy with warnings denied pass; in crates/ocean-tauri, `cargo test` (34) and clippy with warnings denied pass against a placeholder dist. No live daemon, browser or desktop run.
+_________________________________________________________________________________
 time: [22:50] [08-10-26]
 agent: [claude] [claude code]
 worktree: [port/rooms-visual-attention] [/Users/risingtidesdev/dev/port-rooms]

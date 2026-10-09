@@ -522,6 +522,51 @@ pub async fn open_externally(root: &str, path: &str) -> bool {
     tauri_invoke("open_file", &args).await.is_ok()
 }
 
+// ── Room owner mutations (Tauri shell only) ─────────────────────────────
+
+/// The daemon's reply to an owner mutation the native shell sent.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct OwnerMutationReply {
+    pub status: u16,
+    #[serde(default)]
+    pub body: String,
+}
+
+/// Send one of the three Room owner mutations (`kind`: `rename_owner`,
+/// `run_permission`, `agent_settings`) through the native shell, which reads
+/// the daemon's operator key on the Rust side and attaches it (operator
+/// decision 2026-10-08). The page never sees the key and never picks the
+/// method, path or headers. `None` off Tauri; `Some(Err)` when the shell
+/// refused the request or could not reach the daemon.
+pub async fn room_owner_mutation(
+    kind: &str,
+    room: Option<&str>,
+    target: Option<&str>,
+    body: &str,
+) -> Option<Result<OwnerMutationReply, String>> {
+    if !running_in_tauri() {
+        return None;
+    }
+    let opt = |v: Option<&str>| v.map_or(JsValue::NULL, JsValue::from_str);
+    let args = Object::new();
+    for (name, value) in [
+        ("kind", JsValue::from_str(kind)),
+        ("room", opt(room)),
+        ("target", opt(target)),
+        ("body", JsValue::from_str(body)),
+    ] {
+        if Reflect::set(&args, &JsValue::from_str(name), &value).is_err() {
+            return Some(Err("owner mutation arguments".into()));
+        }
+    }
+    Some(match tauri_invoke("room_owner_mutation", &args).await {
+        Ok(val) => Ok(jsval_to::<OwnerMutationReply>(&val)),
+        Err(err) => Err(err
+            .as_string()
+            .unwrap_or_else(|| "owner mutation failed".into())),
+    })
+}
+
 // ── internals ───────────────────────────────────────────────────────────
 
 /// Low-level: call `__TAURI_INTERNALS__.invoke(cmd, args)` and await the

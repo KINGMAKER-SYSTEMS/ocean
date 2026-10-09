@@ -2611,9 +2611,12 @@ pub(super) async fn room_post_message(
             let parked = with_rooms(&state, |store| store.parked_room_agent_runs(&key, root))
                 .unwrap_or_default();
             for run in parked {
-                if !crate::room_agent_runs::claim_answer(&state, &run, msg.seq) {
+                // Held across the admission awaits below: if this request is
+                // dropped mid-way the claim settles on drop, never leaks.
+                let Some(claim) = crate::room_agent_runs::AnswerClaim::take(&state, &run, msg.seq)
+                else {
                     continue;
-                }
+                };
                 let agent_id = run.agent_id.clone();
                 let resumed = if admitted.contains(&agent_id) {
                     true
@@ -2627,7 +2630,7 @@ pub(super) async fn room_post_message(
                     }
                     started
                 };
-                crate::room_agent_runs::settle_answer(&state, &run, msg.seq, resumed);
+                claim.settle(resumed);
             }
         }
     }
@@ -3381,6 +3384,10 @@ struct RoomTurnFinalizer {
     cancel: CancellationToken,
     done: CancellationToken,
     watcher: Option<tokio::task::JoinHandle<()>>,
+    /// The turn's work card, created before the task is spawned. A task that
+    /// never settles (abort before first poll) fails it instead of leaving it
+    /// queued until restart.
+    tracker: Option<Arc<std::sync::Mutex<crate::room_agent_runs::RunTracker>>>,
     armed: bool,
 }
 
@@ -3421,6 +3428,12 @@ impl Drop for RoomTurnFinalizer {
         self.cancel.cancel();
         if !self.armed {
             return;
+        }
+        if let Some(tracker) = self.tracker.take() {
+            match tracker.lock() {
+                Ok(mut guard) => guard.finish_failed("turn_interrupted"),
+                Err(poisoned) => poisoned.into_inner().finish_failed("turn_interrupted"),
+            }
         }
         let state = self.state.clone();
         let admission = self.admission.clone();
@@ -3639,6 +3652,7 @@ async fn spawn_room_agent_turn(
         cancel: cancel.clone(),
         done: done.clone(),
         watcher: None,
+        tracker: None,
         armed: true,
     };
     emit_session_changed(&state.agent_events, session_id);
@@ -3668,6 +3682,32 @@ async fn spawn_room_agent_turn(
         admission_id: admission.admission_id.clone(),
         generation: admission.generation,
     };
+    // G3: the card and the reply attach to the ROOT of the line that
+    // convened the agent. When the trigger row is itself a thread reply,
+    // its own `thread_parent_seq` is the root; a top-level trigger is its
+    // own root.
+    let thread_root = with_rooms(&state, |store| {
+        room_message_at_seq(store, &room, triggered_by_seq)
+    })
+    .and_then(|m| m.thread_parent_seq)
+    .unwrap_or(triggered_by_seq);
+    // Team-platform P3: one live work card per agent turn, folded from the
+    // turn's own session events. It is durable BEFORE this returns `Ok`: a
+    // resumed `room_ask` answer settles its parked run `Done` on that `Ok`, and
+    // restart recovery reads this row as the successor, so a crash after the
+    // settle can never leave the run closed with no successor.
+    let tracker = Arc::new(std::sync::Mutex::new(
+        crate::room_agent_runs::RunTracker::start(
+            state.clone(),
+            room.clone(),
+            &agent.id,
+            session_id,
+            triggered_by_seq,
+            thread_root,
+            prompt_req.cwd.clone(),
+        ),
+    ));
+    terminal.tracker = Some(tracker.clone());
     let requests = state.requests.clone();
     let handle = tokio::spawn(async move {
         let _operation_lifetime = operation_lifetime;
@@ -3700,29 +3740,6 @@ async fn spawn_room_agent_turn(
                 super::compose_folder_agent_prompt(instructions, &prompt_req.prompt);
         }
 
-        // G3: the card and the reply attach to the ROOT of the line that
-        // convened the agent. When the trigger row is itself a thread reply,
-        // its own `thread_parent_seq` is the root; a top-level trigger is its
-        // own root.
-        let thread_root = with_rooms(&state, |store| {
-            room_message_at_seq(store, &room, triggered_by_seq)
-        })
-        .and_then(|m| m.thread_parent_seq)
-        .unwrap_or(triggered_by_seq);
-
-        // Team-platform P3: one live work card per agent turn, folded from the
-        // turn's own session events. Subscribe before the turn can emit.
-        let tracker = std::sync::Arc::new(std::sync::Mutex::new(
-            crate::room_agent_runs::RunTracker::start(
-                state.clone(),
-                room.clone(),
-                &agent.id,
-                session_id,
-                triggered_by_seq,
-                thread_root,
-                prompt_req.cwd.clone(),
-            ),
-        ));
         // The turn's own runtime events drive the card (room turns have no
         // product SSE bridge onto the agent bus).
         let (run_sink, run_events) = mpsc::unbounded_channel();
@@ -6667,6 +6684,13 @@ mod tests {
         .unwrap();
     }
 
+    /// A fresh install: no daemon owner minted yet (the fixture seeds one).
+    fn unseed_owner(state: &AppState) {
+        with_rooms(state, |store| {
+            *store = ocean_store::SqliteRoomStore::open_in_memory().expect("in-mem store");
+        });
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn p2_human_join_and_post_are_authored_by_the_daemon_owner() {
         let tmp = tempfile::tempdir().unwrap();
@@ -6866,8 +6890,8 @@ mod tests {
     async fn p2_owner_identity_is_the_configured_member_not_the_login_name() {
         let tmp = tempfile::tempdir().unwrap();
         let state = fake_convene_state(&tmp);
-        // Minted from the login name before member.toml existed.
-        seed_owner(&state, "loginname", "loginname");
+        // A fresh install with member.toml: the member id seeds the owner.
+        unseed_owner(&state);
         std::fs::write(
             state.runtime.config_dir().join("member.toml"),
             "member_id = \"smaths\"\ndisplay_name = \"John\"\n",
@@ -6899,6 +6923,96 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body.0["room"]["participants"][0]["id"], "smaths");
         assert_eq!(body.0["room"]["participants"][0]["display_name"], "John");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn p2_owner_id_is_the_identity_member_id_with_at_signs_mapped() {
+        for (member, owner_id) in [
+            ("Jay.V", "Jay.V"),
+            ("smaths", "smaths"),
+            ("ec@kingmaker", "ec-kingmaker"),
+            ("EC@Kingmaker", "EC-Kingmaker"),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let state = fake_convene_state(&tmp);
+            unseed_owner(&state);
+            std::fs::write(
+                state.runtime.config_dir().join("member.toml"),
+                format!("member_id = \"{member}\"\n"),
+            )
+            .unwrap();
+            // The identity route's member id, as #41 resolves it.
+            let resolved = resolve_daemon_member(state.runtime.config_dir(), None)
+                .expect("member.toml names the member")
+                .member_id;
+            assert_eq!(resolved, member);
+            let (status, body) = me_get(State(state.clone())).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body.0["participant_id"], owner_id, "{member}");
+            if !member.contains('@') {
+                assert_eq!(body.0["participant_id"], resolved.as_str());
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn p2_persisted_owner_keeps_its_id_when_member_toml_appears() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = fake_convene_state(&tmp);
+        // Minted from the login name before member.toml existed, and already
+        // on a room roster under that id.
+        seed_owner(&state, "loginname", "Login Name");
+        let key = RoomKey::new("p2-persisted-owner");
+        with_rooms(&state, |store| {
+            store.create(key.clone(), "P2", None, Utc::now())
+        })
+        .unwrap();
+        let join = || {
+            room_join(
+                State(state.clone()),
+                Path(key.as_str().to_string()),
+                Json(RoomJoinRequest {
+                    id: String::new(),
+                    display_name: String::new(),
+                    kind: RoomParticipantKind::Human,
+                    owner_id: None,
+                }),
+            )
+        };
+        let (status, _) = join().await;
+        assert_eq!(status, StatusCode::OK);
+
+        for member in ["smaths", "someone-else"] {
+            std::fs::write(
+                state.runtime.config_dir().join("member.toml"),
+                format!("member_id = \"{member}\"\ndisplay_name = \"John\"\n"),
+            )
+            .unwrap();
+            let (status, body) = me_get(State(state.clone())).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body.0["participant_id"], "loginname", "{member}");
+            assert_eq!(body.0["display_name"], "Login Name");
+            // The owner still posts under its roster id without rejoining.
+            let (status, body) = room_post_message(
+                State(state.clone()),
+                Path(key.as_str().to_string()),
+                Json(RoomMessageRequest {
+                    author_id: String::new(),
+                    author_kind: RoomParticipantKind::Human,
+                    body: format!("still me ({member})"),
+                    thread_parent_seq: None,
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{body:?}");
+            assert_eq!(body.0["message"]["author_id"], "loginname");
+        }
+        let roster = with_rooms(&state, |store| store.get(&key))
+            .unwrap()
+            .unwrap()
+            .room
+            .participants;
+        assert_eq!(roster.len(), 1, "no second owner row: {roster:?}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -10121,6 +10235,227 @@ env = { FIXTURE = "1" }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn p4_answer_claim_settles_when_the_posting_request_is_dropped() {
+        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _env = TestEnvRestore::capture(&[
+            "OCEAN_AUTH_FILE",
+            "OCEAN_CODEX_AUTH_FILE",
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+            "OCEAN_AGENTS_DIR",
+        ]);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state = crate::tests::isolated_room_fixture_state(&tmp);
+        let agents_root = tmp.path().join("agents");
+        write_agent_fixture(&agents_root, "asker", "model = \"fake-ok\"\n", None);
+        std::env::set_var("OCEAN_AGENTS_DIR", &agents_root);
+        let key = RoomKey::new("p4-answer-drop");
+        create_mention_room(&state, &key);
+        join_human(&state, &key);
+        let (status, _) = room_join(
+            State(state.clone()),
+            Path(key.as_str().to_string()),
+            Json(RoomJoinRequest {
+                id: "asker".into(),
+                display_name: "Asker".into(),
+                kind: RoomParticipantKind::Agent,
+                owner_id: Some("human".into()),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let generation = authorize_room_agent_fixture(
+            &state,
+            &key,
+            "asker",
+            ActivationPolicy::TaskAndThread,
+            ContextPolicy::InvocationOnly,
+        );
+        let root = append_room_message(
+            &state,
+            &key,
+            "human",
+            RoomParticipantKind::Human,
+            RoomMessageKind::Message,
+            "paint the shed",
+        )
+        .unwrap()
+        .seq;
+        let mut tracker = crate::room_agent_runs::RunTracker::start(
+            state.clone(),
+            key.clone(),
+            "asker",
+            authorized_room_agent_session_id(&key, "asker", generation),
+            root,
+            root,
+            tmp.path().display().to_string(),
+        );
+        tracker.awaiting_reply("Which colour?", None);
+        drop(tracker);
+        let parked_id = with_rooms(&state, |store| store.parked_room_agent_runs(&key, root))
+            .unwrap()
+            .pop()
+            .expect("parked run")
+            .run_id;
+        let run = |id: &str| {
+            with_rooms(&state, |store| store.room_agent_run(id))
+                .unwrap()
+                .unwrap()
+        };
+        let reply = |body: &str| {
+            room_post_message(
+                State(state.clone()),
+                Path(key.as_str().to_string()),
+                Json(RoomMessageRequest {
+                    author_id: String::new(),
+                    author_kind: RoomParticipantKind::Human,
+                    body: body.into(),
+                    thread_parent_seq: Some(root),
+                }),
+            )
+        };
+
+        // Hold the request registry so the successor's registration waits:
+        // the handler is then suspended after the claim, before the settle.
+        let registry = state.requests.write().await;
+        let mut post = Box::pin(reply("blue"));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), post.as_mut())
+                .await
+                .is_err(),
+            "the reply is suspended inside the successor's admission"
+        );
+        assert!(
+            run(&parked_id).answer_seq.is_some(),
+            "suspended after the answer claimed the run"
+        );
+        // The client disconnects: the handler future is dropped mid-way.
+        drop(post);
+        drop(registry);
+        let released = run(&parked_id);
+        assert!(released.state.is_parked(), "{released:?}");
+        assert_eq!(released.answer_seq, None, "the dropped claim is released");
+        assert_eq!(
+            with_rooms(&state, |store| store.room_agent_runs(&key, 10))
+                .unwrap()
+                .len(),
+            1,
+            "no successor was started"
+        );
+
+        // The run is claimable again: the next answer resumes it.
+        let (status, body) = reply("blue, again").await;
+        assert_eq!(status, StatusCode::CREATED);
+        let answer_seq = body.0["message"]["seq"].as_u64().unwrap();
+        let closed = run(&parked_id);
+        assert_eq!(closed.state, ocean_core::RoomAgentRunState::Done);
+        assert_eq!(closed.answer_seq, Some(answer_seq));
+        let runs = wait_for_runs(&state, &key, 2).await;
+        assert!(runs.iter().any(|r| r.trigger_seq == answer_seq));
+    }
+
+    #[tokio::test]
+    async fn p4_successor_work_card_is_durable_before_the_turn_start_returns() {
+        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _env = TestEnvRestore::capture(&[
+            "OCEAN_AUTH_FILE",
+            "OCEAN_CODEX_AUTH_FILE",
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+            "OCEAN_AGENTS_DIR",
+        ]);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state = crate::tests::isolated_room_fixture_state(&tmp);
+        let agents_root = tmp.path().join("agents");
+        write_agent_fixture(&agents_root, "asker", "model = \"fake-ok\"\n", None);
+        std::env::set_var("OCEAN_AGENTS_DIR", &agents_root);
+        let key = RoomKey::new("p4-successor-durable");
+        create_mention_room(&state, &key);
+        join_human(&state, &key);
+        let (status, _) = room_join(
+            State(state.clone()),
+            Path(key.as_str().to_string()),
+            Json(RoomJoinRequest {
+                id: "asker".into(),
+                display_name: "Asker".into(),
+                kind: RoomParticipantKind::Agent,
+                owner_id: Some("human".into()),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let generation = authorize_room_agent_fixture(
+            &state,
+            &key,
+            "asker",
+            ActivationPolicy::TaskAndThread,
+            ContextPolicy::InvocationOnly,
+        );
+        let root = append_room_message(
+            &state,
+            &key,
+            "human",
+            RoomParticipantKind::Human,
+            RoomMessageKind::Message,
+            "paint the shed",
+        )
+        .unwrap()
+        .seq;
+        let _ = generation;
+        let (admission, permit) = room_agent_authority::admit_room_agent(
+            &state,
+            &key,
+            "asker",
+            "asker",
+            AdmissionTrigger::ThreadReply,
+        )
+        .await
+        .expect("admitted");
+        let queued = spawn_room_agent_turn(
+            state.clone(),
+            admission,
+            permit,
+            RoomParticipant {
+                id: "asker".into(),
+                kind: RoomParticipantKind::Agent,
+                display_name: "Asker".into(),
+            },
+            root,
+            None,
+            Uuid::new_v4(),
+            None,
+            None,
+        )
+        .await
+        .expect("successor queued");
+        // No await since the `Ok`: on this single-threaded runtime the turn
+        // task has not been polled, yet its work card must already be durable,
+        // because an answer settles its parked run `Done` on exactly this `Ok`.
+        let runs = with_rooms(&state, |store| store.room_agent_runs(&key, 10)).unwrap();
+        let card = runs
+            .iter()
+            .find(|r| r.agent_id == "asker" && r.trigger_seq == root)
+            .expect("the successor card exists before the turn runs");
+        assert_eq!(card.session_id, queued.session_id.to_string());
+        assert_eq!(card.state, ocean_core::RoomAgentRunState::Queued);
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let runs = with_rooms(&state, |store| store.room_agent_runs(&key, 10)).unwrap();
+            if runs.iter().all(|r| r.state.is_terminal()) {
+                assert_eq!(runs.len(), 1, "one card per turn");
+                break;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "turn never settled");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn p3_owner_cancel_of_a_room_turn_ends_the_card_cancelled_not_failed() {
         let _yolo_guard = crate::tests::yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
@@ -10285,6 +10620,60 @@ env = { FIXTURE = "1" }
         assert_eq!(run.state, ocean_core::RoomAgentRunState::Done);
         assert_eq!(run.reply_seq, Some(2));
         assert_eq!(run.tool_count, 1);
+    }
+
+    #[tokio::test]
+    async fn p4_late_asking_turn_writes_never_reopen_an_answer_claim() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state = crate::tests::isolated_room_fixture_state(&tmp);
+        let key = RoomKey::new("p4-late-turn-write");
+        create_mention_room(&state, &key);
+        let mut tracker = crate::room_agent_runs::RunTracker::start(
+            state.clone(),
+            key.clone(),
+            "asker",
+            AgentSessionId::new_v4(),
+            1,
+            1,
+            "/repo".into(),
+        );
+        tracker.awaiting_reply("Which colour?", Some(2));
+        let run_id = with_rooms(&state, |store| store.parked_room_agent_runs(&key, 1))
+            .unwrap()
+            .pop()
+            .expect("parked run")
+            .run_id;
+        let stored = || {
+            with_rooms(&state, |store| store.room_agent_run(&run_id))
+                .unwrap()
+                .unwrap()
+        };
+        let claim = |seq: u64| {
+            with_rooms(&state, |store| {
+                store.claim_parked_room_agent_run(&run_id, seq, Utc::now())
+            })
+            .unwrap()
+            .is_some()
+        };
+        assert!(claim(3), "the answer claims the parked run");
+
+        // The asking turn reports progress after the answer claimed its run.
+        tracker.posted_update("still looking");
+        assert_eq!(stored().answer_seq, Some(3), "the claim survives");
+        assert_eq!(stored().summary.as_deref(), Some("still looking"));
+        assert!(!claim(4), "a second answer cannot claim the run");
+
+        // The answer's successor closes it; late writes cannot reopen it.
+        with_rooms(&state, |store| {
+            store.settle_room_agent_run_answer(&run_id, 3, true, Utc::now())
+        })
+        .unwrap()
+        .unwrap();
+        tracker.posted_update("late line");
+        tracker.finish_failed("turn_failed");
+        tracker.finish_cancelled();
+        assert_eq!(stored().state, ocean_core::RoomAgentRunState::Done);
+        assert!(!claim(5));
     }
 
     // ── S2-P1: snapshot access, merged SSE via router, outbox/retry ──────────
@@ -12665,6 +13054,7 @@ env = { FIXTURE = "1" }
             cancel: cancel.clone(),
             done: CancellationToken::new(),
             watcher: None,
+            tracker: None,
             armed: true,
         };
         // Single-thread runtime: abort before this newly spawned future can poll.
@@ -12802,6 +13192,7 @@ env = { FIXTURE = "1" }
                 cancel: cancel.clone(),
                 done: CancellationToken::new(),
                 watcher: None,
+                tracker: None,
                 armed: true,
             };
             let result = interrupted_room_result(request_id, session_id);
