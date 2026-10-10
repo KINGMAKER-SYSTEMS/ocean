@@ -1,10 +1,9 @@
 //! Rooms S0 — `GET /v1/identity`: who this daemon says its human is.
 //!
 //! Design direction §3.2 (`ocean-surface/docs/OCEAN_ROOMS_DESIGN_DIRECTION.md`):
-//! one human = one member id on every host. The daemon publishes the same
-//! string `ocean-mcp` resolves, from the same file, so a terminal, the desktop
-//! app, the Chrome extension, and the browser (through the proxy's cross-check)
-//! converge on one id without any client inventing one.
+//! one human = one member id on every host. This endpoint projects the daemon
+//! host's configured member id. It does not authenticate a caller or establish
+//! cross-client identity parity; consumers retain their own authority checks.
 //!
 //! Sources, in order:
 //!
@@ -92,8 +91,7 @@ pub(super) fn resolve(config_dir: &Path, env_member: Option<&str>) -> Identity {
     }
 }
 
-/// The same character set `ocean-mcp` accepts (`member_from_toml`), so both
-/// readers of one file always agree on whether it names anyone.
+/// The configured member id must be a nonempty ASCII identifier.
 fn valid_member_id(value: &str) -> bool {
     !value.is_empty()
         && value
@@ -112,10 +110,9 @@ struct MemberToml {
     display_name: Option<String>,
 }
 
-/// Parse the same strict TOML contract used by the other identity reader.
-/// Unknown fields, duplicate keys, malformed values, and nested tables fail
-/// closed so this endpoint cannot publish a different identity for the same
-/// config file.
+/// Parse the daemon's strict top-level TOML identity contract. Unknown fields,
+/// duplicate keys, malformed values, and nested tables fail closed rather than
+/// being reinterpreted as an identity.
 fn parse_member_toml(path: &Path) -> Option<Identity> {
     let raw = std::fs::read_to_string(path).ok()?;
     parse_member_text(&raw)
@@ -186,8 +183,7 @@ mod tests {
 
     #[test]
     fn malformed_values_are_absent_not_repaired() {
-        // A member_id that ocean-mcp would refuse is refused here too, and the
-        // env fallback still applies.
+        // A malformed member_id is refused, and the env fallback still applies.
         let tmp = dir_with(Some(
             "member_id = \"not a member id\"\ndisplay_name = \"X\"\n",
         ));

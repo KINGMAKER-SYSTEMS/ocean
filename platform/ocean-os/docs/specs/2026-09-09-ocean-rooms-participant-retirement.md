@@ -67,8 +67,8 @@ name in a model prompt now forbid only the private strings.
 
 ## 4. ocean-mcp identity
 
-`ocean-mcp` resolves its member id as: `--member` flag, then `member.toml` in
-the Ocean config dir (`OCEAN_CONFIG_DIR`, else `~/.config/ocean-rs`), then
+The imported S0 design describes `ocean-mcp` resolving its member id as:
+`--member` flag, then `member.toml` in the Ocean config dir (`OCEAN_CONFIG_DIR`, else `~/.config/ocean-rs`), then
 `OCEAN_MEMBER_ID`. With none of them, every read works and `ocean_room_post`
 / `ocean_room_join` refuse with a hint naming the file. There is no `$USER`
 or "operator" default any more: a bridge that does not know who you are does
@@ -79,16 +79,17 @@ member_id = "smaths"
 display_name = "John"   # optional
 ```
 
-The surface's desktop shell reads the same file (design direction §3.2), so a
-person is one id from a terminal and from the app.
+Shared desktop/MCP identity is the design goal (§3.2), not a parity claim for
+this public port: the current public `ocean-mcp` has no `member.toml` reader.
 
-The daemon publishes the same answer on `GET /v1/identity` (credential-free):
+This port implements the daemon-local projection on `GET /v1/identity`
+(credential-free):
 `{ok, member_id: string|null, display_name: string|null, source:
 "member.toml"|"env"|"unset"}`, resolved per request from `member.toml` in
 its config dir then `OCEAN_MEMBER_ID`. Nothing configured answers
-`member_id: null` — never the process user — so a direct host (the desktop
-app, the extension) and the proxy's cross-check see exactly what `ocean-mcp`
-would post as. A malformed `member_id` is absent, not repaired, and does not
+`member_id: null` — never the process user. The result reports local
+configuration; it does not authenticate callers or change Room/operator
+authority. A malformed `member_id` is absent, not repaired, and does not
 block the env fallback. Note for S1: the design
 direction wrote `~/.config/ocean/member.toml`; the daemon's config dir is
 `~/.config/ocean-rs`, and that is the path this document fixes.
@@ -112,11 +113,12 @@ direction wrote `~/.config/ocean/member.toml`; the daemon's config dir is
   audit] helper`.
 - Audit text: admission allowed/refused forms, forged ids dropped, missing
   ids omitted, the retired line.
-- ocean-mcp: strict `member.toml` parsing; flag precedence; without identity
-  reads work and writes refuse with the hint and nothing is posted.
+- Imported ocean-mcp design acceptance (not verified by this public port): strict
+  `member.toml` parsing; flag precedence; without identity reads work and writes
+  refuse with the hint and nothing is posted.
 - daemon identity: strict top-level `member.toml` parsing; malformed, duplicate,
-  or nested identity fields fall back to `OCEAN_MEMBER_ID` rather than producing
-  a value that differs from the other identity reader.
+  or nested identity fields fall back to `OCEAN_MEMBER_ID` rather than being
+  reinterpreted as an identity.
 
 ## 6. Migration on the campaigns room
 

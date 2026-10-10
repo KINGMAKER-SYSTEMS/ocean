@@ -23,6 +23,12 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   identifiers; never log callback descriptions or arbitrary error chains.
 
 - Daemon health is `GET /health`, not `/v1/health`.
+- `identity.rs` owns credential-free `GET /v1/identity`: resolve strict top-level
+  `member.toml` in the daemon config directory at request time, then validated
+  `OCEAN_MEMBER_ID`, otherwise explicit null identity. Malformed/duplicate/
+  unknown/nested file fields fall back without rewriting the file; never infer
+  identity from the process user. The projection is local configuration, not
+  caller authentication or permission to bypass Room/operator authority.
 - `/v1/models` preserves current/id/provider/label/readiness/provenance and
   additively exposes provider-owned `effort_levels` (an empty list is
   authoritative: that route sends no effort parameter); the route fixture verifies
@@ -371,6 +377,8 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   stage authority, production activation or release of migration hold #22.
 
 ## Verification
+
+- `cargo test -p ocean-daemon identity::tests --locked -- --test-threads=1`
 
 - `cargo test -p ocean-daemon provider_auth:: --locked -- --test-threads=1`
 

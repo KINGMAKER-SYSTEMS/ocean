@@ -495,7 +495,7 @@ Grouped by concern:
 ```text
 # Liveness / observability
 GET    /                                  root banner (JSON route list)
-GET    /health    liveness check
+GET    /health                            liveness check
 GET    /v1/identity                      who this daemon says its human is (member.toml, then OCEAN_MEMBER_ID; null when unset)
 GET    /ready                             readiness (model/credentials wired)
 GET    /metrics                           Prometheus text (v0.0.4); Content-Type: text/plain; version=0.0.4
