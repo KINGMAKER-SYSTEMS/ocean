@@ -46,6 +46,10 @@ tokio = { version = "1", features = ["sync", "time", "macros"] }
 git2 = { version = "0.20", features = ["vendored-libgit2"] }
 # Open a file with the OS default application (B0: Open Externally).
 opener = "0.7"
+# Room agent consent (room_consent.rs): no-follow descriptor open + owner uid
+# check for the operator key, and CSPRNG decision ids.
+libc = "0.2"
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 tempfile = "3"

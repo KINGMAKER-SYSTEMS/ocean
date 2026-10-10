@@ -24,6 +24,8 @@ use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
+mod room_consent;
+
 /// One surfaced filesystem change, serialized to the webview as `path-changed`.
 ///
 /// `kind` is created/modified/removed. notify surfaces a rename as a
@@ -1592,6 +1594,11 @@ pub fn run() {
                 })
                 .build(),
         )
+        // Room agent consent broker: numeric-loopback daemon only; an
+        // untrusted OCEAN_DAEMON_URL leaves every consent command refused.
+        .manage(room_consent::ConsentState(Arc::new(
+            room_consent::ConsentBroker::new(&url, room_consent::operator_key_path()),
+        )))
         .manage(AppState {
             watchers: Default::default(),
             daemon: Arc::new(DaemonSup::new(host, port)),
@@ -1921,7 +1928,11 @@ pub fn run() {
             ui_ready,
             deep_link_ready,
             ui_debug_resize,
-            open_external_url
+            open_external_url,
+            room_consent::room_consent_preview,
+            room_consent::room_consent_authorize,
+            room_consent::room_consent_cancel,
+            room_consent::room_agent_revoke
         ])
         .run(tauri::generate_context!())
         .expect("error while running ocean-tauri");
