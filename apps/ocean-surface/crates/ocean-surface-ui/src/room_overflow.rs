@@ -24,6 +24,17 @@ fn room_agents(rooms: Rooms) -> Vec<RoomParticipant> {
         .unwrap_or_default()
 }
 
+/// The open room's mute pref, as carried by the room list.
+fn room_muted(rooms: Rooms) -> bool {
+    let key = rooms.open_key.get();
+    rooms.list.with(|list| {
+        list.iter()
+            .find(|r| Some(&r.id) == key.as_ref())
+            .map(|r| r.muted)
+            .unwrap_or(false)
+    })
+}
+
 /// Settings body from the two fields; blanks clear.
 pub(crate) fn settings_from_fields(instructions: &str, model: &str) -> RoomAgentSettings {
     let clean = |s: &str| Some(s.trim().to_string()).filter(|s| !s.is_empty());
@@ -91,6 +102,22 @@ pub fn RoomOverflow(rooms: Rooms, joined: bool) -> impl IntoView {
                             "Agents"
                         </button>
                     })}
+                    {move || {
+                        let muted = room_muted(rooms);
+                        view! {
+                            <button
+                                class="room-overflow__item"
+                                role="menuitem"
+                                type="button"
+                                on:click=move |_| {
+                                    open.set(false);
+                                    crate::room_attention::toggle_mute(rooms, muted);
+                                }
+                            >
+                                {if muted { "Unmute" } else { "Mute" }}
+                            </button>
+                        }
+                    }}
                     {joined.then(|| view! {
                         <button
                             class="room-overflow__item room-overflow__item--danger"

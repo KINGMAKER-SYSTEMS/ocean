@@ -1196,6 +1196,26 @@ Fixed the second-round review findings on the Rooms P2-P4 port (#68) and recorde
 
 Validation: in platform/ocean-os, `cargo fmt --all -- --check`, `cargo test -p ocean-daemon --locked room` (274 passed, 2 failed: the alias-envelope fixtures that fail on main, #42), `cargo test -p ocean-store --locked` (287), `cargo check --workspace --tests` and docs-check pass. In apps/ocean-surface, fmt, `cargo test -p ocean-surface-ui` (859 unit plus integration suites), `cargo test -p ocean-surface-proxy` (31) and WASM clippy with warnings denied pass; in crates/ocean-tauri, `cargo test` (34) and clippy with warnings denied pass against a placeholder dist. No live daemon, browser or desktop run.
 _________________________________________________________________________________
+time: [22:50] [08-10-26]
+agent: [claude] [claude code]
+worktree: [port/rooms-visual-attention] [/Users/risingtidesdev/dev/port-rooms]
+type: [feature-request]
+area: [frontend] [backend] [testing]
+
+Ported Rooms P5 and P6 on top of the P2-P4 port. P5 splits the Rooms workspace into a rooms_workspace module tree (access, banners, composer, format, members, mentions, read cursor, room list, threads) with the visual pass owned by the shared tokens, and hides the daemon's auto-convene audit rows behind the work card. P6 adds an owner-local mentions and replies inbox, bounded room search, per-room mute preferences and a compact working line, with inbox and search responses retired when origin, room admission, query or request ticket changes. Public main's copy of the old rooms_workspace.rs carried one extra caller-alias test, so the file was deleted by hand and that test moved into rooms_workspace/access.rs; the daemon route baseline is now 129.
+
+Validation: in apps/ocean-surface, fmt, `cargo test -p ocean-surface-ui` (865 unit tests plus integration suites), WASM clippy with warnings denied, WASM check, WASM test compilation, proxy check and proxy tests pass. In platform/ocean-os, fmt, ocean-core (63) and ocean-store (286) tests, `cargo check --workspace --tests` and docs-check pass; ocean-daemon is 920 passed, 3 failed, all three the persistent-room lifecycle fixtures that fail on main and are fixed by open #58. No live daemon, browser or desktop run.
+_________________________________________________________________________________
+time: [23:09] [08-10-26]
+agent: [claude] [claude code]
+worktree: [port/rooms-visual-attention] [/Users/risingtidesdev/dev/fix-pr69]
+type: [bug report]
+area: [backend] [frontend] [testing]
+
+Fixed three review findings on the Rooms P5-P6 port (PR #69). The mentions inbox moved from GET /v1/rooms/persistent/inbox, where its static segment made a room keyed inbox unreachable through its own detail route, to GET /v1/rooms/inbox; the daemon banner and operator guide, the Surface inbox client and a new proxy route follow, and a call room id inbox still reaches its LiveKit token route. The inbox now scans only the 50 most recently active open rooms (updated_at order) instead of every open room under the store lock, and room search refuses queries over 200 characters with 400 query_too_long (the Surface search input carries the same maxlength).
+
+Validation: in platform/ocean-os, `cargo fmt --all -- --check`, `cargo check --workspace --tests` and docs-check pass; `cargo test -p ocean-daemon --locked room` is 268 passed, 2 failed, both the alias-envelope fixtures that fail on main. The new route-precedence, inbox-cap and search-cap tests were each confirmed to fail with their fix reverted. In apps/ocean-surface, fmt, `cargo test -p ocean-surface-ui` (866 unit tests plus integration suites), WASM clippy with warnings denied, `cargo check -p ocean-surface-proxy` and the new proxy inbox routing test (fails without the route) pass. No live daemon, browser or desktop run.
+_________________________________________________________________________________
 
 _________________________________________________________________________________
 time: [21:51] [10-09-26]
@@ -1239,6 +1259,16 @@ passes with disposable auth/config/XDG paths and unchanged HOME. Surface initial
 snapshot passed861 unit and28 integration tests; final work-card tests4/4, live-cap regression1/1 and
 WASM check pass. Independent exact integration review follows this
 ledger update. No merge, install, live provider call or two-machine outcome.
+time: [10:40pm] [09-10-26]
+agent: [claude] [claude-opus-5-5]
+worktree: [port/rooms-visual-attention] [/Users/risingtidesdev/dev/oceanwork/wt-pr69]
+type: [bug report]
+area: [backend] [review] [testing]
+
+Review fix on the Rooms P5-P6 port (PR #69). Room search and the mentions inbox returned stored message rows raw, skipping the human-read projection every transcript response applies, so a row whose author id fails the member-id bound (a pre-guard row or a federated row carrying brackets, control characters or an oversize id) came back verbatim. Search results now go through projected_transcript, inbox messages through projected_room_message, and the inbox author_name fallback uses rendered_author_id; mention and reply matching still runs on the raw row. New test p6_search_and_inbox_project_unbounded_author_ids fails with the fix reverted.
+
+Validation: in platform/ocean-os, `cargo fmt --all -- --check`, `cargo test -p ocean-store --locked` (291), and `cargo test -p ocean-daemon --locked` filtered to p6_, inbox, search, prefs, mute and router_contract pass. In apps/ocean-surface, `cargo test -p ocean-surface-ui -p ocean-surface-proxy` pass. No live daemon, browser or desktop run.
+_________________________________________________________________________________
 time: [22:10] [10-09-26]
 agent: [claude] [claude-opus-5-5] [PR68 reviewer]
 worktree: [port/rooms-identity-cards-agents]
@@ -1279,3 +1309,14 @@ area: [backend] [frontend] [review]
 PR #68 stack reconciliation: preserved concurrent pending-permission repair 41e41b08 and merged the reviewed PR #66 shell head 729cb2fb, including canonical main f1b22bd8. The additive PromptControl conflict retains both Room extra_tools and requested model/provider/reroute metadata in its struct, destructure and defaults. Both public ledger histories retained. Existing owning contracts already describe both behaviors; no new ownership or index changes.
 
 Independent review acknowledged the pending-permission delta; its new regression passed as part of the dependent integrated P4 suite (12/12), with P6 7/7 and locked daemon check on that prior integration. Shell focused evidence is recorded in its preceding receipt. This new combined main/shell/Room head requires fresh review and required builds; combined targeted verification is in progress on the dependent #69 integration. No deployment or live behavior claim.
+
+_________________________________________________________________________________
+time: [22:34] [09-10-26]
+agent: [codex] [factory release]
+worktree: [codex/pr69-reviewed-repairs]
+type: [bug report]
+area: [frontend] [backend] [review] [testing]
+
+PR #69 / issue #76: preserved button semantics for inbox/search, closed compact navigation after inbox selection, and queued search thread focus until root hydration under matching room/origin admission. Inbox roster lookup avoids transcript hydration; SQL LIMIT bounds materialized open-room rows (not a claim of bounded SQLite scan cost). Corrected day-key documentation. Preserved concurrent author projection 42d700ac, pending-permission repair and reviewed shell/main reconciliation through #68 de09e349. A test-only Rooms constructor avoids browser initialization in native regression tests. Source review passed 76dfd1db; final integration receipt precedes exact-head review and hosted checks.
+
+Validation: store 3/3 on unchanged store source, with both new regressions failing without fixes; final daemon P4 12/12, P6 7/7, locked daemon check; Surface Rooms 91/91, attention 6/6, host 14/14, workspace filter 131/131 (includes the same 91 Rooms tests, not additional), sessions chrome 5/5, production event adapter Node 4/4, locked WASM check; component formatting and diff checks pass. Remote Surface validation source matched all 376 tracked file hashes. No install, deployment or live acceptance claim. Final release ownership is this factory chat; required approval/build gates and parent-first release order remain.

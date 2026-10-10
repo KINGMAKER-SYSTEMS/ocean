@@ -1191,6 +1191,16 @@ pub struct RoomAgentSettings {
     pub model: Option<String>,
 }
 
+/// Per-room viewer preferences on the owning daemon (team-platform P6).
+/// Owner-local; never federated.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoomPrefs {
+    /// Suppress unread/attention signals for this room.
+    #[serde(default)]
+    pub muted: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoomReadCursorProjection {
     #[serde(default)]

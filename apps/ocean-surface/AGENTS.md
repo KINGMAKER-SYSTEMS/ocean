@@ -416,10 +416,39 @@ Web surface session UI:
     extension proxy login, so these actions keep the daemon's authority error
     there.
 - The room header has exactly one primary action (Join when not joined) and
-  one overflow (`room_overflow.rs`): Share, Agents, Leave. Agents opens the
+  one overflow (`room_overflow.rs`): Share, Agents, Mute/Unmute, Leave. Agents opens the
   per-room agent settings panel (instructions overlay + model) over
   `GET/PUT .../agents/{agent_id}/settings`; these settings are local to this
   Ocean. New secondary room actions go into this overflow, not the header.
+- Rooms UI lives in `src/rooms_workspace/` (team-platform P5): `mod.rs`
+  owns `RoomsWorkspace`, its shared signals, and the transcript; child
+  components are `RoomListRail` (`room_list.rs`), `ChannelComposer`
+  (`composer.rs`), `ThreadPanel` (`threads.rs`), `MembersPanel`
+  (`members.rs`), and the notice banners (`banners.rs`); pure helpers live
+  in `read_cursor.rs`, `mentions.rs` (one `MentionState` drives both
+  composers), `format.rs`, and `access.rs`, each with its own tests. Drafts,
+  send latches, and mention state stay owned by `RoomsWorkspace` because the
+  center and right rails re-render on room state.
+- The timeline hides the daemon's `auto-convene: …` audit rows
+  (`room_messages::is_convene_audit`) because the work card shows the
+  convene; `auto-convene failed …` rows stay. System rows render as one quiet
+  line; grouped rows keep the avatar gutter with the time revealed on intent.
+- Attention (P6, `room_attention.rs`, `styles/rooms-attention.css`): the
+  left-rail @ icon swaps the room list for the mentions inbox
+  (`GET /v1/rooms/inbox`, also forwarded by the proxy; render the daemon's
+  `author_name`); room search input is capped at the daemon's 200 characters;
+  inbox picks dismiss the compact room drawer; both inbox and search picks queue
+  their thread via an origin- and room-key-scoped `Rooms.focus_thread`, consumed
+  only after that room record and root load. Action rows retain native button
+  semantics inside list-item wrappers. Inbox/search responses retire on newer reads, changed daemon origins, room admissions, query edits, and panel cleanup. Mute errors only publish into their originating room. The
+  header search icon opens room search in the right rail (thread > search >
+  members). Muted rooms (`GET/PUT .../prefs`) dim and drop the unread dot.
+  The line above the composer shows agents with a live run. Coworker typing
+  presence is not built: it would cross Bedrock and needs an operator
+  trust-boundary decision. Empty states carry no copy.
+- In `styles/rooms-workspace.css` the "Layout & depth (canonical)" section is
+  the final say on geometry, density, and depth; change values there rather
+  than adding another override layer. Colors only from `tokens.css`.
 - Owner responses publish only for the latest owner request at the current
   daemon origin. Origin changes clear the old owner and refresh `/v1/me`;
   an older response cannot overwrite a later owner read.

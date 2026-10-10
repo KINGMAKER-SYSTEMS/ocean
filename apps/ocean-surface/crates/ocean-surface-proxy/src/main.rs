@@ -522,6 +522,10 @@ fn build_app(state: Arc<AppState>, dist: &std::path::Path) -> Router {
                 .put(proxy_rooms_persistent)
                 .delete(proxy_rooms_persistent),
         )
+        // The owner's cross-room mentions inbox (team-platform P6) sits
+        // outside `/v1/rooms/persistent/{key}` so it never shadows a room
+        // keyed `inbox`; same buffered forwarder.
+        .route("/v1/rooms/inbox", get(proxy_rooms_persistent))
         .route(
             "/v1/rooms/{room_id}/livekit-token",
             post(proxy_livekit_token),
@@ -1675,8 +1679,8 @@ async fn proxy_rooms_persistent(
         };
     }
 
-    // The path is always under /v1/rooms/persistent (the only routes wired to
-    // this handler); forward it unchanged, with the query string preserved so
+    // The path is always under /v1/rooms/persistent or exactly /v1/rooms/inbox
+    // (the only routes wired to this handler); forward it unchanged, with the query string preserved so
     // the transcript tail's ?after_seq= reaches the daemon.
     let url = format!("{}{path}{q}", state.daemon_url.trim_end_matches('/'));
     // buffer the (small) body so we can forward it on POST/DELETE
@@ -3215,6 +3219,64 @@ mod tests {
             resp.status(),
             StatusCode::BAD_GATEWAY,
             "a legitimate path (incl. dots inside a segment) must still route",
+        );
+    }
+
+    /// GET /v1/rooms/inbox reaches the rooms forwarder (502 at the closed
+    /// daemon port) instead of the ServeDir fallback's 404, and the inbox
+    /// route does not swallow the LiveKit route of a call room id `inbox`.
+    #[tokio::test]
+    async fn rooms_inbox_routes_through_production_router() {
+        let dist = tempfile::tempdir().expect("tempdir");
+        let state = Arc::new(AppState {
+            http: reqwest::Client::new(),
+            http_json: reqwest::Client::new(),
+            voice_profile: "leo".to_string(),
+            daemon_url: "http://127.0.0.1:9".to_string(),
+            default_livekit_room_id: "project:surface-test".to_string(),
+            tldraw_sync_uri: None,
+            maps_key: None,
+            maps_map_id: "DEMO_MAP_ID".to_string(),
+            basic_auth: None,
+            session_token: "test-session".to_string(),
+            secure_cookie: false,
+            observer_token_path: PathBuf::from("/not-used"),
+            operator_key_path: PathBuf::from("/not-used-operator-key"),
+        });
+        let app = build_app(state, dist.path());
+
+        for (method, uri) in [
+            ("GET", "/v1/rooms/inbox?limit=50"),
+            ("GET", "/v1/rooms/persistent/inbox"),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_GATEWAY, "{method} {uri}");
+        }
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/rooms/inbox/livekit-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_GATEWAY,
+            "a call room id `inbox` must still reach the LiveKit forwarder"
         );
     }
 
