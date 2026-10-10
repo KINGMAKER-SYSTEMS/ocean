@@ -1185,3 +1185,14 @@ Round 5: round-4 review follow-ups on model reroute fidelity. (F2) Selection-tim
 
 Validation: ocean-agent 280 passed / 0 failed / 2 ignored; ocean-daemon 908 passed / 2 failed (only the two known pre-existing persistent_room envelope-key assertions); clippy -p ocean-agent --all-targets -D warnings clean; fmt --all --check clean; git diff --check clean.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [23:29] [09-10-26]
+agent: [codex] [factory release]
+worktree: [codex/pr45-resource-reconcile]
+type: [bug report]
+area: [backend] [testing] [review]
+
+PR #45 / issue #82: reconciled grant-management routes with canonical main f1b22bd8 while preserving both public ledger histories. Restored admitted-turn scope, digest, cancellation and current owner/access authority; operator previews capture separate request authority and reuse the same per-call checks. Consumed grant decisions reach transactional replay before mutable expiry/root-liveness checks, retaining exact replay after expiry or root removal and fixed mismatch/cross-ledger refusal. Fresh requests still validate their roots and expiry; stored absolute roots remain unchanged for confined descriptor I/O.
+
+Validation: missing-root replay failed before repair (400 instead of 200), then resource tests 7/7, router 5/5, locked daemon check, formatting, diff and docs checks passed (30 packages, 153 docs, 170 links). Synthetic fixtures cover cancellation, wrong scope/digest, owner/access loss, revoke/suspend, preview authority, expiry/root removal, normalized path replay, cross-ledger reuse and fresh invalid inputs. Independent source review ACKed 2c4b2ee6; this receipt precedes final exact-head review and hosted checks. Nearest daemon contract updated; parent ownership/indexes unchanged. Required maintainer approval and existing architecture/live-migration holds remain. No live credentials, provider calls, installation or deployment.
