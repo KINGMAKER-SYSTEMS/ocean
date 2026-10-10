@@ -1135,3 +1135,15 @@ Validation on isolated Mac mini: ten p4_ tests and locked daemon check passed.
 Both new regressions fail with swallowed-error behavior restored; fixed sources
 restored byte-identically and all ten passed again. Formatting and diff checks pass.
 No live daemon changes. Other PR68 review findings remain outside this repair.
+
+_________________________________________________________________________________
+time: [22:25] [10-09-26]
+agent: [claude code] [claude-opus-5-5]
+worktree: [fix/daemon-cors-put] (wt-ocean-cors-put, stacked on port/rooms-identity-cards-agents)
+type: [bug report] ocean-private #93
+area: [backend] [testing]
+
+The daemon now serves PUT (`/v1/me`, room agent settings, and P6 prefs in the next stacked PR), but its CORS preflight still advertised only GET/POST/PATCH/DELETE. So a direct cross-origin PUT from the Tauri webview, such as `put_prefs`, could never be sent. `cors_allowed_methods()` now includes PUT. A new production-router test takes every method from `banner_routes()`, preflights each one from the Tauri and loopback origins, checks that foreign origins get no authorization, and checks that a real PUT from Tauri hits the operator gate (not a 405) and carries CORS headers. Origins, headers and route authority are unchanged. The daemon AGENTS records the method contract.
+
+Validation on the Mac mini (dedicated target dir): `cargo fmt -p ocean-daemon -- --check`, `cargo test -p ocean-daemon --locked -- cors router_contract` (14 passed), the new test fails with PUT removed, `cargo clippy -p ocean-daemon --locked --all-targets -- -D warnings`, `cargo xtask docs-check` PASS. No live daemon or Tauri run.
+_________________________________________________________________________________
