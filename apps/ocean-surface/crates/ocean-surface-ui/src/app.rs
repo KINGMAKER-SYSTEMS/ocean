@@ -1835,7 +1835,8 @@ pub fn App() -> impl IntoView {
         registry.register(Command {
             id: "focus-search",
             title: "Switch Session…".into(),
-            hint: Some("⌘P".into()),
+            // Native-only shortcut: web/PWA leaves Cmd/Ctrl+P to browser Print.
+            hint: in_tauri.then(|| "⌘P".into()),
             scope: CommandScope::App,
             slash: None,
             enabled: always,
