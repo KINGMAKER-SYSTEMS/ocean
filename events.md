@@ -1183,3 +1183,14 @@ Round 5: round-4 review follow-ups on model reroute fidelity. (F2) Selection-tim
 
 Validation: ocean-agent 280 passed / 0 failed / 2 ignored; ocean-daemon 908 passed / 2 failed (only the two known pre-existing persistent_room envelope-key assertions); clippy -p ocean-agent --all-targets -D warnings clean; fmt --all --check clean; git diff --check clean.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [23:34] [09-10-26]
+agent: [codex] [factory release]
+worktree: [codex/pr46-attachment-reconcile]
+type: [bug report]
+area: [backend] [testing] [review]
+
+PR #46 / issue #83: reconciled durable attachments with canonical main f1b22bd8 and preserved both public ledger histories. Reads reject oversized/nonregular blobs before bounded allocation and verify bytes against recorded metadata. No-follow root/room/blob descriptor custody, private exclusive temporary files, non-overwriting publication and directory sync protect bytes before indexing; retained directory custody confines rollback and post-commit cleanup. HTTP upload/delete recheck human authors inside their store transaction while generic agent-capable APIs remain intact. Returning known committed metadata eliminates the fallible post-commit lookup that could trigger cleanup of committed bytes. Relative database-path configuration remains supported.
+
+Validation: daemon attachment tests 21/21, store attachment tests 9/9, locked daemon/store check, formatting and diff checks pass. Removing both transactional human guards makes the deterministic absent-to-Agent/System author regression fail; exact source restoration passes all 21 daemon attachment tests. Remote hashes match all five changed source/docs files. Independent source review ACKed 19c24c16; this receipt precedes final exact-head review and required hosted builds. Daemon/store contracts updated; parent ownership/indexes unchanged. Safe byte I/O is Unix-only; unsupported platforms fail closed. Existing caller-asserted room authority remains unchanged. PR #47 stays held under #84 pending maintenance custody/snapshot repair and stack reconciliation. Maintainer approval and existing live-migration acceptance remain separate. No deployment, installation or live data/provider access.
