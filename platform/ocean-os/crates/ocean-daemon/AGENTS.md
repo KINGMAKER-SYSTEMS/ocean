@@ -272,8 +272,11 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   compilation remotely; independent exact-source review is required.
 - `room_summary.rs` owns the bounded summarize candidate: one timed, permit-
   limited provider call, no tools/session creation, then post-commit artifact
-  wake publication. Capture artifact absence/version before the provider and
-  preserve that expectation through store CAS, including unchanged results.
+  wake publication. Prefer explicit `summarize`, then `fast` roles; otherwise
+  preserve the bound provider/model pair through qualified runtime resolution,
+  including fake and custom endpoint models. Capture artifact absence/version
+  before the provider and preserve that expectation through store CAS,
+  including unchanged results.
   Reject unknown/agent/system requesters before provider work. Identical model
   and prose in an exact generated header preserve the stored artifact and its
   original coverage/timestamp; a no-op does not claim newly read coverage.

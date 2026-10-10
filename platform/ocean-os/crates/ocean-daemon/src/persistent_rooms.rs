@@ -1855,7 +1855,8 @@ pub(super) async fn room_summarize(
     // A cheap role if the operator configured one, otherwise whatever model the
     // daemon is already bound to — the feature works with zero config rather
     // than being dead by default.
-    let alias = room_summary::resolve_summary_alias(&state.roles, &state.runtime.current_model().1);
+    let (provider, model) = state.runtime.current_model();
+    let alias = room_summary::resolve_summary_alias(&state.roles, &provider, &model);
     let runtime = state.runtime.clone();
     let outcome =
         room_summary::summarize_room(

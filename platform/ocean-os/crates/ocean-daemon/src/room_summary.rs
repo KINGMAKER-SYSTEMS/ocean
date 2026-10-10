@@ -106,14 +106,19 @@ pub(super) enum SummarizeOutcome {
 /// config. `complete_once` requires an explicit alias, so there is no "no alias"
 /// path to represent — an unconfigured daemon summarizes on whatever it is
 /// already running, which is honest if not cheap. Blank role values are skipped
-/// so an empty `[roles]` entry cannot resolve to an unusable model spec.
-pub(super) fn resolve_summary_alias(roles: &HashMap<String, String>, global_model: &str) -> String {
+/// so an empty `[roles]` entry cannot resolve to an unusable model spec. Preserve
+/// the bound provider too: a bare wire model can select a different auth route.
+pub(super) fn resolve_summary_alias(
+    roles: &HashMap<String, String>,
+    global_provider: &str,
+    global_model: &str,
+) -> String {
     for role in ["summarize", "fast"] {
         if let Some(alias) = roles.get(role).map(|a| a.trim()).filter(|a| !a.is_empty()) {
             return alias.to_string();
         }
     }
-    global_model.to_string()
+    format!("{global_provider}/{global_model}")
 }
 
 /// Derive the `after_seq` cursor that makes the existing ascending, `LIMIT`ed
@@ -579,20 +584,90 @@ mod tests {
     #[test]
     fn summary_alias_prefers_summarize_then_fast_then_the_bound_model() {
         assert_eq!(
-            resolve_summary_alias(&roles(&[("summarize", "haiku"), ("fast", "mini")]), "opus"),
+            resolve_summary_alias(
+                &roles(&[("summarize", "haiku"), ("fast", "mini")]),
+                "anthropic",
+                "claude-opus-5-5"
+            ),
             "haiku"
         );
         assert_eq!(
-            resolve_summary_alias(&roles(&[("fast", "mini"), ("advisor", "sonnet")]), "opus"),
+            resolve_summary_alias(
+                &roles(&[("fast", "mini"), ("advisor", "sonnet")]),
+                "anthropic",
+                "claude-opus-5-5"
+            ),
             "mini"
         );
         // A blank role value is not a model spec; skip it rather than handing
         // `complete_once` something it cannot resolve.
         assert_eq!(
-            resolve_summary_alias(&roles(&[("summarize", "   "), ("fast", "mini")]), "opus"),
+            resolve_summary_alias(
+                &roles(&[("summarize", "   "), ("fast", "mini")]),
+                "anthropic",
+                "claude-opus-5-5"
+            ),
             "mini"
         );
-        assert_eq!(resolve_summary_alias(&roles(&[]), "opus"), "opus");
+        assert_eq!(
+            resolve_summary_alias(&roles(&[]), "anthropic", "claude-opus-5-5"),
+            "anthropic/claude-opus-5-5"
+        );
+    }
+
+    #[test]
+    fn summary_fallback_preserves_the_bound_provider_through_runtime_resolution() {
+        let mut env = ocean_providers::ProviderEnv::default();
+        env.vars
+            .insert("OCEAN_MODEL".into(), "openai/gpt-6.1-sol".into());
+        let bound = ocean_providers::resolve_model_selection(&env).unwrap();
+        assert_eq!(bound.provider, ocean_providers::ProviderId::OpenAi);
+        let alias = resolve_summary_alias(&roles(&[]), bound.provider.as_str(), &bound.model);
+        env.vars.insert("OCEAN_MODEL".into(), alias);
+        let summary = ocean_providers::resolve_model_selection(&env).unwrap();
+        assert_eq!(summary.provider, bound.provider);
+        assert_eq!(summary.model, bound.model);
+    }
+
+    #[test]
+    fn summary_fallback_preserves_fake_and_custom_routes() {
+        for (route, base_url) in [
+            ("fake/fake-ok", None),
+            (
+                "openai-compatible/custom-model",
+                Some("http://127.0.0.1:9999/v1"),
+            ),
+        ] {
+            let mut env = ocean_providers::ProviderEnv::default();
+            env.vars.insert("OCEAN_MODEL".into(), route.into());
+            if let Some(base_url) = base_url {
+                env.vars
+                    .insert("OCEAN_OPENAI_BASE_URL".into(), base_url.into());
+            }
+            let bound = ocean_providers::resolve_model_selection(&env).unwrap();
+            let alias = resolve_summary_alias(&roles(&[]), bound.provider.as_str(), &bound.model);
+            env.vars.insert("OCEAN_MODEL".into(), alias);
+            let summary = ocean_providers::resolve_model_selection(&env).unwrap();
+            assert_eq!(summary.provider, bound.provider);
+            assert_eq!(summary.model, bound.model);
+            assert_eq!(summary.base_url, bound.base_url);
+        }
+    }
+
+    #[test]
+    fn summary_role_routes_override_the_bound_provider_without_rewriting_aliases() {
+        for role_config in [
+            roles(&[("summarize", " openai/gpt-6.1-sol "), ("fast", "fake-ok")]),
+            roles(&[("summarize", "  "), ("fast", "openai/gpt-6.1-sol")]),
+        ] {
+            let alias = resolve_summary_alias(&role_config, "openai-codex", "gpt-6-sol");
+            assert_eq!(alias, "openai/gpt-6.1-sol");
+            let mut env = ocean_providers::ProviderEnv::default();
+            env.vars.insert("OCEAN_MODEL".into(), alias);
+            let summary = ocean_providers::resolve_model_selection(&env).unwrap();
+            assert_eq!(summary.provider, ocean_providers::ProviderId::OpenAi);
+            assert_eq!(summary.model, "gpt-6.1-sol");
+        }
     }
 
     #[test]
