@@ -1176,3 +1176,14 @@ Ported the daemon half of ocean-private #66 so an invited Room Member can review
 
 Validation: `cargo fmt --all -- --check`, `cargo check --workspace --tests --locked`, `cargo run -q -p xtask -- docs-check` (PASS; 30 packages, 153 Markdown files, 170 local links) and `git diff --check` pass. `cargo test -p ocean-daemon --locked`: 918 passed, 2 failed; the two failures are the alias-envelope fixtures already failing on main (issue #42, fixed by open PR #58). Focused `room_reviewed_digest_` 3, `room_sovereign_` 6 and `p2c_` 40 passed. No external provider was called.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [23:30] [09-10-26]
+agent: [codex] [factory release]
+worktree: [codex/pr65-consent-reconcile]
+type: [workflow]
+area: [backend] [testing] [review]
+
+PR #65 reconciled own-agent consent with canonical main f1b22bd8 and preserved both public ledger histories. Original consent and federation source remains unchanged; main's request fixture additions merged cleanly. Resolved the outstanding review finding by removing the private frozen-base identifier from the public consent manifest. Optional reviewed-digest consent remains exact and object-only; invited federated Members may consent only to their own locally bound agents while access is Live/Recovering. Existing Connecting/Revoked refusal, operator authority and Local bootstrap semantics remain unchanged.
+
+Validation: focused reviewed-digest, sovereign-consent and federation p2c groups passed (3, 6 and 40 tests), plus locked daemon check, formatting, diff and docs checks (30 packages, 153 docs, 170 links). Synthetic absolute auth/config/XDG fixtures only; HOME unchanged. Independent source review ACKed 307a316f. This receipt precedes final exact-head review and required hosted checks. Nearest owning contract corrected; parent ownership/indexes unchanged. Maintainer approval, client adoption of the optional digest and actual two-human/live-migration acceptance remain separate. No installation, deployment or live provider calls.
