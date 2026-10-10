@@ -1166,3 +1166,11 @@ Ported the Rooms team-platform P0/P1 shell onto public main: the spec amendment 
 
 Validation: in apps/ocean-surface, `cargo fmt --all -- --check`, `cargo test -p ocean-surface-ui` (847 unit plus integration suites), WASM clippy with warnings denied, WASM check, WASM test compilation, `cargo check -p ocean-surface-proxy`, and `git diff --check` pass. No live browser or desktop run.
 _________________________________________________________________________________
+time: [11:40] [09-10-26]
+agent: [claude] [claude-opus-5-5]
+worktree: [port/rooms-shell] [~/dev/oceanwork/wt-pr66]
+type: [bug report]
+area: [frontend] [review]
+
+PR #66 review fix: the palette's "Switch Session…" command still advertised the ⌘P hint on web/PWA, where Cmd/Ctrl+P is left to browser Print and does not open Sessions. The hint now renders only in native Tauri, matching the amendment's "native-only shortcut hint is hidden on web" rule (the Island hint already did). Validation: `cargo fmt --all -- --check`, `cargo test -p ocean-surface-ui`, WASM clippy with warnings denied pass.
+_________________________________________________________________________________
