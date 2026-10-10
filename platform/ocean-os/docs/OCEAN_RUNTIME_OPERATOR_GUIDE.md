@@ -211,6 +211,24 @@ once at startup, never accepted from a surface request, and after registration
 is retained only in owner-only `rooms.db`. Missing owner token disables Local
 bootstrap only; existing credentialed rooms and invite redemption still work.
 
+The supervised launcher (`deploy/ocean-daemon.sh`) sources the owner-only
+`~/.config/ocean-rs/federation.env` (KEY=VALUE) when present and prints
+`federation=on|off` in its startup banner; launchd passes no shell profile, so
+exporting the variables elsewhere does not reach the daemon. Contributor
+daemons set only `OCEAN_FEDERATION_URL`. They join a room by redeeming the
+owner's invite through their own local `POST /v1/rooms/persistent/invites/redeem`
+so the room bearer lands in their `rooms.db`; redeeming directly against
+Bedrock and pasting the result into `OCEAN_FEDERATION_OWNER_TOKEN` gives the
+daemon nothing it can use for that room.
+
+If a credentialed room stays `recovering` while Bedrock answers, replay the
+receiver's two reads with the room bearer (`GET /api/v1/rooms/{key}/events`,
+expecting a `hello` frame, then `GET /api/v1/rooms/{key}/members`) and compare
+both against the daemon's strict wire structs. A rejected roster logs
+`outcome="roster_rejected"` at warn; every failed epoch also logs
+`outcome="epoch_recover"` with attempt and backoff under
+`RUST_LOG=ocean_daemon::room_federation=debug`.
+
 At startup, the AppState-owned federation supervisor enumerates durable room
 credentials and starts one cancellable task tree per room. The receiver
 reconnects the Bedrock room SSE from the persisted cursor, commits the roster

@@ -48,7 +48,17 @@ fi
 #   OCEAN_ASSISTANTS_DIR    -> optional; defaults to ~/.config/ocean-rs/assistants.
 #   OCEAN_PROMPT_CAPTURE_DIR -> optional owner-only local JSON request captures;
 #                               includes private prompt/transcript/tool content.
+#   ~/.config/ocean-rs/federation.env -> optional owner-only KEY=VALUE file for
+#                               the federated-room Bedrock bridge:
+#                               OCEAN_FEDERATION_URL (origin only) and, on an
+#                               owner daemon only, OCEAN_FEDERATION_OWNER_TOKEN.
+#                               launchd passes no shell profile, so without this
+#                               every credentialed room sits in `recovering`.
 export OCEAN_YOLO="${OCEAN_YOLO:-1}"
+FEDERATION_ENV="${HOME:-}/.config/ocean-rs/federation.env"
+if [[ -f "$FEDERATION_ENV" ]]; then set -a; . "$FEDERATION_ENV"; set +a; fi
+FEDERATION_STATE=off
+if [[ -n "${OCEAN_FEDERATION_URL:-}" ]]; then FEDERATION_STATE=on; fi
 
 # Run from a NEUTRAL cwd so the startup guard's repo-cwd check passes and the
 # unbound-turn fallback anchor is harmless (home, not ocean-os).
@@ -67,6 +77,6 @@ if [[ ! -d "$NEUTRAL_CWD" ]]; then
   echo "FATAL: neutral cwd '$NEUTRAL_CWD' does not exist (check OCEAN_DAEMON_CWD)." >&2
   exit 78 # EX_CONFIG
 fi
-echo "==> ocean-daemon: cwd=$NEUTRAL_CWD (neutral) bin=$BIN yolo=$OCEAN_YOLO bind=${OCEAN_BIND:-127.0.0.1:4780}"
+echo "==> ocean-daemon: cwd=$NEUTRAL_CWD (neutral) bin=$BIN yolo=$OCEAN_YOLO bind=${OCEAN_BIND:-127.0.0.1:4780} federation=$FEDERATION_STATE"
 cd "$NEUTRAL_CWD"
 exec "$BIN"
