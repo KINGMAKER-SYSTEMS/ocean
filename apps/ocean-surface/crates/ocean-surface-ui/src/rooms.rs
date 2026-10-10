@@ -640,6 +640,11 @@ impl Rooms {
         Self::with_url(daemon.url)
     }
 
+    #[cfg(test)]
+    pub(crate) fn for_test(url: &str) -> Self {
+        Self::with_url(RwSignal::new(url.into()))
+    }
+
     fn with_url(url: RwSignal<String>) -> Self {
         Self {
             url,

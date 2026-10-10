@@ -1022,7 +1022,7 @@ mod tests {
     fn search_pick_waits_for_root_hydration_and_retires_on_room_reset() {
         let owner = Owner::new();
         owner.set();
-        let rooms = Rooms::new(&crate::daemon::Daemon::new("https://first.example"));
+        let rooms = Rooms::for_test("https://first.example");
         rooms.open_key.set(Some("room".into()));
         rooms.open_room.set(Some(
             serde_json::from_str(r#"{"id":"room","name":"Room","participants":[]}"#).unwrap(),
