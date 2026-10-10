@@ -319,7 +319,12 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   committed counts after failures; incomplete counts are lower bounds. Terminal
   publication is exactly once and must not call logging or other fallible hooks.
   Catch sweep/stage/logging panics without publishing payloads; a subsequent
-  scheduler tick must recover. No timeout may admit overlapping blocking cleanup.
+  scheduler tick must recover. Each scheduled iteration runs as its own task: a
+  panic outside the worker (including the join fallback) ends only that
+  iteration, and the scheduler settles it once, as `panicked`/`unknown`, only if
+  no worker holds custody and nothing was published. Cadence is fixed-delay and
+  `next_due_at` is republished after every iteration, so a past value means the
+  loop stopped. No timeout may admit overlapping blocking cleanup.
 - Verify focused `room_maintenance::`, `room_attachments::` and router-contract
   tests plus locked daemon compilation; fixtures use hooks/clocks, never sleeps.
 
