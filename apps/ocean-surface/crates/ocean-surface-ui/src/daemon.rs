@@ -5100,6 +5100,11 @@ impl Daemon {
         reconcile_permission_snapshot(&mut source).await
     }
 
+    /// Tracked focus epoch for component-owned asynchronous work.
+    pub(crate) fn session_intent_epoch(&self) -> u64 {
+        self.session_intent_generation.get()
+    }
+
     /// Reset to a fresh, not-yet-created session. Clears state and leaves
     /// `session_id` as `None` so the next prompt lazily creates a session
     /// (see `dispatch_prompt`).
@@ -6224,21 +6229,14 @@ fn apply_session_projection(
 
 /// Build the `args_preview` stored on a `ToolCall` block.
 ///
-/// Non-browser tools are truncated to 60 chars for a compact raw-args glance
-/// (a bash/write call can carry huge args). Browser tools are kept WHOLE:
-/// browser-action summaries PARSE this string as JSON to extract
-/// `url`/`selector`/`text`, and a mid-JSON truncation makes it
-/// unparseable — degrading every real browser action (a full URL or
-/// selector+text easily exceeds 60 chars) to a useless `"?"` (TASK-98). Browser
-/// args are small and structured, so storing them whole is cheap and keeps the
-/// summary accurate.
-fn tool_args_preview(name: &str, args_json: &Value) -> String {
-    let args = serde_json::to_string(args_json).unwrap_or_else(|_| "{}".into());
-    if name.starts_with("browser_") {
-        args
-    } else {
-        args.chars().take(60).collect()
-    }
+/// All tools use a bounded raw-args glance. The retired browser cockpit was
+/// the only whole-JSON consumer; transcripts display text, never parse this.
+fn tool_args_preview(_name: &str, args_json: &Value) -> String {
+    serde_json::to_string(args_json)
+        .unwrap_or_else(|_| "{}".into())
+        .chars()
+        .take(60)
+        .collect()
 }
 
 /// Mutate the turns vec in response to a single SSE event. Splits assistant
@@ -12128,29 +12126,31 @@ mod tests {
         assert!(!planner_prompt_already_echoed(&turns, "# Other"));
     }
 
-    // TASK-98: browser tool args are kept WHOLE so the cockpit's
-    // summary_from_args can parse them as JSON — a real browser_navigate URL
-    // exceeds 60 chars, and truncating mid-JSON made the summary "?". Non-browser
-    // tools stay truncated for a compact raw-args glance.
     #[test]
-    fn browser_tool_args_preview_is_kept_whole_for_summary_parsing() {
-        let long_url = "https://example.com/some/very/long/path?query=one&more=two&yet=three";
-        let preview = tool_args_preview("browser_navigate", &json!({ "url": long_url }));
-        // Kept whole → still valid JSON, so the cockpit summary parses the url.
-        let parsed: Value =
-            serde_json::from_str(&preview).expect("browser args must stay parseable JSON");
-        assert_eq!(parsed.get("url").and_then(|v| v.as_str()), Some(long_url));
-        // Non-browser tools remain truncated (a bash/write call can be huge).
-        let bash = tool_args_preview("bash", &json!({ "command": "x".repeat(200) }));
-        assert!(bash.chars().count() <= 60);
+    fn tool_args_preview_bounds_browser_and_other_tools_by_unicode_chars() {
+        for name in [
+            "browser_navigate",
+            "browser_type",
+            "browser_evaluate",
+            "bash",
+        ] {
+            let args = json!({"text": "界".repeat(200)});
+            let preview = tool_args_preview(name, &args);
+            assert_eq!(preview.chars().count(), 60);
+            assert_eq!(
+                preview,
+                serde_json::to_string(&args)
+                    .unwrap()
+                    .chars()
+                    .take(60)
+                    .collect::<String>()
+            );
+        }
+        assert_eq!(tool_args_preview("browser_click", &json!({})), "{}");
     }
 
-    // TASK-99: a RELOADED session must recover browser-action summaries too — the
-    // transcript rebuild now populates a tool block's args_preview from the
-    // matching tool CALL's persisted arguments (by tool_call_id), instead of
-    // dropping it to empty and leaving the cockpit summary as "?".
     #[test]
-    fn transcript_rebuild_recovers_browser_tool_args_for_summary() {
+    fn transcript_rebuild_recovers_bounded_browser_tool_args() {
         let long_url = "https://example.com/very/long/path?a=1&b=2&c=3&d=4&e=5&f=6";
         let entries = vec![SessionTranscriptEntry {
             role: "tool".into(),
@@ -12176,10 +12176,11 @@ mod tests {
                 _ => None,
             })
             .expect("a browser_navigate tool block was rebuilt");
-        // The rebuilt args are whole + parseable, so the summary recovers the url.
-        let parsed: Value =
-            serde_json::from_str(&preview).expect("rebuilt browser args must parse as JSON");
-        assert_eq!(parsed.get("url").and_then(|v| v.as_str()), Some(long_url));
+        assert_eq!(
+            preview,
+            tool_args_preview("browser_navigate", &json!({ "url": long_url }))
+        );
+        assert_eq!(preview.chars().count(), 60);
     }
 
     // -- session persistence (should_restore_session pure helper) --
