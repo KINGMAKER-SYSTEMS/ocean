@@ -1166,6 +1166,89 @@ Ported the Rooms team-platform P0/P1 shell onto public main: the spec amendment 
 
 Validation: in apps/ocean-surface, `cargo fmt --all -- --check`, `cargo test -p ocean-surface-ui` (847 unit plus integration suites), WASM clippy with warnings denied, WASM check, WASM test compilation, `cargo check -p ocean-surface-proxy`, and `git diff --check` pass. No live browser or desktop run.
 _________________________________________________________________________________
+time: [22:43] [08-10-26]
+agent: [claude] [claude code]
+worktree: [port/rooms-identity-cards-agents] [/Users/risingtidesdev/dev/port-rooms]
+type: [feature-request]
+area: [frontend] [backend] [testing]
+
+Ported Rooms P2 through P4 on top of the shell port. P2 gives each daemon one persisted owner identity (GET/PUT /v1/me, proxied for the PWA); local human joins and posts are authored as that owner whatever id the client claims, and Surface renders real names and initials from the roster or federated member projection instead of minting a browser identity. P3 adds live agent work cards (GET /v1/rooms/persistent/{key}/runs plus room_agent_run SSE frames, interrupted on restart). P4 lets room agents post progress and ask questions through two reserved room tools, with operator-gated run permission and per-room agent settings routes. Reconciled against public main's participant retirement and room inspect routes (import lists, operator guide, route baseline now 125), the endpoint_ready gate on the Rooms workspace, and one retirement test that claimed a retired human id: it now seeds the daemon owner as the retired placeholder, which still gets 409 on join and 403 on post.
+
+Validation: in platform/ocean-os, `cargo fmt --all -- --check`, `cargo test` for ocean-core (63), ocean-store (282), ocean-agent (269) and ocean-daemon (918 passed, 2 failed: the alias-envelope fixtures that already fail on main and are fixed by open #58), `cargo check --workspace --tests`, and docs-check pass. In apps/ocean-surface, all six Surface gates plus proxy tests pass (857 unit tests). No live daemon, browser or desktop run.
+_________________________________________________________________________________
+time: [23:24] [08-10-26]
+agent: [claude] [claude code]
+worktree: [port/rooms-identity-cards-agents] [/Users/risingtidesdev/dev/fix-pr68]
+type: [bug report]
+area: [backend] [frontend] [testing]
+
+Fixed the review defects in the Rooms P2-P4 port (#68), inherited from private issues #91 and #92. The in-room permission route now needs the pending permission_id (and the card's tool name when the client has it) and returns 409 for anything but the request pending now, so a retried Allow or AllowSession can never approve a later request; Surface sends both. A thread answer claims a parked room_ask run with a store compare-and-swap before admission, only an admitted successor closes it Done, a refused admission leaves it parked, a losing concurrent reply starts nothing, and startup settles an outstanding claim from durable evidence without replaying. An owner-cancelled room turn now ends Cancelled instead of Failed "turn_failed". The daemon owner id now comes from member.toml, then OCEAN_MEMBER_ID, with the same precedence and strict parsing as the #41 identity route, re-keying a login-derived owner once; USER is only the fallback. PUT /v1/me requires the room operator. The logged-in Surface web proxy now attaches the daemon's mode-0600 operator key to exactly PUT /v1/me, run permission and agent settings, so in-room approval works from the browser; with login off it attaches nothing, and the daemon gate is unchanged for every other caller.
+
+Validation: in platform/ocean-os, `cargo fmt --all -- --check`, `cargo test -p ocean-daemon --locked room` (269 passed, 2 failed: the alias-envelope fixtures that already fail on main, issue #42), `cargo test -p ocean-store --locked` (285), `cargo check --workspace --tests`, and docs-check pass. In apps/ocean-surface, `cargo test -p ocean-surface-ui` (858 unit), WASM clippy with warnings denied, and proxy tests (31) plus proxy clippy pass. New tests: bound permission decisions, single-claim and refused-admission resume, restart claim settlement, owner cancel ends Cancelled (fails without the fix), member-id owner, operator-gated rename, proxy operator key. No live daemon, browser or desktop run.
+_________________________________________________________________________________
+time: [11:51] [09-10-26]
+agent: [claude] [claude code]
+worktree: [port/rooms-identity-cards-agents] [/Users/risingtidesdev/dev/fix-pr68b]
+type: [bug report]
+area: [backend] [testing]
+
+Fixed the second-round review findings on the Rooms P2-P4 port (#68) and recorded the operator's decision on owner mutations. A thread answer's claim on a parked room_ask run is now a guard that settles from durable evidence if the posting request is dropped mid-admission, so a client disconnect no longer leaves the run claimed until restart. The running turn writes its work card through a store call that never rewrites a closed run and keeps the stored answer claim, so a late progress line or finish from the asking turn cannot reopen an answer. The successor's work card is written before the turn start returns, so settling an answer Done always has a durable successor. The member id now only seeds a fresh owner: an owner already in rooms.db is never re-keyed, and the seeded id is the identity member id as is, with each @ mapped to - because @ starts a mention. The operator decided on 2026-10-08 that any first-party surface he is signed into may make exactly PUT /v1/me, run permission decisions and room agent settings as the Room operator; the contracts say so, and the Tauri shell now does it natively (reads operator.key on the Rust side, fixed routes only, loopback only, key never reaches the page). The Chrome extension is not covered (no key access, no proxy session, origin refused by design) and the TUI makes none of these calls.
+
+Validation: in platform/ocean-os, `cargo fmt --all -- --check`, `cargo test -p ocean-daemon --locked room` (274 passed, 2 failed: the alias-envelope fixtures that fail on main, #42), `cargo test -p ocean-store --locked` (287), `cargo check --workspace --tests` and docs-check pass. In apps/ocean-surface, fmt, `cargo test -p ocean-surface-ui` (859 unit plus integration suites), `cargo test -p ocean-surface-proxy` (31) and WASM clippy with warnings denied pass; in crates/ocean-tauri, `cargo test` (34) and clippy with warnings denied pass against a placeholder dist. No live daemon, browser or desktop run.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [21:51] [10-09-26]
+agent: [Codex] [PR68 persistence repair]
+worktree: [codex/pr68-durable-run-transitions]
+type: [bug report] PR68 / issue71
+area: [backend] [testing]
+
+Run admission propagates initial work-card store failures before spawning execution.
+room_ask returns a failed-park error without terminating or retaining an uncommitted
+parked state; its already-posted question remains in the append-only transcript.
+Added real SQLite abort-trigger regressions for both failure points and retained
+success, claim and authority coverage. Owning daemon AGENTS now states the durable
+transition contract; parent ownership/index contracts remain unchanged.
+Validation on isolated Mac mini: ten p4_ tests and locked daemon check passed.
+Both new regressions fail with swallowed-error behavior restored; fixed sources
+restored byte-identically and all ten passed again. Formatting and diff checks pass.
+No live daemon changes. Other PR68 review findings remain outside this repair.
+
+_________________________________________________________________________________
+time: [22:09] [2026-10-09] America/New_York
+agent: [Codex] [factory release owner]
+worktree: [codex/pr68-reviewed-repairs]
+type: [bug report]
+area: [backend] [frontend] [review]
+
+Resolved the five remaining PR68 review findings through issues73/74. Invalid
+room-model overrides retain the immutable admitted package fallback using the
+actual runtime resolver; valid overrides and explicit turn selection keep their
+priority. Fresh-owner identity documentation now matches member-id seeding and
+preserved persisted ids. Surface uses ordinary accessible agent-selection buttons,
+retains the newest50 work cards, and fences both transcript and error completions
+by request ticket, open lifecycle, daemon origin and the complete captured run.
+Independent review found an Effect-scheduling gap; full-run equality and a
+same-ticket Thinking-to-Done regression close it. Prior durable start/park repairs
+remain intact. Owning devlogs updated; parent ownership and child indexes unchanged.
+
+Validation: daemon P4 tests11/11, locked daemon check, format/diff checks pass;
+new model regression fails with its resolver filter removed. Cached P4 rerun also
+passes with disposable auth/config/XDG paths and unchanged HOME. Surface initial
+snapshot passed861 unit and28 integration tests; final work-card tests4/4, live-cap regression1/1 and
+WASM check pass. Independent exact integration review follows this
+ledger update. No merge, install, live provider call or two-machine outcome.
+time: [22:10] [10-09-26]
+agent: [claude] [claude-opus-5-5] [PR68 reviewer]
+worktree: [port/rooms-identity-cards-agents]
+type: [bug report] PR68
+area: [backend] [testing]
+
+Fixed a work-card race: the permission wait hook marks a run AwaitingPermission synchronously, but runtime events reach the card watcher through two channels, so a TextDelta or ToolExecutionStart still queued at that moment flipped the card back to Thinking/RunningTool. The Surface shows Approve/Deny only for AwaitingPermission and room-turn waiters only accept the run token, so the turn could block with no way to approve it. set_state and tool_started now keep AwaitingPermission while a permission is pending; tool counts still advance. Added a daemon regression test. Daemon AGENTS unchanged: the durable-transition contract is the same.
+
+Validation on Mac mini (private target dir): `cargo test -p ocean-daemon --locked` 933 passed, 2 failed (the alias-envelope fixtures that also fail on main, #42); ocean-store 287, ocean-agent/ocean-core pass.
+_________________________________________________________________________________
 time: [11:40] [09-10-26]
 agent: [claude] [claude-opus-5-5]
 worktree: [port/rooms-shell] [~/dev/oceanwork/wt-pr66]
@@ -1185,3 +1268,14 @@ area: [frontend] [testing] [review]
 PR #66 / issue #75: restored native-only Sessions and Recall shortcut hints and interception, bounded Unicode tool previews, horizontal pinned cards while Workspace is open, and pane-local Files picker/watch refresh. Files uses generation and disposal fencing, canonical owner leases isolated by native window, and page-Started retirement preserving Repo and other windows. Shared Tauri 2 event adapter now uses the pinned IPC API with synchronous cancellation and late-admission cleanup. Preserved concurrent palette repair 51cd328c and reconciled canonical main f1b22bd8; source matches builder 698431ad except its explanatory shortcut comment.
 
 Validation: native watcher tests 11/11 (real notify aliases, peer and legacy survival), locked native lib check; workspace tests 146/146, sessions chrome 5/5, shortcuts 2/2, previews 3/3, final host tests 14/14, WASM check, executable production event-adapter Node tests 4/4. Native compilation used an ignored disposable frontendDist fixture, not a served bundle. No installation, native UI smoke, deployment or live verification. Final integration review and hosted builds remain required; release owner is this factory chat.
+
+_________________________________________________________________________________
+time: [22:31] [09-10-26]
+agent: [codex] [factory release]
+worktree: [codex/pr68-reviewed-repairs]
+type: [workflow]
+area: [backend] [frontend] [review]
+
+PR #68 stack reconciliation: preserved concurrent pending-permission repair 41e41b08 and merged the reviewed PR #66 shell head 729cb2fb, including canonical main f1b22bd8. The additive PromptControl conflict retains both Room extra_tools and requested model/provider/reroute metadata in its struct, destructure and defaults. Both public ledger histories retained. Existing owning contracts already describe both behaviors; no new ownership or index changes.
+
+Independent review acknowledged the pending-permission delta; its new regression passed as part of the dependent integrated P4 suite (12/12), with P6 7/7 and locked daemon check on that prior integration. Shell focused evidence is recorded in its preceding receipt. This new combined main/shell/Room head requires fresh review and required builds; combined targeted verification is in progress on the dependent #69 integration. No deployment or live behavior claim.

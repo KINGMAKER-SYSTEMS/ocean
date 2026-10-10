@@ -49,6 +49,7 @@ transcripts by session id.
   the turn itself succeeded. A turn stopped at its turn limit is marked too:
   it ends on a tool round whose results were saved after the measured request.
   The daemon must take the label from that mark, never from the turn's `ok`.
+- `AgentRuntime::model_is_routable` delegates to the turn resolver and wire-model construction without mutating selection or contacting a provider. Routability is not readiness, entitlement, or successful inference.
 - Preserve session compatibility unless a migration is documented.
 - Every advertised catalog model must construct a runtime wire model with the
   same id and limits. Current Opus/Sonnet 5.5 constructors use 1M/128K;
@@ -227,6 +228,8 @@ transcripts by session id.
   by the 300-second turn budget; every failure path (not-ready, provider
   error, timeout, empty summary) leaves the stored transcript untouched, and
   corrupt storage is an `Err`, never a wipe.
+
+- P4 Room voice tools use an opaque final-admission handle for only `room_post_update` and `room_ask`, appended after the unchanged ambient capability intersection. Reserve both names against ambient providers. The daemon implementations own exact generation/session/cancellation validation for every write; `without_tools()` suppresses the handle too.
 
 ## Work Guidance
 

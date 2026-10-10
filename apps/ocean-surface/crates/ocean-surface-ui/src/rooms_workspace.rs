@@ -12,10 +12,10 @@ use wasm_bindgen::JsCast;
 
 use crate::room_messages;
 use crate::rooms::{
-    AgentSummary, CreateResolution, FederatedActorType, FederatedRoomMemberProjection,
-    FederatedRoomRole, MemberPresence, OutboxItemState, Room, RoomAccessProjection,
-    RoomAccessState, RoomMessage, RoomMessageKind, RoomParticipant, RoomParticipantKind,
-    RoomReadCursorProjection, Rooms,
+    author_display_name, local_speaker_id, AgentSummary, CreateResolution, FederatedActorType,
+    FederatedRoomMemberProjection, FederatedRoomRole, MemberPresence, OutboxItemState, Room,
+    RoomAccessProjection, RoomAccessState, RoomMessage, RoomMessageKind, RoomParticipant,
+    RoomParticipantKind, RoomReadCursorProjection, Rooms,
 };
 
 // ── Production helpers (testable directly, called from Effects) ─
@@ -93,7 +93,29 @@ fn access_allows_writes(access: Option<&RoomAccessProjection>) -> bool {
     )
 }
 
-fn access_allows_sharing(access: Option<&RoomAccessProjection>) -> bool {
+/// Display name for an author/member id in the open room (tracked, so a late
+/// roster load or an owner rename re-renders names in place).
+fn author_name(rooms: Rooms, id: &str) -> String {
+    author_display_name(
+        rooms.open_room.get().as_ref(),
+        rooms.access.get().as_ref(),
+        id,
+    )
+}
+
+/// Who this surface speaks as in the open room (untracked read), or empty
+/// while the owner identity or federated member projection is still loading.
+fn speaker_id(rooms: Rooms) -> String {
+    local_speaker_id(
+        rooms.access.get_untracked().as_ref(),
+        rooms.identity_id.get_untracked(),
+    )
+    .unwrap_or_default()
+}
+
+/// Local rooms are always shareable by their daemon owner; a Live federated
+/// room only by the member this daemon speaks as, and only if it owns the room.
+pub(crate) fn access_allows_sharing(access: Option<&RoomAccessProjection>) -> bool {
     match access {
         Some(RoomAccessProjection {
             state: RoomAccessState::Local,
@@ -758,20 +780,26 @@ fn is_thread_open(selected_thread_root_seq: Option<u64>, root_seq: u64) -> bool 
 #[component]
 pub fn RoomsWorkspace(
     rooms: Rooms,
+    /// The owner's daemon handle; work cards render agent-session steps with
+    /// the session transcript's own components.
+    daemon: crate::daemon::Daemon,
     /// Called when the user wants to leave the Rooms workspace entirely
     /// (e.g. switch to Direct Messages). If `None` the close button is
     /// hidden.
     #[prop(optional)]
     on_close: Option<Callback<()>>,
 ) -> impl IntoView {
+    let daemon_sv = StoredValue::new(daemon);
     // ── Left-rail: create form signals ────────────────────────────────
     let new_room_name = RwSignal::new(String::new());
 
     // Toggle for narrow-screen left-rail visibility.
     let show_left_rail = RwSignal::new(false);
 
-    // Fetch room list on mount.
+    // Refresh owner identity and room list when bootstrap resolves the origin.
     Effect::new(move |_| {
+        let _origin = rooms.url.get();
+        rooms.fetch_me();
         rooms.fetch_rooms();
     });
 
@@ -1261,7 +1289,8 @@ pub fn RoomsWorkspace(
         }
         let wire = last_sent_wire.get();
         let sent_at_seq = last_sent_seq.get();
-        let me = rooms.identity_id.get_untracked();
+        let me = speaker_id(rooms);
+        let me = me.as_str();
         let confirmed = rooms.transcript.get().iter().any(|m| {
             m.seq > sent_at_seq
                 && m.body == wire
@@ -1304,7 +1333,8 @@ pub fn RoomsWorkspace(
         };
         let wire = thread_last_sent_wire.get();
         let sent_at_seq = thread_last_sent_seq.get();
-        let me = rooms.identity_id.get_untracked();
+        let me = speaker_id(rooms);
+        let me = me.as_str();
         let confirmed = rooms.transcript.get().iter().any(|m| {
             m.seq > sent_at_seq
                 && m.body == wire
@@ -1686,43 +1716,16 @@ pub fn RoomsWorkspace(
                                         {room_name.clone()}
                                     </h1>
                                     <div class="rooms-workspace__center-actions">
-                                        {if joined {
-                                            view! {
-                                                <button
-                                                    class="room-stage__leave"
-                                                    type="button"
-                                                    on:click=move |_| rooms.leave_open()
-                                                >
-                                                    "Leave"
-                                                </button>
-                                            }.into_any()
-                                        } else {
-                                            view! {
-                                                <button
-                                                    class="rooms-workspace__join-btn"
-                                                    type="button"
-                                                    on:click=move |_| rooms.join_open()
-                                                >
-                                                    "Join room"
-                                                </button>
-                                            }.into_any()
-                                        }}
-                                        {move || access_allows_sharing(
-                                            rooms.access.get().as_ref(),
-                                        ).then(|| view! {
+                                        {(!joined).then(|| view! {
                                             <button
-                                                class="rooms-workspace__share-btn"
+                                                class="rooms-workspace__join-btn"
                                                 type="button"
-                                                disabled=move || rooms.invite_loading.get()
-                                                on:click=move |_| rooms.create_invite()
+                                                on:click=move |_| rooms.join_open()
                                             >
-                                                {move || if rooms.invite_loading.get() {
-                                                    "Creating link…"
-                                                } else {
-                                                    "Share"
-                                                }}
+                                                "Join room"
                                             </button>
                                         })}
+                                        <crate::room_overflow::RoomOverflow rooms=rooms joined=joined />
                                         <button
                                             class="rooms-workspace__center-back"
                                             type="button"
@@ -1934,15 +1937,15 @@ pub fn RoomsWorkspace(
                                                         )
                                                     }>
                                                         {if is_system {
-                                                            view! { <crate::icons::Spark /> }.into_any()
+                                                            view! { <crate::icons::Waves /> }.into_any()
                                                         } else {
-                                                            m.author_id.chars().take(2).collect::<String>().to_uppercase().into_any()
+                                                            { let id = m.author_id.clone(); move || crate::rooms::name_initials(&author_name(rooms, &id)) }.into_any()
                                                         }}
                                                     </div>
                                                     <div class="rooms-workspace__msg-body">
                                                         <div class="rooms-workspace__msg-author">
                                                             <span class="rooms-workspace__msg-name">
-                                                                {m.author_id.clone()}
+                                                                { let id = m.author_id.clone(); move || author_name(rooms, &id) }
                                                             </span>
                                                             <time
                                                                 class="rooms-workspace__msg-time"
@@ -2015,6 +2018,19 @@ pub fn RoomsWorkspace(
                                                                 ().into_any()
                                                             }
                                                         }}
+                                                        // Team-platform P3: live agent work cards for turns
+                                                        // this message convened.
+                                                        <For
+                                                            each=move || rooms.runs.with(|runs| crate::rooms::run_ids_for_root(runs, root_seq))
+                                                            key=|id: &String| id.clone()
+                                                            children=move |id: String| view! {
+                                                                <crate::room_work_card::RoomWorkCard
+                                                                    run_id=id
+                                                                    rooms=rooms
+                                                                    daemon=daemon_sv
+                                                                />
+                                                            }
+                                                        />
                                                     </div>
                                                 </div>
                                             }
@@ -2242,12 +2258,7 @@ pub fn RoomsWorkspace(
                                                         .enumerate()
                                                         .map(|(i, item)| {
                                                             let desc = agent_descriptor_line(access.as_ref(), &item.id);
-                                                            let initials = item
-                                                                .display_name
-                                                                .chars()
-                                                                .take(2)
-                                                                .collect::<String>()
-                                                                .to_uppercase();
+                                                            let initials = crate::rooms::name_initials(&item.display_name);
                                                             let avatar_class = format!(
                                                                 "rooms-workspace__member-avatar {}",
                                                                 avatar_identity_class(&item.id)
@@ -2395,14 +2406,14 @@ pub fn RoomsWorkspace(
                                                 )
                                             }>
                                                 {if root_is_system {
-                                                    view! { <crate::icons::Spark /> }.into_any()
+                                                    view! { <crate::icons::Waves /> }.into_any()
                                                 } else {
-                                                    root.author_id.chars().take(2).collect::<String>().to_uppercase().into_any()
+                                                    { let id = root.author_id.clone(); move || crate::rooms::name_initials(&author_name(rooms, &id)) }.into_any()
                                                 }}
                                             </div>
                                             <div class="rooms-workspace__msg-body">
                                                 <div class="rooms-workspace__msg-author">
-                                                    <span class="rooms-workspace__msg-name">{root.author_id.clone()}</span>
+                                                    <span class="rooms-workspace__msg-name">{ let id = root.author_id.clone(); move || author_name(rooms, &id) }</span>
                                                     <time
                                                         class="rooms-workspace__msg-time"
                                                         datetime=full_ts.clone()
@@ -2437,14 +2448,14 @@ pub fn RoomsWorkspace(
                                                             )
                                                         }>
                                                             {if is_system {
-                                                                view! { <crate::icons::Spark /> }.into_any()
+                                                                view! { <crate::icons::Waves /> }.into_any()
                                                             } else {
-                                                                reply.author_id.chars().take(2).collect::<String>().to_uppercase().into_any()
+                                                                { let id = reply.author_id.clone(); move || crate::rooms::name_initials(&author_name(rooms, &id)) }.into_any()
                                                             }}
                                                         </div>
                                                         <div class="rooms-workspace__msg-body">
                                                             <div class="rooms-workspace__msg-author">
-                                                                <span class="rooms-workspace__msg-name">{reply.author_id.clone()}</span>
+                                                                <span class="rooms-workspace__msg-name">{ let id = reply.author_id.clone(); move || author_name(rooms, &id) }</span>
                                                                 <time
                                                                     class="rooms-workspace__msg-time"
                                                                     datetime=full_ts.clone()
@@ -2597,12 +2608,7 @@ pub fn RoomsWorkspace(
                                                             .enumerate()
                                                             .map(|(i, item)| {
                                                                 let desc = agent_descriptor_line(access.as_ref(), &item.id);
-                                                                let initials = item
-                                                                    .display_name
-                                                                    .chars()
-                                                                    .take(2)
-                                                                    .collect::<String>()
-                                                                    .to_uppercase();
+                                                                let initials = crate::rooms::name_initials(&item.display_name);
                                                                 let avatar_class = format!(
                                                                     "rooms-workspace__member-avatar {}",
                                                                     avatar_identity_class(&item.id)
@@ -2702,8 +2708,11 @@ pub fn RoomsWorkspace(
                                                                 class="rooms-workspace__member"
                                                                 role="listitem"
                                                             >
-                                                                <div class="rooms-workspace__member-avatar">
-                                                                    {p.display_name.chars().take(2).collect::<String>().to_uppercase()}
+                                                                <div class=format!(
+                                                                    "rooms-workspace__member-avatar {}",
+                                                                    avatar_identity_class(&p.id)
+                                                                )>
+                                                                    {crate::rooms::name_initials(&p.display_name)}
                                                                 </div>
                                                                 <span class="rooms-workspace__member-name">
                                                                     {p.display_name.clone()}
@@ -2757,9 +2766,7 @@ pub fn RoomsWorkspace(
                                                                         .get()
                                                                         .map(|r| r.participants.into_iter().map(|p| p.id).collect())
                                                                         .unwrap_or_default();
-                                                                    rooms.available_agents.get().into_iter()
-                                                                        .filter(|agent| !present.contains(&agent.name))
-                                                                        .collect::<Vec<_>>()
+                                                                    rooms.available_agents.get().into_iter().filter(|agent| !present.contains(&agent.name)).collect::<Vec<AgentSummary>>()
                                                                 }
                                                                 key=|agent: &AgentSummary| agent.name.clone()
                                                                 children=move |agent: AgentSummary| {
@@ -2868,8 +2875,11 @@ pub fn RoomsWorkspace(
                                                             class:rooms-workspace__member--remote-agent=remote_agent
                                                             title=desc_title
                                                         >
-                                                            <div class="rooms-workspace__member-avatar">
-                                                                {member.display_name.chars().take(2).collect::<String>().to_uppercase()}
+                                                            <div class=format!(
+                                                                "rooms-workspace__member-avatar {}",
+                                                                avatar_identity_class(&member.member_id)
+                                                            )>
+                                                                {crate::rooms::name_initials(&member.display_name)}
                                                             </div>
                                                             <span class="rooms-workspace__member-name">
                                                                 {member.display_name.clone()}
@@ -3486,6 +3496,7 @@ mod tests {
             state,
             caller_member_id: None,
             last_confirmed_global_sequence: None,
+            local_member_id: None,
             members: vec![],
             outbox: vec![],
         }
@@ -3543,6 +3554,7 @@ mod tests {
         assert!(access_allows_sharing(Some(&local)));
 
         let mut live = test_access(RoomAccessState::Live);
+        live.local_member_id = Some("human-local".into());
         live.members.push(FederatedRoomMemberProjection {
             member_id: "bedrock-owner".into(),
             owner_member_id: None,
