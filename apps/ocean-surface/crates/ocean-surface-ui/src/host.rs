@@ -548,6 +548,138 @@ pub async fn open_externally(root: &str, path: &str) -> bool {
     tauri_invoke("open_file", &args).await.is_ok()
 }
 
+// ── Room agent consent (native broker, ocean-private #65) ───────────────
+
+/// Native-frozen Room agent consent preview. The shell fetched it from the
+/// daemon itself; `consent_id` is an opaque handle to that frozen state, and
+/// the page can never supply the digest it authorizes.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct RoomConsentPreview {
+    pub consent_id: String,
+    pub room: String,
+    pub package_id: String,
+    pub agent_member_id: String,
+    pub owner_member_id: String,
+    pub display_name: String,
+    pub definition_digest: String,
+    #[serde(default)]
+    pub definition_revision: Option<String>,
+    #[serde(default)]
+    pub requested_capabilities: Vec<String>,
+    /// `authorize` | `reauthorize`.
+    pub mode: String,
+    #[serde(default)]
+    pub binding_status: Option<String>,
+    #[serde(default)]
+    pub expires_in_ms: u64,
+}
+
+/// Outcome of one native consent decision. `state` is `applied` |
+/// `declined` | `refused` | `unknown`; `unknown` means the acknowledgement
+/// was lost and is never retried automatically.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct RoomConsentOutcome {
+    pub state: String,
+    #[serde(default)]
+    pub status: Option<u16>,
+    #[serde(default)]
+    pub code: Option<String>,
+}
+
+/// True when this host can broker native Room agent consent. Browser and
+/// extension hosts have no operator credential custody, so consent controls
+/// stay absent there rather than emulated.
+pub fn room_consent_supported() -> bool {
+    running_in_tauri()
+}
+
+fn consent_args(pairs: &[(&str, &str)]) -> Object {
+    let args = Object::new();
+    for (key, value) in pairs {
+        let _ = Reflect::set(&args, &JsValue::from_str(key), &JsValue::from_str(value));
+    }
+    args
+}
+
+fn consent_decode<T: serde::de::DeserializeOwned>(val: &JsValue) -> Result<T, String> {
+    let json = js_sys::JSON::stringify(val)
+        .ok()
+        .and_then(|s| s.as_string())
+        .ok_or_else(|| "invalid_reply".to_string())?;
+    serde_json::from_str(&json).map_err(|_| "invalid_reply".to_string())
+}
+
+fn consent_error(err: JsValue) -> String {
+    err.as_string()
+        .filter(|code| code.len() <= 64)
+        .unwrap_or_else(|| "consent_unavailable".to_string())
+}
+
+/// Ask the shell to fetch and freeze the authoritative preview for
+/// `package_id` in `room`. `None` off-Tauri.
+pub async fn room_consent_preview(
+    room: &str,
+    package_id: &str,
+) -> Option<Result<RoomConsentPreview, String>> {
+    if !room_consent_supported() {
+        return None;
+    }
+    let args = consent_args(&[("room", room), ("packageId", package_id)]);
+    Some(match tauri_invoke("room_consent_preview", &args).await {
+        Ok(val) => consent_decode(&val),
+        Err(err) => Err(consent_error(err)),
+    })
+}
+
+/// Run the native confirmation for a frozen consent and, only if confirmed,
+/// send the digest-guarded authorize/reauthorize. `None` off-Tauri.
+pub async fn room_consent_authorize(
+    consent_id: &str,
+) -> Option<Result<RoomConsentOutcome, String>> {
+    if !room_consent_supported() {
+        return None;
+    }
+    let args = consent_args(&[("consentId", consent_id)]);
+    Some(match tauri_invoke("room_consent_authorize", &args).await {
+        Ok(val) => consent_decode(&val),
+        Err(err) => Err(consent_error(err)),
+    })
+}
+
+/// Drop one frozen consent, or all of them (`None`) on navigation.
+pub fn room_consent_cancel(consent_id: Option<&str>) {
+    if !room_consent_supported() {
+        return;
+    }
+    let args = Object::new();
+    let value = consent_id.map_or(JsValue::NULL, JsValue::from_str);
+    let _ = Reflect::set(&args, &JsValue::from_str("consentId"), &value);
+    wasm_bindgen_futures::spawn_local(async move {
+        let _ = tauri_invoke("room_consent_cancel", &args).await;
+    });
+}
+
+/// Natively confirm, then revoke an own agent's Room binding. `None`
+/// off-Tauri.
+pub async fn room_agent_revoke(
+    room: &str,
+    agent_member_id: &str,
+    display_name: &str,
+) -> Option<Result<RoomConsentOutcome, String>> {
+    if !room_consent_supported() {
+        return None;
+    }
+    let args = consent_args(&[
+        ("room", room),
+        ("agentMemberId", agent_member_id),
+        ("displayName", display_name),
+    ]);
+    Some(match tauri_invoke("room_agent_revoke", &args).await {
+        Ok(val) => consent_decode(&val),
+        Err(err) => Err(consent_error(err)),
+    })
+}
+
 // ── internals ───────────────────────────────────────────────────────────
 
 /// Low-level: call `__TAURI_INTERNALS__.invoke(cmd, args)` and await the

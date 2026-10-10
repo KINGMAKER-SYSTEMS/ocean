@@ -7178,28 +7178,35 @@ fn apply_permission_decision_completion(
 /// recognisable sentinel if the browser Crypto API is unavailable (unreachable
 /// in any supported browser, but avoids a panic).
 fn mint_decision_token() -> String {
-    let crypto = web_sys::window().and_then(|w| w.crypto().ok());
-    let Some(crypto) = crypto else {
-        log::error!("OCEAN-314: window.crypto unavailable — decision token not minted");
-        return "CRYPTO_UNAVAILABLE".to_string();
-    };
+    try_mint_decision_token().unwrap_or_else(|| "CRYPTO_UNAVAILABLE".to_string())
+}
 
+/// Fallible core of [`mint_decision_token`]: 32 CSPRNG bytes as lowercase hex,
+/// or `None` when the browser Crypto API is unavailable. Room agent
+/// invocations use this directly so a missing CSPRNG refuses the invocation
+/// instead of sending a sentinel token.
+pub(crate) fn try_mint_decision_token() -> Option<String> {
+    let Some(crypto) = web_sys::window().and_then(|w| w.crypto().ok()) else {
+        log::error!("OCEAN-314: window.crypto unavailable — decision token not minted");
+        return None;
+    };
     let buf = js_sys::Uint8Array::new_with_length(32);
     if crypto
         .get_random_values_with_array_buffer_view(&buf)
         .is_err()
     {
         log::error!("OCEAN-314: getRandomValues failed — decision token not minted");
-        return "GETRANDOMVALUES_FAILED".to_string();
+        return None;
     }
-
-    buf.to_vec()
-        .iter()
-        .fold(String::with_capacity(64), |mut s, b| {
-            use std::fmt::Write;
-            let _ = write!(s, "{b:02x}");
-            s
-        })
+    Some(
+        buf.to_vec()
+            .iter()
+            .fold(String::with_capacity(64), |mut s, b| {
+                use std::fmt::Write;
+                let _ = write!(s, "{b:02x}");
+                s
+            }),
+    )
 }
 
 /// Upper bound on the per-session canvas-patch ledger (OCEAN-178). Oldest
