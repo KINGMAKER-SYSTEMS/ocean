@@ -60,6 +60,7 @@ class FakeDaemon:
         self.unavailable = False
         self.sessions_unreadable = False
         self.requests_malformed = False
+        self.requests_reply = None
         self.session_claims_active = {}
         self.worker = {"config": {"tools": list(WORKER_TOOLS)}, "tools": []}
         self.models = [
@@ -191,7 +192,8 @@ class FakeDaemon:
                         requests = None
                     if owner.before_requests_reply is not None:
                         owner.before_requests_reply(requests)
-                    self.reply(200, {"ok": True, "requests": requests})
+                    status, body = owner.requests_reply or (200, {"ok": True, "requests": requests})
+                    self.reply(status, body)
                     return
                 if self.path == "/v1/permissions":
                     with owner.lock:
@@ -869,6 +871,48 @@ class OceanSubagentTests(unittest.TestCase):
             self.assertEqual(responses[0]["error"]["code"], -32602)
             self.assertNotIn("private daemon details", responses[0]["error"]["message"])
             self.assertEqual(self.stored(root, run["run_id"])["status"], "running")
+
+    def test_cancel_refusal_reconciliation_never_exposes_daemon_response_bodies(self):
+        # Fail either the first registry lookup or refresh's subsequent lookup.
+        for fail_on in (1, 2):
+            with self.subTest(fail_on=fail_on), tempfile.TemporaryDirectory() as root, FakeDaemon() as daemon:
+                manager = self.manager(root, daemon)
+                manager.watchdog_attempts = 1
+                run = self.unwatched_run(manager, root)
+                daemon.cancel_reply = (200, {"ok": False})
+
+                def after_refusal(_request_id):
+                    reads = 0
+
+                    def fail_registry_read(_requests):
+                        nonlocal reads
+                        reads += 1
+                        if reads == fail_on:
+                            daemon.requests_reply = (503, {"error": "private reconciliation details"})
+
+                    daemon.before_requests_reply = fail_registry_read
+                    daemon.requests_reply = None
+
+                daemon.before_cancel_reply = after_refusal
+                before = manager.store.path.read_bytes()
+                with mock.patch.object(manager, "_start_watchdog"), self.assertRaises(module.PluginError) as raised:
+                    manager.cancel({"run_id": run["run_id"]})
+                self.assertEqual(str(raised.exception), "Ocean daemon cancellation reconciliation failed")
+                self.assertEqual(manager.store.path.read_bytes(), before)
+
+                # Let the watchdog's pre-cancel refresh succeed, then fail the
+                # refusal reconciliation; the durable error stays sanitized.
+                daemon.before_requests_reply = None
+                daemon.requests_reply = None
+                expired = self.expire_watchdog(manager, run)
+                self.assertEqual(expired["status"], "running")
+                self.assertEqual(expired["error"], "Ocean daemon cancellation reconciliation failed")
+                # Avoid a fresh process arming an already-expired watchdog.
+                manager.store.update(run["run_id"], started_at=module.now_iso())
+                responses = self.wire_responses(root, daemon, [self.rpc(1, "cancel", run_id=run["run_id"])])
+                self.assertEqual(responses[0]["error"]["message"], "Ocean daemon cancellation reconciliation failed")
+                self.assertNotIn("private reconciliation details", json.dumps(responses))
+                self.assertNotIn("private reconciliation details", manager.store.path.read_text())
 
     def test_the_watchdog_never_claims_a_cancellation_the_daemon_did_not_accept(self):
         with tempfile.TemporaryDirectory() as root, FakeDaemon() as daemon:

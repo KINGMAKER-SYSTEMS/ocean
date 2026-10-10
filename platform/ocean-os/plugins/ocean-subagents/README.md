@@ -36,7 +36,7 @@ Approve the subagent plugin calls when Ocean asks. Child mutating tools remain s
 - Default elapsed-time ceiling: 600 seconds; configurable per spawn from 30–1800 seconds.
 - `model` is passed to the daemon as given; omit it to use the daemon's current model. A name the daemon cannot route fails the child turn, and the failure lists the ready catalog ids. `send` reuses the run's model, so recover with a new `spawn`.
 - `thinking_level` (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`) sets the child's reasoning effort and is reused by `send`; omit it for the model's default.
-- State: `$OCEAN_SUBAGENT_STATE_DIR/runs.json`, `$XDG_STATE_HOME/ocean/subagents/runs.json`, or `~/.local/state/ocean/subagents/runs.json`. The 200 most recently finished runs are kept; active runs are never pruned.
+- State: `$OCEAN_SUBAGENT_STATE_DIR/runs.json`, `$XDG_STATE_HOME/ocean/subagents/runs.json`, or `~/.local/state/ocean/subagents/runs.json`. Inserting a run prunes finished history to the 200 most recently finished runs; terminal updates can temporarily exceed that count until the next insertion. Active runs are never pruned.
 - Daemon URL: `$OCEAN_DAEMON_URL`, default `http://127.0.0.1:4780`.
 - Child default cwd: `$OCEAN_SUBAGENT_DEFAULT_CWD`, otherwise `$HOME`; callers should normally pass their workspace path.
 - The daemon launches plugins with a cleared environment (only `PATH` and the plugin directory as cwd), so the three variables above apply when the plugin is started by hand or by a host that sets them. A daemon-launched plugin uses the defaults, including the default daemon URL.

@@ -918,11 +918,16 @@ class Subagents:
         leaves the run as it was."""
         if self.client.cancel(run["request_id"]):
             return True
-        request = self.client.request_status(run["request_id"])
-        if request is None:
-            self._settle_untracked(run, grace=False)
-        else:
-            self.refresh(run["run_id"])
+        try:
+            request = self.client.request_status(run["request_id"])
+            if request is None:
+                self._settle_untracked(run, grace=False)
+            else:
+                self.refresh(run["run_id"])
+        except PluginError:
+            # Refusal reconciliation is part of cancellation too: neither the
+            # parent tool response nor watchdog state may contain HTTP bodies.
+            raise PluginError("Ocean daemon cancellation reconciliation failed") from None
         return False
 
     def list_runs(self, args: dict[str, Any]) -> dict[str, Any]:

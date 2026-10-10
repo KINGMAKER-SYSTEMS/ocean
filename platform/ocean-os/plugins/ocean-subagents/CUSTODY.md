@@ -47,9 +47,10 @@ Keep everything the plugin guarantees today:
   short grace (immediately on an explicit cancel refusal), keeping what the
   child wrote in that turn. This releases its slot; it is the only way a run
   survives a daemon restart without holding a slot forever.
-- Retention: the newest 200 finished runs are kept and older finished runs are
-  pruned; active runs are never pruned. A pruned run's child session stays in
-  the daemon.
+- Retention: inserting a run prunes finished history to the newest 200;
+  terminal updates do not prune. Newly finished runs can temporarily exceed
+  200 until the next insertion. Active runs are never pruned, and a pruned
+  run's child session stays in the daemon.
 - `--check` reads state only and never starts watchdogs or calls the daemon.
 
 No provider, Room trust, credential, core fleet or scheduler authority is added.
@@ -153,7 +154,7 @@ snapshot before materializing it.
 | --- | --- |
 | Caller inputs | One JSON-RPC line and one encoded dispatch body: 512 KiB each. Keep today's limits: task/message 64,000 UTF-8 bytes, role and model 200 each, cwd 4,096. Private token at most 96 ASCII bytes, UUIDs exactly the canonical 36 bytes, timestamps at most 64 bytes. |
 | Lifecycle text | Output at most 24,019 UTF-8 bytes (today's 24,000-byte cap plus the truncation marker); error at most 2,000 characters, so at most 8,000 UTF-8 bytes, as today. These maxima are included in lifecycle headroom. |
-| Runs and history | Today's retention bound of 200 finished runs, plus active runs and runs held by an unfinished operation; each encoded run at most 1 MiB. At most 256 turn-history entries per run and 16,384 overall, each at most 1 KiB. An accepted turn must fit before dispatch; a refused admission preserves every existing entry. |
+| Runs and history | The proposed snapshot budget is 200 finished runs, plus active runs and runs held by an unfinished operation (today's implementation prunes only on insertion, as noted above); each encoded run at most 1 MiB. At most 256 turn-history entries per run and 16,384 overall, each at most 1 KiB. An accepted turn must fit before dispatch; a refused admission preserves every existing entry. |
 | Operations | At most 512 retained operations, each at most 512 KiB including inputs, reservation and disposition fields. Finished and rejected operations count until pruned with their run (below). |
 | Disposition receipts | At most 512 immutable receipts, each at most 8 KiB. Store bounded disposition codes and digests plus exact ids and token, never raw response bodies. Accepted-202 and registered-503 receipts share this budget. |
 | Snapshot and legacy backup | `runs.json` and the single byte-exact `schema1.backup`: at most 8 MiB each. No rotating backups or numbered archives. |
