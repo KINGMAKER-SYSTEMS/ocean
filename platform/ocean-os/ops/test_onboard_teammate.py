@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """Exercise the real onboarding script with synthetic files and command mocks."""
+import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -10,6 +12,7 @@ import sys
 import tempfile
 import tomllib
 import unittest
+from unittest.mock import patch
 
 SOURCE = Path(__file__).parent
 MOCK = r'''#!/usr/bin/env python3
@@ -22,7 +25,9 @@ if name == "uname":
     print("Darwin" if sys.argv[1] == "-s" else "arm64")
 elif name == "gh":
     if sys.argv[1:3] == ["auth", "status"]: print("logged in read:packages")
-    elif sys.argv[1:3] == ["auth", "token"]: print("fake_fixture_token123")
+    elif sys.argv[1:3] == ["auth", "token"]:
+        print("fake_fixture_token123")
+        sys.exit(int(os.environ.get("OCEAN_FIXTURE_TOKEN_EXIT", "0")))
     else: sys.exit(91)
 elif name in {"bun", "npm"}:
     sys.exit(int(os.environ.get("OCEAN_FIXTURE_PACKAGE_EXIT", "0")))
@@ -52,7 +57,7 @@ class Onboarding(unittest.TestCase):
             path.chmod(0o755)
         self.env = os.environ.copy()
         self.env.update(OCEAN_ONBOARD_FIXTURE_HOME=str(self.root), PATH=f"{self.bin}:/usr/bin:/bin")
-        for key in ["OCEAN_CONFIG_DIR", "XDG_CONFIG_HOME", "OCEAN_FIXTURE_PACKAGE_EXIT"]:
+        for key in ["OCEAN_CONFIG_DIR", "XDG_CONFIG_HOME", "OCEAN_FIXTURE_PACKAGE_EXIT", "OCEAN_FIXTURE_TOKEN_EXIT"]:
             self.env.pop(key, None)
         self.member = self.root / ".config/ocean-rs/member.toml"
         self.npmrc = self.root / ".npmrc"
@@ -142,6 +147,66 @@ class Onboarding(unittest.TestCase):
         self.env["OCEAN_FIXTURE_PACKAGE_EXIT"] = "17"
         self.run_script(success=False)
         self.assertFalse(self.member.exists())
+
+    def test_failed_token_producer_cannot_replace_npmrc(self):
+        self.npmrc.write_text("existing=preserved\n")
+        self.npmrc.chmod(0o640)
+        self.env["OCEAN_FIXTURE_TOKEN_EXIT"] = "17"
+        self.run_script(success=False)
+        self.assertEqual(self.npmrc.read_text(), "existing=preserved\n")
+        self.assertEqual(stat.S_IMODE(self.npmrc.stat().st_mode), 0o640)
+        self.assertFalse(self.member.exists())
+        self.assertFalse(any(c[0] in {"bun", "npm"} for c in self.calls()))
+
+    def test_hardlinked_destination_is_refused(self):
+        victim = self.root / "hardlink-victim"
+        victim.write_text("preserved")
+        self.npmrc.hardlink_to(victim)
+        self.run_script("--force", success=False)
+        self.assertEqual(victim.read_text(), "preserved")
+        self.assertFalse(any(c[0] == "gh" for c in self.calls()))
+
+    def test_parent_swap_cannot_redirect_identity_or_token_writes(self):
+        spec = importlib.util.spec_from_file_location("onboarding_files_fixture", SOURCE / "onboarding_files.py")
+        files = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(files)
+        for action, name in [("identity", "member.toml"), ("npmrc", ".npmrc")]:
+            with self.subTest(action=action):
+                parent = self.root / action
+                parent.mkdir()
+                outside = self.root / (action + "-outside")
+                outside.mkdir(mode=0o755)
+                outside.chmod(0o755)
+                sentinel = outside / name
+                sentinel.write_text("outside sentinel")
+                sentinel.chmod(0o644)
+                held = self.root / (action + "-held")
+                original_open = os.open
+                swapped = False
+
+                def swap_at_creation(path, flags, *args, **kwargs):
+                    nonlocal swapped
+                    if flags & os.O_CREAT and Path(path).name.startswith("." + name + "."):
+                        self.assertFalse(swapped)
+                        parent.rename(held)
+                        parent.symlink_to(outside, target_is_directory=True)
+                        swapped = True
+                    return original_open(path, flags, *args, **kwargs)
+
+                argv = ["onboarding_files.py", action]
+                if action == "identity":
+                    argv += ["--config-dir", str(parent), "--member", "fixture.member"]
+                else:
+                    argv += ["--npmrc", str(parent / name)]
+                with patch.object(files.os, "open", side_effect=swap_at_creation), patch.object(sys, "argv", argv), patch.object(sys, "stdin", io.StringIO("fake_fixture_token123")):
+                    files.main()
+                self.assertTrue(swapped)
+                self.assertEqual(sentinel.read_text(), "outside sentinel")
+                self.assertEqual(stat.S_IMODE(sentinel.stat().st_mode), 0o644)
+                self.assertEqual(stat.S_IMODE(outside.stat().st_mode), 0o755)
+                self.assertTrue((held / name).is_file())
+                self.assertEqual(stat.S_IMODE((held / name).stat().st_mode), 0o600)
+                self.assertEqual(list(outside.iterdir()), [sentinel])
 
     def test_missing_real_package_binary_refuses_completion(self):
         (self.bin / "ocean-update").unlink()

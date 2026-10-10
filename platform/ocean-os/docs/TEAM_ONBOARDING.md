@@ -39,9 +39,11 @@ optional `display_name`, matching the daemon-local identity projection.
 The [script](../ops/onboard-teammate.sh) validates destinations and existing
 identity before requesting package credentials. It refreshes only the relevant
 scope/token entries in `~/.npmrc`, preserving unrelated entries, and installs
-the package with bun or npm. The token travels through stdin and is never
-printed or placed in process arguments. `.npmrc` and `member.toml` are atomically
+the package with bun or npm. Credentials are used only after `gh` exits successfully. The token travels
+through stdin and is never printed or placed in process arguments. `.npmrc` and `member.toml` are atomically
 written with mode `0600`; the dedicated identity directory is mode `0700`.
+No-follow directory/file descriptors anchor validation, reads, mode changes and
+replacement, so a concurrent parent symlink swap cannot redirect these operations.
 Symlink paths, nonregular or multiply linked files, foreign-owned destinations,
 and malformed existing identities are refused. `--force` permits intentional
 identity replacement; it does not bypass file custody checks.

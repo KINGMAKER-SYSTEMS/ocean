@@ -62,7 +62,11 @@ fi
 gh auth status >/dev/null 2>&1 || fail "run gh auth login first" 78
 gh auth status 2>&1 | grep -q 'read:packages' || fail "run gh auth refresh -s read:packages first" 78
 # The token travels only over stdin, never a process argument or printed output.
-gh auth token 2>/dev/null | python3 "$FILES" npmrc --npmrc "$NPMRC"
+if ! package_token="$(gh auth token 2>/dev/null)"; then
+  fail "could not obtain package credentials; npm configuration was not changed" 78
+fi
+printf '%s\n' "$package_token" | python3 "$FILES" npmrc --npmrc "$NPMRC"
+unset package_token
 "${installer[@]}" "$PKG@latest"
 for bin in ocean ocean-daemon ocean-update; do
   command -v "$bin" >/dev/null 2>&1 || fail "$bin is missing after package install; check the package manager's global bin PATH" 70
