@@ -192,11 +192,12 @@ python3 - "$STAGE/disabled" "$LABEL" <<'PY'
 import pathlib, re, sys
 text = pathlib.Path(sys.argv[1]).read_text()
 target = '"' + re.escape(sys.argv[2]) + '"'
-match = re.search(r'^\s*' + target + r'\s*=>\s*(true|false)\s*[,;]?\s*$', text, re.M)
+# Older launchd prints true/false; macOS 26 prints disabled/enabled.
+match = re.search(r'^\s*' + target + r'\s*=>\s*(true|false|disabled|enabled)\s*[,;]?\s*$', text, re.M)
 if not re.search(r"disabled services\s*=\s*\{", text) or (re.search(target, text) and not match):
     print("FATAL: cannot establish the prior supervision override.", file=sys.stderr)
     sys.exit(70)
-if match and match[1] == "true":
+if match and match[1] in ("true", "disabled"):
     print("FATAL: the named daemon is operator-disabled; preserve that override.", file=sys.stderr)
     sys.exit(75)
 PY

@@ -1076,6 +1076,7 @@ the same credential. Raised CODEX_VERSION to 0.159.2 (as Risingtides-dev/ocean-o
 ChatGPT sign-in: gpt-6.1-sol, glm-5.3 and deepseek-v4-pro each ran a bash tool
 call and answered; session model = requested, no reroute. ocean-protocol codex
 tests 36/36, ocean-providers 67/67.
+
 _________________________________________________________________________________
 time: [14:16] [06-10-26]
 agent: [codex]
@@ -1156,3 +1157,58 @@ Round 5: round-4 review follow-ups on model reroute fidelity. (F2) Selection-tim
 
 Validation: ocean-agent 280 passed / 0 failed / 2 ignored; ocean-daemon 908 passed / 2 failed (only the two known pre-existing persistent_room envelope-key assertions); clippy -p ocean-agent --all-targets -D warnings clean; fmt --all --check clean; git diff --check clean.
 _________________________________________________________________________________
+
+
+_________________________________________________________________________________
+time: [12:20pm] [06-10-26]
+agent: [claude] [claude-opus-5-5]
+worktree: [worktree-fix-installer-launchd-enabled] [.claude/worktrees/fix-installer-launchd-enabled]
+type: [bug report]
+area: [backend] [automations]
+
+Every Ocean turn was failing with "turn failed". The supervised daemon was still the Oct 2 build (0abb558179af) while the TUI had been updated on Oct 5 to send provider-qualified picker ids (glm/glm-5.3, openai-codex/gpt-5.6-sol, from a5ac9279). The old resolver only knows bare ids, so each pinned session failed with "unknown model". Current main already resolves qualified ids; the fix is reinstalling the daemon from main. That reinstall failed: on macOS 26 `launchctl print-disabled` prints `=> enabled` / `=> disabled`, and the installer's override parser accepted only true/false, so it refused with "cannot establish the prior supervision override" before promoting anything. The parser now accepts both vocabularies and treats `disabled` like `true`. The data volume was also at 100% (ENOSPC in daemon logs); about 9 GB of uv and Codex updater caches were cleared.
+
+Validation: `bash -n` and ops/test_install_ocean_daemon.py pass (14 tests, 2 new for the modern vocabulary, both enabled and disabled). The daemon still has to be reinstalled from main after this merges.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [10:50am] [07-10-26]
+agent: [claude] [claude-opus-5-5]
+worktree: [worktree-fix-installer-launchd-enabled] [.claude/worktrees/fix-installer-launchd-enabled]
+type: [bug report]
+area: [backend] [automations]
+
+The operator asked for Ocean restored immediately, before the installer fix landed. I did the installer's promotion step by hand using a locked release build from clean origin/main 32bd82a9 (`--features legacy-chromium`): staged ~/.local/libexec/ocean-daemon/ocean-daemon-32bd82a93f27..., installed main's deploy/ocean-daemon.sh as launch.sh (previous launcher kept as launch.sh.prev-0abb558179af), flipped `current`, and ran `launchctl kickstart -k`. The prior artifact ocean-daemon-0abb558179af is kept for rollback. /health reports rev 32bd82a93f27, /ready is ok, /v1/models lists glm/glm-5.3 and openai-codex/gpt-5.6-sol as ready, and a live glm/glm-5.3 turn returned ok. Future installs should go through ops/install-ocean-daemon.sh once this branch merges.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [16:45] [07-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/repair-ocean39-20261007] [/private/tmp/ocean-repair-39-20261007]
+type: [bug report]
+area: [automations] [testing]
+
+Reconciled installer PR #39 with current public main, preserving both ledger histories. The modern enabled fixture reproduces exit 70 on the unchanged main parser; the repaired parser passes all 14 non-live installer fixtures and bash syntax validation, including preservation of explicit disabled overrides. Updated the component devlog to document both supported launchd vocabularies; root ownership and child indexes remain unchanged. This is source/fixture validation only: no live launchd, daemon restart, provider credential, or database operation occurred. Hosted build and fresh reviewer acknowledgement remain required before merge.
+
+_________________________________________________________________________________
+time: [21:51] [10-09-26]
+agent: [Codex] [release preflight]
+worktree: [codex/pr39-release-unblock]
+type: [bug report] PR39 / issue55
+area: [review] [testing]
+
+Both local and Mac mini daemons report healthy/ready at canonical aa1e317b2e25,
+an ancestor of current f1b22bd8. No room/store schema changes across that upgrade;
+new session reroute fields are optional with serde defaults. Mac mini has72.72GiB
+free, zero active turns/nonterminal requests, and existing rollback artifacts.
+Current-main installer rejects its real launchd enabled output (read-only parser
+proof exit70). Existing PR39 fixes that confirmed deployment blocker.
+
+Independently reviewed PR39 parser: exact true/false and disabled/enabled accepted,
+malformed values rejected, explicitly disabled supervision remains rejected before
+promotion. Reconciled main f1b22bd8 while preserving both events histories; parser
+and test source unchanged. All14 non-live installer fixtures and bash syntax pass;
+enabled fixture fails at exit70 against unchanged current-main parser. Component
+devlog already documents both vocabularies; ownership/index contracts unchanged.
+No live install/restart, credentials or database mutation. Promotion still needs
+merge, clean-main production build, quiet-window check and exact revision readback.
