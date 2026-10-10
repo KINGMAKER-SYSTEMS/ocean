@@ -2271,6 +2271,10 @@ mod tests {
         let response = client
             .post(format!("http://{proxy_address}/v1/browser/input"))
             .header(reqwest::header::COOKIE, "ocean_session=test-session")
+            .header(
+                reqwest::header::AUTHORIZATION,
+                "Bearer synthetic-client-token",
+            )
             .header(reqwest::header::ORIGIN, "https://surface.example")
             .header("x-ocean-operator-key", "synthetic-unused-key")
             .header(reqwest::header::CONTENT_TYPE, "application/json")
