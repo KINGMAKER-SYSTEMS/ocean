@@ -16,7 +16,7 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   Serialize start, cancel, and logout under an independent per-provider
   operation lease through cancel/bind/register or removal. Retain each attempt's
   OAuth publication fence even when an HTTP future drops; revoke and settle it
-  before replacement/logout. Blocking removal retains its operation lease.
+  before replacement/logout. Logout retains its operation lease in an owned task through local credential removal and bounded remote revocation even if the HTTP waiter drops. The response exposes `remote_revocation` and a fixed message so local sign-out never implies confirmed remote revocation.
   Status runs custody/native reads off Tokio workers and projects the shared
   runtime resolver's token-free origin separately from stored OAuth facts.
   Login failure logs and responses contain only fixed classifications/provider
