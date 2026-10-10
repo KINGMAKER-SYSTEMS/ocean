@@ -145,7 +145,7 @@ impl RunTracker {
         trigger_seq: u64,
         thread_root_seq: u64,
         cwd: String,
-    ) -> Self {
+    ) -> Result<Self, ocean_store::RoomStoreError> {
         let now = Utc::now();
         let mut tracker = Self {
             state,
@@ -168,8 +168,8 @@ impl RunTracker {
             },
             cwd,
         };
-        tracker.save();
-        tracker
+        tracker.try_save()?;
+        Ok(tracker)
     }
 
     pub(crate) fn is_parked(&self) -> bool {
@@ -219,35 +219,55 @@ impl RunTracker {
     }
 
     /// `room_ask`: park the run until a human answers in its thread.
-    pub(crate) fn awaiting_reply(&mut self, question: &str, ask_seq: Option<u64>) {
+    pub(crate) fn awaiting_reply(
+        &mut self,
+        question: &str,
+        ask_seq: Option<u64>,
+    ) -> Result<(), ocean_store::RoomStoreError> {
         if self.run.state.is_terminal() {
-            return;
+            return Err(ocean_store::RoomStoreError::Encode(
+                "room_agent_run_closed".into(),
+            ));
         }
+        let previous = self.run.clone();
         self.run.summary = summarize(question);
         self.run.reply_seq = ask_seq;
         self.run.state = RoomAgentRunState::AwaitingReply;
-        self.save();
+        if let Err(error) = self.try_save() {
+            // The turn must not treat a failed write as a parked run, nor may
+            // a later progress save silently retry this unacknowledged park.
+            self.run = previous;
+            return Err(error);
+        }
+        if !self.is_parked() {
+            return Err(ocean_store::RoomStoreError::Encode(
+                "room_agent_run_closed".into(),
+            ));
+        }
+        Ok(())
     }
 
-    /// Persist this turn's projection. The write never regresses state the
-    /// turn does not own: a run another writer already closed stays closed
-    /// (and this copy adopts it, so the turn stops writing), and the answer
-    /// claim is kept from the stored row, so a late progress line or finish
-    /// from the asking turn can never reopen a claimed or settled answer.
+    /// Best-effort progress projection. Admission and parking must instead
+    /// propagate `try_save` errors because their success promises durability.
     fn save(&mut self) {
-        self.run.updated_at = Utc::now();
-        let run = self.run.clone();
-        match with_rooms(&self.state, |store| {
-            store.put_room_agent_run_from_turn(&run)
-        }) {
-            Ok((stored, landed)) => {
-                self.run = stored;
-                if landed {
-                    publish_room_access_wake(&self.state, &run.room_id);
-                }
-            }
-            Err(e) => tracing::warn!(room = %run.room_id, %e, "room agent run write failed"),
+        if let Err(e) = self.try_save() {
+            tracing::warn!(room = %self.run.room_id, %e, "room agent run write failed");
         }
+    }
+
+    /// Persist this turn's projection without regressing another writer's
+    /// terminal state or answer claim. Publish only a committed write.
+    fn try_save(&mut self) -> Result<(), ocean_store::RoomStoreError> {
+        let mut run = self.run.clone();
+        run.updated_at = Utc::now();
+        let (stored, landed) = with_rooms(&self.state, |store| {
+            store.put_room_agent_run_from_turn(&run)
+        })?;
+        self.run = stored;
+        if landed {
+            publish_room_access_wake(&self.state, &run.room_id);
+        }
+        Ok(())
     }
 
     /// Move to `next` unless the run is already terminal or unchanged.

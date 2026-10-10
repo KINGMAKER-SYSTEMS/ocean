@@ -3461,7 +3461,8 @@ async fn spawn_room_agent_turn(
             triggered_by_seq,
             thread_root,
             prompt_req.cwd.clone(),
-        ),
+        )
+        .map_err(|error| RoomTurnStartError::Authority(ApiError::from(error)))?,
     ));
     terminal.tracker = Some(tracker.clone());
     let requests = state.requests.clone();
@@ -9091,7 +9092,8 @@ env = { FIXTURE = "1" }
             1,
             1,
             "/repo".into(),
-        );
+        )
+        .expect("durable run");
         let token = tracker.mint_decision_token();
         let mut run = with_rooms(&state, |store| store.room_agent_runs(&key, 10))
             .unwrap()
@@ -9258,15 +9260,18 @@ env = { FIXTURE = "1" }
             .last()
             .unwrap()
             .seq;
-        let tracker = Arc::new(Mutex::new(crate::room_agent_runs::RunTracker::start(
-            state.clone(),
-            key.clone(),
-            "guarded",
-            session_id,
-            trigger,
-            trigger,
-            tmp.path().display().to_string(),
-        )));
+        let tracker = Arc::new(Mutex::new(
+            crate::room_agent_runs::RunTracker::start(
+                state.clone(),
+                key.clone(),
+                "guarded",
+                session_id,
+                trigger,
+                trigger,
+                tmp.path().display().to_string(),
+            )
+            .expect("durable run"),
+        ));
         let baseline = with_rooms(&state, |store| store.transcript(&key, None)).unwrap();
         for cancelled in [false, true] {
             let cancel = CancellationToken::new();
@@ -9536,8 +9541,9 @@ env = { FIXTURE = "1" }
             root,
             root,
             tmp.path().display().to_string(),
-        );
-        tracker.awaiting_reply("Which colour?", None);
+        )
+        .expect("durable run");
+        tracker.awaiting_reply("Which colour?", None).unwrap();
         drop(tracker);
         let parked_id = with_rooms(&state, |store| store.parked_room_agent_runs(&key, root))
             .unwrap()
@@ -9681,8 +9687,9 @@ env = { FIXTURE = "1" }
             root,
             root,
             tmp.path().display().to_string(),
-        );
-        tracker.awaiting_reply("Which colour?", None);
+        )
+        .expect("durable run");
+        tracker.awaiting_reply("Which colour?", None).unwrap();
         drop(tracker);
         let parked_id = with_rooms(&state, |store| store.parked_room_agent_runs(&key, root))
             .unwrap()
@@ -9744,6 +9751,247 @@ env = { FIXTURE = "1" }
         assert_eq!(closed.answer_seq, Some(answer_seq));
         let runs = wait_for_runs(&state, &key, 2).await;
         assert!(runs.iter().any(|r| r.trigger_seq == answer_seq));
+    }
+
+    #[tokio::test]
+    async fn p4_run_persistence_failure_refuses_successor_admission() {
+        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _env = TestEnvRestore::capture(&[
+            "OCEAN_AUTH_FILE",
+            "OCEAN_CODEX_AUTH_FILE",
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+            "OCEAN_AGENTS_DIR",
+        ]);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state = crate::tests::isolated_room_fixture_state(&tmp);
+        let db_path = tmp.path().join("run-failures.db");
+        let mut store = ocean_store::SqliteRoomStore::open(&db_path).unwrap();
+        store
+            .replace_owner_identity(&ocean_store::OwnerIdentity {
+                participant_id: "john".into(),
+                display_name: "John".into(),
+            })
+            .unwrap();
+        *state.rooms.lock().unwrap() = store;
+        let conn = rusqlite::Connection::open(db_path).unwrap();
+        let agents_root = tmp.path().join("agents");
+        write_agent_fixture(&agents_root, "asker", "model = \"fake-ok\"\n", None);
+        std::env::set_var("OCEAN_AGENTS_DIR", &agents_root);
+        let key = RoomKey::new("p4-successor-durable");
+        create_mention_room(&state, &key);
+        join_human(&state, &key);
+        let (status, _) = room_join(
+            State(state.clone()),
+            Path(key.as_str().to_string()),
+            Json(RoomJoinRequest {
+                id: "asker".into(),
+                display_name: "Asker".into(),
+                kind: RoomParticipantKind::Agent,
+                owner_id: Some("human".into()),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let generation = authorize_room_agent_fixture(
+            &state,
+            &key,
+            "asker",
+            ActivationPolicy::TaskAndThread,
+            ContextPolicy::InvocationOnly,
+        );
+        let root = append_room_message(
+            &state,
+            &key,
+            "human",
+            RoomParticipantKind::Human,
+            RoomMessageKind::Message,
+            "paint the shed",
+        )
+        .unwrap()
+        .seq;
+        let _ = generation;
+        let (admission, permit) = room_agent_authority::admit_room_agent(
+            &state,
+            &key,
+            "asker",
+            "asker",
+            AdmissionTrigger::ThreadReply,
+        )
+        .await
+        .expect("admitted");
+        conn.execute_batch(
+            "CREATE TRIGGER reject_run_write BEFORE INSERT ON room_agent_runs
+            BEGIN SELECT RAISE(ABORT, 'injected run persistence failure'); END;",
+        )
+        .unwrap();
+        let request_id = Uuid::new_v4();
+        let result = spawn_room_agent_turn(
+            state.clone(),
+            admission,
+            permit,
+            RoomParticipant {
+                id: "asker".into(),
+                kind: RoomParticipantKind::Agent,
+                display_name: "Asker".into(),
+            },
+            root,
+            None,
+            request_id,
+            None,
+            None,
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "admission must fail when the card cannot commit"
+        );
+        assert!(with_rooms(&state, |store| store.room_agent_runs(&key, 10))
+            .unwrap()
+            .is_empty());
+        // The finalizer settles the registered request without spawning execution.
+        tokio::task::yield_now().await;
+        let requests = state.requests.read().await;
+        let request = requests.get(&request_id).expect("registered request");
+        assert_eq!(request.status.state, RequestState::Errored);
+    }
+
+    #[tokio::test]
+    async fn p4_run_persistence_failure_does_not_terminate_or_park_room_ask() {
+        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _env = TestEnvRestore::capture(&[
+            "OCEAN_AUTH_FILE",
+            "OCEAN_CODEX_AUTH_FILE",
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+            "OCEAN_AGENTS_DIR",
+        ]);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state = crate::tests::isolated_room_fixture_state(&tmp);
+        let db_path = tmp.path().join("run-failures.db");
+        let mut store = ocean_store::SqliteRoomStore::open(&db_path).unwrap();
+        store
+            .replace_owner_identity(&ocean_store::OwnerIdentity {
+                participant_id: "john".into(),
+                display_name: "John".into(),
+            })
+            .unwrap();
+        *state.rooms.lock().unwrap() = store;
+        let conn = rusqlite::Connection::open(db_path).unwrap();
+        let agents_root = tmp.path().join("agents");
+        write_agent_fixture(&agents_root, "asker", "model = \"fake-ok\"\n", None);
+        std::env::set_var("OCEAN_AGENTS_DIR", &agents_root);
+        let key = RoomKey::new("p4-successor-durable");
+        create_mention_room(&state, &key);
+        join_human(&state, &key);
+        let (status, _) = room_join(
+            State(state.clone()),
+            Path(key.as_str().to_string()),
+            Json(RoomJoinRequest {
+                id: "asker".into(),
+                display_name: "Asker".into(),
+                kind: RoomParticipantKind::Agent,
+                owner_id: Some("human".into()),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let generation = authorize_room_agent_fixture(
+            &state,
+            &key,
+            "asker",
+            ActivationPolicy::TaskAndThread,
+            ContextPolicy::InvocationOnly,
+        );
+        let root = append_room_message(
+            &state,
+            &key,
+            "human",
+            RoomParticipantKind::Human,
+            RoomMessageKind::Message,
+            "paint the shed",
+        )
+        .unwrap()
+        .seq;
+        let _ = generation;
+        let (admission, _permit) = room_agent_authority::admit_room_agent(
+            &state,
+            &key,
+            "asker",
+            "asker",
+            AdmissionTrigger::ThreadReply,
+        )
+        .await
+        .expect("admitted");
+        let session_id = authorized_room_agent_session_id(&key, "asker", generation);
+        let tracker = Arc::new(Mutex::new(
+            crate::room_agent_runs::RunTracker::start(
+                state.clone(),
+                key.clone(),
+                "asker",
+                session_id,
+                root,
+                root,
+                tmp.path().display().to_string(),
+            )
+            .unwrap(),
+        ));
+        let tools = crate::room_tools::room_turn_tools(crate::room_tools::RoomTurnBinding {
+            state: state.clone(),
+            admission,
+            session_id,
+            cancel: CancellationToken::new(),
+            thread_root: root,
+            tracker: tracker.clone(),
+        });
+        conn.execute_batch(
+            "CREATE TRIGGER reject_run_write BEFORE INSERT ON room_agent_runs
+            BEGIN SELECT RAISE(ABORT, 'injected run persistence failure'); END;",
+        )
+        .unwrap();
+        let result = tools[1]
+            .execute("ask", json!({"question": "Which colour?"}))
+            .await;
+        assert!(
+            result.is_err(),
+            "failed parking must not return successful termination"
+        );
+        assert!(result
+            .unwrap_err()
+            .contains("question posted, but could not park"));
+        assert!(!tracker.lock().unwrap().is_parked());
+        let run = with_rooms(&state, |store| store.room_agent_runs(&key, 10))
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(run.state, ocean_core::RoomAgentRunState::Queued);
+        assert_eq!(run.reply_seq, None);
+        assert!(with_rooms(&state, |store| store.transcript(&key, None))
+            .unwrap()
+            .iter()
+            .any(|row| row.body == "Which colour?"));
+        conn.execute_batch("DROP TRIGGER reject_run_write").unwrap();
+        tracker.lock().unwrap().posted_update("Store recovered");
+        let run = with_rooms(&state, |store| store.room_agent_runs(&key, 10))
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(
+            run.state,
+            ocean_core::RoomAgentRunState::Queued,
+            "later progress must not accidentally commit the failed park"
+        );
+        assert_eq!(run.reply_seq, None);
+        let result = tools[1]
+            .execute("ask-again", json!({"question": "Which colour?"}))
+            .await
+            .unwrap();
+        assert!(result.terminate);
+        assert!(tracker.lock().unwrap().is_parked());
     }
 
     #[tokio::test]
@@ -9956,15 +10204,18 @@ env = { FIXTURE = "1" }
         let state = crate::tests::isolated_room_fixture_state(&tmp);
         let key = RoomKey::new("p3-runtime-sink");
         create_mention_room(&state, &key);
-        let tracker = Arc::new(Mutex::new(crate::room_agent_runs::RunTracker::start(
-            state.clone(),
-            key.clone(),
-            "helper",
-            AgentSessionId::new_v4(),
-            1,
-            1,
-            "/repo".into(),
-        )));
+        let tracker = Arc::new(Mutex::new(
+            crate::room_agent_runs::RunTracker::start(
+                state.clone(),
+                key.clone(),
+                "helper",
+                AgentSessionId::new_v4(),
+                1,
+                1,
+                "/repo".into(),
+            )
+            .expect("durable run"),
+        ));
         let (sink, events) = mpsc::unbounded_channel();
         let watch = tokio::spawn(crate::room_agent_runs::watch_runtime_events(
             tracker.clone(),
@@ -10026,8 +10277,9 @@ env = { FIXTURE = "1" }
             1,
             1,
             "/repo".into(),
-        );
-        tracker.awaiting_reply("Which colour?", Some(2));
+        )
+        .expect("durable run");
+        tracker.awaiting_reply("Which colour?", Some(2)).unwrap();
         let run_id = with_rooms(&state, |store| store.parked_room_agent_runs(&key, 1))
             .unwrap()
             .pop()
