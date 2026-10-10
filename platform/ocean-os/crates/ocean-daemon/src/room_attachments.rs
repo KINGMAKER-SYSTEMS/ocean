@@ -56,14 +56,9 @@
 //!    leaves it for a future GC sweep). An orphan row is a download that 500s
 //!    forever.
 //!
-//! This module still stops at the bytes. Prompt assembly lives in
-//! `room_context.rs`, which reads through [`attachment_bytes`] — the ONE
-//! in-process surface widened past the private path helpers, so the hashed
-//! directory and the id validation keep exactly one implementation. What is
-//! deliberately still absent is the Ocean Rooms v2 §7
-//! `ContextPolicy`/`ContextMount` model the root `AGENTS.md` forbids
-//! implementing from the proposal alone: there is no per-agent selection and no
-//! declared mount, only "a room's files are the room's shared context".
+//! This module owns durable upload/list/download/delete only. Prompt assembly,
+//! maintenance and context selection are separate dependent stages. Unix storage
+//! uses descriptor-relative no-follow operations; unsupported platforms fail closed.
 
 use axum::{
     body::Bytes,
@@ -510,13 +505,16 @@ pub(super) async fn room_upload_attachment(
         // not validate.
         return internal_error("minted attachment id failed its own validation");
     };
-    if let Err(e) = write_blob(&dir, &path, &body) {
-        tracing::warn!(room = %key, error = %e, "room attachment blob write failed");
-        return internal_error("could not store the attachment bytes");
-    }
+    let custody = match write_blob(&dir, &path, &body) {
+        Ok(custody) => custody,
+        Err(e) => {
+            tracing::warn!(room = %key, error = %e, "room attachment blob write failed");
+            return internal_error("could not store the attachment bytes");
+        }
+    };
 
     let result = with_rooms(&state, |store| {
-        store.add_attachment(
+        store.add_human_attachment(
             &key,
             &id,
             &filename,
@@ -541,7 +539,7 @@ pub(super) async fn room_upload_attachment(
             // The row did not commit, so nothing references these bytes. Best
             // effort: a failed unlink leaves unreachable garbage, which is the
             // survivable half of this trade.
-            let _ = std::fs::remove_file(&path);
+            let _ = custody.remove(&id);
             room_store_error_response(e)
         }
     }
@@ -675,15 +673,23 @@ pub(super) async fn room_delete_attachment(
     if let Some(refusal) = forged_author_response(&state, &key, actor) {
         return refusal;
     }
+    // Capture the directory before SQL; postcommit cleanup never re-resolves it.
+    let custody = match BlobDir::open(path.parent().expect("derived room directory"), false) {
+        Ok(dir) => Some(dir),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => return internal_error("could not safely access attachment storage"),
+    };
     let result = with_rooms(&state, |store| {
-        store.remove_attachment(&key, id, actor, Utc::now())
+        store.remove_human_attachment(&key, id, actor, Utc::now())
     });
     match result {
         Ok((removed, message)) => {
             // Best effort, post-commit. A failed unlink leaves an unreachable
             // file; a pre-commit unlink would risk deleting bytes for a row that
             // then failed to be removed.
-            let _ = std::fs::remove_file(&path);
+            if let Some(dir) = custody {
+                let _ = dir.remove(id);
+            }
             publish_room_wake(&state, &key, &message);
             (
                 StatusCode::OK,
@@ -696,41 +702,250 @@ pub(super) async fn room_delete_attachment(
 
 // ---- Internals --------------------------------------------------------------
 
-/// Write one blob durably: temp file, fsync, owner-only mode, atomic rename.
-///
-/// The rename is what makes the final path either absent or complete — a reader
-/// can never observe a half-written file under an id the store has committed.
-/// The fsync happens before the rename so a crash cannot leave a
-/// correctly-named file full of zeroes.
-fn write_blob(dir: &std::path::Path, path: &std::path::Path, body: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
+/// Directory capability: all blob names are resolved relative to this descriptor.
+/// The configured parent is trusted; attachment root/room components never follow links.
+#[cfg(unix)]
+struct BlobDir(std::fs::File);
 
-    std::fs::create_dir_all(dir)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        // Owner-only, matching the posture `ocean-store` enforces on `rooms.db`:
-        // a room's files are no more public than the index that lists them.
-        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+#[cfg(unix)]
+impl BlobDir {
+    fn name(name: &std::ffi::OsStr) -> std::io::Result<std::ffi::CString> {
+        use std::os::unix::ffi::OsStrExt;
+        if name.as_bytes().contains(&b'/') || name == "." || name == ".." {
+            return Err(std::io::Error::other("invalid blob component"));
+        }
+        std::ffi::CString::new(name.as_bytes()).map_err(std::io::Error::other)
     }
-    let tmp = path.with_extension("tmp");
-    {
-        let mut file = std::fs::File::create(&tmp)?;
-        file.write_all(body)?;
-        file.sync_all()?;
-        #[cfg(unix)]
-        {
+
+    fn open_at(
+        parent: &std::fs::File,
+        name: &std::ffi::CStr,
+        flags: i32,
+        mode: u32,
+    ) -> std::io::Result<std::fs::File> {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        // SAFETY: parent owns a live fd, name is NUL terminated, and returned fd
+        // is transferred exactly once to File. No-follow applies to every child.
+        let fd = unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                name.as_ptr(),
+                flags | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                mode as libc::c_uint,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+    }
+
+    fn child(
+        parent: &std::fs::File,
+        name: &std::ffi::OsStr,
+        create: bool,
+    ) -> std::io::Result<std::fs::File> {
+        use std::os::fd::AsRawFd;
+        let name = Self::name(name)?;
+        if create {
+            let result = unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) };
+            if result < 0
+                && std::io::Error::last_os_error().kind() != std::io::ErrorKind::AlreadyExists
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+        let dir = Self::open_at(parent, &name, libc::O_RDONLY | libc::O_DIRECTORY, 0)?;
+        if create {
             use std::os::unix::fs::PermissionsExt;
-            let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+            dir.set_permissions(std::fs::Permissions::from_mode(0o700))?;
+            dir.sync_all()?;
+            parent.sync_all()?;
+        }
+        Ok(dir)
+    }
+
+    fn storage_parent(root: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+        let parent = root
+            .parent()
+            .ok_or_else(|| std::io::Error::other("missing storage parent"))?;
+        if parent.as_os_str().is_empty() {
+            std::path::Path::new(".").canonicalize()
+        } else {
+            parent.canonicalize()
         }
     }
-    match std::fs::rename(&tmp, path) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
-            Err(e)
+
+    fn open(room_dir: &std::path::Path, create: bool) -> std::io::Result<Self> {
+        let root = room_dir
+            .parent()
+            .ok_or_else(|| std::io::Error::other("missing attachment root"))?;
+        let parent = Self::storage_parent(root)?;
+        // Canonicalize only the trusted configured parent (e.g. macOS /var).
+        // Then walk descriptors, so even a later ancestor replacement is not followed.
+        let mut descriptor = std::fs::File::open("/")?;
+        for component in parent.components() {
+            if let std::path::Component::Normal(name) = component {
+                descriptor = Self::child(&descriptor, name, false)?;
+            }
         }
+        let root = Self::child(
+            &descriptor,
+            root.file_name()
+                .ok_or_else(|| std::io::Error::other("missing root name"))?,
+            create,
+        )?;
+        let room = Self::child(
+            &root,
+            room_dir
+                .file_name()
+                .ok_or_else(|| std::io::Error::other("missing room name"))?,
+            create,
+        )?;
+        Ok(Self(room))
     }
+
+    fn unlink(&self, name: &std::ffi::CStr) -> std::io::Result<()> {
+        use std::os::fd::AsRawFd;
+        if unsafe { libc::unlinkat(self.0.as_raw_fd(), name.as_ptr(), 0) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    fn remove(&self, id: &str) -> std::io::Result<()> {
+        if !is_attachment_id(id) {
+            return Err(std::io::Error::other("invalid attachment id"));
+        }
+        self.unlink(&Self::name(id.as_ref())?)?;
+        self.0.sync_all()
+    }
+
+    fn write(&self, id: &str, body: &[u8]) -> std::io::Result<()> {
+        use std::{io::Write, os::fd::AsRawFd};
+        if !is_attachment_id(id) || body.len() > MAX_ATTACHMENT_BYTES {
+            return Err(std::io::Error::other("invalid attachment blob"));
+        }
+        let name = Self::name(id.as_ref())?;
+        let temp = Self::name(format!(".{}.tmp", mint_attachment_id()).as_ref())?;
+        let mut file = Self::open_at(
+            &self.0,
+            &temp,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+            0o600,
+        )?;
+        let mut published = false;
+        let result = (|| {
+            file.write_all(body)?;
+            file.sync_all()?;
+            // linkat publishes atomically without overwriting a colliding id.
+            if unsafe {
+                libc::linkat(
+                    self.0.as_raw_fd(),
+                    temp.as_ptr(),
+                    self.0.as_raw_fd(),
+                    name.as_ptr(),
+                    0,
+                )
+            } < 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            published = true;
+            self.unlink(&temp)?;
+            self.0.sync_all()
+        })();
+        if result.is_err() {
+            let _ = self.unlink(&temp);
+            if published {
+                let _ = self.unlink(&name);
+            }
+            let _ = self.0.sync_all();
+        }
+        result
+    }
+
+    fn read(&self, id: &str, expected: u64) -> std::io::Result<Vec<u8>> {
+        use std::{io::Read, os::fd::AsRawFd, os::unix::fs::MetadataExt};
+        if !is_attachment_id(id) || expected > MAX_ATTACHMENT_BYTES as u64 {
+            return Err(std::io::Error::other("invalid attachment blob"));
+        }
+        let name = Self::name(id.as_ref())?;
+        let mut prior = std::mem::MaybeUninit::<libc::stat>::uninit();
+        if unsafe {
+            libc::fstatat(
+                self.0.as_raw_fd(),
+                name.as_ptr(),
+                prior.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        } < 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        let prior = unsafe { prior.assume_init() };
+        if prior.st_mode & libc::S_IFMT != libc::S_IFREG {
+            return Err(std::io::Error::other("attachment is not a regular file"));
+        }
+        // NONBLOCK also closes a regular-file-to-FIFO swap between stat/open.
+        let file = Self::open_at(
+            &self.0,
+            &name,
+            libc::O_RDONLY | libc::O_NONBLOCK | libc::O_NOCTTY,
+            0,
+        )?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file()
+            || metadata.len() != expected
+            || metadata.dev() != prior.st_dev as u64
+            || metadata.ino() != prior.st_ino as u64
+        {
+            return Err(std::io::Error::other("attachment file changed"));
+        }
+        let mut bytes = Vec::new();
+        (&file).take(expected + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 != expected || file.metadata()?.len() != expected {
+            return Err(std::io::Error::other("attachment length changed"));
+        }
+        Ok(bytes)
+    }
+}
+
+// Unsupported platforms fail closed rather than reverting to path-following I/O.
+#[cfg(not(unix))]
+struct BlobDir;
+#[cfg(not(unix))]
+impl BlobDir {
+    fn open(_: &std::path::Path, _: bool) -> std::io::Result<Self> {
+        Err(std::io::Error::other(
+            "safe attachment storage requires Unix directory capabilities",
+        ))
+    }
+    fn write(&self, _: &str, _: &[u8]) -> std::io::Result<()> {
+        Err(std::io::Error::other("unsupported attachment storage"))
+    }
+    fn remove(&self, _: &str) -> std::io::Result<()> {
+        Err(std::io::Error::other("unsupported attachment storage"))
+    }
+    fn read(&self, _: &str, _: u64) -> std::io::Result<Vec<u8>> {
+        Err(std::io::Error::other("unsupported attachment storage"))
+    }
+}
+
+/// Publish complete private bytes and keep directory custody through SQL cleanup.
+fn write_blob(
+    dir: &std::path::Path,
+    path: &std::path::Path,
+    body: &[u8],
+) -> std::io::Result<BlobDir> {
+    let custody = BlobDir::open(dir, true)?;
+    let id = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .filter(|s| is_attachment_id(s))
+        .ok_or_else(|| std::io::Error::other("invalid attachment id"))?;
+    custody.write(id, body)?;
+    Ok(custody)
 }
 
 /// One attachment's stored bytes, checked against the row that indexes them.
@@ -748,7 +963,12 @@ fn read_verified_blob(
     key: &RoomKey,
     row: &ocean_core::RoomAttachment,
 ) -> Option<Vec<u8>> {
-    let bytes = match std::fs::read(path) {
+    if row.byte_len > MAX_ATTACHMENT_BYTES as u64 {
+        return None;
+    }
+    let bytes = match BlobDir::open(path.parent()?, false)
+        .and_then(|dir| dir.read(&row.id, row.byte_len))
+    {
         Ok(bytes) => bytes,
         Err(e) => {
             tracing::warn!(room = %key, attachment = %row.id, error = %e,
@@ -764,13 +984,7 @@ fn read_verified_blob(
     Some(bytes)
 }
 
-/// Put bytes under an attachment id the way an upload would.
-///
-/// Test-only, and for sibling modules whose fixtures need a room whose files
-/// really exist on disk — the convene tests in `persistent_rooms`. It is routed
-/// through the same `blob_path`/`write_blob` the upload handler uses, because a
-/// fixture that invented its own directory layout would keep passing after the
-/// real one moved.
+/// Unique storage root per fixture: concurrent tests never share attachment bytes.
 #[cfg(test)]
 pub(super) fn write_blob_for_test(root: &std::path::Path, key: &RoomKey, id: &str, bytes: &[u8]) {
     let path = blob_path(root, key, id).expect("a test attachment id must be well-formed");
@@ -871,6 +1085,145 @@ mod tests {
             room_list_attachments(State(state.clone()), Path(key.as_str().to_string())).await;
         assert_eq!(status, StatusCode::OK);
         body
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relative_attachment_root_uses_current_directory_as_trusted_parent() {
+        assert_eq!(
+            BlobDir::storage_parent(std::path::Path::new("room-attachments")).unwrap(),
+            std::env::current_dir().unwrap().canonicalize().unwrap()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn blob_custody_refuses_links_oversize_and_special_files() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("attachments");
+        let key = RoomKey::new("bounded");
+        let id = "0123456789abcdef0123456789abcdef";
+        let path = blob_path(&root, &key, id).unwrap();
+        let dir = room_dir(&root, &key);
+        let custody = write_blob(&dir, &path, b"safe").unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(custody.read(id, 4).unwrap(), b"safe");
+        // A colliding final id is not overwritten; predictable legacy temp links are untouched.
+        let outside = temp.path().join("outside");
+        std::fs::write(&outside, b"sentinel").unwrap();
+        symlink(&outside, path.with_extension("tmp")).unwrap();
+        assert!(write_blob(&dir, &path, b"replacement").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"safe");
+        assert_eq!(std::fs::read(&outside).unwrap(), b"sentinel");
+        custody.remove(id).unwrap();
+        symlink(&outside, &path).unwrap();
+        assert!(custody.read(id, 8).is_err());
+        custody.remove(id).unwrap();
+        let large = std::fs::File::create(&path).unwrap();
+        large.set_len(1024 * 1024 * 1024).unwrap();
+        assert!(custody.read(id, 4).is_err());
+        assert!(custody.read(id, MAX_ATTACHMENT_BYTES as u64 + 1).is_err());
+        custody.remove(id).unwrap();
+        let cpath = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(cpath.as_ptr(), 0o600) }, 0);
+        assert!(custody.read(id, 4).is_err());
+        custody.remove(id).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(custody.read(id, 4).is_err());
+        assert_eq!(std::fs::read(&outside).unwrap(), b"sentinel");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn blob_cleanup_retains_directory_custody_across_path_replacement() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("attachments");
+        let key = RoomKey::new("swapped");
+        let id = "0123456789abcdef0123456789abcdef";
+        let dir = room_dir(&root, &key);
+        let path = blob_path(&root, &key, id).unwrap();
+        let custody = write_blob(&dir, &path, b"ours").unwrap();
+        let moved = temp.path().join("moved-room");
+        std::fs::rename(&dir, &moved).unwrap();
+        let outside = temp.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join(id), b"sentinel").unwrap();
+        symlink(&outside, &dir).unwrap();
+        assert!(BlobDir::open(&dir, false).is_err());
+        assert!(write_blob(&dir, &path, b"bad").is_err());
+        custody.remove(id).unwrap();
+        assert!(!moved.join(id).exists());
+        assert_eq!(std::fs::read(outside.join(id)).unwrap(), b"sentinel");
+        std::fs::remove_file(&dir).unwrap();
+        std::fs::remove_dir(&root).unwrap();
+        symlink(&outside, &root).unwrap();
+        assert!(write_blob(&dir, &path, b"bad").is_err());
+        assert_eq!(std::fs::read(outside.join(id)).unwrap(), b"sentinel");
+    }
+
+    #[test]
+    fn attachment_http_precheck_does_not_authorize_a_later_agent_join() {
+        for kind in [RoomParticipantKind::Agent, RoomParticipantKind::System] {
+            let tmp = tempfile::tempdir().unwrap();
+            let state = fake_convene_state(&tmp);
+            let key = RoomKey::new("late-join");
+            room_with_roster(&state, &key);
+            assert!(forged_author_response(&state, &key, "late").is_none());
+            // Deterministic interleaving: the HTTP precheck saw no participant;
+            // another operation commits a non-human before the mutation starts.
+            with_rooms(&state, |store| {
+                store.add_participant(
+                    &key,
+                    ocean_core::RoomParticipant {
+                        id: "late".into(),
+                        kind,
+                        display_name: "Late".into(),
+                    },
+                    Utc::now(),
+                )?;
+                let (existing, _) = store.add_attachment(
+                    &key,
+                    "0123456789abcdef0123456789abcdef",
+                    "safe",
+                    "text/plain",
+                    4,
+                    "digest",
+                    "alice",
+                    Utc::now(),
+                )?;
+                let before = store.get(&key)?.unwrap().transcript.len();
+                assert!(matches!(
+                    store.add_human_attachment(
+                        &key,
+                        "1123456789abcdef0123456789abcdef",
+                        "forged",
+                        "text/plain",
+                        4,
+                        "digest",
+                        "late",
+                        Utc::now()
+                    ),
+                    Err(ocean_store::RoomStoreError::AttachmentActorNotHuman { .. })
+                ));
+                assert!(matches!(
+                    store.remove_human_attachment(&key, &existing.id, "late", Utc::now()),
+                    Err(ocean_store::RoomStoreError::AttachmentActorNotHuman { .. })
+                ));
+                assert_eq!(store.attachments(&key)?.len(), 1);
+                assert_eq!(store.get(&key)?.unwrap().transcript.len(), before);
+                Ok::<(), ocean_store::RoomStoreError>(())
+            })
+            .unwrap();
+        }
     }
 
     /// Every file the daemon wrote anywhere under the injected root, so a test
