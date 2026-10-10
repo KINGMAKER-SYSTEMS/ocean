@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -71,6 +72,85 @@ impl AgentToolResult {
     }
 }
 
+/// A request-only replacement for one tool result, visible to the provider
+/// only during the active run (minimizer M2).
+///
+/// Crate-private: only the runtime's output-economy wrapper can construct one,
+/// so external [`AgentTool`] implementations cannot forge a projection. The
+/// lease keeps the exact raw recovery artifact reachable while the projection's
+/// `read artifact://<id>` footer can be sent.
+pub(crate) struct ProviderProjection {
+    pub(crate) content: Vec<Content>,
+    pub(crate) lease: crate::artifacts::ArtifactLease,
+}
+
+/// The outcome of one tool execution as the agent loop consumes it.
+///
+/// Opaque by design: it always carries the ordinary [`AgentToolResult`] (the
+/// authority for live events, checkpoints, and saved history) and may carry a
+/// sealed provider-only projection that the runtime alone can create. It is
+/// never serialized or emitted.
+pub struct ToolExecutionResult {
+    result: AgentToolResult,
+    projection: Option<ProviderProjection>,
+}
+
+impl ToolExecutionResult {
+    /// The ordinary result with no provider projection.
+    pub fn plain(result: AgentToolResult) -> Self {
+        Self {
+            result,
+            projection: None,
+        }
+    }
+
+    pub(crate) fn with_projection(result: AgentToolResult, projection: ProviderProjection) -> Self {
+        Self {
+            result,
+            projection: Some(projection),
+        }
+    }
+
+    /// The ordinary (raw) tool result.
+    pub fn result(&self) -> &AgentToolResult {
+        &self.result
+    }
+
+    /// Discard any provider projection (releasing its artifact lease) and
+    /// return the ordinary result.
+    pub fn into_result(self) -> AgentToolResult {
+        self.result
+    }
+
+    /// Whether a sealed provider-only projection is attached.
+    pub fn has_provider_projection(&self) -> bool {
+        self.projection.is_some()
+    }
+
+    /// The provider-only replacement content, when a projection is attached.
+    pub fn provider_content(&self) -> Option<&[Content]> {
+        self.projection.as_ref().map(|p| p.content.as_slice())
+    }
+
+    /// The pinned recovery artifact id, when a projection is attached.
+    pub fn recovery_artifact_id(&self) -> Option<&str> {
+        self.projection.as_ref().map(|p| p.lease.id())
+    }
+
+    pub(crate) fn into_parts(self) -> (AgentToolResult, Option<ProviderProjection>) {
+        (self.result, self.projection)
+    }
+}
+
+impl std::fmt::Debug for ToolExecutionResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never print content: results can carry file bodies or secrets.
+        f.debug_struct("ToolExecutionResult")
+            .field("has_provider_projection", &self.projection.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
 /// How a tool may be scheduled relative to the other tool calls in the same
 /// assistant batch.
 ///
@@ -141,8 +221,12 @@ impl PermissionPolicy for AllowAllPolicy {
 }
 
 /// Tool execution trait — analog of `AgentTool.execute` in TS.
+///
+/// `Any` lets the runtime recognize its own built-in tools (the minimizer M2
+/// output-economy wrapper only ever minimizes the built-in `BashTool`); every
+/// `'static` implementor satisfies it automatically.
 #[async_trait]
-pub trait AgentTool: Send + Sync {
+pub trait AgentTool: Send + Sync + Any {
     fn name(&self) -> &str;
     fn label(&self) -> &str {
         self.name()
@@ -163,6 +247,20 @@ pub trait AgentTool: Send + Sync {
         Concurrency::Exclusive
     }
     async fn execute(&self, tool_call_id: &str, args: Value) -> Result<AgentToolResult, String>;
+
+    /// The agent loop's single execution entry point. The default runs
+    /// [`AgentTool::execute`] and attaches no provider projection; only the
+    /// runtime's output-economy wrapper overrides it. Callers outside the loop
+    /// should keep using `execute`.
+    async fn execute_for_run(
+        &self,
+        tool_call_id: &str,
+        args: Value,
+    ) -> Result<ToolExecutionResult, String> {
+        self.execute(tool_call_id, args)
+            .await
+            .map(ToolExecutionResult::plain)
+    }
 }
 
 pub fn tool_def(t: &dyn AgentTool) -> Tool {
@@ -437,6 +535,45 @@ pub enum AgentEvent {
 }
 
 impl AgentEvent {
+    /// Whether the daemon relays this variant onto the client wire
+    /// (`/v1/agent/events`). This is the single source of truth for that
+    /// decision: `ocean-agent` forwards to its event sink exactly the events
+    /// for which this is `true`, and the daemon turn bridge's exhaustive match
+    /// is tested against it (`turn_bridge_relays_exactly_the_wire_relayed_variants`).
+    ///
+    /// The `false` variants (OCEAN-373) are run/turn markers the daemon covers
+    /// itself, message payloads already streamed as deltas, or `TurnCheckpoint`
+    /// durability deltas that `ocean-agent` persists. `AgentEnd` carries the
+    /// whole history, so never forwarding it matters (bounded turn event
+    /// channel proposal, slice 2).
+    ///
+    /// No wildcard: a new variant must be classified here, and the bridge's
+    /// match forces the matching wire decision in `ocean-daemon`. When in doubt,
+    /// `true` is the safe answer — the bridge then decides.
+    pub fn is_wire_relayed(&self) -> bool {
+        match self {
+            AgentEvent::TextDelta { .. }
+            | AgentEvent::ThinkingDelta { .. }
+            | AgentEvent::ToolExecutionStart { .. }
+            | AgentEvent::ToolExecutionEnd { .. }
+            | AgentEvent::PermissionDenied { .. }
+            | AgentEvent::ModelRerouted { .. }
+            | AgentEvent::ProviderRetrying { .. }
+            | AgentEvent::Render { .. }
+            | AgentEvent::Unmount { .. }
+            | AgentEvent::BrowserActivity { .. }
+            | AgentEvent::SurfacePatch { .. }
+            | AgentEvent::SlackCanvas { .. } => true,
+            AgentEvent::AgentStart { .. }
+            | AgentEvent::AgentEnd { .. }
+            | AgentEvent::TurnStart { .. }
+            | AgentEvent::TurnEnd { .. }
+            | AgentEvent::TurnCheckpoint { .. }
+            | AgentEvent::AssistantMessage { .. }
+            | AgentEvent::UserMessage { .. } => false,
+        }
+    }
+
     /// The session this event belongs to, if the run had one.
     pub fn session_id(&self) -> Option<&str> {
         match self {
@@ -467,6 +604,60 @@ impl AgentEvent {
 mod tests {
     use super::*;
     use ocean_protocol::Model;
+
+    /// The seven OCEAN-373 variants are not wire-relayed; everything that
+    /// carries client-visible output is. Full parity with the daemon bridge is
+    /// pinned in `ocean-daemon` against the real bridge.
+    #[test]
+    fn wire_relay_classification_pins_the_ocean_373_filter() {
+        let message = ocean_protocol::Message::user_text("x");
+        let not_relayed = [
+            AgentEvent::AgentStart { session_id: None },
+            AgentEvent::AgentEnd {
+                session_id: None,
+                messages: vec![message.clone()],
+            },
+            AgentEvent::TurnStart { session_id: None },
+            AgentEvent::TurnEnd { session_id: None },
+            AgentEvent::TurnCheckpoint {
+                session_id: None,
+                messages: vec![message.clone()],
+            },
+            AgentEvent::AssistantMessage {
+                session_id: None,
+                message: message.clone(),
+            },
+            AgentEvent::UserMessage {
+                session_id: None,
+                message,
+            },
+        ];
+        for ev in &not_relayed {
+            assert!(!ev.is_wire_relayed(), "{ev:?}");
+        }
+        let relayed = [
+            AgentEvent::TextDelta {
+                session_id: None,
+                delta: "d".into(),
+            },
+            AgentEvent::ToolExecutionEnd {
+                session_id: None,
+                tool_call_id: "c".into(),
+                tool_name: "bash".into(),
+                is_error: false,
+                content: vec![],
+                details: Value::Null,
+            },
+            AgentEvent::PermissionDenied {
+                session_id: None,
+                tool_name: "write".into(),
+                reason: "no".into(),
+            },
+        ];
+        for ev in &relayed {
+            assert!(ev.is_wire_relayed(), "{ev:?}");
+        }
+    }
 
     fn cfg() -> AgentConfig {
         AgentConfig::new(Model::anthropic_claude_sonnet_4_6(), "test")
