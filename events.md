@@ -1309,3 +1309,14 @@ area: [backend] [frontend] [review]
 PR #68 stack reconciliation: preserved concurrent pending-permission repair 41e41b08 and merged the reviewed PR #66 shell head 729cb2fb, including canonical main f1b22bd8. The additive PromptControl conflict retains both Room extra_tools and requested model/provider/reroute metadata in its struct, destructure and defaults. Both public ledger histories retained. Existing owning contracts already describe both behaviors; no new ownership or index changes.
 
 Independent review acknowledged the pending-permission delta; its new regression passed as part of the dependent integrated P4 suite (12/12), with P6 7/7 and locked daemon check on that prior integration. Shell focused evidence is recorded in its preceding receipt. This new combined main/shell/Room head requires fresh review and required builds; combined targeted verification is in progress on the dependent #69 integration. No deployment or live behavior claim.
+
+_________________________________________________________________________________
+time: [22:34] [09-10-26]
+agent: [codex] [factory release]
+worktree: [codex/pr69-reviewed-repairs]
+type: [bug report]
+area: [frontend] [backend] [review] [testing]
+
+PR #69 / issue #76: preserved button semantics for inbox/search, closed compact navigation after inbox selection, and queued search thread focus until root hydration under matching room/origin admission. Inbox roster lookup avoids transcript hydration; SQL LIMIT bounds materialized open-room rows (not a claim of bounded SQLite scan cost). Corrected day-key documentation. Preserved concurrent author projection 42d700ac, pending-permission repair and reviewed shell/main reconciliation through #68 de09e349. A test-only Rooms constructor avoids browser initialization in native regression tests. Source review passed 76dfd1db; final integration receipt precedes exact-head review and hosted checks.
+
+Validation: store 3/3 on unchanged store source, with both new regressions failing without fixes; final daemon P4 12/12, P6 7/7, locked daemon check; Surface Rooms 91/91, attention 6/6, host 14/14, workspace filter 131/131 (includes the same 91 Rooms tests, not additional), sessions chrome 5/5, production event adapter Node 4/4, locked WASM check; component formatting and diff checks pass. Remote Surface validation source matched all 376 tracked file hashes. No install, deployment or live acceptance claim. Final release ownership is this factory chat; required approval/build gates and parent-first release order remain.
