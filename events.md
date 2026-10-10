@@ -1245,3 +1245,14 @@ area: [backend] maintenance failure accounting and recovery
 Independent review reproduced the proposed maintenance publisher counting one failed sweep twice and replacing known committed counts with zeros. The bounded repair retains cleanup custody and accumulated progress across worker/join failures, reports fixed stage/classification plus complete/incomplete/unknown accounting and in-progress start, and publishes terminal facts once without calling the failing logger. A later scheduler tick recovers; blocked workers retain custody rather than admitting overlapping cleanup.
 
 Validation at source8171961: maintenance24/24, attachments23/23 and router5/5 fixtures passed; locked daemon compilation, formatting, diff and docs checks passed (30 packages,153 active Markdown files,170 local links). Local and remote changed-source hashes matched; exact-source independent review ACK received. The daemon devlog records the changed reporting contract; parent ownership/index contracts are unchanged. Fixtures cover queued cancellation, exceptional join failure, committed retention before panic, publication panic, next-tick recovery and dropped-waiter custody. No live sweep, incident-cause attribution, installation or deployment occurred. Final-head review/builds, maintainer approval, #46 dependency and live migration/installation acceptance remain separate gates.
+
+_________________________________________________________________________________
+time: [19:06 10-10-26] []
+agent: [claude code] [claude-opus-5-5]
+worktree: [fix/room-maintenance-loop-survives] (wt-w2a-maint, stacked on port/rooms-maintenance)
+type: [bug report] #30
+area: [backend] [testing]
+
+Issue #30 residual on top of 8171961: the scheduler still awaited each sweep inline, so a panic outside the worker catch (start, join fallback, its publication) could end the loop task. Each scheduled iteration now runs as its own task; a panicked iteration is settled once by the scheduler as panicked/unknown with zero lower-bound counts, only when no worker holds custody and nothing was published, and settlement has its own unwind fence and no logging. The card gains `next_due_at`, republished after every iteration under fixed-delay cadence, so a past value distinguishes a dead loop from a failed sweep. Daemon AGENTS records the contract.
+
+Validation on the Mac mini (dedicated target dir): new paused-clock fixtures inject a panic in the async publication path and a panic after publication; both assert one recorded run and that the next tick runs. `cargo test -p ocean-daemon --locked room_maintenance -- --test-threads=1` 26/26; the three loop tests pass 5/5 repeated runs. Parallel runs show 1-3 orphan_gc fixture failures that reproduce identically on unmodified 1bff98d. `cargo fmt` clean; clippy -D warnings fails only on two pre-existing `u64` casts in room_attachments.rs. No live daemon, sweep or /v1/rooms/maintenance/run call.
