@@ -2103,6 +2103,7 @@ pub(super) fn admission_generation_is_current(
 pub(super) fn apply_admission_to_control(
     mut control: ocean_agent::PromptControl,
     admission: &RoomAgentAdmission,
+    runtime: &ocean_agent::AgentRuntime,
 ) -> ocean_agent::PromptControl {
     let effective: BTreeSet<&str> = admission
         .effective_capabilities
@@ -2125,7 +2126,12 @@ pub(super) fn apply_admission_to_control(
         admission
             .settings_snapshot
             .model
-            .clone()
+            .as_ref()
+            // Keep the admitted package fallback when a room override cannot
+            // use the runtime's actual resolver. Picker membership/readiness
+            // would reject valid legacy routes or change failover semantics.
+            .filter(|model| runtime.model_is_routable(model))
+            .cloned()
             .or_else(|| admission.package.model.clone()),
     );
     if !subprocess.is_empty() {
