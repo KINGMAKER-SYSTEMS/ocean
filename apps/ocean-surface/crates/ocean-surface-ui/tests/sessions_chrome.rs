@@ -80,30 +80,60 @@ fn island_mounts_in_header_on_every_host() {
     );
 }
 
-/// `app.rs` without the body of `should_handle_sessions_shortcut`: the one
-/// documented keyboard exception (native Cmd/Ctrl+P, so web/PWA keeps browser
-/// Print) is allowed to read `in_tauri`.
+/// Exempt only the two documented native keyboard helpers, not layout code.
 fn app_rs_without_shortcut_seam() -> String {
-    let src = app_rs();
-    let Some(at) = src.find("fn should_handle_sessions_shortcut") else {
-        return src;
-    };
-    let open = at + src[at..].find('{').expect("shortcut helper has a body");
-    let mut depth = 0usize;
-    for (i, ch) in src[open..].char_indices() {
-        match ch {
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    let close = open + i + 1;
-                    return format!("{}{}", &src[..at], &src[close..]);
+    let mut src = app_rs();
+    for name in [
+        "should_handle_sessions_shortcut",
+        "should_handle_recall_shortcut",
+    ] {
+        let at = src.find(&format!("fn {name}")).expect("shortcut helper");
+        let open = at + src[at..].find('{').unwrap();
+        let mut depth = 0;
+        let mut end = None;
+        for (i, ch) in src[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(open + i + 1);
+                        break;
+                    }
                 }
+                _ => {}
             }
-            _ => {}
         }
+        src.replace_range(at..end.expect("balanced helper"), "");
     }
-    panic!("unbalanced braces in should_handle_sessions_shortcut");
+    src
+}
+
+#[test]
+fn native_shortcut_hints_match_their_bindings() {
+    let src = app_rs();
+    assert!(src.contains("hint: in_tauri.then(|| \"⌘P\".into())"));
+    assert!(src.contains("hint: in_tauri.then(|| \"⌘⇧F\".into())"));
+    let island = read("crates/ocean-surface-ui/src/island_dynamic.rs");
+    for hint in ["⌘P", "⌘⇧F"] {
+        let at = island
+            .find(&format!(
+                "<span class=\"island-stage__hint\">\"{hint}\"</span>"
+            ))
+            .unwrap();
+        assert!(island[..at]
+            .trim_end()
+            .ends_with("<Show when=move || in_tauri>"));
+    }
+}
+
+#[test]
+fn pinned_vertical_rail_requires_closed_workspace() {
+    let css = strip_css_comments(&read("styles/panels.css"));
+    let wide = css.split("@media (min-width: 1480px)").nth(1).unwrap();
+    assert!(wide
+        .trim_start()
+        .starts_with("{\n  .ocean-surface:not(.has-workspace-open) .pinned-rail"));
 }
 
 #[test]

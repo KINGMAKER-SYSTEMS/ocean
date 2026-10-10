@@ -1551,7 +1551,7 @@
 }
 
 @media (min-width: 1480px) {
-  .pinned-rail {
+  .ocean-surface:not(.has-workspace-open) .pinned-rail {
     flex-direction: column;
     top: 68px;
     bottom: 12px;
@@ -1562,7 +1562,7 @@
     overflow-y: auto;
   }
 
-  .pinned-card {
+  .ocean-surface:not(.has-workspace-open) .pinned-card {
     flex: 0 0 auto;
   }
 }

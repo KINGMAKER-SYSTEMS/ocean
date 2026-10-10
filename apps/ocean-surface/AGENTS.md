@@ -43,7 +43,7 @@ Capability Matrix). The load-bearing rules:
   the only Files/Repo/Browser surface, docked at ≥900px and overlaying below
   (width-driven, never host-driven). `in_tauri` may gate native titlebar chrome
   (`is-titlebar` inset, drag region) and keyboard bindings that conflict with
-  browser commands (Cmd/Ctrl+P must leave web/PWA Print available) — never
+  browser commands (Cmd/Ctrl+P and Cmd/Ctrl+Shift+F remain native-only; their hints are absent on web/PWA) — never
   layout, panels, or navigation. Do not reintroduce a web-only deck or per-host
   panel markup.
 - Shared-file discipline (`app.rs`): smallest hunks, committed promptly;
@@ -389,6 +389,14 @@ Web surface session UI:
 - The rooms browser is a flex column; `.rooms-panel__list` keeps
   `min-height: 0` with vertical overflow so long room lists scroll instead of
   pushing status/actions outside the viewport.
+
+## Workspace Files lifecycle
+
+- Native empty Files exposes the host folder picker as pane-local browsing; picking never rewrites daemon session cwd. Session/cwd intent changes retire picked roots, previews, tree caches and asynchronous results synchronously, including A-B-A; disposal rejects late picker/watch/read completions.
+- Files acquires one native root lease per generation and drops only that lease on change or cleanup. `watch_paths`/`unwatch_paths` accept an optional owner token scoped by the injected native window label; scoped canonical maps are independent of legacy Repo watchers and other consumers/windows. Page-load Started and window destruction retire only that window’s scoped leases; a native page generation rejects pending old-page admissions, while Finished leaves new watches intact. Events carry the lease owner and canonical paths map back to the requested alias. Never clear the legacy canonical map for Files cleanup.
+- The private `host/native_events.mjs` adapter belongs to the `host.rs` seam and uses Tauri 2 IPC callback registration and `plugin:event|listen/unlisten`; legacy subscribers retain their app lifetime. Workspace path listeners belong to the component; cleanup unregisters even late native registration. Ignore events outside the root by path-component boundary. All transcript tool argument previews, including browser tools, are capped at 60 Unicode characters; no remaining consumer parses whole preview JSON.
+- Verify the production event adapter with `node --test scripts/native-events.test.mjs`; its mocked pinned Tauri API exercises delivery, cancellation, late admission and failure cleanup.
+- Pinned cards use the vertical gutter only with the workspace closed; open-workspace layouts retain the horizontal strip.
 
 ## Workspace Map
 
