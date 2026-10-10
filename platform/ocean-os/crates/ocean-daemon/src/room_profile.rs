@@ -20,10 +20,11 @@
 //!
 //! # Phase 2b restrictions (manifest §2.1, ruling §11.1)
 //!
-//! - Every `resource_id`, `default_resource_id`, or `agent_defaults` value
-//!   must name a grant in this room that is not revoked (`resource_not_found`
-//!   otherwise): a dangling reference would be authority minted by a later
-//!   grant without a decision. Before 2c landed these were `phase_not_open`.
+//! - For new decisions, every `resource_id`, `default_resource_id`, or
+//!   `agent_defaults` value must name a grant in this room that is not revoked
+//!   (`resource_not_found` otherwise). The store validates references in the
+//!   write transaction, after resolving consumed decisions: an exact retry
+//!   remains idempotent after revocation and cannot mint new authority.
 //! - `keychain:` is a valid scheme that resolves to `resolver_not_open`.
 //! - Tool `installed` status is REPORTED on read, not enforced on write. The
 //!   write-time refusal the manifest names lands with the resource-aware tools
@@ -237,8 +238,8 @@ struct ValidatedProfile {
 fn validate(body: PutProfileBody) -> Result<(String, ValidatedProfile), ApiError> {
     let decision_id = validate_decision_id(&body.decision_id)?;
 
-    // Resource references are shape-checked here and existence-checked by the
-    // route against live grants (2c) — validation stays pure.
+    // Resource references are shape-checked here and checked against grants by
+    // the store write transaction after replay resolution — validation stays pure.
     let default_resource_id = body
         .default_resource_id
         .as_deref()
@@ -582,17 +583,6 @@ pub(super) async fn room_profile_put(
             return Err(ApiError::bad_request("invalid_room_key"));
         }
         let (decision_id, validated) = validate(body)?;
-        // Every referenced resource must be a live grant in THIS room (2c).
-        let refs = validated
-            .repos
-            .iter()
-            .filter_map(|r| r.resource_id.clone())
-            .chain(validated.default_resource_id.clone())
-            .chain(validated.agent_defaults.values().cloned())
-            .collect::<Vec<_>>();
-        with_rooms(&state, |store| {
-            crate::room_resources::check_profile_resource_refs(store, &room, refs)
-        })?;
         let digest = decision_digest(&ProfileDecisionDigestInput {
             room_id: room.as_str(),
             repos: &validated.repos,
@@ -620,7 +610,14 @@ pub(super) async fn room_profile_put(
                 Utc::now(),
             )
         })
-        .map_err(ApiError::from)?;
+        .map_err(|error| match error {
+            // Keep the profile route's typed refusal while the store owns
+            // replay, grant validation and the write in one transaction.
+            RoomStoreError::UnknownResourceGrant { .. } => {
+                ApiError::bad_request("resource_not_found")
+            }
+            other => ApiError::from(other),
+        })?;
         if let Some(audit) = audit.as_ref() {
             publish_room_wake(&state, &room, audit);
         }
@@ -665,6 +662,140 @@ pub(super) fn blocking_slot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn put_profile_route(
+        app: axum::Router,
+        room: &RoomKey,
+        body: Value,
+    ) -> (StatusCode, Value) {
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let response = app
+            .oneshot(
+                axum::http::Request::put(format!("/v1/rooms/persistent/{room}/profile"))
+                    .header("content-type", "application/json")
+                    .header("x-ocean-operator", "test-room-operator")
+                    .body(axum::body::Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[tokio::test]
+    async fn profile_route_replays_before_revoked_resource_validation() {
+        use crate::tests::{isolated_room_fixture_state, TestEnvRestore, AUTO_CONVENE_ENV_LOCK};
+        use ocean_store::{
+            GrantRoomResourceInput, ResourceAccessMode, ResourceStatus, RoomStore,
+            SetResourceStatusInput,
+        };
+
+        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _restore = TestEnvRestore::capture(&[
+            "OCEAN_AUTH_FILE",
+            "OCEAN_CODEX_AUTH_FILE",
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let state = isolated_room_fixture_state(&tmp);
+        let room = RoomKey::new("profile-replay-route");
+        let grant_decision = uuid::Uuid::new_v4().to_string();
+        let grant = with_rooms(&state, |store| {
+            store
+                .create(room.clone(), "Profile replay", None, Utc::now())
+                .unwrap();
+            store
+                .grant_room_resource(
+                    &room,
+                    GrantRoomResourceInput {
+                        display_name: "Fixture folder".into(),
+                        local_root: tmp
+                            .path()
+                            .canonicalize()
+                            .unwrap()
+                            .to_string_lossy()
+                            .into_owned(),
+                        access_mode: ResourceAccessMode::Read,
+                        authorized_agent_member_ids: vec!["helper".into()],
+                        expires_at: None,
+                        granted_by: "fixture-operator".into(),
+                        decision_id: grant_decision.clone(),
+                        request_digest: "fixture-grant".into(),
+                    },
+                    Utc::now(),
+                )
+                .unwrap()
+                .0
+        });
+        let app = crate::room_routes().with_state(state.clone());
+        let body = json!({
+            "decision_id": uuid::Uuid::new_v4().to_string(),
+            "repos": [{"alias": "source", "remote": "https://example.com/repo", "resource_id": grant.resource_id}],
+            "default_resource_id": grant.resource_id,
+            "agent_defaults": {"helper": grant.resource_id},
+        });
+        let (status, original) = put_profile_route(app.clone(), &room, body.clone()).await;
+        assert_eq!(status, StatusCode::CREATED, "{original}");
+        assert_eq!(original["changed"], true);
+
+        with_rooms(&state, |store| {
+            store.set_room_resource_status(
+                &room,
+                &grant.resource_id,
+                SetResourceStatusInput {
+                    status: ResourceStatus::Revoked,
+                    actor: "fixture-operator".into(),
+                    decision_id: uuid::Uuid::new_v4().to_string(),
+                    request_digest: "fixture-revoke".into(),
+                },
+                Utc::now(),
+            )
+        })
+        .unwrap();
+        let before = with_rooms(&state, |store| store.transcript(&room, None)).unwrap();
+
+        let (status, retry) = put_profile_route(app.clone(), &room, body.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{retry}");
+        assert_eq!(retry["changed"], false);
+        assert_eq!(retry["profile"], original["profile"]);
+
+        let mut mismatch = body.clone();
+        mismatch["repos"][0]["remote"] = json!("https://example.com/different");
+        let (status, rejected) = put_profile_route(app.clone(), &room, mismatch).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
+        assert_eq!(rejected["error"], "decision_replay_mismatch");
+
+        let mut cross_ledger = body.clone();
+        cross_ledger["decision_id"] = json!(grant_decision);
+        let (status, rejected) = put_profile_route(app.clone(), &room, cross_ledger).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
+        assert_eq!(rejected["error"], "decision_replay_mismatch");
+
+        let fresh_decision = uuid::Uuid::new_v4().to_string();
+        let mut fresh = body;
+        fresh["decision_id"] = json!(fresh_decision);
+        let (status, rejected) = put_profile_route(app, &room, fresh).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected}");
+        assert_eq!(rejected["error"], "resource_not_found");
+        with_rooms(&state, |store| {
+            assert!(store
+                .room_profile_decision(&room, &fresh_decision)
+                .unwrap()
+                .is_none());
+            assert_eq!(
+                profile_projection(&store.room_profile(&room).unwrap().unwrap()),
+                original["profile"]
+            );
+            assert_eq!(store.transcript(&room, None).unwrap(), before);
+        });
+    }
 
     fn slot(name: &str, required: bool, resolvers: &[&str]) -> CredentialSlot {
         CredentialSlot {
@@ -837,8 +968,8 @@ mod tests {
             serde_json::from_value(v).unwrap()
         };
         let code = |body: PutProfileBody| validate(body).map(|_| ()).unwrap_err().code();
-        // Resource references are shape-checked here; existence is the route's
-        // job against live grants.
+        // Resource references are shape-checked here; the store transaction checks
+        // new decisions against grants after resolving consumed decisions.
         assert!(validate(base(json!({"default_resource_id": "res-1"}))).is_ok());
         assert!(validate(base(json!({"agent_defaults": {"builder": "res-1"}}))).is_ok());
         assert_eq!(
