@@ -1222,3 +1222,14 @@ Round 5: round-4 review follow-ups on model reroute fidelity. (F2) Selection-tim
 
 Validation: ocean-agent 280 passed / 0 failed / 2 ignored; ocean-daemon 908 passed / 2 failed (only the two known pre-existing persistent_room envelope-key assertions); clippy -p ocean-agent --all-targets -D warnings clean; fmt --all --check clean; git diff --check clean.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [00:04] [10-10-26]
+agent: [codex] [gpt-6]
+worktree: [codex/pr40-reconciliation-ledger] (PR #40)
+type: [workflow]
+area: [review] public reconciliation receipts
+
+Reconciled existing PR #40 onto f1b22bd8 and verified the public merge commits for #25, #31 and #49. The record now includes bounded alias inspection, retention/replay and snapshot consistency, and the redacted artifact Debug regression. Removed unsupported source-history absolutes from the active documentation; inherited chronological event entries remain historical observations, not renewed claims of source parity or current stack compatibility. Both parent ledger histories are preserved.
+
+Validation: docs-check passed (30 packages, 153 active Markdown files, 170 local links), and diff-check passed. Root/docs AGENTS are intentionally unchanged because scope, ownership and verification contracts remain unchanged. Documentation only; no new implementation merge, install, deployment or live verification is claimed. Final-head independent review and required hosted gates remain required.
