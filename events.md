@@ -1208,3 +1208,14 @@ Round 5: round-4 review follow-ups on model reroute fidelity. (F2) Selection-tim
 
 Validation: ocean-agent 280 passed / 0 failed / 2 ignored; ocean-daemon 908 passed / 2 failed (only the two known pre-existing persistent_room envelope-key assertions); clippy -p ocean-agent --all-targets -D warnings clean; fmt --all --check clean; git diff --check clean.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [23:02] [09-10-26]
+agent: [codex] [factory release]
+worktree: [codex/pr62-reviewed-lifecycle]
+type: [bug report]
+area: [backend] [testing] [review]
+
+PR #62 / issue #80: reconciled the separate ChatGPT-plan Responses provider with canonical main f1b22bd8. Persist host identity before initial authorization, retain selected account/client registration after sign-out, detach usable credentials under custody before bounded trusted-origin refresh-token revocation, and return explicit confirmed/unconfirmed status. Detached credentials stay only with the bounded revocation operation; daemon operation ownership survives HTTP cancellation and refresh cannot republish the detached block. Codex and ChatGPT provider flows remain separate. Both public ledger histories preserved.
+
+Validation: repaired source OAuth 54 unit + 2 integration, daemon auth 17 (including blocked removal and dropped-waiter remote-phase custody), agent refresh 10, locked six-crate check, formatting and diff checks pass. Host-retention regression fails without repair and passes restored. Prior reconciled source also passed providers 70, protocol 3, agent route/model constructors 2, catalog 3 and TUI login 13. Synthetic isolated fixtures only; four changed Rust hashes match the remotely validated copy. Independent review ACKed 7c9a120e; final receipt precedes exact-head review and required builds. OAuth/daemon contracts updated, parent ownership/indexes unchanged. No live authentication, installation, inference, deployment or live acceptance; issue #61 stays open for real-account proof. Maintainer approval remains required.
