@@ -2471,12 +2471,23 @@ struct MessagePayload {
 #[serde(deny_unknown_fields)]
 struct MembersEnvelope {
     members: Vec<WireMember>,
-    /// Bedrock returns the caller's own member ids beside the roster. Accepted
-    /// and ignored: local identity comes from the durable room credential.
-    /// Rejecting it failed every receiver epoch silently (stuck Recovering).
+    /// Bedrock returns the caller's own member ids beside the roster. Local
+    /// identity still comes from the durable room credential; this is used only
+    /// for a warn-only stale-credential diagnostic. Rejecting it failed every
+    /// receiver epoch silently (stuck Recovering).
     #[serde(default)]
-    #[allow(dead_code)]
     caller_member_ids: Vec<String>,
+}
+
+/// True when Bedrock names the caller's memberships and the credential's local
+/// human is not among them (for example a stale credential after the member was
+/// removed and readmitted). Diagnostic only: never blocks Live.
+fn caller_lacks_credential_member(envelope: &MembersEnvelope, credential: &RoomCredential) -> bool {
+    !envelope.caller_member_ids.is_empty()
+        && !envelope
+            .caller_member_ids
+            .iter()
+            .any(|id| id == &credential.local_human_member_id)
 }
 
 #[derive(Debug, Deserialize)]
@@ -2772,6 +2783,13 @@ async fn fetch_roster(
             return Err(EpochOutcome::Recover);
         }
     };
+    if caller_lacks_credential_member(&envelope, credential) {
+        tracing::warn!(
+            room = %credential.room_id,
+            outcome = "credential_member_mismatch",
+            "Bedrock does not list this credential's local member as the caller; credential may be stale"
+        );
+    }
     project_roster(inner, credential, envelope, live_human_member_ids).map_err(|error| {
         let outcome = if error == BridgeError::Store {
             "roster_store_failed"
@@ -7749,6 +7767,28 @@ mod tests {
     /// the roster (and `operator_id` on operator-room members). The strict
     /// envelope once rejected it, so every epoch returned Recover after a
     /// valid hello and rooms never reached Live.
+    #[test]
+    fn caller_member_mismatch_is_detected_only_when_bedrock_names_callers() {
+        let credential = RoomCredential {
+            room_id: RoomKey::new("mismatch".to_owned()),
+            bearer_token: "bearer".to_owned(),
+            local_human_member_id: "me".to_owned(),
+        };
+        let envelope = |ids: &[&str]| MembersEnvelope {
+            members: Vec::new(),
+            caller_member_ids: ids.iter().map(|id| (*id).to_owned()).collect(),
+        };
+        assert!(!caller_lacks_credential_member(&envelope(&[]), &credential));
+        assert!(!caller_lacks_credential_member(
+            &envelope(&["agent", "me"]),
+            &credential
+        ));
+        assert!(caller_lacks_credential_member(
+            &envelope(&["someone-else"]),
+            &credential
+        ));
+    }
+
     #[tokio::test]
     async fn roster_with_caller_member_ids_reaches_live() {
         let key = RoomKey::new("caller-ids".to_owned());
