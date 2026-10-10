@@ -14,6 +14,7 @@ All four Kingmaker maintainers work from this repository.
 ## Local Contracts
 
 - Read this file and every applicable child `AGENTS.md` before editing.
+- `main` merges need one APPROVED review on the current head from someone other than the author, plus `Build Ocean` and `Build Surface`. Stale approvals are dismissed, the last push needs its own approval, and admins are bound. A COMMENTED review is not approval. Only maintainers change branch protection.
 - Never import `org/`, `services/`, private deployments, production data, credentials, or mixed historical branches into this repository. Port selected public-component diffs onto public `main`.
 - Preserve component build systems, licenses, notices, and trademark restrictions. Public use must not require private components.
 - Keep runtime authority in Ocean OS; Surface renders state and gathers intent; reusable packages stay organization-neutral.

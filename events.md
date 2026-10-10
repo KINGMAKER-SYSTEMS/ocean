@@ -1156,3 +1156,19 @@ Round 5: round-4 review follow-ups on model reroute fidelity. (F2) Selection-tim
 
 Validation: ocean-agent 280 passed / 0 failed / 2 ignored; ocean-daemon 908 passed / 2 failed (only the two known pre-existing persistent_room envelope-key assertions); clippy -p ocean-agent --all-targets -D warnings clean; fmt --all --check clean; git diff --check clean.
 _________________________________________________________________________________
+
+time: [22:05] [09-10-26]
+agent: [claude code] [claude-opus-5-5]
+worktree: [fix/review-gate-contract] [~/dev/oceanwork/wt-review-gate-contract]
+type: [gh actions] [issue #54]
+area: [review] [writing]
+
+Recorded the main review gate as a root contract and added a read-only
+protection read-back to `.github/AGENTS.md` Verification, following the #54
+audit (a stored approval count with review enforcement off let unapproved PRs
+merge before 2026-10-06 20:37 UTC). No protection settings were changed.
+
+Validation: `gh api` read-back shows one approval, stale dismissal, last-push
+approval, enforced admins, strict Build Ocean + Build Surface; the only branch
+ruleset (org Copilot review) has no bypass actors. `git diff --check` passed.
+_________________________________________________________________________________
