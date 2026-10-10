@@ -1046,6 +1046,39 @@ Closed the leftovers from the review that acknowledged the thinking-binding reco
 Validation: ocean-protocol (187 plus 5) passes; clippy with warnings denied on ocean-protocol and ocean-agent tests, rustfmt check pass. The strip test covers the thinking-only assistant turn. No provider was called.
 _________________________________________________________________________________
 _________________________________________________________________________________
+time: [13:22] [06-10-26]
+agent: [zcode] [glm-5.3]
+worktree: [port/rooms-identity-route]
+type: [feature-request]
+area: [backend] reconciliation: Rooms S0 identity route
+
+Fourth bounded Track B port: `GET /v1/identity` (Rooms S0, design direction
+§3.2 — one human = one member id on every host). The 243-line module resolves
+the daemon's human from `<config_dir>/member.toml` (member_id, optional
+display_name), then `OCEAN_MEMBER_ID`; neither set answers member_id: null,
+source "unset" — never the process user. Credential-free and read at request
+time so writing member.toml takes effect without a restart. std-only imports;
+no crate-internal dependencies beyond AppState wiring. Wired into the router,
+the GET / discovery banner, and the operator guide quick reference; the
+router-contract parity baseline moved 119 → 120.
+
+Before choosing this unit I re-scoped room_inspect.rs: it is NOT bounded — it
+sits on three unported Phase 2 sub-features (room_profile::profile_with_slots,
+room_resources::resources_projection + the §5 TurnCwd rules, and
+session_detail_optional), so it stays behind the Phase 2 chain.
+
+Pre-existing main breakage, reproduced on clean 32bd82a before my changes:
+three persistent-rooms lifecycle tests fail (closing_a_room_ends_the_message_
+tail_after_the_marker at persistent_rooms.rs:6494 "room tail ended",
+closed_persistent_room_preserves_audit_http_asymmetry,
+persistent_room_http_lifecycle_preserves_envelopes_and_ordering). Reported in
+the PR; not caused by this port — the same three fail identically on main.
+
+Validation: identity module tests (4) pass; cargo test -p ocean-daemon 912
+passed / 3 failed — all three pre-existing on main; router-contract parity 120
+green; cargo check --workspace --tests; rustfmt; denied-warning Clippy zero;
+cargo xtask docs-check for the guide edit.
+_________________________________________________________________________________
 time: [15:42] [06-10-26]
 agent: [codex] [gpt-6]
 worktree: [port/output-economy] [/Users/risingtidesdev/.codex/worktrees/factory-pr49-artifact-debug/ocean]
@@ -1156,3 +1189,58 @@ Round 5: round-4 review follow-ups on model reroute fidelity. (F2) Selection-tim
 
 Validation: ocean-agent 280 passed / 0 failed / 2 ignored; ocean-daemon 908 passed / 2 failed (only the two known pre-existing persistent_room envelope-key assertions); clippy -p ocean-agent --all-targets -D warnings clean; fmt --all --check clean; git diff --check clean.
 _________________________________________________________________________________
+time: [17:10] [06-10-26]
+agent: [codex] [gpt-6]
+worktree: [codex/rooms-identity-reconcile]
+type: [review] [reconciliation]: PR #41 current main
+area: [backend] [testing]
+
+Reconciled the Rooms S0 identity route branch with current `origin/main`
+(`1e3655e4946c428a50871bcccdb4a0cde1854343`) after confirming the remote PR
+head remained `76a20aa662219b89842786f5ce00f92585379d3d`. The only merge conflict
+was the append-only root ledger; preserved PR #41's 13:22 entry, then the
+canonical PR #49 15:42 entry. Source changes merged without conflict. Current
+head review and hosted Build Ocean/Build Surface remain pending; local builds
+and behavioral tests are not verified in this run. `cargo fmt --all` corrected
+one formatting-only line in the existing identity test; formatting and diff checks
+are rerun before publishing the reconciled head.
+_________________________________________________________________________________
+time: [17:18] [06-10-26]
+agent: [codex] [gpt-6]
+worktree: [codex/rooms-identity-reconcile]
+type: [review] [bug fix]: PR #41 strict identity config parsing
+area: [backend] [testing]
+
+Independent adversarial review of `b24113355b9735175def830358014266fece1340`
+found the hand-written `member.toml` parser accepted values that strict TOML
+readers reject, including bare strings and duplicate keys, and treated nested
+table fields as identity. Replaced it with the existing workspace TOML
+deserializer and `deny_unknown_fields`; added malformed, duplicate, and nested
+field fallback cases; updated the Rooms spec; and recorded the package dependency
+in the lockfile. `cargo fmt --all -- --check`, `git diff --check`, and locked
+`cargo metadata` pass. Only 397 MiB of local disk remains, below the 4 GiB build
+threshold, so focused Rust tests and package builds are not run. Re-review and
+hosted Build Ocean/Build Surface are still required on the revised head.
+_________________________________________________________________________________
+time: [17:19] [06-10-26]
+agent: [codex] [gpt-6]
+worktree: [codex/rooms-identity-reconcile]
+type: [testing]: PR #41 strict parser follow-up
+area: [backend] [testing]
+
+After the parser/test edits, reran `cargo fmt --all -- --check` and `git diff
+--check`; both pass. Parsed the lockfile and manifest structurally to confirm
+the daemon adds exactly one existing `toml 0.8.23` dependency. Current free disk
+is 385 MiB; no Rust package build or behavior test was run.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [22:57] [09-10-26]
+agent: [codex] [factory release]
+worktree: [codex/pr41-reviewed-identity]
+type: [workflow]
+area: [backend] [testing] [review]
+
+PR #41: reconciled the existing Rooms identity route with canonical main f1b22bd8; source merged without conflict and both public ledger histories retained. Executed previously unrun strict TOML parser regressions (7/7) and production router contracts (5/5). Locked daemon check, formatting and docs-check passed with disposable auth/config/XDG fixtures and unchanged HOME. Corrected source/spec wording to describe daemon-local configured identity without claiming unported MCP parity or caller authentication. The nearest daemon devlog now owns the route and narrow checks; parent ownership/indexes unchanged.
+
+Independent release review found no blocking source issue at ef80d05e. Final canonical receipt precedes exact-head review and fresh hosted builds. Required maintainer approval remains outstanding. No deployment or cross-client/live identity parity claimed.
