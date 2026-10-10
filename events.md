@@ -1167,3 +1167,14 @@ Round 5: round-4 review follow-ups on model reroute fidelity. (F2) Selection-tim
 
 Validation: ocean-agent 280 passed / 0 failed / 2 ignored; ocean-daemon 908 passed / 2 failed (only the two known pre-existing persistent_room envelope-key assertions); clippy -p ocean-agent --all-targets -D warnings clean; fmt --all --check clean; git diff --check clean.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [23:08] [09-10-26]
+agent: [codex] [factory release]
+worktree: [codex/pr63-reviewed-fallback]
+type: [workflow]
+area: [backend] [testing] [review]
+
+PR #63 source reconciliation with canonical main f1b22bd8 preserved both public ledger histories. Provider source is unchanged from original bfa8965a: default fallback replacements include gpt-6-astra on openai-codex, Sonnet 5.5 and MiniMax M2.7. Provider tests 68/68, locked check, formatting and diff checks pass; remote validated provider hash matches the candidate. Existing owning contracts already distinguish catalog routing from account entitlement and remain unchanged; parent ownership/indexes unchanged. Final receipt precedes exact-head review and hosted checks.
+
+Explicit live-acceptance/promotion hold remains: issue #61's unsupported-GPT6 report and PR #63's later Astra-success claim lack matching exact-model/account/serving-revision receipts. Synthetic routing and catalog membership do not establish a remedy for the observed user failure. PR #62's separate public ChatGPT-plan provider does not change this bare model's Codex route. No live provider probe, installation or deployment; required maintainer approval and this evidence hold are not lifted.
