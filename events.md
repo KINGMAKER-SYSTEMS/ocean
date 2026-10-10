@@ -1268,3 +1268,14 @@ area: [frontend] [testing] [review]
 PR #66 / issue #75: restored native-only Sessions and Recall shortcut hints and interception, bounded Unicode tool previews, horizontal pinned cards while Workspace is open, and pane-local Files picker/watch refresh. Files uses generation and disposal fencing, canonical owner leases isolated by native window, and page-Started retirement preserving Repo and other windows. Shared Tauri 2 event adapter now uses the pinned IPC API with synchronous cancellation and late-admission cleanup. Preserved concurrent palette repair 51cd328c and reconciled canonical main f1b22bd8; source matches builder 698431ad except its explanatory shortcut comment.
 
 Validation: native watcher tests 11/11 (real notify aliases, peer and legacy survival), locked native lib check; workspace tests 146/146, sessions chrome 5/5, shortcuts 2/2, previews 3/3, final host tests 14/14, WASM check, executable production event-adapter Node tests 4/4. Native compilation used an ignored disposable frontendDist fixture, not a served bundle. No installation, native UI smoke, deployment or live verification. Final integration review and hosted builds remain required; release owner is this factory chat.
+
+_________________________________________________________________________________
+time: [22:31] [09-10-26]
+agent: [codex] [factory release]
+worktree: [codex/pr68-reviewed-repairs]
+type: [workflow]
+area: [backend] [frontend] [review]
+
+PR #68 stack reconciliation: preserved concurrent pending-permission repair 41e41b08 and merged the reviewed PR #66 shell head 729cb2fb, including canonical main f1b22bd8. The additive PromptControl conflict retains both Room extra_tools and requested model/provider/reroute metadata in its struct, destructure and defaults. Both public ledger histories retained. Existing owning contracts already describe both behaviors; no new ownership or index changes.
+
+Independent review acknowledged the pending-permission delta; its new regression passed as part of the dependent integrated P4 suite (12/12), with P6 7/7 and locked daemon check on that prior integration. Shell focused evidence is recorded in its preceding receipt. This new combined main/shell/Room head requires fresh review and required builds; combined targeted verification is in progress on the dependent #69 integration. No deployment or live behavior claim.
