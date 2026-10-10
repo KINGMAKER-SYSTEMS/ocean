@@ -31,41 +31,39 @@ remains separate and is not declared landed.
 
 ## Reconciled slices
 
-Bounded personal-source slices landed on Kingmaker main, newest first. Each
-entry names the personal source tip the slice was ported from and what was
-deliberately left behind.
+Bounded slices landed on Kingmaker main, newest first. The October 6 receipts
+identify public merge commits and landed behavior; they do not establish source
+parity, deployment, or live verification.
 
-- 2026-10-06 — Minimizer M2 output economy (PR #49, personal tip
-  `1bd1bc37636e0a4363f1f20aa1b72ee4c79b14cb`): the first CONFLICT-CLASS
-  reconciliation — `agent_loop.rs` three-way merged (Kingmaker's
-  token-aggregation and `Option<ThinkingLevel>` fixes preserved verbatim; the
-  single textual conflict resolved to Kingmaker's types), `output_economy.rs`
-  provider-only tool-result projections (PinBudget-bounded, exact provider
-  ordinals, sealed from emission) with the m2a/m2b characterization suites,
-  the `execute_for_run`/argv-mode capability seam, `ArtifactLease`/`PinBudget`,
-  the default-off `SessionContext::command_output_minimization` gate (M2c
-  profile enablement remains separately reviewed), and the ocean-minimizer
-  dependency. NOT ported: personal's +1234-line metrics expansion beyond
-  what later units need.
-
-- 2026-10-06 — Rooms S0 participant retirement (PR #25, personal tip
-  `1bd1bc37636e0a4363f1f20aa1b72ee4c79b14cb`): the daemon operator route
-  `POST /v1/rooms/persistent/{key}/participants/{id}/retire` plus its governing
-  spec. The store retirement core already existed on Kingmaker main from the
-  publication snapshot. PR #25 also hardened that store implementation with
-  transaction-bound retired-alias reservation and bounded alias projection and
-  inspection. The remaining Rooms files (`room_maintenance`, `room_context`,
-  `room_attachments`, `room_summary`, `room_workspace_proxy`, `room_inspect`)
-  still await their units on top of the persistent_rooms rework.
-- 2026-10-06 — Observatory durability cluster (PR #31, personal tip
-  `1bd1bc37636e0a4363f1f20aa1b72ee4c79b14cb`): versioned idempotent
-  `observatory.db` schema migrations (v1 baseline → v2 §4.1 rebuilds), the v2
-  store with backfilled correlation/producer/recorded_at, §7.3 envelope
-  replay, admission-wiring and observer-token gates, and the daemon half
-  (first production caller for the G3 retention loop, checkpointing, extracted
-  durability pump, summary-token rotation with failure metrics). NOT ported:
-  personal's +1234-line metrics.rs expansion beyond the rotation-failure
-  counter. Kingmaker had not touched these files since the split.
+- 2026-10-06 — Minimizer M2 output economy
+  ([PR #49](https://github.com/KINGMAKER-SYSTEMS/ocean/pull/49), merge
+  `1e3655e4946c428a50871bcccdb4a0cde1854343`): provider-only tool-result
+  projections, bounded artifact pinning through `ArtifactLease`/`PinBudget`,
+  the `execute_for_run`/argv-mode capability seam, and the M2 characterization
+  suites. The merged head includes the redacted `ArtifactLease` Debug formatter
+  and sentinel regression for unrelated session output exposure (issue #50).
+  `SessionContext::command_output_minimization` remains default-off, with no
+  production setter in this change; profile enablement requires separate review.
+- 2026-10-06 — Observatory durability cluster
+  ([PR #31](https://github.com/KINGMAKER-SYSTEMS/ocean/pull/31), merge
+  `8c7a1465ad33657bf64a94efaa38e4dc0d501407`): versioned restart-safe schema
+  migrations, retention/archive persistence, bounded envelope replay, admission
+  wiring and observer-token gates, plus daemon retention, checkpointing,
+  durability-pump, and summary-token rotation work. Replay validates the retention
+  boundary and reads its page under one store lock; cursors strictly before the
+  boundary return 410, while equality can resume. Snapshot cursor and retention
+  state are read under the projection lock, and response headers use the returned
+  projection watermark. These consistency fixes were included before merge.
+- 2026-10-06 — Rooms S0 participant retirement
+  ([PR #25](https://github.com/KINGMAKER-SYSTEMS/ocean/pull/25), merge
+  `855e0c40029fb74e684fd935f9c4d419370ffc32`): the operator-authenticated
+  `POST /v1/rooms/persistent/{key}/participants/{id}/retire` route and governing
+  specification, with retired-alias reservation inside roster-write transactions.
+  Detail, snapshot, and read-only `GET /v1/rooms/persistent/{key}/inspect`
+  responses expose up to the oldest 256 aliases and `aliases_truncated` to report
+  incomplete projections. Inspection returns room identity, local ownership,
+  and aliases without transcript or workspace contents. This slice does not
+  establish maintenance, context, attachments, summary, or workspace-bridge parity.
 - 2026-10-05 — OAuth custody cluster (PR #23, personal tip
   `1bd1bc37636e0a4363f1f20aa1b72ee4c79b14cb`): operator-authenticated
   `/v1/auth/providers*` login/status/logout routes (`ocean-daemon/src/provider_auth.rs`),
