@@ -1177,3 +1177,14 @@ Ported the public half of ocean-private #97 onto public main: the PROPOSED gener
 
 Validation: cargo xtask docs-check PASS (30 packages, 155 active Markdown files, 173 local links); git diff --check clean. Documentation only, no Rust changes.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [23:50] [09-10-26]
+agent: [codex]
+worktree: [codex/pr59-public-proposals-reconcile]
+type: [workflow] [PR #59] [issue #86]
+area: [docs] [review]
+
+Reconciled the two existing extension/lifecycle proposals with canonical main and made their public authority self-contained. Active proposals and owning indexes now describe technical requirements and public source anchors directly, require explicit canonical public operator rulings, and remove private tracker/SHA dependencies and stale tracker-number/billing claims. Both proposals remain PROPOSED; implementation, lifecycle-state adoption, installation and acceptance stay gated. Existing ledger histories were preserved.
+
+Validation: docs-check passed (30 packages, 155 active Markdown files, 175 local links), git diff --check passed, public source anchors were checked, and the accepted Stage A manifest remains byte-identical to canonical main. Independent review acknowledged source e291fa0b; final receipt head and required checks remain release gates. Owning component/docs contracts and proposal indexes updated; root ownership/index unchanged. No runtime change, merge or deployment is claimed.
