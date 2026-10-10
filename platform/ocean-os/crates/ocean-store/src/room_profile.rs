@@ -318,6 +318,21 @@ impl SqliteRoomStore {
             return Ok((current, false, None));
         }
 
+        // A profile's grant references and decision must be checked in the
+        // same write transaction. Otherwise a revoke can commit after a
+        // separate caller-side check and before this profile is persisted.
+        super::room_resources::validate_profile_resource_refs_on(
+            &tx,
+            key,
+            input
+                .repos
+                .iter()
+                .filter_map(|repo| repo.resource_id.clone())
+                .chain(input.default_resource_id.clone())
+                .chain(input.agent_defaults.values().cloned()),
+            now,
+        )?;
+
         let existing_revision: Option<String> = tx
             .query_row(
                 "SELECT revision FROM room_profiles WHERE room_id = ?1",
@@ -428,7 +443,29 @@ impl SqliteRoomStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ActivationPolicy, AuthorizeAgentInput, ContextPolicy, MemoryScope, RoomStore};
+    use crate::{
+        ActivationPolicy, AuthorizeAgentInput, ContextPolicy, GrantRoomResourceInput, MemoryScope,
+        ResourceAccessMode, ResourceStatus, RoomStore, SetResourceStatusInput,
+    };
+    use std::{
+        sync::atomic::{AtomicBool, Ordering},
+        thread,
+        time::{Duration, Instant},
+    };
+
+    static PROFILE_WRITER_BUSY_HANDLER_REACHED: AtomicBool = AtomicBool::new(false);
+    static RELEASE_PROFILE_WRITER_BUSY_HANDLER: AtomicBool = AtomicBool::new(false);
+
+    fn pause_profile_writer_on_busy(_attempts: i32) -> bool {
+        PROFILE_WRITER_BUSY_HANDLER_REACHED.store(true, Ordering::Release);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !RELEASE_PROFILE_WRITER_BUSY_HANDLER.load(Ordering::Acquire)
+            && Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(1));
+        }
+        RELEASE_PROFILE_WRITER_BUSY_HANDLER.load(Ordering::Acquire)
+    }
 
     fn store() -> SqliteRoomStore {
         SqliteRoomStore::open_in_memory().unwrap()
@@ -642,16 +679,236 @@ mod tests {
     #[test]
     fn agent_defaults_and_default_resource_round_trip() {
         let (mut s, key) = room();
+        let (room_grant, _, _) = s
+            .grant_room_resource(
+                &key,
+                grant_input("grant-room", "grant-room", "/tmp/profile-room"),
+                Utc::now(),
+            )
+            .unwrap();
+        let (agent_grant, _, _) = s
+            .grant_room_resource(
+                &key,
+                grant_input("grant-builder", "grant-builder", "/tmp/profile-builder"),
+                Utc::now(),
+            )
+            .unwrap();
         let mut i = input("dec-1", "d1");
-        i.default_resource_id = Some("res-room".into());
+        i.repos[0].resource_id = Some(room_grant.resource_id.clone());
+        i.default_resource_id = Some(room_grant.resource_id.clone());
         i.agent_defaults
-            .insert("builder".into(), "res-builder".into());
+            .insert("builder".into(), agent_grant.resource_id.clone());
         s.put_room_profile(&key, i, Utc::now()).unwrap();
         let p = s.room_profile(&key).unwrap().unwrap();
-        assert_eq!(p.default_resource_id.as_deref(), Some("res-room"));
+        assert_eq!(p.default_resource_id, Some(room_grant.resource_id));
         assert_eq!(
             p.agent_defaults.get("builder").map(String::as_str),
-            Some("res-builder")
+            Some(agent_grant.resource_id.as_str())
+        );
+    }
+
+    #[test]
+    fn a_new_profile_write_refuses_each_missing_grant_reference_without_consuming_its_decision() {
+        for field in ["repo", "default", "agent-default"] {
+            let (mut store, key) = room();
+            let decision_id = format!("profile-missing-{field}");
+            let mut profile = input(&decision_id, &decision_id);
+            match field {
+                "repo" => profile.repos[0].resource_id = Some("res-missing".into()),
+                "default" => profile.default_resource_id = Some("res-missing".into()),
+                "agent-default" => {
+                    profile
+                        .agent_defaults
+                        .insert("builder".into(), "res-missing".into());
+                }
+                _ => unreachable!("test field is enumerated above"),
+            }
+
+            let err = store
+                .put_room_profile(&key, profile, Utc::now())
+                .unwrap_err();
+            assert!(matches!(
+                err,
+                RoomStoreError::UnknownResourceGrant { ref resource_id, .. }
+                    if resource_id == "res-missing"
+            ));
+            assert_eq!(store.room_profile(&key).unwrap(), None);
+            assert_eq!(
+                store.room_profile_decision(&key, &decision_id).unwrap(),
+                None,
+                "a missing {field} grant must not consume the profile decision"
+            );
+        }
+    }
+
+    fn grant_input(decision: &str, digest: &str, root: &str) -> GrantRoomResourceInput {
+        GrantRoomResourceInput {
+            display_name: "source".into(),
+            local_root: root.into(),
+            access_mode: ResourceAccessMode::Read,
+            authorized_agent_member_ids: vec!["helper".into()],
+            expires_at: None,
+            granted_by: "operator-1".into(),
+            decision_id: decision.into(),
+            request_digest: digest.into(),
+        }
+    }
+
+    fn profile_referencing(decision: &str, digest: &str, resource_id: &str) -> PutRoomProfileInput {
+        let mut profile = input(decision, digest);
+        profile.default_resource_id = Some(resource_id.into());
+        profile
+    }
+
+    fn revoke_input() -> SetResourceStatusInput {
+        SetResourceStatusInput {
+            status: ResourceStatus::Revoked,
+            actor: "operator-1".into(),
+            decision_id: "revoke-source".into(),
+            request_digest: "revoke-source".into(),
+        }
+    }
+
+    #[test]
+    fn exact_profile_replay_survives_revocation_of_a_referenced_grant() {
+        let (mut store, key) = room();
+        let (grant, _, _) = store
+            .grant_room_resource(
+                &key,
+                grant_input("grant-source", "grant-source", "/tmp/profile-replay"),
+                Utc::now(),
+            )
+            .unwrap();
+        let request = profile_referencing("profile-1", "profile-1", &grant.resource_id);
+        let (before, changed, audit) = store
+            .put_room_profile(&key, request.clone(), Utc::now())
+            .unwrap();
+        assert!(changed);
+        assert!(audit.is_some());
+
+        store
+            .set_room_resource_status(&key, &grant.resource_id, revoke_input(), Utc::now())
+            .unwrap();
+
+        let (replayed, changed, audit) = store.put_room_profile(&key, request, Utc::now()).unwrap();
+        assert!(!changed);
+        assert!(audit.is_none());
+        assert_eq!(replayed, before);
+    }
+
+    #[test]
+    fn mismatched_profile_replay_is_refused_before_revalidating_revoked_grants() {
+        let (mut store, key) = room();
+        let (grant, _, _) = store
+            .grant_room_resource(
+                &key,
+                grant_input("grant-source", "grant-source", "/tmp/profile-mismatch"),
+                Utc::now(),
+            )
+            .unwrap();
+        store
+            .put_room_profile(
+                &key,
+                profile_referencing("profile-1", "profile-1", &grant.resource_id),
+                Utc::now(),
+            )
+            .unwrap();
+        store
+            .set_room_resource_status(&key, &grant.resource_id, revoke_input(), Utc::now())
+            .unwrap();
+
+        let err = store
+            .put_room_profile(
+                &key,
+                profile_referencing("profile-1", "different-content", &grant.resource_id),
+                Utc::now(),
+            )
+            .unwrap_err();
+        assert!(matches!(err, RoomStoreError::DecisionReplayMismatch { .. }));
+    }
+
+    #[test]
+    fn profile_write_waits_for_revocation_and_cannot_persist_a_new_revoked_reference() {
+        use std::sync::mpsc;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("rooms.db");
+        let key = RoomKey::new("hq");
+        let mut seed = SqliteRoomStore::open(&path).unwrap();
+        seed.create(key.clone(), "HQ", None, Utc::now()).unwrap();
+        let (grant, _, _) = seed
+            .grant_room_resource(
+                &key,
+                grant_input("grant-source", "grant-source", "/tmp/profile-race"),
+                Utc::now(),
+            )
+            .unwrap();
+        drop(seed);
+
+        PROFILE_WRITER_BUSY_HANDLER_REACHED.store(false, Ordering::Release);
+        RELEASE_PROFILE_WRITER_BUSY_HANDLER.store(false, Ordering::Release);
+        let mut writer_store = SqliteRoomStore::open(&path).unwrap();
+        let mut revoker = SqliteRoomStore::open(&path).unwrap();
+        let revoke_tx = revoker
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        revoke_tx
+            .execute(
+                "UPDATE room_resource_grants
+                    SET status = 'revoked', revoked_at = ?3, revoked_by = 'operator-1', generation = '2'
+                  WHERE room_id = ?1 AND resource_id = ?2",
+                params![key.as_str(), grant.resource_id, fmt_ts(Utc::now())],
+            )
+            .unwrap();
+
+        let writer_key = key.clone();
+        let resource_id = grant.resource_id.clone();
+        writer_store
+            .conn
+            .busy_handler(Some(pause_profile_writer_on_busy))
+            .unwrap();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let writer = thread::spawn(move || {
+            let result = writer_store.put_room_profile(
+                &writer_key,
+                profile_referencing("profile-after-revoke", "profile-after-revoke", &resource_id),
+                Utc::now(),
+            );
+            finished_tx
+                .send(matches!(
+                    result,
+                    Err(RoomStoreError::UnknownResourceGrant { .. })
+                ))
+                .unwrap();
+        });
+
+        // SQLite invokes this handler only after the writer actually hits the
+        // revoker's IMMEDIATE transaction lock. Hold it there so the test
+        // proves the ordering instead of inferring it from a sleep timeout.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !PROFILE_WRITER_BUSY_HANDLER_REACHED.load(Ordering::Acquire)
+            && Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            PROFILE_WRITER_BUSY_HANDLER_REACHED.load(Ordering::Acquire),
+            "profile writer did not contend with the revocation lock"
+        );
+        assert!(matches!(
+            finished_rx.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        revoke_tx.commit().unwrap();
+        RELEASE_PROFILE_WRITER_BUSY_HANDLER.store(true, Ordering::Release);
+
+        assert!(finished_rx.recv_timeout(Duration::from_secs(5)).unwrap());
+        writer.join().unwrap();
+        assert_eq!(
+            revoker.room_profile(&key).unwrap(),
+            None,
+            "a write that loses to revocation must leave no profile row"
         );
     }
 }
