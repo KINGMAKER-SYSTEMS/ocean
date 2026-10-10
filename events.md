@@ -1305,3 +1305,14 @@ type: [workflow]
 area: [backend] [testing] [review]
 
 Reconciled PR #60 store grant serialization with canonical main f1b22bd8. Only conflict was additive public ledger history; both sides retained. Store implementation and owning contract remain byte-identical to original head 72f089c4: exact/cross-ledger decision replay precedes reference validation inside the same IMMEDIATE transaction as a new profile write. Current-main store suite passes 279/279 with disposable auth/config/XDG paths and unchanged HOME. Final exact-head review and hosted checks follow this receipt. Issue #54 audit hold is resolved, but independent maintainer approval remains required. Issue #56 stays open for the separate PR #43 daemon retry path; this store PR alone does not finish its acceptance. No deployment or live database access. Parent ownership and indexes unchanged.
+
+_________________________________________________________________________________
+time: [22:52] [09-10-26]
+agent: [codex] [factory release]
+worktree: [codex/pr43-reviewed-replay]
+type: [bug report]
+area: [backend] [testing] [review]
+
+PR #43 / issue #56: reconciled profile routes with canonical main f1b22bd8 and PR #60 a0c66c48, preserving both public ledger histories. Removed route-level grant validation so the serialized store transaction resolves consumed profile decisions before checking current grants. Exact retries after revocation remain no-ops; mismatched/cross-ledger retries stay 409; fresh missing/revoked references retain 400 resource_not_found without consuming a decision or mutating profile/audit history. Existing operator and pure shape checks remain.
+
+Validation: registered production-route regression reproduced 400 before repair and passed afterward; profile 6/6, resources 2/2, locked daemon check, formatting and docs-check passed. Dependency store suite passed 279/279. Disposable auth/config/XDG fixtures; no live account/database access. Independent source review acknowledged b0d21403; final receipt and parent ledger integration precede exact-head review and hosted builds. Owning daemon contract updated; parent ownership/indexes unchanged. Maintainer approval and live migration holds remain. Not merged, deployed or live-verified.
