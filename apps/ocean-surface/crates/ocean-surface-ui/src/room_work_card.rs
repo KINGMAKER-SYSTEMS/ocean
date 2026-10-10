@@ -7,12 +7,17 @@
 //! transcript's own `AssistantTurn` — the same tool groups, thinking, and
 //! component blocks as direct chat. Steps are collapsed by default.
 
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
+
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
 use crate::daemon::Daemon;
 use crate::model::{Block, Role, Turn};
-use crate::rooms::{name_initials, RoomAgentRunState, Rooms};
+use crate::rooms::{name_initials, RoomAgentRun, RoomAgentRunState, Rooms};
 
 /// Short status label for a run state (no instructional copy).
 pub(crate) fn state_label(state: &RoomAgentRunState) -> String {
@@ -80,6 +85,17 @@ pub(crate) fn run_turns(turns: &[Turn], trigger_seq: u64) -> Vec<Turn> {
         .collect()
 }
 
+/// Both successful and failed fetches belong only to the latest open card request.
+fn steps_request_is_current(
+    ticket: u64,
+    latest: u64,
+    open: bool,
+    expected: &RoomAgentRun,
+    current: Option<&RoomAgentRun>,
+) -> bool {
+    ticket == latest && open && current == Some(expected)
+}
+
 fn parse_ms(rfc3339: &str) -> f64 {
     js_sys::Date::parse(rfc3339)
 }
@@ -125,14 +141,44 @@ pub fn RoomWorkCard(run_id: String, rooms: Rooms, daemon: StoredValue<Daemon>) -
     // Hoisted: a turbofish inside a `view!` attribute parses as a tag opener.
     let step_indices = move || -> Vec<usize> { (0..steps.with(Vec::len)).collect() };
     let steps_error = RwSignal::new(None::<String>);
+    // Atomic ownership outlives disposed signals, so cleanup rejects a late
+    // completion before it can read or write a destroyed card.
+    let request_ticket = Arc::new(AtomicU64::new(0));
+    on_cleanup({
+        let request_ticket = request_ticket.clone();
+        move || {
+            request_ticket.fetch_add(1, Ordering::SeqCst);
+        }
+    });
     Effect::new(move |_| {
+        let ticket = request_ticket
+            .fetch_add(1, Ordering::SeqCst)
+            .wrapping_add(1);
         if !open.get() {
             return;
         }
         let Some(r) = run.get() else { return };
-        let base = rooms.url.get_untracked();
+        let base = rooms.url.get();
+        let request_ticket = request_ticket.clone();
         spawn_local(async move {
-            match crate::daemon::fetch_session_turns(&base, &r.session_id).await {
+            let result = crate::daemon::fetch_session_turns(&base, &r.session_id).await;
+            let latest = request_ticket.load(Ordering::SeqCst);
+            if ticket != latest {
+                return;
+            }
+            let current = run.get_untracked();
+            if rooms.url.get_untracked() != base
+                || !steps_request_is_current(
+                    ticket,
+                    latest,
+                    open.get_untracked(),
+                    &r,
+                    current.as_ref(),
+                )
+            {
+                return;
+            }
+            match result {
                 Ok(turns) => {
                     steps.set(run_turns(&turns, r.trigger_seq));
                     steps_error.set(None);
@@ -336,6 +382,75 @@ mod tests {
         assert!(run_turns(&turns, 99).is_empty());
         // `[#8] … ` context lines that are not the mention never match.
         assert!(run_turns(&turns, 8).is_empty());
+    }
+
+    #[test]
+    fn stale_steps_success_and_error_cannot_replace_terminal_result() {
+        let terminal: RoomAgentRun = serde_json::from_value(serde_json::json!({
+            "run_id": "run", "room_id": "room", "agent_id": "agent",
+            "session_id": "session", "trigger_seq": 9, "thread_root_seq": 9,
+            "state": "done", "started_at": "2026-10-09T10:00:00Z",
+            "updated_at": "2026-10-09T10:01:00Z"
+        }))
+        .unwrap();
+        let mut shown = Ok("initial");
+        // The terminal request completes first; earlier success and error
+        // completions must both leave its full transcript intact.
+        for (ticket, result) in [
+            (2, Ok("terminal")),
+            (1, Ok("thinking")),
+            (1, Err("old error")),
+        ] {
+            if steps_request_is_current(ticket, 2, true, &terminal, Some(&terminal)) {
+                shown = result;
+            }
+        }
+        assert_eq!(shown, Ok("terminal"));
+        assert!(!steps_request_is_current(
+            2,
+            2,
+            false,
+            &terminal,
+            Some(&terminal)
+        ));
+        let mut changed = terminal.clone();
+        changed.session_id = "other-session".into();
+        assert!(!steps_request_is_current(
+            2,
+            2,
+            true,
+            &terminal,
+            Some(&changed)
+        ));
+        changed = terminal.clone();
+        changed.trigger_seq = 10;
+        assert!(!steps_request_is_current(
+            2,
+            2,
+            true,
+            &terminal,
+            Some(&changed)
+        ));
+        assert!(!steps_request_is_current(2, 2, true, &terminal, None));
+        // A run frame can update the memo before its Effect advances the
+        // request ticket. Reject the older snapshot in that gap as well.
+        let mut thinking = terminal.clone();
+        thinking.state = RoomAgentRunState::Thinking;
+        assert!(!steps_request_is_current(
+            2,
+            2,
+            true,
+            &thinking,
+            Some(&terminal)
+        ));
+        // Closing/reopening or disposing advances custody even for the same run.
+        assert!(!steps_request_is_current(
+            2,
+            3,
+            true,
+            &terminal,
+            Some(&terminal)
+        ));
     }
 
     #[test]

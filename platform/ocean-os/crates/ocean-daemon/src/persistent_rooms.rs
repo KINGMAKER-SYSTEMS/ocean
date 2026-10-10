@@ -3544,7 +3544,8 @@ async fn spawn_room_agent_turn(
             wait_hook,
         )
         .with_event_sink(run_sink);
-        let control = room_agent_authority::apply_admission_to_control(control, &admission);
+        let control =
+            room_agent_authority::apply_admission_to_control(control, &admission, &state.runtime);
         let control = room_agent_authority::attach_operation_authority(
             control,
             &state,
@@ -9187,6 +9188,89 @@ env = { FIXTURE = "1" }
     }
 
     #[tokio::test]
+    async fn p4_room_model_override_falls_back_to_admitted_package() {
+        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _env = TestEnvRestore::capture(&[
+            "OCEAN_AUTH_FILE",
+            "OCEAN_CODEX_AUTH_FILE",
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+            "OCEAN_AGENTS_DIR",
+            "OCEAN_PROVIDER",
+        ]);
+        std::env::remove_var("OCEAN_PROVIDER");
+        let tmp = tempfile::tempdir().unwrap();
+        let state = crate::tests::isolated_room_fixture_state(&tmp);
+        let agents_root = tmp.path().join("agents");
+        write_agent_fixture(&agents_root, "guarded", "model = \"fake-ok\"\n", None);
+        std::env::set_var("OCEAN_AGENTS_DIR", &agents_root);
+        let key = RoomKey::new("p4-write-guards");
+        create_mention_room(&state, &key);
+        join_human(&state, &key);
+        let (status, _) = room_join(
+            State(state.clone()),
+            Path(key.as_str().into()),
+            Json(RoomJoinRequest {
+                id: "guarded".into(),
+                display_name: "Guarded".into(),
+                kind: RoomParticipantKind::Agent,
+                owner_id: Some("human".into()),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let _generation = authorize_room_agent_fixture(
+            &state,
+            &key,
+            "guarded",
+            ActivationPolicy::Mention,
+            ContextPolicy::InvocationOnly,
+        );
+        let (mut admission, _permit) = room_agent_authority::admit_room_agent(
+            &state,
+            &key,
+            "guarded",
+            "guarded",
+            AdmissionTrigger::Mention,
+        )
+        .await
+        .unwrap();
+        let global_before = state.runtime.current_model();
+        for (override_model, expected) in [
+            (Some("not-a-real-room-model"), "fake-ok"),
+            (Some("anthropic/not-a-real-wire-model"), "fake-ok"),
+            (Some("gpt-4o"), "gpt-4o"),
+            (
+                Some("anthropic/claude-sonnet-4-6"),
+                "anthropic/claude-sonnet-4-6",
+            ),
+            (None, "fake-ok"),
+        ] {
+            admission.settings_snapshot.model = override_model.map(str::to_string);
+            let control = room_agent_authority::apply_admission_to_control(
+                ocean_agent::PromptControl::yolo(false)
+                    .with_model_id(Some("explicit-operator-choice".into())),
+                &admission,
+                &state.runtime,
+            );
+            assert_eq!(
+                control.agent_model.as_deref(),
+                Some(expected),
+                "override {override_model:?}"
+            );
+            assert_eq!(
+                control.model_id.as_deref(),
+                Some("explicit-operator-choice")
+            );
+            assert_eq!(admission.settings_snapshot.model.as_deref(), override_model);
+            assert_eq!(admission.package.model.as_deref(), Some("fake-ok"));
+            assert_eq!(state.runtime.current_model(), global_before);
+        }
+    }
+
+    #[tokio::test]
     async fn p4_room_tools_refuse_cancelled_and_stale_generation_writes() {
         let _yolo_guard = crate::tests::yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
@@ -9248,6 +9332,7 @@ env = { FIXTURE = "1" }
         let control = room_agent_authority::apply_admission_to_control(
             ocean_agent::PromptControl::yolo(false),
             &admission,
+            &state.runtime,
         );
         assert_eq!(control.agent_model.as_deref(), Some("fake-ok"));
         assert!(
@@ -10261,6 +10346,78 @@ env = { FIXTURE = "1" }
         assert_eq!(run.state, ocean_core::RoomAgentRunState::Done);
         assert_eq!(run.reply_seq, Some(2));
         assert_eq!(run.tool_count, 1);
+    }
+
+    #[tokio::test]
+    async fn p4_lagging_runtime_events_never_hide_a_pending_permission() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state = crate::tests::isolated_room_fixture_state(&tmp);
+        let key = RoomKey::new("p4-lagging-permission");
+        create_mention_room(&state, &key);
+        let tracker = Arc::new(Mutex::new(
+            crate::room_agent_runs::RunTracker::start(
+                state.clone(),
+                key.clone(),
+                "helper",
+                AgentSessionId::new_v4(),
+                1,
+                1,
+                "/repo".into(),
+            )
+            .expect("durable run"),
+        ));
+        // The synchronous wait hook lands before deltas still queued in the
+        // runtime's event channels.
+        tracker.lock().unwrap().awaiting_permission(
+            PermissionId::new_v4().to_string(),
+            "bash",
+            &json!({"command": "rm -rf build"}),
+        );
+        let (sink, events) = mpsc::unbounded_channel();
+        for event in [
+            ocean_runtime::AgentEvent::TextDelta {
+                session_id: None,
+                delta: "late".into(),
+            },
+            ocean_runtime::AgentEvent::ToolExecutionStart {
+                session_id: None,
+                tool_call_id: "call-0".into(),
+                tool_name: "write".into(),
+                args: json!({"path": "/repo/a.rs"}),
+            },
+        ] {
+            sink.send(event).unwrap();
+        }
+        drop(sink);
+        crate::room_agent_runs::watch_runtime_events(tracker.clone(), events).await;
+        let run = with_rooms(&state, |store| store.room_agent_runs(&key, 10))
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(run.state, ocean_core::RoomAgentRunState::AwaitingPermission);
+        assert_eq!(run.pending_permission.as_ref().unwrap().tool, "bash");
+        assert_eq!(run.tool_count, 1);
+        // Once decided, progress resumes normally.
+        tracker.lock().unwrap().permission_resolved();
+        let (sink, events) = mpsc::unbounded_channel();
+        sink.send(ocean_runtime::AgentEvent::ToolExecutionStart {
+            session_id: None,
+            tool_call_id: "call-1".into(),
+            tool_name: "bash".into(),
+            args: json!({"command": "rm -rf build"}),
+        })
+        .unwrap();
+        drop(sink);
+        crate::room_agent_runs::watch_runtime_events(tracker, events).await;
+        let run = with_rooms(&state, |store| store.room_agent_runs(&key, 10))
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert!(matches!(
+            run.state,
+            ocean_core::RoomAgentRunState::RunningTool { .. }
+        ));
+        assert!(run.pending_permission.is_none());
     }
 
     #[tokio::test]

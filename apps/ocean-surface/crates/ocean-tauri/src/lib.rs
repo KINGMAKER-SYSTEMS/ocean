@@ -35,6 +35,8 @@ mod owner_mutation;
 struct PathEvent {
     path: String,
     kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner: Option<String>,
 }
 
 /// Live watchers keyed by canonical path. The value is the spawned debounce
@@ -80,9 +82,79 @@ fn enqueue_deep_link(bridge: &mut DeepLinkBridge, url: String) -> bool {
 
 struct AppState {
     watchers: Mutex<HashMap<String, tauri::async_runtime::JoinHandle<()>>>,
+    // Files leases are isolated from legacy Repo watches and other windows.
+    scoped_watchers: Mutex<ScopedWatchState<tauri::async_runtime::JoinHandle<()>>>,
     daemon: Arc<DaemonSup>,
     menu: Mutex<MenuBridge>,
     deep_links: Mutex<DeepLinkBridge>,
+}
+
+type ScopedWatches<H> = HashMap<(String, String), HashMap<String, H>>;
+
+struct ScopedWatchState<H> {
+    generation: HashMap<String, u64>,
+    watches: ScopedWatches<H>,
+}
+
+impl<H> Default for ScopedWatchState<H> {
+    fn default() -> Self {
+        Self {
+            generation: HashMap::new(),
+            watches: HashMap::new(),
+        }
+    }
+}
+
+impl<H> ScopedWatchState<H> {
+    fn generation(&self, window: &str) -> u64 {
+        self.generation.get(window).copied().unwrap_or(0)
+    }
+    fn retire_page(&mut self, window: &str, retire: impl FnMut(H)) {
+        let next = self.generation(window).wrapping_add(1);
+        self.generation.insert(window.to_owned(), next);
+        retire_scoped_window(&mut self.watches, window, retire);
+    }
+}
+
+#[tauri::command]
+fn workspace_watch_generation(state: State<'_, AppState>, window: tauri::WebviewWindow) -> u64 {
+    state.scoped_watchers.lock().generation(window.label())
+}
+
+fn retire_scoped_window<H>(
+    watches: &mut ScopedWatches<H>,
+    window: &str,
+    mut retire: impl FnMut(H),
+) {
+    watches.retain(|(label, _), owned| {
+        if label != window {
+            return true;
+        }
+        for (_, handle) in owned.drain() {
+            retire(handle);
+        }
+        false
+    });
+}
+
+fn retire_scoped_paths<H>(
+    watches: &mut ScopedWatches<H>,
+    window: &str,
+    owner: &str,
+    paths: &[String],
+    mut retire: impl FnMut(H),
+) {
+    let key = (window.to_owned(), owner.to_owned());
+    if let Some(owned) = watches.get_mut(&key) {
+        for path in paths {
+            if let Some(handle) = owned.remove(path) {
+                retire(handle);
+            }
+        }
+        if owned.is_empty() {
+            watches.remove(&key);
+        }
+    }
 }
 
 fn kind_str(kind: &EventKind) -> &'static str {
@@ -220,9 +292,10 @@ async fn watch_paths(
     paths: Vec<String>,
     state: State<'_, AppState>,
     app: AppHandle,
+    window: tauri::WebviewWindow,
+    owner: Option<String>,
+    generation: Option<u64>,
 ) -> Result<WatchOutcome, String> {
-    let mut watchers = state.watchers.lock();
-
     let canonicalize = |raw: &str| -> Result<String, String> {
         Path::new(raw)
             .canonicalize()
@@ -230,11 +303,13 @@ async fn watch_paths(
             .map_err(|e| format!("{raw}: {e}"))
     };
 
+    let event_owner = owner.clone();
     let install = |key: &str| -> Result<tauri::async_runtime::JoinHandle<()>, String> {
         // notify's callback runs on its own thread, so bridge into the async
         // world with a bounded channel; try_send keeps that thread non-blocking
         // (drops under backpressure, which the debounce absorbs anyway).
         let (tx, mut rx) = tokio::sync::mpsc::channel::<PathEvent>(64);
+        let event_owner = event_owner.clone();
         let mut watcher = RecommendedWatcher::new(
             move |res: notify::Result<notify::Event>| {
                 let Ok(event) = res else { return };
@@ -243,6 +318,7 @@ async fn watch_paths(
                     let _ = tx.try_send(PathEvent {
                         path: p.to_string_lossy().into_owned(),
                         kind: kind.clone(),
+                        owner: event_owner.clone(),
                     });
                 }
             },
@@ -278,9 +354,26 @@ async fn watch_paths(
         Ok(handle)
     };
 
-    let outcome = admit_watches(&mut *watchers, paths, canonicalize, install, |handle| {
-        handle.abort()
-    });
+    let outcome = if let Some(owner) = owner {
+        let mut scoped = state.scoped_watchers.lock();
+        if generation != Some(scoped.generation(window.label())) {
+            return Err("retired workspace page".into());
+        }
+        let key = (window.label().to_owned(), owner);
+        let watches = scoped.watches.entry(key.clone()).or_default();
+        let outcome = admit_watches(watches, paths, canonicalize, install, |handle| {
+            handle.abort()
+        });
+        if watches.is_empty() {
+            scoped.watches.remove(&key);
+        }
+        outcome
+    } else {
+        let mut watchers = state.watchers.lock();
+        admit_watches(&mut *watchers, paths, canonicalize, install, |handle| {
+            handle.abort()
+        })
+    };
     Ok(outcome)
 }
 
@@ -289,7 +382,23 @@ async fn watch_paths(
 /// [`resolve_watch_key`]) — so an unwatch that follows a removal still tears the
 /// watcher down instead of leaking it.
 #[tauri::command]
-async fn unwatch_paths(paths: Vec<String>, state: State<'_, AppState>) -> Result<(), String> {
+async fn unwatch_paths(
+    paths: Vec<String>,
+    state: State<'_, AppState>,
+    window: tauri::WebviewWindow,
+    owner: Option<String>,
+) -> Result<(), String> {
+    if let Some(owner) = owner {
+        let keys: Vec<String> = paths.iter().map(|path| resolve_watch_key(path)).collect();
+        retire_scoped_paths(
+            &mut state.scoped_watchers.lock().watches,
+            window.label(),
+            &owner,
+            &keys,
+            |handle| handle.abort(),
+        );
+        return Ok(());
+    }
     let mut watchers = state.watchers.lock();
     for raw in paths {
         let key = resolve_watch_key(&raw);
@@ -313,6 +422,143 @@ mod watch_admission_tests {
         } else {
             Ok(raw.to_string())
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scoped_native_watch_release_keeps_alias_peer_and_legacy_watch_live() {
+        use std::sync::mpsc;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("repo");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        let alias = temp.path().join("alias");
+        std::os::unix::fs::symlink(&root, &alias).unwrap();
+        let (tx, rx) = mpsc::channel();
+        let build = |path: &str, id: &'static str| {
+            let tx = tx.clone();
+            let mut watcher = RecommendedWatcher::new(
+                move |event: notify::Result<notify::Event>| {
+                    if event.is_ok() {
+                        let _ = tx.send(id);
+                    }
+                },
+                notify::Config::default(),
+            )
+            .map_err(|e| e.to_string())?;
+            watcher
+                .watch(Path::new(path), RecursiveMode::Recursive)
+                .map_err(|e| e.to_string())?;
+            Ok::<_, String>(watcher)
+        };
+        let canonicalize = |path: &str| {
+            Path::new(path)
+                .canonicalize()
+                .map(|p| p.to_string_lossy().into_owned())
+                .map_err(|e| e.to_string())
+        };
+        let mut scoped = ScopedWatches::new();
+        for (window, owner, path) in [
+            ("main", "old", &alias),
+            ("main", "new", &root),
+            ("float", "peer", &root),
+        ] {
+            let outcome = admit_watches(
+                scoped.entry((window.into(), owner.into())).or_default(),
+                vec![path.to_string_lossy().into_owned()],
+                canonicalize,
+                |key| build(key, owner),
+                drop,
+            );
+            assert!(outcome.failed.is_empty());
+        }
+        let mut legacy = HashMap::new();
+        let outcome = admit_watches(
+            &mut legacy,
+            vec![root.join(".git").to_string_lossy().into_owned()],
+            canonicalize,
+            |key| build(key, "legacy"),
+            drop,
+        );
+        assert!(outcome.failed.is_empty());
+        let root_key = root.canonicalize().unwrap().to_string_lossy().into_owned();
+        retire_scoped_paths(&mut scoped, "main", "old", &[root_key], drop);
+        std::fs::write(root.join(".git/live"), "changed").unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut seen = std::collections::HashSet::new();
+        while !["new", "peer", "legacy"].iter().all(|id| seen.contains(id)) {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            seen.insert(
+                rx.recv_timeout(remaining)
+                    .expect("surviving native watches emit"),
+            );
+        }
+        assert_eq!(legacy.len(), 1);
+        assert_eq!(scoped.len(), 2);
+    }
+
+    #[test]
+    fn workspace_reload_retires_only_its_page_and_fences_pending_admission() {
+        let mut state = ScopedWatchState::<u8>::default();
+        let pending_generation = state.generation("main");
+        state.watches.insert(
+            ("main".into(), "old".into()),
+            HashMap::from([("/root".into(), 1)]),
+        );
+        state.watches.insert(
+            ("float".into(), "peer".into()),
+            HashMap::from([("/root".into(), 2)]),
+        );
+        let mut retired = vec![];
+        state.retire_page("main", |h| retired.push(h));
+        assert_ne!(pending_generation, state.generation("main"));
+        assert_eq!(retired, [1]);
+        assert_eq!(state.generation("float"), 0);
+        assert!(state.watches.contains_key(&("float".into(), "peer".into())));
+    }
+
+    #[test]
+    fn scoped_watch_cleanup_preserves_aliases_other_owners_and_windows() {
+        let mut watches = ScopedWatches::new();
+        for (window, owner, handle) in [
+            ("main", "old-a", 1),
+            ("main", "new-a", 2),
+            ("float", "old-a", 3),
+        ] {
+            watches
+                .entry((window.into(), owner.into()))
+                .or_default()
+                .insert("/canonical/root".into(), handle);
+        }
+        let mut retired = vec![];
+        retire_scoped_paths(
+            &mut watches,
+            "main",
+            "old-a",
+            &["/canonical/root".into()],
+            |h| retired.push(h),
+        );
+        assert_eq!(retired, [1]);
+        assert_eq!(watches.len(), 2);
+        assert_eq!(
+            watches[&("main".into(), "new-a".into())]["/canonical/root"],
+            2
+        );
+        assert_eq!(
+            watches[&("float".into(), "old-a".into())]["/canonical/root"],
+            3
+        );
+        retire_scoped_paths(
+            &mut watches,
+            "main",
+            "old-a",
+            &["/canonical/root".into()],
+            |h| retired.push(h),
+        );
+        assert_eq!(retired, [1]);
+        retire_scoped_window(&mut watches, "main", |h| retired.push(h));
+        assert_eq!(retired, [1, 2]);
+        assert_eq!(watches.len(), 1);
+        assert!(watches.contains_key(&("float".into(), "old-a".into())));
     }
 
     #[test]
@@ -1630,6 +1876,7 @@ pub fn run() {
         )
         .manage(AppState {
             watchers: Default::default(),
+            scoped_watchers: Default::default(),
             daemon: Arc::new(DaemonSup::new(host, port)),
             menu: Mutex::new(MenuBridge {
                 ready: false,
@@ -1908,7 +2155,24 @@ pub fn run() {
             }
             Ok(())
         })
+        .on_page_load(|webview, payload| {
+            // Reload does not destroy the native window or run WASM destructors.
+            if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
+                webview
+                    .state::<AppState>()
+                    .scoped_watchers
+                    .lock()
+                    .retire_page(webview.label(), |handle| handle.abort());
+            }
+        })
         .on_window_event(|window, event| {
+            if matches!(event, WindowEvent::Destroyed) {
+                window
+                    .state::<AppState>()
+                    .scoped_watchers
+                    .lock()
+                    .retire_page(window.label(), |handle| handle.abort());
+            }
             // Menubar-app pattern: closing the main window hides it to the tray
             // rather than quitting. Real quit is via tray "Quit" (or Cmd+Q).
             if window.label() != "main" {
@@ -1946,6 +2210,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             pick_folder,
             watch_paths,
+            workspace_watch_generation,
             unwatch_paths,
             repo_state,
             set_badge,

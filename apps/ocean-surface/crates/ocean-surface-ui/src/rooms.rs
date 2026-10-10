@@ -2272,15 +2272,22 @@ pub(crate) fn run_ids_for_root(runs: &[RoomAgentRun], root_seq: u64) -> Vec<Stri
         .collect()
 }
 
-/// Insert or replace a run by id, keeping start order.
+/// Match the daemon's recent work-card projection on reconnect and live updates.
+pub(crate) const ROOM_RUNS_LIMIT: usize = 50;
+
+/// Insert or replace a run by id, retaining the most recent starts.
 pub(crate) fn upsert_run(runs: &mut Vec<RoomAgentRun>, run: RoomAgentRun) {
     match runs.iter_mut().find(|r| r.run_id == run.run_id) {
         Some(existing) => *existing = run,
-        None => {
-            runs.push(run);
-            runs.sort_by(|a, b| a.started_at.cmp(&b.started_at));
-        }
+        None => runs.push(run),
     }
+    runs.sort_by(|a, b| {
+        a.started_at
+            .cmp(&b.started_at)
+            .then(a.run_id.cmp(&b.run_id))
+    });
+    let excess = runs.len().saturating_sub(ROOM_RUNS_LIMIT);
+    runs.drain(..excess);
 }
 
 fn decode_room_tail_frame(
@@ -3426,6 +3433,36 @@ mod tests {
         assert_eq!(runs[1].state, RoomAgentRunState::Done);
         assert_eq!(run_ids_for_root(&runs, 4), vec!["a", "b"]);
         assert!(run_ids_for_root(&runs, 5).is_empty());
+    }
+
+    #[test]
+    fn live_run_projection_keeps_only_latest_fifty_across_replay_and_updates() {
+        let make = |index: usize, state: &str| {
+            serde_json::from_str::<RoomAgentRun>(&run_wire(
+                &format!("run-{index:03}"),
+                "r",
+                state,
+                &format!("2026-10-03T10:{:02}:{:02}Z", index / 60, index % 60),
+            ))
+            .unwrap()
+        };
+        let mut runs = Vec::new();
+        // Replay may arrive in reverse order; retain newest, not last received.
+        for index in (0..75).rev() {
+            upsert_run(&mut runs, make(index, "thinking"));
+            assert!(runs.len() <= ROOM_RUNS_LIMIT);
+        }
+        assert_eq!(runs.first().unwrap().run_id, "run-025");
+        assert_eq!(runs.last().unwrap().run_id, "run-074");
+        upsert_run(&mut runs, make(74, "done"));
+        assert_eq!(runs.len(), ROOM_RUNS_LIMIT);
+        assert_eq!(runs.last().unwrap().state, RoomAgentRunState::Done);
+        // A late update to an evicted run must not displace a recent card.
+        upsert_run(&mut runs, make(2, "done"));
+        assert_eq!(runs.first().unwrap().run_id, "run-025");
+        upsert_run(&mut runs, make(75, "queued"));
+        assert_eq!(runs.first().unwrap().run_id, "run-026");
+        assert_eq!(runs.last().unwrap().run_id, "run-075");
     }
 
     #[test]

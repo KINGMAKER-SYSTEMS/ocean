@@ -398,7 +398,7 @@
   cursor: pointer;
 }
 
-.room-agent-settings__agent[aria-selected="true"] {
+.room-agent-settings__agent[aria-pressed="true"] {
   background: var(--accent-soft);
   color: var(--accent-bright);
 }
