@@ -268,7 +268,7 @@ pub fn WorkingIndicator(rooms: Rooms) -> impl IntoView {
 
 /// Mentions and replies to the owner across rooms (left rail).
 #[component]
-pub fn RoomInboxPanel(rooms: Rooms, open: RwSignal<bool>) -> impl IntoView {
+pub fn RoomInboxPanel(rooms: Rooms, open: RwSignal<bool>, on_pick: Callback<()>) -> impl IntoView {
     let items = RwSignal::new(None::<Result<Vec<InboxItem>, String>>);
     let ticket = RwSignal::new(0u64);
     Effect::new(move |_| {
@@ -324,31 +324,33 @@ pub fn RoomInboxPanel(rooms: Rooms, open: RwSignal<bool>) -> impl IntoView {
                             item.room_name.clone()
                         };
                         view! {
-                            <button
-                                class="room-inbox__item"
-                                type="button"
-                                role="listitem"
-                                data-reason=match item.reason {
-                                    InboxReason::Mention => "mention",
-                                    InboxReason::Reply => "reply",
-                                    InboxReason::Other => "other",
-                                }
-                                on:click=move |_| {
-                                    open.set(false);
-                                    rooms.open_room(room_id.clone());
-                                    rooms.focus_thread.set(Some((rooms.url.get_untracked(), room_id.clone(), root)));
-                                }
-                            >
-                                <span class="room-inbox__avatar" aria-hidden="true">{initials}</span>
-                                <span class="room-inbox__main">
-                                    <span class="room-inbox__meta">
-                                        <span class="room-inbox__author">{author}</span>
-                                        <span class="room-inbox__room">{format!("#{room_label}")}</span>
-                                        <span class="room-inbox__time">{short_time(&item.message.created_at)}</span>
+                            <div role="listitem">
+                                <button
+                                    class="room-inbox__item"
+                                    type="button"
+                                    data-reason=match item.reason {
+                                        InboxReason::Mention => "mention",
+                                        InboxReason::Reply => "reply",
+                                        InboxReason::Other => "other",
+                                    }
+                                    on:click=move |_| {
+                                        on_pick.run(());
+                                        open.set(false);
+                                        rooms.open_room(room_id.clone());
+                                        rooms.focus_thread.set(Some((rooms.url.get_untracked(), room_id.clone(), root)));
+                                    }
+                                >
+                                    <span class="room-inbox__avatar" aria-hidden="true">{initials}</span>
+                                    <span class="room-inbox__main">
+                                        <span class="room-inbox__meta">
+                                            <span class="room-inbox__author">{author}</span>
+                                            <span class="room-inbox__room">{format!("#{room_label}")}</span>
+                                            <span class="room-inbox__time">{short_time(&item.message.created_at)}</span>
+                                        </span>
+                                        <span class="room-inbox__body">{excerpt(&item.message.body, "", 120)}</span>
                                     </span>
-                                    <span class="room-inbox__body">{excerpt(&item.message.body, "", 120)}</span>
-                                </span>
-                            </button>
+                                </button>
+                            </div>
                         }
                     })
                     .collect_view()
@@ -446,18 +448,19 @@ pub fn RoomSearchPanel(rooms: Rooms, on_pick: Callback<u64>) -> impl IntoView {
                                 );
                                 let text = excerpt(&m.body, &q, 140);
                                 view! {
-                                    <button
-                                        class="room-search__hit"
-                                        type="button"
-                                        role="listitem"
-                                        on:click=move |_| on_pick.run(root)
-                                    >
-                                        <span class="room-search__meta">
-                                            <span class="room-search__author">{author}</span>
-                                            <span class="room-search__time">{short_time(&m.created_at)}</span>
-                                        </span>
-                                        <span class="room-search__body">{text}</span>
-                                    </button>
+                                    <div role="listitem">
+                                        <button
+                                            class="room-search__hit"
+                                            type="button"
+                                            on:click=move |_| on_pick.run(root)
+                                        >
+                                            <span class="room-search__meta">
+                                                <span class="room-search__author">{author}</span>
+                                                <span class="room-search__time">{short_time(&m.created_at)}</span>
+                                            </span>
+                                            <span class="room-search__body">{text}</span>
+                                        </button>
+                                    </div>
                                 }
                             })
                             .collect_view()

@@ -184,7 +184,11 @@ pub(super) fn RoomListRail(
                 <Show
                     when=move || !inbox_open.get()
                     fallback=move || view! {
-                        <crate::room_attention::RoomInboxPanel rooms=rooms open=inbox_open />
+                        <crate::room_attention::RoomInboxPanel
+                            rooms=rooms
+                            open=inbox_open
+                            on_pick=Callback::new(move |()| show_left_rail.set(false))
+                        />
                     }
                 >
                 {move || {

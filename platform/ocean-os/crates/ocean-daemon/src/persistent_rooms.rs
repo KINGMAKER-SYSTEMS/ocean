@@ -1492,11 +1492,7 @@ pub(super) async fn room_inbox(
     let result = with_rooms(&state, |store| {
         let mut items: Vec<InboxItem> = Vec::new();
         // `open_room_names` is ordered `updated_at DESC`.
-        for (key, name) in store
-            .open_room_names()?
-            .into_iter()
-            .take(ROOM_INBOX_MAX_ROOMS)
-        {
+        for (key, name) in store.open_room_names(ROOM_INBOX_MAX_ROOMS)? {
             let access = store.room_access(&key)?;
             let me = match access.state {
                 RoomAccessState::Local => owner.clone(),
@@ -1505,10 +1501,7 @@ pub(super) async fn room_inbox(
                     None => continue,
                 },
             };
-            let roster = store
-                .get(&key)?
-                .map(|rec| rec.room.participants)
-                .unwrap_or_default();
+            let roster = store.room_participants(&key)?;
             let display = |id: &str| -> String {
                 roster
                     .iter()
@@ -5901,6 +5894,45 @@ mod tests {
             from_oldest, 2,
             "the re-admitted room contributes every mention"
         );
+    }
+
+    #[tokio::test]
+    async fn p6_inbox_roster_lookup_does_not_hydrate_old_transcript() {
+        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _env = TestEnvRestore::capture(&[
+            "OCEAN_AUTH_FILE",
+            "OCEAN_CODEX_AUTH_FILE",
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let state = crate::tests::isolated_room_fixture_state(&tmp);
+        let path = tmp.path().join("inbox-roster.db");
+        *state.rooms.lock().unwrap() = ocean_store::SqliteRoomStore::open(&path).unwrap();
+        let room = RoomKey::new("p6-roster-only");
+        create_plain_room(&state, &room);
+        seed_owner(&state, "ada", "Ada");
+        join_participant(&state, &room, "bob", RoomParticipantKind::Human, "Robert");
+        let old = p6_post(&state, &room, "bob", "old unrelated history", None);
+        for _ in 0..ROOM_INBOX_SCAN_PER_ROOM {
+            p6_post(&state, &room, "bob", "filler", None);
+        }
+        p6_post(&state, &room, "bob", "@ada new mention", None);
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute(
+            "UPDATE messages SET author_kind = 'invalid-fixture-kind' WHERE room_id = ?1 AND seq = ?2",
+            rusqlite::params![room.as_str(), old as i64],
+        ).unwrap();
+        assert!(with_rooms(&state, |store| store.get(&room)).is_err());
+        let (status, Json(body)) =
+            room_inbox(State(state), Query(RoomInboxQuery { limit: None })).await;
+        assert_eq!(status, StatusCode::OK);
+        let items = body["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["author_name"], json!("Robert"));
+        assert_eq!(items[0]["message"]["body"], json!("@ada new mention"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -3,10 +3,6 @@
 
 use crate::rooms::{RoomAccessProjection, RoomParticipantKind};
 
-/// Render a compact clock label from the canonical RFC3339 wire timestamp.
-/// Extracts the shared `HH:MM` prefix for `Z`, fractional-second, and offset
-/// variants without converting timezones or localizing; invalid/non-canonical
-/// input passes through unchanged.
 /// The client's current UTC day key (`YYYY-MM-DD`), matching the daemon's
 /// ISO-8601 UTC timestamps, for humanizing day separators.
 pub(super) fn today_day_key() -> String {

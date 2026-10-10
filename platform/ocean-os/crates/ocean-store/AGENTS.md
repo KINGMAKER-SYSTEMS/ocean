@@ -59,7 +59,9 @@ participant retirement. One database file (`rooms.db`), one owning crate.
   `room_id` (cascade with the room); open rooms only, default prefs delete the
   row. Read-side P6 APIs: `search_room_messages` (bounded `LIKE ? ESCAPE '\'`
   over `kind = 'message'` with `%`/`_`/`\` escaped, newest first),
-  `open_room_names`, and `recent_room_messages_with_parent_author` (newest N
+  `open_room_names(limit)` (SQL-bounded row materialization, not a bounded-scan
+  guarantee), `room_participants` (open-room roster without transcript hydration),
+  and `recent_room_messages_with_parent_author` (newest N
   rows paired with the thread parent's author for inbox classification).
 - `daemon_owner` — singleton team-platform P2 owner identity
   `{participant_id, display_name}`. `owner_identity_as(member_id, default)`

@@ -51,6 +51,15 @@ use threads::{
 
 // ── Production helpers (testable directly, called from Effects) ─
 
+/// Search may find a root before the room's replay has hydrated it.
+fn queue_search_thread(rooms: Rooms, root: u64) {
+    if let Some(key) = rooms.open_key.get_untracked() {
+        rooms
+            .focus_thread
+            .set(Some((rooms.url.get_untracked(), key, root)));
+    }
+}
+
 /// Toggle a boolean signal — the exact logic consumed by hamburger
 /// drawer open/close clicks.
 fn toggle_drawer(current: bool) -> bool {
@@ -989,7 +998,7 @@ pub fn RoomsWorkspace(
                             view! {
                                 <crate::room_attention::RoomSearchPanel
                                     rooms=rooms
-                                    on_pick=Callback::new(move |root: u64| selected_thread_root_seq.set(Some(root)))
+                                    on_pick=Callback::new(move |root: u64| queue_search_thread(rooms, root))
                                 />
                             }.into_any()
                         } else {
@@ -1008,6 +1017,29 @@ pub fn RoomsWorkspace(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_pick_waits_for_root_hydration_and_retires_on_room_reset() {
+        let owner = Owner::new();
+        owner.set();
+        let rooms = Rooms::with_url(RwSignal::new("https://first.example".into()));
+        rooms.open_key.set(Some("room".into()));
+        rooms.open_room.set(Some(
+            serde_json::from_str(r#"{"id":"room","name":"Room","participants":[]}"#).unwrap(),
+        ));
+        queue_search_thread(rooms, 1001);
+        assert_eq!(rooms.take_pending_thread_focus(), None);
+        assert!(rooms.focus_thread.get_untracked().is_some());
+        rooms
+            .transcript
+            .set(vec![test_support::test_msg(1001, "root", None)]);
+        assert_eq!(rooms.take_pending_thread_focus(), Some(1001));
+        assert_eq!(rooms.focus_thread.get_untracked(), None);
+        queue_search_thread(rooms, 1002);
+        rooms.close_room();
+        assert_eq!(rooms.take_pending_thread_focus(), None);
+        assert_eq!(rooms.focus_thread.get_untracked(), None);
+    }
 
     #[test]
     fn drawer_opens_when_closed() {

@@ -4180,6 +4180,14 @@ impl SqliteRoomStore {
         Ok(out)
     }
 
+    /// Open-room roster only, without loading or decoding transcript rows.
+    pub fn room_participants(&self, key: &RoomKey) -> Result<Vec<RoomParticipant>> {
+        if !self.room_is_open(key)? {
+            return Err(RoomStoreError::UnknownRoom(key.clone()));
+        }
+        self.load_participants(key)
+    }
+
     fn load_participants(&self, key: &RoomKey) -> Result<Vec<RoomParticipant>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, kind, display_name FROM participants WHERE room_id = ?1 ORDER BY position",
@@ -6362,13 +6370,14 @@ impl SqliteRoomStore {
         Ok(out)
     }
 
-    /// Every open room's key and name, most-recently-updated first
-    /// (team-platform P6 inbox fan-out).
-    pub fn open_room_names(&self) -> Result<Vec<(RoomKey, String)>> {
+    /// At most `limit` open room keys/names, most-recently-updated first.
+    /// SQL bounds materialization; it does not guarantee an indexed scan.
+    pub fn open_room_names(&self, limit: usize) -> Result<Vec<(RoomKey, String)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name FROM rooms WHERE closed_at IS NULL ORDER BY updated_at DESC, id ASC",
+            "SELECT id, name FROM rooms WHERE closed_at IS NULL
+             ORDER BY updated_at DESC, id ASC LIMIT ?1",
         )?;
-        let rows = stmt.query_map([], |r| {
+        let rows = stmt.query_map([i64::try_from(limit).unwrap_or(i64::MAX)], |r| {
             Ok((RoomKey::new(r.get::<_, String>(0)?), r.get::<_, String>(1)?))
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -15741,6 +15750,69 @@ mod tests {
     }
 
     #[test]
+    fn room_participants_does_not_decode_transcript_rows() {
+        let mut s = store();
+        let key = RoomKey::new("roster-only");
+        s.create(key.clone(), "Roster", None, now()).unwrap();
+        s.add_participant(&key, human("ada", "Ada"), now()).unwrap();
+        let seq = post(&mut s, &key, "ada", "old message");
+        s.conn.execute(
+            "UPDATE messages SET author_kind = 'invalid-fixture-kind' WHERE room_id = ?1 AND seq = ?2",
+            params![key.as_str(), seq as i64],
+        ).unwrap();
+        assert!(
+            s.get(&key).is_err(),
+            "full hydration reaches the invalid transcript row"
+        );
+        assert_eq!(
+            s.room_participants(&key).unwrap(),
+            vec![human("ada", "Ada")]
+        );
+        assert!(s.room_participants(&RoomKey::new("missing")).is_err());
+        s.conn
+            .execute(
+                "UPDATE messages SET author_kind = 'human' WHERE room_id = ?1 AND seq = ?2",
+                params![key.as_str(), seq as i64],
+            )
+            .unwrap();
+        s.close(&key).unwrap();
+        assert!(s.room_participants(&key).is_err());
+    }
+
+    #[test]
+    fn open_room_names_limits_materialization_and_preserves_order() {
+        let mut s = store();
+        let stamp = now();
+        for name in ["b", "a", "c", "closed"] {
+            let updated = if name == "c" || name == "closed" {
+                stamp + chrono::Duration::seconds(1)
+            } else {
+                stamp
+            };
+            s.create(RoomKey::new(name), name, None, updated).unwrap();
+        }
+        s.close(&RoomKey::new("closed")).unwrap();
+        assert!(s.open_room_names(0).unwrap().is_empty());
+        // If rows beyond LIMIT are materialized, their invalid SQL type fails
+        // String decoding. A Rust-side take/truncate after query cannot pass.
+        s.conn
+            .execute("UPDATE rooms SET name = x'ff' WHERE id = 'b'", [])
+            .unwrap();
+        assert_eq!(
+            s.open_room_names(2).unwrap(),
+            vec![
+                (RoomKey::new("c"), "c".into()),
+                (RoomKey::new("a"), "a".into()),
+            ]
+        );
+        assert!(s.open_room_names(3).is_err());
+        s.conn
+            .execute("UPDATE rooms SET name = 'b' WHERE id = 'b'", [])
+            .unwrap();
+        assert_eq!(s.open_room_names(usize::MAX).unwrap().len(), 3);
+    }
+
+    #[test]
     fn recent_room_messages_pair_replies_with_parent_author() {
         let mut s = store();
         let key = RoomKey::new("window");
@@ -15764,10 +15836,10 @@ mod tests {
         assert_eq!(window[0].1, None);
         assert_eq!(window[1].0.body, "reply");
         assert_eq!(window[1].1.as_deref(), Some("ada"));
-        let names = s.open_room_names().unwrap();
+        let names = s.open_room_names(50).unwrap();
         assert_eq!(names, vec![(key.clone(), "window".to_string())]);
         s.close(&key).unwrap();
-        assert!(s.open_room_names().unwrap().is_empty());
+        assert!(s.open_room_names(50).unwrap().is_empty());
     }
 
     #[test]

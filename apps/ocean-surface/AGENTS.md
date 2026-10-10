@@ -437,7 +437,10 @@ Web surface session UI:
   left-rail @ icon swaps the room list for the mentions inbox
   (`GET /v1/rooms/inbox`, also forwarded by the proxy; render the daemon's
   `author_name`); room search input is capped at the daemon's 200 characters;
-  picking an item opens its room and thread via an origin- and room-key-scoped `Rooms.focus_thread`, consumed only after that room record and root load. Inbox/search responses retire on newer reads, changed daemon origins, room admissions, query edits, and panel cleanup. Mute errors only publish into their originating room. The
+  inbox picks dismiss the compact room drawer; both inbox and search picks queue
+  their thread via an origin- and room-key-scoped `Rooms.focus_thread`, consumed
+  only after that room record and root load. Action rows retain native button
+  semantics inside list-item wrappers. Inbox/search responses retire on newer reads, changed daemon origins, room admissions, query edits, and panel cleanup. Mute errors only publish into their originating room. The
   header search icon opens room search in the right rail (thread > search >
   members). Muted rooms (`GET/PUT .../prefs`) dim and drop the unread dot.
   The line above the composer shows agents with a live run. Coworker typing
