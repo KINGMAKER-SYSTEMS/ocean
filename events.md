@@ -1176,3 +1176,14 @@ and passed (30 packages, 153 active Markdown files, 170 local links);
 correction. Merge remains held pending the required-review enforcement audit
 in issue #54.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [23:44] [09-10-26]
+agent: [codex]
+worktree: [codex/issue52-public-doc-provenance-fix]
+type: [workflow] [PR #51]
+area: [docs] [review]
+
+Reconciled the existing public Stage A clarification with canonical main, preserving both ledger histories. Issue #54 now resolves the historical review-policy hold; the effective required maintainer approval and exact-head checks still apply. The two manifest changes remain unchanged: implementation presence does not establish slice acceptance. No runtime behavior or acceptance gate changed.
+
+Validation: canonical xtask source compiled with rustc; docs-check passed (30 packages, 153 active Markdown files, 170 local links), and git diff --check passed. Owning devlog contracts/indexes remain unchanged because scope, authority and structure are unchanged. Independent final-head review and required checks remain release gates; no merge or deployment is claimed.
