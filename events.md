@@ -1108,3 +1108,23 @@ the request without ending the login, and regression tests prove a subsequent
 valid callback still completes. `cargo test --locked -p ocean-oauth
 server::tests:: -- --test-threads=1`, formatting check, and `git diff --check` pass.
 _________________________________________________________________________________
+
+time: [04:30pm] [10-09-26]
+agent: [claude-code] [claude-opus-5-5]
+worktree: [codex/chatgpt-plan-responses-provider]
+type: [bug report]: PR #62 review fix
+area: [backend]: ChatGPT-plan route resolution
+
+Review of #62 found two routing bugs. The new early qualified-route branch in
+`resolve_model_selection` sent every catalog route to `model_for_explicit_provider`,
+which has no `kimi-coding` arm, so `kimi-coding/k3` stopped resolving (failing
+`qualified_routes_round_trip_wire_id_provider_and_efforts` and, via the new
+`provider/model` last_model persistence, a daemon restart after selecting it).
+The branch is now limited to `openai-chatgpt`. Dynamically listed ChatGPT-plan
+slugs were picker-ready but rejected by session create/config PATCH and dropped
+to a bare id by `model_spec`, because `catalog_model` did not know them;
+`catalog_model` now accepts validated `openai-chatgpt/<slug>` routes. Added a
+last_model round-trip regression test. `cargo fmt --all -- --check` passes;
+ocean-oauth, ocean-providers, ocean-protocol, ocean-agent pass; ocean-daemon's two
+persistent-room alias tests fail identically without this change.
+_________________________________________________________________________________

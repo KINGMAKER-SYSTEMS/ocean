@@ -993,6 +993,25 @@ pub fn catalog_model(spec: &str) -> Option<KnownModel> {
             provider: route.provider,
             label: route.label,
         })
+        .or_else(|| chatgpt_account_model(spec))
+}
+
+/// ChatGPT-plan exposes an account-scoped catalog, so newly listed slugs
+/// cannot be bundled into this binary's static catalog. A qualified
+/// `openai-chatgpt/<slug>` route is still an explicit catalog selection: session
+/// pins and route reconstruction must keep it on the ChatGPT-plan provider
+/// instead of degrading to a bare id that routes through Codex or the API key.
+fn chatgpt_account_model(spec: &str) -> Option<KnownModel> {
+    let model = spec.strip_prefix("openai-chatgpt/")?;
+    let valid = !model.is_empty()
+        && model
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'));
+    valid.then(|| KnownModel {
+        id: model.to_string(),
+        provider: "openai-chatgpt".into(),
+        label: model.to_string(),
+    })
 }
 
 pub fn model_routes_with_readiness(env: &ProviderEnv) -> Vec<ModelRoute> {
@@ -1025,25 +1044,16 @@ pub fn resolve_model_selection(env: &ProviderEnv) -> Result<ModelSelection, Prov
     let Some(chosen) = chosen else {
         return Err(ProviderConfigError::NoModelSelected);
     };
-    // A qualified picker route is an explicit provider selection. Resolve it
-    // before ambient OCEAN_PROVIDER so a saved ChatGPT-plan choice cannot be
-    // silently routed through Codex or a metered API key.
+    // A qualified ChatGPT-plan route is an explicit provider selection. Resolve
+    // it before ambient OCEAN_PROVIDER so a saved ChatGPT-plan choice cannot be
+    // silently routed through Codex or a metered API key. Other qualified
+    // routes keep the bare-alias path below: some providers (e.g. kimi-coding)
+    // have no `model_for_explicit_provider` arm.
     if chosen.contains('/') {
-        if let Some(route) = catalog_model(chosen) {
-            return model_for_explicit_provider(&route.provider, &route.id, env);
-        }
-    }
-    // ChatGPT-plan exposes an account-scoped catalog, so newly listed slugs
-    // cannot be bundled into this binary's static catalog. Preserve the exact
-    // slug from the qualified route and let the public API validate it.
-    if let Some(("openai-chatgpt", model)) = chosen.split_once('/') {
-        if !model.is_empty()
-            && !model.contains('/')
-            && model
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        if let Some(route) =
+            catalog_model(chosen).filter(|route| route.provider == "openai-chatgpt")
         {
-            return model_for_explicit_provider("openai-chatgpt", model, env);
+            return model_for_explicit_provider(&route.provider, &route.id, env);
         }
     }
     let model = normalize_model_id(chosen);
@@ -2611,6 +2621,31 @@ mod tests {
     }
 
     #[test]
+    fn persisted_provider_model_route_resolves_to_the_same_selection() {
+        let mut specs: Vec<String> = model_routes().into_iter().map(|r| r.id).collect();
+        specs.extend(known_models().into_iter().map(|m| m.id));
+        let mut bad = Vec::new();
+        for spec in specs {
+            let Ok(sel) = resolve_model_selection(&env(&[("OCEAN_MODEL", spec.as_str())])) else {
+                continue;
+            };
+            let persisted = format!("{}/{}", sel.provider.as_str(), sel.model);
+            match resolve_model_selection(&env(&[("OCEAN_MODEL", persisted.as_str())])) {
+                Ok(again) if again.provider == sel.provider && again.model == sel.model => {}
+                other => bad.push(format!(
+                    "{spec} -> {persisted} -> {:?}",
+                    other.map(|s| (s.provider, s.model))
+                )),
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "persisted last_model routes failed to resolve back:\n{}",
+            bad.join("\n")
+        );
+    }
+
+    #[test]
     fn qualified_chatgpt_plan_route_overrides_ambient_provider() {
         let route = "openai-chatgpt/gpt-6-astra";
         let selection = resolve_model_selection(&env(&[
@@ -2634,7 +2669,16 @@ mod tests {
         assert_eq!(selection.provider, ProviderId::OpenAiChatGpt);
         assert_eq!(selection.model, "gpt-next-preview");
         assert_eq!(selection.base_url, OPENAI_BASE_URL);
-        assert!(catalog_model("openai-chatgpt/gpt-next-preview").is_none());
+        // Session create/config PATCH and `model_spec` validate through
+        // `catalog_model`; a dynamically listed slug must stay on its route.
+        let known = catalog_model("openai-chatgpt/gpt-next-preview").unwrap();
+        assert_eq!(known.provider, "openai-chatgpt");
+        assert_eq!(known.id, "gpt-next-preview");
+        assert!(catalog_model("openai-chatgpt/../openai").is_none());
+        assert!(catalog_model("openai-chatgpt/").is_none());
+        assert!(!model_routes()
+            .iter()
+            .any(|route| route.id == "openai-chatgpt/gpt-next-preview"));
     }
 
     #[test]
