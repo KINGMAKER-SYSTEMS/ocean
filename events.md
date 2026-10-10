@@ -1160,3 +1160,13 @@ passes with disposable auth/config/XDG paths and unchanged HOME. Surface initial
 snapshot passed861 unit and28 integration tests; final work-card tests4/4, live-cap regression1/1 and
 WASM check pass. Independent exact integration review follows this
 ledger update. No merge, install, live provider call or two-machine outcome.
+time: [22:10] [10-09-26]
+agent: [claude] [claude-opus-5-5] [PR68 reviewer]
+worktree: [port/rooms-identity-cards-agents]
+type: [bug report] PR68
+area: [backend] [testing]
+
+Fixed a work-card race: the permission wait hook marks a run AwaitingPermission synchronously, but runtime events reach the card watcher through two channels, so a TextDelta or ToolExecutionStart still queued at that moment flipped the card back to Thinking/RunningTool. The Surface shows Approve/Deny only for AwaitingPermission and room-turn waiters only accept the run token, so the turn could block with no way to approve it. set_state and tool_started now keep AwaitingPermission while a permission is pending; tool counts still advance. Added a daemon regression test. Daemon AGENTS unchanged: the durable-transition contract is the same.
+
+Validation on Mac mini (private target dir): `cargo test -p ocean-daemon --locked` 933 passed, 2 failed (the alias-envelope fixtures that also fail on main, #42); ocean-store 287, ocean-agent/ocean-core pass.
+_________________________________________________________________________________

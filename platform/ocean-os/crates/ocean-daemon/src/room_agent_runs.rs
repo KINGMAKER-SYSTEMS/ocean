@@ -271,8 +271,17 @@ impl RunTracker {
     }
 
     /// Move to `next` unless the run is already terminal or unchanged.
+    ///
+    /// A pending permission keeps the card `AwaitingPermission`: the wait hook
+    /// runs synchronously, but runtime events reach the watcher through two
+    /// channels, so a delta queued before the wait can land after it and must
+    /// not hide the approval the turn is blocked on.
     pub(crate) fn set_state(&mut self, next: RoomAgentRunState) {
-        if self.run.state.is_terminal() || self.run.state.is_parked() || self.run.state == next {
+        if self.run.state.is_terminal()
+            || self.run.state.is_parked()
+            || self.run.pending_permission.is_some()
+            || self.run.state == next
+        {
             return;
         }
         self.run.state = next;
@@ -291,9 +300,12 @@ impl RunTracker {
                 self.run.files_changed.push(path);
             }
         }
-        self.run.state = RoomAgentRunState::RunningTool {
-            label: tool_label(name, args, &self.cwd),
-        };
+        // A lagging start never replaces a pending approval (see `set_state`).
+        if self.run.pending_permission.is_none() {
+            self.run.state = RoomAgentRunState::RunningTool {
+                label: tool_label(name, args, &self.cwd),
+            };
+        }
         self.save();
     }
 
