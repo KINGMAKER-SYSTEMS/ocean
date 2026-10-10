@@ -1234,3 +1234,14 @@ area: [backend] [testing] [review]
 Reconciled maintenance with reviewed attachment PR #46 and preserved both ledger histories. Issue #84 repair coordinates upload publication with cleanup, fixes the sweep cutoff before enumeration, and rechecks live room/attachment references under the store guard through descriptor-relative unlink. Cleanup is row-first; filesystem and SQL effects are not one transaction. Flat regular files only, actual unlinked-byte accounting, verified empty-directory identity, and a fused directory iterator preserve bounded cleanup. Ambiguous inherited tracker references now name the actual live migration/installation boundary.
 
 Validation: maintenance 20/20, attachments 23/23 and router 5/5 passed, plus clean locked daemon check, formatting and diff check. Deterministic in-flight publication, new-room, delayed-cutoff, directory-replacement and iterator-error fixtures passed. Independent source review acknowledged 74e4a1c1. The nearest daemon contract is updated; parent ownership/indexes are unchanged. Final-head review, required builds, independent maintainer approval and release after #46 remain gates. No live sweep, merge or deployment is claimed.
+
+_________________________________________________________________________________
+time: [00:12] [10-10-26]
+agent: [codex] [gpt-6]
+worktree: [codex/pr47-maintenance-reporting] (PR #47, issue #30)
+type: [bug report] [workflow]
+area: [backend] maintenance failure accounting and recovery
+
+Independent review reproduced the proposed maintenance publisher counting one failed sweep twice and replacing known committed counts with zeros. The bounded repair retains cleanup custody and accumulated progress across worker/join failures, reports fixed stage/classification plus complete/incomplete/unknown accounting and in-progress start, and publishes terminal facts once without calling the failing logger. A later scheduler tick recovers; blocked workers retain custody rather than admitting overlapping cleanup.
+
+Validation at source8171961: maintenance24/24, attachments23/23 and router5/5 fixtures passed; locked daemon compilation, formatting, diff and docs checks passed (30 packages,153 active Markdown files,170 local links). Local and remote changed-source hashes matched; exact-source independent review ACK received. The daemon devlog records the changed reporting contract; parent ownership/index contracts are unchanged. Fixtures cover queued cancellation, exceptional join failure, committed retention before panic, publication panic, next-tick recovery and dropped-waiter custody. No live sweep, incident-cause attribution, installation or deployment occurred. Final-head review/builds, maintainer approval, #46 dependency and live migration/installation acceptance remain separate gates.
