@@ -51,6 +51,11 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   configured origins remain accepted. These guards do not authenticate callers
   or replace route/runtime permission checks; public proxy login remains owned
   by Surface. DNS-based daemon consumers must configure their upstream host.
+- `cors_allowed_methods()` advertises every method in `banner_routes()` (GET,
+  POST, PUT, PATCH, DELETE plus OPTIONS) so the cross-origin Tauri webview can
+  send each one; `router_contract_preflight_admits_every_served_method` derives
+  the served set and fails when a new method is not added. Advertising a method
+  never widens trusted origins or skips route authority.
 - Global approval policy is exposed at `GET/POST /v1/settings/permissions` with
   manual, automatic (default), and skip-all modes; the legacy yolo endpoint
   remains a compatibility adapter and request-wire `yolo` remains inert.

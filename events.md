@@ -1279,3 +1279,24 @@ area: [backend] [frontend] [review]
 PR #68 stack reconciliation: preserved concurrent pending-permission repair 41e41b08 and merged the reviewed PR #66 shell head 729cb2fb, including canonical main f1b22bd8. The additive PromptControl conflict retains both Room extra_tools and requested model/provider/reroute metadata in its struct, destructure and defaults. Both public ledger histories retained. Existing owning contracts already describe both behaviors; no new ownership or index changes.
 
 Independent review acknowledged the pending-permission delta; its new regression passed as part of the dependent integrated P4 suite (12/12), with P6 7/7 and locked daemon check on that prior integration. Shell focused evidence is recorded in its preceding receipt. This new combined main/shell/Room head requires fresh review and required builds; combined targeted verification is in progress on the dependent #69 integration. No deployment or live behavior claim.
+
+_________________________________________________________________________________
+time: [22:25] [10-09-26]
+agent: [claude code] [claude-opus-5-5]
+worktree: [fix/daemon-cors-put] (wt-ocean-cors-put, stacked on port/rooms-identity-cards-agents)
+type: [bug report] ocean-private #93
+area: [backend] [testing]
+
+The daemon now serves PUT (`/v1/me`, room agent settings, and P6 prefs in the next stacked PR), but its CORS preflight still advertised only GET/POST/PATCH/DELETE. So a direct cross-origin PUT from the Tauri webview, such as `put_prefs`, could never be sent. `cors_allowed_methods()` now includes PUT. A new production-router test takes every method from `banner_routes()`, preflights each one from the Tauri and loopback origins, checks that foreign origins get no authorization, and checks that a real PUT from Tauri hits the operator gate (not a 405) and carries CORS headers. Origins, headers and route authority are unchanged. The daemon AGENTS records the method contract.
+
+Validation on the Mac mini (dedicated target dir): `cargo fmt -p ocean-daemon -- --check`, `cargo test -p ocean-daemon --locked -- cors router_contract` (14 passed), the new test fails with PUT removed, `cargo clippy -p ocean-daemon --locked --all-targets -- -D warnings`, `cargo xtask docs-check` PASS. No live daemon or Tauri run.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [19:00] [10-10-26]
+agent: [claude code] [claude-opus-5-5]
+worktree: [fix/daemon-cors-put] (detached wt-w2a-cors, stacked on port/rooms-identity-cards-agents)
+type: [workflow]
+area: [backend] [testing]
+
+PR #77 reconciliation: merged current port/rooms-identity-cards-agents (de09e349) into fix/daemon-cors-put. The only conflict was this append-only ledger; both histories are kept, base entries first. daemon main.rs and AGENTS.md merged cleanly; the CORS method contract is unchanged. Validation on the Mac mini (dedicated target dir): `cargo test -p ocean-daemon --locked -- cors router` 28 passed (including router_contract_preflight_admits_every_served_method), `cargo fmt -p ocean-daemon -- --check` clean. No live daemon run.
