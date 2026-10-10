@@ -1,294 +1,101 @@
-# Ocean team onboarding (macOS arm64)
+# Ocean onboarding preparation (macOS arm64)
 
-Status: current runbook, written 2026-09-09 against the runtime `main` of its origin repository and ported to the Kingmaker monorepo.
-Machine side: [`../ops/onboard-teammate.sh`](../ops/onboard-teammate.sh).
-Operator side of federation: [`OPERATIONS.md`](OPERATIONS.md) "Rooms and
-federation". Package facts: [`../packaging/npm/README.md`](../packaging/npm/README.md).
-Budget: about fifteen minutes once the operator prerequisites are in place,
-and every step is a command you can paste into a terminal, Claude Code, or
-Codex — nothing needs the operator on the call.
+This candidate prepares the published package and a host identity file. It does
+not install a supervised daemon, activate federation, redeem invitations, or
+provide an Ocean MCP server. Package installation, merged source, and verified
+runtime behavior are separate outcomes.
 
-## What you get
+## Prerequisites
 
-A room is a durable transcript, roster, and set of contributed folders that
-spans daemons: you read and post in `campaigns` from your own daemon on your
-own Mac, Bedrock carries the ordered stream between nodes, and the same
-messages reach the operator, the other members, and the agents. Agents live
-in rooms: a room-authorized agent such as `room-builder` wakes when someone
-writes `@room-builder …`, runs on the node that owns it, under that node's
-permission policy, and answers in the room. You reach all of that from the
-tools you already use: `ocean-mcp` exposes your daemon to Claude Code, Codex,
-and Cursor as an MCP server — `ocean_rooms`, `ocean_room_read`,
-`ocean_room_post`, `ocean_room_join`, `ocean_room_inspect`,
-`ocean_room_resources`, `ocean_agents`, `ocean_sessions`, `ocean_health`, and
-`ocean_prompt` to run one Ocean turn in the project you are sitting in. The
-daemon stays the authority for permissions and tools; nothing about you
-crosses the MCP wire but tool arguments. Folders you contribute to a room stay
-on your machine: a grant is a local, path-confined, read-only view that an
-admitted agent reads through `room_list` / `room_read` with one audit row per
-call. Nothing is mirrored anywhere.
+- macOS on Apple silicon, Python 3.11 or newer, and bun or npm.
+- GitHub CLI authenticated for the intended package with `read:packages` access.
+- A published `@risingtides-dev/ocean` version with verified package access.
+  The current package contains `ocean`, `ocean-daemon`, and `ocean-update`.
+  See [the package contract](../packaging/npm/README.md); repository visibility
+  alone does not establish package access or a published release.
+- An agreed member identifier and a supported model alias.
+- The identity route from PR41 must be reviewed, merged, and installed before
+  the running daemon can project `member.toml` through `GET /v1/identity`.
+  This script does not install that feature or establish cross-client identity.
 
-## Prerequisites the operator does for you
+## Prepare the machine
 
-Ask John for these before you start; nothing below works without them.
-
-- A Tailscale invite to the `tail168656.ts.net` tailnet. Your Mac shows up
-  as a `100.x.y.z` node once you accept it.
-- A GitHub invite to the `KINGMAKER-SYSTEMS` organization.
-- Membership on the Rising Tides Cloudflare account (used for `wrangler`
-  deploys; not needed for rooms, but it arrives with the rest).
-- A Bedrock room invite link. The operator mints it from their daemon
-  (`POST /v1/rooms/persistent/<key>/invites`); the 201 body carries the
-  32-character `code` and an `onboard_url` of the form
-  `https://ocean-bedrock-production.up.railway.app/api/v1/invites/<code>/onboard`.
-  The link embeds the code, so it is the credential: single-use, expiring,
-  never pasted into a ticket or a screenshot.
-- A published `@risingtides-dev/ocean` release. The release workflow
-  (`.github/workflows/release.yml`) builds and stages `ocean`, `ocean-daemon`,
-  and `ocean-mcp` and publishes them to GitHub Packages on a `v*` tag pushed
-  from `main`; `v0.1.0` is the first. If step (c) below answers 404 from
-  GitHub Packages, the tag has not been pushed yet — ask the operator.
-- Your member id: the username the operator put in the surface's
-  `users.json` (`smaths`, `ecfromthedc`). It is who you are in every room
-  from every host — the daemon, `ocean-mcp`, the desktop app, and the browser
-  all converge on it — and there is no default: nothing ever posts as your
-  shell user.
-- The model alias to start with (`--model` below) and which provider to sign
-  in to (Claude or Codex). `curl -s 127.0.0.1:4780/v1/models` lists the
-  registry once your daemon is up.
-
-## Steps you run
-
-(a) Tailscale. Install the Tailscale app, sign in with the invited account,
-and confirm your machine is on the tailnet:
+Log in explicitly; the script never starts an interactive login:
 
 ```bash
-tailscale up          # or sign in through the menu-bar app
-tailscale status      # your Mac is the row with your login
-```
-
-(b) GitHub. Log in, accept the organization invite, then add the scope that
-GitHub Packages needs:
-
-```bash
-gh auth login                       # browser flow
-# accept the KINGMAKER-SYSTEMS invite at https://github.com/orgs/KINGMAKER-SYSTEMS
+gh auth login
 gh auth refresh -s read:packages
+git clone https://github.com/KINGMAKER-SYSTEMS/ocean.git
+cd ocean/platform/ocean-os
+ops/onboard-teammate.sh --model MODEL --member MEMBER --dry-run
+ops/onboard-teammate.sh --model MODEL --member MEMBER
 ```
 
-(c) Toolchain and the package. bun installs global binaries into
-`~/.bun/bin`; make sure that directory is on your `PATH`.
+Optional `--display-name NAME` supports quotes, backslashes and Unicode, up to
+80 characters without controls. Member identifiers use ASCII letters, digits,
+`.`, `_`, `@`, and `-`. The strict TOML file contains only `member_id` and an
+optional `display_name`, matching the daemon-local identity projection.
+
+The [script](../ops/onboard-teammate.sh) validates destinations and existing
+identity before requesting package credentials. It refreshes only the relevant
+scope/token entries in `~/.npmrc`, preserving unrelated entries, and installs
+the package with bun or npm. The token travels through stdin and is never
+printed or placed in process arguments. `.npmrc` and `member.toml` are atomically
+written with mode `0600`; the dedicated identity directory is mode `0700`.
+Symlink paths, nonregular or multiply linked files, foreign-owned destinations,
+and malformed existing identities are refused. `--force` permits intentional
+identity replacement; it does not bypass file custody checks.
+
+Identity directory precedence is `OCEAN_CONFIG_DIR`, then
+`XDG_CONFIG_HOME/ocean-rs`, then `~/.config/ocean-rs`. Nondefault paths must be
+absolute and must match the configuration used by the eventual daemon.
+`--dry-run` performs no package/auth/network/service calls or file changes.
+
+## Start and verify separately
+
+On a machine without a supervised daemon, the package TUI can launch its sibling
+daemon. Start outside a Git checkout and select the model deliberately:
 
 ```bash
-brew install oven-sh/bun/bun gh
-printf '%s\n' \
-  "@risingtides-dev:registry=https://npm.pkg.github.com" \
-  "//npm.pkg.github.com/:_authToken=$(gh auth token)" >> ~/.npmrc
-bun add -g @risingtides-dev/ocean
+cd ~
+OCEAN_MODEL=MODEL ocean
 ```
 
-This puts `ocean` (TUI), `ocean-daemon`, `ocean-mcp`, and `ocean-update` on
-`PATH`. The script in (d) does all of (c) for you, without ever duplicating
-the two `~/.npmrc` lines, so you may skip straight to it.
+Use `/login` and `/model` in the TUI. Codex and ChatGPT login remain distinct
+provider flows where the installed release supports them.
 
-(d) The machine setup script. It needs a checkout only for the launcher it
-copies out of `deploy/`:
+Existing supervised installations retain the [canonical installer](../ops/install-ocean-daemon.sh)
+and [operations contract](OPERATIONS.md). That installer requires clean, freshly
+fetched canonical `main`, preserves immutable artifacts, and verifies recovery
+and revision. Observe its intake and Rooms migration gates. Updating the package
+does not update an already-running supervised daemon.
+
+After the identity feature is installed, verify separately:
 
 ```bash
-git clone https://github.com/Risingtides-dev/ocean-os
-cd ocean-os
-ops/onboard-teammate.sh --model <alias-from-the-operator> --member <your-username>
-```
-
-Idempotent; re-run it whenever you like. In order it checks macOS arm64,
-bun, gh, and the `read:packages` scope (it never starts a login for you; it
-prints the command and stops); writes the `~/.npmrc` lines; installs the
-package; writes `~/.config/ocean-rs/federation.env` (see "Federation facts")
-and `~/.config/ocean-rs/member.toml` (`member_id = "<--member>"`, plus
-`display_name` when you pass `--display-name`; a file naming someone else is
-left alone unless `--force`);
-copies the package `ocean-daemon` to `~/.local/libexec/ocean-daemon/current`
-and installs the `dev.risingtides.ocean-daemon` LaunchAgent, which runs the
-repo launcher from `$HOME` with `OCEAN_YOLO=1` and your `OCEAN_MODEL`, then
-waits for `/health`; runs `ocean-mcp setup`; registers the MCP server in
-Claude Code when `claude` is on `PATH`; and prints the checklist for (e)–(h).
-`--dry-run` prints every mutating step instead of doing it. The manual
-equivalents, should you prefer them: [`../ops/README.md`](../ops/README.md)
-for the LaunchAgent shape, `ocean-mcp setup` for the MCP lines, and the
-federation file described below.
-
-(e) Sign in to a model provider. Run the TUI and use its login flow — the
-daemon holds the credential, so this is once per machine, not per terminal:
-
-```bash
-ocean
-/login              # opens the provider picker; Enter on Claude or Codex starts the browser flow
-/model              # pick from the live registry; the pick persists across restarts
-```
-
-(f) Wire Ocean into Claude Code and Codex. `ocean-mcp setup` installs the
-`ocean` skill into `~/.claude/skills`, `~/.codex/skills`, and
-`~/.agents/skills` (only where the tool's directory already exists) and
-prints the exact config lines; the two you need:
-
-```bash
-ocean-mcp setup
-claude mcp add --scope user ocean -- "$(command -v ocean-mcp)" serve
-```
-
-```toml
-# ~/.codex/config.toml
-[mcp_servers.ocean]
-command = "/Users/<you>/.bun/bin/ocean-mcp"
-args = ["serve"]
-```
-
-You post as the `member_id` in `~/.config/ocean-rs/member.toml`, the file
-the script wrote from `--member`. `ocean-mcp` resolves `--member`, then that
-file, then `OCEAN_MEMBER_ID`; with none of them reads still work and
-`ocean_room_post` refuses with a hint naming the file — it never guesses.
-The daemon publishes the same answer on `GET /v1/identity`, so the desktop
-app and the browser see exactly what a terminal would post as:
-
-```bash
-curl -s http://127.0.0.1:4780/v1/identity
-# {"ok":true,"member_id":"ecfromthedc","display_name":"Eric","source":"member.toml"}
-ocean-mcp doctor      # its 'member id' line must agree
-```
-
-(g) Join the team room. Redeem the invite exactly once, with your daemon:
-
-```bash
-curl -s -X POST http://127.0.0.1:4780/v1/rooms/persistent/invites/redeem \
-  -H 'content-type: application/json' -d '{"code":"<code>"}'
-```
-
-A good answer is the room's access projection with `"room_key"` on it;
-`state` is `connecting` or `live`. The daemon generates a local bearer,
-persists the pending redemption first, and exchanges it with Bedrock, so a
-lost response is safe to retry and a restart finishes it. The `onboard_url`
-page carries a JSON manifest (`curl -s <onboard_url>`) with the invite's
-name, role, scopes, and expiry, plus Bedrock's one-command bootstrap
-(`npm run ocean:bootstrap -- --invite <onboard_url>`). That command is the
-Bedrock knowledge-layer path — a push-only folder mirror from a Bedrock
-checkout — and it consumes the same single-use code. For rooms, redeem with
-the daemon as above and leave the bootstrap alone unless the operator asked
-for both, in which case ask for two invites.
-
-(h) Verify.
-
-```bash
+curl -fsS http://127.0.0.1:4780/health
 curl -fsS http://127.0.0.1:4780/v1/identity
-# member_id is you, source is "member.toml"
-ocean-mcp doctor
-# daemon: ok at http://127.0.0.1:4780 (backend …, rev …) / member id: … / rooms: 1
-curl -fsS "http://127.0.0.1:4780/v1/rooms/persistent/<room_key>/snapshot?before_seq=18446744073709551615&limit=1"
-# access.state: "live"
 ```
 
-Then, in Claude Code, ask it to read the room — "read the latest messages in
-the campaigns room" — and confirm the `ocean_room_read` tool answers with the
-transcript. Post a hello with `ocean_room_post`; it answers 202 and lands in
-the transcript once Bedrock's ordered stream confirms it.
+Check the actual running revision and expected `member_id`. The identity answer
+is host configuration, not authentication or authorization of a caller. It does
+not prove that another client posts as that identity.
 
-## Federation facts
+Federation requires a separately reviewed operator deployment. Current public
+runtime configuration uses environment variables; this candidate supplies no
+`federation.env` or Keychain loader and performs no federation activation.
+Keep service origins, invitations, credentials, private host inventory, and
+organization-specific access procedures outside this public runbook.
 
-Your daemon needs one thing to reach Bedrock: the origin, in
-`~/.config/ocean-rs/federation.env` (`OCEAN_CONFIG_DIR` overrides the
-directory). The file must be a regular file owned by you at mode `0600`, in a
-directory that is yours and not group- or world-writable (the script makes it
-`0700`); anything else and the launcher refuses the whole file, logs a fixed
-reason code, and starts the daemon with federation off. The launcher
-(`deploy/ocean-daemon.sh`, installed as `~/.local/libexec/ocean-daemon/launch.sh`)
-reads the file immediately before it execs the daemon on every start and
-never publishes the values anywhere else; the daemon reads the same file
-natively when it is started by hand.
+## Verification
 
-The owner token is not needed to redeem an invite or to stay in a room.
-`OCEAN_FEDERATION_OWNER_TOKEN` is used for exactly one thing — bootstrapping a
-Local room as its Bedrock owner and minting invites — and that is the
-operator's job, done with [`../ops/set-ocean-federation.sh`](../ops/set-ocean-federation.sh)
-on the operator's machine. Do not ask for it and do not paste one in.
+```bash
+bash -n ops/onboard-teammate.sh
+PYTHONDONTWRITEBYTECODE=1 python3 ops/test_onboard_teammate.py
+cargo xtask docs-check
+```
 
-Your daemon is a **member node**: `federation.env` holds the origin and
-nothing else, and the launcher logs `federation=on (file, member)`. Only the
-room owner's daemon carries a bearer (written there by
-`ops/set-ocean-federation.sh`); redeeming an invite never uses one, and an
-owner-only route on your node answers `federation_unavailable`, which is
-correct. The script marks the file it wrote with a comment line so a re-run
-recognises it, and it leaves a file that carries a real credential alone
-unless you pass `--force`.
-
-What redemption leaves behind: the room credential the daemon minted lives in
-owner-only `rooms.db` beside the config dir, never in `federation.env`, and it
-is what keeps you in the room across restarts. Transport is what
-`OCEAN_FEDERATION_URL` enables; a missing or invalid origin moves your
-credentialed rooms to `recovering` (not out of the room) until it is fixed.
-
-## Team status
-
-Facts as of 2026-09-09; `?` means not checked, not a guess.
-
-| Person | Tailscale | GitHub org | Surface login | Ocean daemon | ocean-mcp | Bedrock room |
-| --- | --- | --- | --- | --- | --- | --- |
-| Eric (`ecfromthedc`) | yes — `erics-machine` 100.119.217.76 | yes | yes | yes (older build) | no | no |
-| Jake (`jakebalik-bit`) | yes — `jakes-macbook-air` | yes | **no** | no | ? | no |
-| Jay (`jayvespertine`) | yes — `jays-macbook-air` | yes | **no** | no | ? | no |
-| Johnny (`johnnybalikmusic`) | yes — `johnnys-mac-mini` | **no** (not a member yet) | **no** | no | ? | no |
-
-Update the row when a step lands; this table is the only place the team's
-state is written down.
-
-"Surface login" is a roster entry in the operator's
-`~/.config/ocean-surface/users.json` (the ocean-surface repo, `ops/README.md`):
-username, password, and the person's tailnet `daemon_url`. The username IS the
-member id above — it is what `--member` writes and what the surface will post
-as — so pick it once. Only the operator can mint one (the roster holds
-passwords); `ops/add-device.sh` in ocean-surface adds further machines to an
-existing entry.
-
-## Troubleshooting
-
-- Health is `GET /health`, not `/v1/health`. A 404 on a path is not "down";
-  `curl -fsS http://127.0.0.1:4780/health` is the truth, and its `rev` is the
-  build you are running. `launchctl print gui/$(id -u)/dev.risingtides.ocean-daemon`
-  shows launchd's view; `tail -f /private/tmp/ocean-daemon.log` the daemon's.
-- The launcher writes one line per start:
-  `==> ocean-daemon: cwd=… (neutral) bin=… yolo=1 bind=127.0.0.1:4780 federation=on (file)`.
-  `federation=off` with `private configuration refused: <reason>` above it
-  names the custody failure — `unsafe_mode` (not `0600`), `unsafe_parent`
-  (directory writable by others or not yours), `not_regular`, `foreign_owner`,
-  `unsupported_entry` (a line that is not one of the three keys),
-  `duplicate_entry`, `origin is invalid` (anything after the host, or plain
-  `http` to a remote host), `credential is invalid` (no token line at all; see
-  "Federation facts"). Fix the file, then
-  `launchctl kickstart -k gui/$(id -u)/dev.risingtides.ocean-daemon`.
-- Access states, from the room snapshot's `access.state`: `connecting` is the
-  first lease after a redeem or restart; `live` is healthy; `recovering` means
-  the daemon holds a credential but cannot currently hold the Bedrock stream —
-  bad origin, Bedrock down, or a network that cannot reach it — and it clears
-  by itself once the cause does; `revoked` is terminal and needs a new invite;
-  `local` is an unfederated room. During `recovering` you still see the
-  transcript you already have and your posts wait in the outbox.
-- The daemon refuses to start inside a git repository:
-  `refusing to start: daemon cwd … is inside a git repo`. The LaunchAgent runs
-  it from `$HOME`; if you start one by hand, `cd ~` first. Never set
-  `OCEAN_ALLOW_REPO_CWD=1`. Two daemons on `:4780` is the other classic —
-  `lsof -nP -iTCP:4780 -sTCP:LISTEN` should show exactly one.
-- Redeem answers: 503 `federation_unavailable` means your daemon has no valid
-  federation configuration (see the launcher line); 403 `invite_forbidden`
-  means the code is used, expired, or mistyped — ask for a fresh link;
-  502 `federation_protocol` means Bedrock answered something the daemon
-  could not accept — tell the operator.
-- `no model selected — set OCEAN_MODEL or pick one via POST /v1/model`: the
-  daemon never defaults to a model. The script pinned `OCEAN_MODEL` in the
-  plist; `/model` in the TUI persists a new pick.
-- `bun add -g @risingtides-dev/ocean` answers 401: the `~/.npmrc` token is
-  stale or lacks `read:packages` — `gh auth refresh -s read:packages` and
-  re-run the script. 404: no release has been published yet (see
-  "Prerequisites").
-- `claude mcp add` says `ocean` already exists: fine, it is registered;
-  `claude mcp get ocean` shows it.
-- Updating: `ocean-update` refreshes the package but never touches the
-  supervised daemon (that copy is immutable by design); re-run
-  `ops/onboard-teammate.sh --model …` to publish the new build and restart it.
+Fixtures copy the script, redirect only its home-path token into a temporary
+directory, preserve process `HOME`, and replace package/auth/platform commands
+with mocks. They do not install software, operate services, read real
+credentials, or contact a network.
