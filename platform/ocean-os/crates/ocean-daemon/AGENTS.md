@@ -270,10 +270,29 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   new synthetic capture-bound and per-call memory-revocation checks. Root runs
   locked focused/full daemon tests, denied-warning Clippy and workspace test
   compilation remotely; independent exact-source review is required.
-- Deferred: Room metrics/sampler, attachments/context, profile/resource writes,
+- Deferred: Room metrics/sampler, attachment context/maintenance, profile/resource writes,
   retirement/summary/maintenance/workspace bridge, client onboarding/UI, extension
   scheduling, Unknown build execution and CI orchestration. Keep #22/#48 holds;
   automated CI remains only Build Ocean and Build Surface.
+
+### Durable room attachment bytes
+
+- `room_attachments.rs` owns the four durable-room attachment routes: raw upload,
+  metadata list, verified download and delete. HTTP authors remain caller-asserted;
+  only human roster identities may mutate, checked inside the store transaction.
+- Uploads are capped at 8 MiB. Unix attachment root/room/file access uses retained
+  no-follow directory descriptors; final files must be regular, bounded and match
+  stored length/hash. Unsupported platforms fail closed for attachment byte I/O.
+- Create private exclusive temporary files (0600), publish without replacing an
+  existing id, then sync the containing directory before committing metadata.
+  Failed SQL uploads unlink through the retained descriptor. Delete commits the
+  row/marker first, then best-effort unlinks through captured directory custody.
+- Declared content type is metadata only. Downloads use verified image signatures
+  or octet-stream, always with nosniff and attachment disposition.
+- Prompt/context assembly and attachment maintenance remain dependent stages;
+  this feature does not lift #22/#48 live migration holds.
+- Verify `cargo test --locked -p ocean-daemon room_attachments::` and attachment
+  store regressions; run a locked daemon/store check for interface changes.
 
 ### Rooms persistence migration boundary
 
