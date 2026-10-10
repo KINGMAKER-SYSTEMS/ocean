@@ -49,6 +49,7 @@ transcripts by session id.
   the turn itself succeeded. A turn stopped at its turn limit is marked too:
   it ends on a tool round whose results were saved after the measured request.
   The daemon must take the label from that mark, never from the turn's `ok`.
+- `AgentRuntime::model_is_routable` delegates to the turn resolver and wire-model construction without mutating selection or contacting a provider. Routability is not readiness, entitlement, or successful inference.
 - Preserve session compatibility unless a migration is documented.
 - Every advertised catalog model must construct a runtime wire model with the
   same id and limits. Current Opus/Sonnet 5.5 constructors use 1M/128K;

@@ -202,7 +202,7 @@ fn RoomAgentSettingsPanel(rooms: Rooms, open: RwSignal<bool>) -> impl IntoView {
     view! {
         <div class="room-agent-settings" role="dialog" aria-label="Agent settings">
             <div class="room-agent-settings__head">
-                <div class="room-agent-settings__agents" role="tablist">
+                <div class="room-agent-settings__agents" role="group" aria-label="Agent">
                     <For
                         each=move || agents.get()
                         key=|agent| agent.id.clone()
@@ -212,9 +212,8 @@ fn RoomAgentSettingsPanel(rooms: Rooms, open: RwSignal<bool>) -> impl IntoView {
                             view! {
                                 <button
                                     class="room-agent-settings__agent"
-                                    role="tab"
                                     type="button"
-                                    aria-selected=move || {
+                                    aria-pressed=move || {
                                         (selected.get().as_deref() == Some(id.as_str())).to_string()
                                     }
                                     on:click=move |_| selected.set(Some(pick.clone()))

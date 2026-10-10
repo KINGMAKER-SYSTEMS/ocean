@@ -173,7 +173,8 @@ impl AgentTool for RoomAskTool {
         let question = post_text(&args, "question")?;
         let seq = self.binding.post(&question)?;
         self.binding
-            .with_tracker(|t| t.awaiting_reply(&question, Some(seq)));
+            .with_tracker(|t| t.awaiting_reply(&question, Some(seq)))
+            .map_err(|_| "question posted, but could not park the room run".to_string())?;
         Ok(AgentToolResult {
             terminate: true,
             ..AgentToolResult::text(

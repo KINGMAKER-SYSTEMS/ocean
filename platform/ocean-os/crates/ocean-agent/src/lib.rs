@@ -810,6 +810,13 @@ impl AgentRuntime {
         state_from_provider_config(provider_config)
     }
 
+    /// Whether the current turn resolver can construct this model's wire route.
+    /// This does not mutate selection, contact the provider, or prove readiness
+    /// or entitlement. Callers must leave actual turn resolution to `prompt`.
+    pub fn model_is_routable(&self, model_spec: &str) -> bool {
+        self.resolve_state_for_model(model_spec).is_ok()
+    }
+
     /// One-shot, single-completion call against an arbitrary model alias on a
     /// FRESH context — no session, no history, no tools, no agent loop. Resolves
     /// `model_spec` through the same provider-config machinery as a real turn

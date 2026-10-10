@@ -1137,3 +1137,46 @@ Fixed three review findings on the Rooms P5-P6 port (PR #69). The mentions inbox
 
 Validation: in platform/ocean-os, `cargo fmt --all -- --check`, `cargo check --workspace --tests` and docs-check pass; `cargo test -p ocean-daemon --locked room` is 268 passed, 2 failed, both the alias-envelope fixtures that fail on main. The new route-precedence, inbox-cap and search-cap tests were each confirmed to fail with their fix reverted. In apps/ocean-surface, fmt, `cargo test -p ocean-surface-ui` (866 unit tests plus integration suites), WASM clippy with warnings denied, `cargo check -p ocean-surface-proxy` and the new proxy inbox routing test (fails without the route) pass. No live daemon, browser or desktop run.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [21:51] [10-09-26]
+agent: [Codex] [PR68 persistence repair]
+worktree: [codex/pr68-durable-run-transitions]
+type: [bug report] PR68 / issue71
+area: [backend] [testing]
+
+Run admission propagates initial work-card store failures before spawning execution.
+room_ask returns a failed-park error without terminating or retaining an uncommitted
+parked state; its already-posted question remains in the append-only transcript.
+Added real SQLite abort-trigger regressions for both failure points and retained
+success, claim and authority coverage. Owning daemon AGENTS now states the durable
+transition contract; parent ownership/index contracts remain unchanged.
+Validation on isolated Mac mini: ten p4_ tests and locked daemon check passed.
+Both new regressions fail with swallowed-error behavior restored; fixed sources
+restored byte-identically and all ten passed again. Formatting and diff checks pass.
+No live daemon changes. Other PR68 review findings remain outside this repair.
+
+_________________________________________________________________________________
+time: [22:09] [2026-10-09] America/New_York
+agent: [Codex] [factory release owner]
+worktree: [codex/pr68-reviewed-repairs]
+type: [bug report]
+area: [backend] [frontend] [review]
+
+Resolved the five remaining PR68 review findings through issues73/74. Invalid
+room-model overrides retain the immutable admitted package fallback using the
+actual runtime resolver; valid overrides and explicit turn selection keep their
+priority. Fresh-owner identity documentation now matches member-id seeding and
+preserved persisted ids. Surface uses ordinary accessible agent-selection buttons,
+retains the newest50 work cards, and fences both transcript and error completions
+by request ticket, open lifecycle, daemon origin and the complete captured run.
+Independent review found an Effect-scheduling gap; full-run equality and a
+same-ticket Thinking-to-Done regression close it. Prior durable start/park repairs
+remain intact. Owning devlogs updated; parent ownership and child indexes unchanged.
+
+Validation: daemon P4 tests11/11, locked daemon check, format/diff checks pass;
+new model regression fails with its resolver filter removed. Cached P4 rerun also
+passes with disposable auth/config/XDG paths and unchanged HOME. Surface initial
+snapshot passed861 unit and28 integration tests; final work-card tests4/4, live-cap regression1/1 and
+WASM check pass. Independent exact integration review follows this
+ledger update. No merge, install, live provider call or two-machine outcome.

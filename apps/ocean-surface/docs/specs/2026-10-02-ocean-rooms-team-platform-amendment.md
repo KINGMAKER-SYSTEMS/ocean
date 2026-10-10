@@ -57,7 +57,7 @@ Gate P1: web (`run-surface.sh`) and Tauri (`run-tauri.sh`) screenshots at the sa
 
 Interfaces:
 
-- **ocean-os** `GET /v1/me` → `{ participant_id, display_name }` (ocean-store `daemon_owner`). `participant_id` is derived once from the first display name (`OCEAN_OWNER_NAME`, else `USER`) and never changes; `PUT /v1/me { display_name }` renames the owner and its Local roster rows. The avatar seed is the participant/member id itself.
+- **ocean-os** `GET /v1/me` → `{ participant_id, display_name }` (ocean-store `daemon_owner`). `participant_id` is seeded only on a fresh install from `member.toml`, then `OCEAN_MEMBER_ID`, preserving case and length while mapping `@` to `-`; when neither supplies a member id, it is derived from the first display name (`OCEAN_OWNER_NAME`, else `USER`, else `Operator`). A persisted owner is never re-keyed when member configuration appears or changes; `PUT /v1/me { display_name }` renames the owner and its Local roster rows. The avatar seed is the participant/member id itself.
 - **ocean-core** `RoomAccessProjection.local_member_id` (additive, optional): the credential's local human member id, so a surface knows "me" in a federated room without minting identity.
 - **ocean-os** room writes derive authorship server-side:
   - Local rooms: human posts are authored by the daemon owner participant. `RoomMessageRequest.author_id/author_kind` become ignored-for-humans (accepted for wire compatibility, never trusted). Agent and system authorship remain daemon-internal only.
