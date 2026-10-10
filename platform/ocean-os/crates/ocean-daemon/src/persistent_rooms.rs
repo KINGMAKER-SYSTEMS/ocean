@@ -3825,7 +3825,7 @@ async fn run_room_tail(
         }
     }
 
-    if !with_rooms(&state, |store| store.get(&room).ok().flatten().is_some()) {
+    if !room_tail_still_open(&state, &room, &mut last_sent_seq, &tx).await {
         return;
     }
     // Tests can hold this exact replay/live seam open. The broadcast receiver was
@@ -3847,7 +3847,7 @@ async fn run_room_tail(
         match hint {
             Ok(hint) if hint.room != room => continue,
             Ok(hint) if Some(hint.seq) <= last_sent_seq => {
-                if !with_rooms(&state, |store| store.get(&room).ok().flatten().is_some()) {
+                if !room_tail_still_open(&state, &room, &mut last_sent_seq, &tx).await {
                     return;
                 }
                 continue;
@@ -3877,10 +3877,31 @@ async fn run_room_tail(
                 return;
             }
         }
-        if !with_rooms(&state, |store| store.get(&room).ok().flatten().is_some()) {
+        if !room_tail_still_open(&state, &room, &mut last_sent_seq, &tx).await {
             return;
         }
     }
+}
+
+/// Answers whether the tail should keep waiting on `room`. A room observed
+/// closed gets one final durable catch-up first: `close_with_marker` commits the
+/// marker and `closed_at` atomically, so a close that lands between the previous
+/// page read and this openness check would otherwise end the stream before the
+/// marker row is sent. Closed rooms accept no further rows, so this last page is
+/// complete.
+async fn room_tail_still_open(
+    state: &AppState,
+    room: &RoomKey,
+    last_sent_seq: &mut Option<u64>,
+    tx: &mpsc::Sender<RoomMessage>,
+) -> bool {
+    if with_rooms(state, |store| store.get(room).ok().flatten().is_some()) {
+        return true;
+    }
+    if let Err(error) = send_room_catch_up(state, room, last_sent_seq, tx).await {
+        tracing::warn!(room = %room, %error, "room SSE final catch-up failed");
+    }
+    false
 }
 
 #[allow(dead_code)]
@@ -9786,6 +9807,57 @@ env = { FIXTURE = "1" }
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_close_between_replay_and_openness_check_still_sends_the_marker() {
+        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
+        let _env = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _restore = TestEnvRestore::capture(&[
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+            "OCEAN_AGENTS_DIR",
+            "OCEAN_AUTH_FILE",
+            "OCEAN_CODEX_AUTH_FILE",
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let state = crate::tests::isolated_room_fixture_state(&tmp);
+        let key = RoomKey::new("tail-close-gap-room");
+        with_rooms(&state, |store| {
+            store.create(key.clone(), "Tail Close Gap", None, Utc::now())
+        })
+        .unwrap();
+        join_participant(&state, &key, "alice", RoomParticipantKind::Human, "Alice");
+
+        // The tail has replayed everything up to the join row...
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut last_sent_seq = None;
+        assert!(send_room_catch_up(&state, &key, &mut last_sent_seq, &tx)
+            .await
+            .unwrap());
+        assert_eq!(rx.recv().await.unwrap().body, "Alice joined");
+
+        // ...then the close commits before its openness check runs.
+        let (status, _) = room_close(
+            State(state.clone()),
+            Path(key.as_str().to_string()),
+            HeaderMap::new(),
+            Query(CloseRoomQuery {
+                actor_id: Some("alice".into()),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        assert!(!room_tail_still_open(&state, &key, &mut last_sent_seq, &tx).await);
+        drop(tx);
+        let marker = tokio::time::timeout(std::time::Duration::from_millis(250), rx.recv())
+            .await
+            .expect("tail channel closed promptly")
+            .expect("the close marker is sent before the tail ends");
+        assert_eq!(marker.body, "alice closed the room");
+        assert!(rx.recv().await.is_none(), "no rows follow the close marker");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
