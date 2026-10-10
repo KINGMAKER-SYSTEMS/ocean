@@ -1296,3 +1296,12 @@ The GitHub deployments endpoint currently returns no records. The supervised
 daemon's health endpoint remains live-verified at revision aa1e317b2e25; that is
 separate from this unmerged issue #56 change, which is not deployed.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [22:48] [09-10-26]
+agent: [codex] [factory release]
+worktree: [codex/pr60-reviewed-reconcile]
+type: [workflow]
+area: [backend] [testing] [review]
+
+Reconciled PR #60 store grant serialization with canonical main f1b22bd8. Only conflict was additive public ledger history; both sides retained. Store implementation and owning contract remain byte-identical to original head 72f089c4: exact/cross-ledger decision replay precedes reference validation inside the same IMMEDIATE transaction as a new profile write. Current-main store suite passes 279/279 with disposable auth/config/XDG paths and unchanged HOME. Final exact-head review and hosted checks follow this receipt. Issue #54 audit hold is resolved, but independent maintainer approval remains required. Issue #56 stays open for the separate PR #43 daemon retry path; this store PR alone does not finish its acceptance. No deployment or live database access. Parent ownership and indexes unchanged.
