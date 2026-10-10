@@ -1077,3 +1077,82 @@ ChatGPT sign-in: gpt-6.1-sol, glm-5.3 and deepseek-v4-pro each ran a bash tool
 call and answered; session model = requested, no reroute. ocean-protocol codex
 tests 36/36, ocean-providers 67/67.
 _________________________________________________________________________________
+time: [14:16] [06-10-26]
+agent: [codex]
+worktree: [fix/report-model-reroute-in-session] [/Users/seenorising/dev/ocean-org-sub]
+type: [bug fix]
+area: [backend] [sessions] [testing]
+
+Persisted provider-failover reroutes on the session record so `GET /v1/sessions/{id}` reports that the model the operator asked for did not run. Added optional `requested_model` + `reroute_reason` fields to `Session` (ocean-agent) and `SessionDetail` (ocean-core), both serde-default + skip-if-none so legacy session files deserialize as `None`. `prompt_inner` (selection-time) and `run_turn_with_failover` (pre-stream) populate them, and `run_prompt`/`run_fake_prompt` persist them; `model`/`provider` remain the effective selection. Failover behavior is unchanged. New regression test: `selection_failover_reroute_is_recorded_in_session_detail`.
+
+Validation: focused test RED (assertion `None != Some("deepseek-v4-pro")`) then GREEN; `cargo test -p ocean-agent` 269 passed / 2 ignored; `cargo fmt --check` pass. `cargo test -p ocean-daemon` 905 passed / 5 failed, all pre-existing and unrelated to this change (three extension_service timing tests and two persistent-room envelope-key assertions for the already-present aliases fields).
+_________________________________________________________________________________
+_________________________________________________________________________________
+
+time: [14:52] [06-10-26]
+agent: [codex]
+worktree: [fix/report-model-reroute-in-session] [/Users/seenorising/dev/ocean-org-sub]
+type: [bug fix]
+area: [backend] [sessions] [testing]
+
+Round 2 hardening of the reroute session record after reviewer findings (gpt-6.1-sol, glm-5.3). Fixed four defects, each failing-first:
+
+- F1 (raw body leak): `reroute_reason` now stores a fixed typed class (`rate limited` / `server error` / `connection failed` / `timed out` / `missing credential` / `invalid response` / `cancelled` / `provider unavailable`) via a new `reroute_reason_for` classifier, never the `format!("{e}")` provider body.
+- F2 (sticky metadata): both `run_prompt` and `run_fake_prompt` now assign `requested_model`/`reroute_reason` unconditionally every turn, so an ordinary later turn clears them.
+- F3 (effective model): both paths re-sync `session.model`/`session.provider` to the effective selection on every turn (fresh and resumed), so `requested_model != model` exactly when a reroute happened.
+- F4 (second reroute): the pre-stream site preserves an already-populated `control.requested_model` instead of overwriting it with the first fallback, keeping the operator's original request A across a A→B→C chain.
+
+Failover behavior unchanged (no change to `failover_eligible` or candidate selection). New regression tests: `pre_stream_reroute_records_fixed_reason_and_effective_model`, `ordinary_turn_clears_previous_reroute_fields`, `resumed_session_resyncs_model_after_reroute`, `second_reroute_preserves_original_requested_model`.
+
+Validation: RED (4 failed / 1 passed at the predicted assertions) then GREEN. `cargo test -p ocean-agent` 273 passed / 2 ignored; `cargo fmt --all -- --check` and `cargo clippy -p ocean-agent --all-targets` clean.
+
+extension_service flake check: `cargo test -p ocean-daemon extension_service -- --test-threads=1` → this branch 57 passed / 0 failed; clean origin/main worktree 57 passed / 0 failed. The 5 extra extension_service failures reported under parallel load are timing/load flakes, NOT caused by this branch. `cargo test -p ocean-daemon` → 908 passed / 2 failed; both are the pre-existing persistent_room envelope-key assertions that also fail identically on origin/main (not branch-caused).
+_________________________________________________________________________________
+_________________________________________________________________________________
+
+time: [16:06] [06-10-26]
+agent: [codex]
+worktree: [fix/report-model-reroute-in-session] [/Users/seenorising/dev/ocean-org-sub]
+type: [bug fix]
+area: [backend] [sessions] [testing]
+
+Round 3: fixed two HIGH regressions confirmed at source (review of round 2). `session.model`/`session.provider` are the session's authoritative pin — `SessionModelConfig::from_session` reads them for daemon turn selection — but round 2 assigned them from the effective snapshot on every turn, so one failover made the fallback permanent and an ordinary claude-code turn rewrote the OAuth provider pin to direct anthropic. Fix: never assign the pin from the effective selection. What actually ran is now recorded in NEW separate fields `effective_model`/`effective_provider` on `Session` and `SessionDetail` (serde default + skip-if-none; legacy files deserialize as `None`), set every turn. `requested_model`/`reroute_reason` semantics unchanged (set only on a rerouted turn, cleared on an ordinary one; fixed reason classes; original request preserved across a second-stage reroute). `/v1/sessions/{id}` exposes the new fields via `SessionDetail`.
+
+Regression tests, all failing-first (RED shown by temporarily restoring the round-2 assignments): (a) `rerouted_real_turn_does_not_pin_the_fallback_for_the_next_turn` — pre-stream 429 reroute, then a daemon-equivalent resume whose model override comes from the persisted pin, driving the REAL loop (`run_prompt`) via a scripted provider; (b) `ordinary_claude_code_real_turn_keeps_oauth_provider_pin` — REAL-loop turn on a claude-code-pinned session keeps provider `claude-code`; (c) `resumed_session_keeps_pin_and_records_effective_after_reroute` plus effective-field assertions folded into the existing reroute tests — `effective_model` shows the fallback on a rerouted turn and the pin on an ordinary one; (d) `legacy_session_file_without_effective_fields_deserializes` — old session file without the new fields loads. Round-2 test `resumed_session_resyncs_model_after_reroute` was rewritten as (c)'s pin-preservation test since its old expectation (pin follows the reroute) encoded the regression.
+
+Validation: RED (3 failed at the predicted assertions: pin overwritten by fallback, OAuth route rewritten to anthropic, resume pin lost) then GREEN. `cargo test -p ocean-agent` 276 passed / 2 ignored; `cargo test -p ocean-daemon` 908 passed / 2 failed (the known pre-existing persistent_room envelope-key assertions, identical on origin/main); `cargo fmt --all`; `cargo clippy -p ocean-agent --all-targets` clean.
+
+time: [16:45] [06-10-26]
+agent: [ocean]
+worktree: [fix/report-model-reroute-in-session] [/Users/seenorising/dev/ocean-org-sub]
+type: [bug fix]
+area: [backend] [sessions]
+
+Round 4: closed three review findings on the round-3 reroute reporting. (F1) A rerouted turn that creates the session now pins the REQUESTED route, not the substitute that ran — `Session::new_with_route` + `PromptControl.requested_provider` carry the requested route from both failover sites (selection-time and pre-stream, preserving the original across a second-stage reroute), so the next turn re-selects the primary once it recovers and `is_session_pinned` no longer mistakes a fallback for an operator pin. (F2) `effective_provider` records the ROUTE that ran (e.g. claude-code) rather than the wire model's protocol provider (anthropic), keeping OAuth routes distinguishable in the report. (F3) AGENTS.md and field docs rewritten to the corrected semantics: a reroute is signalled by `requested_model`/`reroute_reason` presence, not by inequality with `model`. Four test expectations updated to the new pin semantics.
+
+Validation: `cargo test -p ocean-agent --lib` 276 passed / 2 ignored; `cargo check --workspace --tests` clean; `cargo clippy -p ocean-agent --lib -- -D warnings` clean.
+
+time: [17:00] [06-10-26]
+agent: [ocean]
+worktree: [fix/report-model-reroute-in-session] [/Users/seenorising/dev/ocean-org-sub]
+type: [bug fix]
+area: [backend] [sessions] [testing]
+
+Round 4b: lead-review follow-ups on the reroute creation pin. Formatting normalized (`cargo fmt --all`, check clean). `effective_provider_route` renamed `requested_provider_route` with a doc stating exactly what it returns (the REQUESTED route's provider feeding the creation pin; effective route's provider only as fallback). Two failing-first regression tests added covering BOTH reroute sites creating a session (selection-time degraded primary; pre-stream 429 on a ready primary), each asserting the next turn re-selects the recovered PRIMARY through the real daemon selection path (`session_model_config_optional` → `is_session_pinned` → `model_spec`) and runs on it in the REAL loop. RED evidence recorded with both fixes temporarily reverted: creation-pin revert fails 3 tests at the pin assertions (fallback minted as pin: fake-ok≠deepseek-v4-pro, claude-opus-4-7≠deepseek-v4-pro); effective_provider revert fails the OAuth test (anthropic≠claude-code). Restored and green.
+
+Round 5 correction (this ledger's "failing-first" claim for the 4b tests was imprecise): which reverted change each 4b test detects — `selection_reroute_created_session_reselects_primary_next_turn` detects reverting the reroute-branch creation pin (`new_with_route` ← requested route): reverted, the pin mints from the fallback (fake-ok) and turn 2 runs the global fake-ok. `pre_stream_reroute_created_session_reselects_primary_next_turn` does NOT detect that revert: the pre-stream failure fires AFTER the accepted-user checkpoint already created the session via the ordinary constructor against the PRIMARY's snapshot (deepseek — where protocol provider == route), so the requested-route branch never runs on that path; what it detects is reverting the round-3 pin-preservation (the fallback dispatch's save would rewrite the pin to the substitute) and reverting the pre-stream reroute recording (`control.requested_model`/`reroute_reason` at the second site — it asserts reason "rate limited" on turn 1). The claude-code route-vs-protocol gap that the deepseek-based 4b test could not see is covered by round 5's `claude_code_pre_stream_failover_creates_session_with_route_pin`.
+
+Validation: ocean-agent 278 passed / 0 failed / 2 ignored; ocean-daemon 908 passed / 2 failed (only the two known pre-existing persistent_room envelope-key assertions, identical on the c49db99 baseline); clippy -p ocean-agent --all-targets -D warnings clean; fmt --check clean; git diff --check clean.
+
+_________________________________________________________________________________
+
+time: [17:55] [06-10-26]
+agent: [ocean] [glm-5.3]
+worktree: [fix/report-model-reroute-in-session] [/Users/seenorising/dev/ocean-org-sub]
+type: [fix] [backend] [sessions] [testing]
+area: [ocean-agent] [sessions]
+
+Round 5: round-4 review follow-ups on model reroute fidelity. (F2) Selection-time reroute detection now compares the (provider, model) ROUTE pair instead of the model id alone, so a same-model cross-provider fallback (keyless claude-code/claude-opus-5-5 → anthropic/claude-opus-5-5 via an OCEAN_PROVIDER_FALLBACK `provider/model` entry) is recorded on the session and emitted; when a reroute's two routes carry the same model id, the ModelRerouted event strings are provider-qualified (fixed route identifiers only) so they never read as a no-op — applied at both the selection-time and pre-stream emission sites. (F3) Ordinary session creation in run_prompt/run_fake_prompt/create_session_with_model pins the selection ROUTE (`new_with_route(id, model.id, selection.provider)`), never the wire model's protocol provider, so a claude-code OAuth primary that fails pre-stream persists `provider = "claude-code"` at the accepted-user checkpoint; `Session::new_with_id` becomes cfg(test) scaffolding with a doc to that effect. Also fixed a resolution seam the new F3 turn-2 path exposed: the per-turn model override (`resolve_state_for_model`) read `ProviderEnv::from_process()` directly instead of `turn_env()`, so it could not see a test's injected env — now it uses `turn_env()`, the same env source as the failover decisions. Production-identical: outside tests `turn_env()` is still a fresh process-env read per call, not one cached snapshot per turn. Two failing-first tests (RED: requested_model None≠Some(claude-opus-5-5); pin anthropic≠claude-code), each re-verified by reverting ONLY its fix. Round-4b ledger corrected (F4): see the Round 5 correction paragraph above.
+
+Validation: ocean-agent 280 passed / 0 failed / 2 ignored; ocean-daemon 908 passed / 2 failed (only the two known pre-existing persistent_room envelope-key assertions); clippy -p ocean-agent --all-targets -D warnings clean; fmt --all --check clean; git diff --check clean.
+_________________________________________________________________________________
