@@ -1046,6 +1046,35 @@ Closed the leftovers from the review that acknowledged the thinking-binding reco
 Validation: ocean-protocol (187 plus 5) passes; clippy with warnings denied on ocean-protocol and ocean-agent tests, rustfmt check pass. The strip test covers the thinking-only assistant turn. No provider was called.
 _________________________________________________________________________________
 _________________________________________________________________________________
+time: [14:00] [06-10-26]
+agent: [zcode] [glm-5.3]
+worktree: [port/rooms-stage2c-resources]
+type: [feature-request]
+area: [backend] reconciliation: Rooms Phase 2 Stage 2c grant surface
+
+Seventh bounded Track B port: the Rooms Phase 2 Stage 2c contributed-folder
+grant surface. Scoping found the enforcement half was ALREADY on Kingmaker
+main from the publication snapshot — resolve_turn_cwd applies the §5 rule
+(agent default folder > admitted grant > room workspace root),
+DurableRoomResourceAuthority gates per-call confined list/read, and
+ocean-agent already exports confine/ConfineRefusal — so this unit is the
+management surface only and grants become effective the moment they are
+created: list/grant, get/revoke, suspend, resume, and the two operator
+preview endpoints (confined list/read through the same authority an admitted
+agent uses, audited as operator_preview). Grant roots must canonicalize (the
+manifest's dangerous-root list is refused by name); the §7.4 safe projection
+never carries local_root or digests. The one structural adaptation:
+DurableRoomResourceAuthority's fields moved to the personal shape (rooms
+handle + actor), with the base persistent_rooms call site updated to match;
+check_profile_resource_refs and TurnCwd::projection were trimmed from this
+branch because their consumers are #43's profile routes and the upcoming
+room_inspect port respectively — they ride those PRs so this one stays
+warning-free. Router-contract parity moved 119 → 127.
+
+Validation: room_resources tests (3) pass; router-contract parity (127)
+green; cargo test -p ocean-daemon 909 passed / 2 deterministic issue-#42
+failures reproduced on clean main; rustfmt; denied-warning Clippy zero;
+cargo check --workspace --tests; cargo xtask docs-check PASS.
 time: [15:42] [06-10-26]
 agent: [codex] [gpt-6]
 worktree: [port/output-economy] [/Users/risingtidesdev/.codex/worktrees/factory-pr49-artifact-debug/ocean]
@@ -1156,3 +1185,14 @@ Round 5: round-4 review follow-ups on model reroute fidelity. (F2) Selection-tim
 
 Validation: ocean-agent 280 passed / 0 failed / 2 ignored; ocean-daemon 908 passed / 2 failed (only the two known pre-existing persistent_room envelope-key assertions); clippy -p ocean-agent --all-targets -D warnings clean; fmt --all --check clean; git diff --check clean.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [23:29] [09-10-26]
+agent: [codex] [factory release]
+worktree: [codex/pr45-resource-reconcile]
+type: [bug report]
+area: [backend] [testing] [review]
+
+PR #45 / issue #82: reconciled grant-management routes with canonical main f1b22bd8 while preserving both public ledger histories. Restored admitted-turn scope, digest, cancellation and current owner/access authority; operator previews capture separate request authority and reuse the same per-call checks. Consumed grant decisions reach transactional replay before mutable expiry/root-liveness checks, retaining exact replay after expiry or root removal and fixed mismatch/cross-ledger refusal. Fresh requests still validate their roots and expiry; stored absolute roots remain unchanged for confined descriptor I/O.
+
+Validation: missing-root replay failed before repair (400 instead of 200), then resource tests 7/7, router 5/5, locked daemon check, formatting, diff and docs checks passed (30 packages, 153 docs, 170 links). Synthetic fixtures cover cancellation, wrong scope/digest, owner/access loss, revoke/suspend, preview authority, expiry/root removal, normalized path replay, cross-ledger reuse and fresh invalid inputs. Independent source review ACKed 2c4b2ee6; this receipt precedes final exact-head review and hosted checks. Nearest daemon contract updated; parent ownership/indexes unchanged. Required maintainer approval and existing architecture/live-migration holds remain. No live credentials, provider calls, installation or deployment.
