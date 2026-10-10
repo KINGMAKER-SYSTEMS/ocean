@@ -418,6 +418,20 @@ commit an organization-owned browser key or restore a compiled-in default.
   check, Clippy and independent exact-head review; no live service or owner auth
   is a fixture input.
 
+### Browser pane forwarding (ocean-private #100)
+
+- Expose only the exact daemon `GET /v1/browser/screencast` SSE and
+  `POST /v1/browser/input` JSON endpoints through the session-authenticated
+  PWA proxy. Tauri continues to use its direct daemon URL.
+- Stream screencast bytes through the existing untimed SSE client and
+  `sse_stream_response`; use the bounded JSON client for input and preserve
+  only the upstream status and JSON response bytes. Do not add wildcard
+  forwarding, client credential/header forwarding, CORS, or daemon authority.
+- Drive the production router in fixtures: prove the screencast response
+  arrives before the upstream stream closes, input method/body/status
+  passthrough, and refusal of both routes before upstream access without a
+  valid existing proxy session. Do not use live daemon/browser state.
+
 ## Build / Check
 
 ```sh
