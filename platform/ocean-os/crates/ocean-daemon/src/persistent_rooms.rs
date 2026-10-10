@@ -11033,6 +11033,78 @@ env = { FIXTURE = "1" }
     }
 
     #[tokio::test]
+    async fn p4_lagging_runtime_events_never_hide_a_pending_permission() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state = crate::tests::isolated_room_fixture_state(&tmp);
+        let key = RoomKey::new("p4-lagging-permission");
+        create_mention_room(&state, &key);
+        let tracker = Arc::new(Mutex::new(
+            crate::room_agent_runs::RunTracker::start(
+                state.clone(),
+                key.clone(),
+                "helper",
+                AgentSessionId::new_v4(),
+                1,
+                1,
+                "/repo".into(),
+            )
+            .expect("durable run"),
+        ));
+        // The synchronous wait hook lands before deltas still queued in the
+        // runtime's event channels.
+        tracker.lock().unwrap().awaiting_permission(
+            PermissionId::new_v4().to_string(),
+            "bash",
+            &json!({"command": "rm -rf build"}),
+        );
+        let (sink, events) = mpsc::unbounded_channel();
+        for event in [
+            ocean_runtime::AgentEvent::TextDelta {
+                session_id: None,
+                delta: "late".into(),
+            },
+            ocean_runtime::AgentEvent::ToolExecutionStart {
+                session_id: None,
+                tool_call_id: "call-0".into(),
+                tool_name: "write".into(),
+                args: json!({"path": "/repo/a.rs"}),
+            },
+        ] {
+            sink.send(event).unwrap();
+        }
+        drop(sink);
+        crate::room_agent_runs::watch_runtime_events(tracker.clone(), events).await;
+        let run = with_rooms(&state, |store| store.room_agent_runs(&key, 10))
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(run.state, ocean_core::RoomAgentRunState::AwaitingPermission);
+        assert_eq!(run.pending_permission.as_ref().unwrap().tool, "bash");
+        assert_eq!(run.tool_count, 1);
+        // Once decided, progress resumes normally.
+        tracker.lock().unwrap().permission_resolved();
+        let (sink, events) = mpsc::unbounded_channel();
+        sink.send(ocean_runtime::AgentEvent::ToolExecutionStart {
+            session_id: None,
+            tool_call_id: "call-1".into(),
+            tool_name: "bash".into(),
+            args: json!({"command": "rm -rf build"}),
+        })
+        .unwrap();
+        drop(sink);
+        crate::room_agent_runs::watch_runtime_events(tracker, events).await;
+        let run = with_rooms(&state, |store| store.room_agent_runs(&key, 10))
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert!(matches!(
+            run.state,
+            ocean_core::RoomAgentRunState::RunningTool { .. }
+        ));
+        assert!(run.pending_permission.is_none());
+    }
+
+    #[tokio::test]
     async fn p4_late_asking_turn_writes_never_reopen_an_answer_claim() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let state = crate::tests::isolated_room_fixture_state(&tmp);
