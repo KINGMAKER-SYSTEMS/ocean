@@ -40,6 +40,7 @@ Root GitHub Actions builds for the public Ocean monorepo.
 - `PYTHONDONTWRITEBYTECODE=1 python3 .github/test-build-scope.py`
 - `PYTHONDONTWRITEBYTECODE=1 python3 .github/test-release-workflow.py`
 - Actual hosted builds establish build success. Syntax checking alone does not.
+- Review gate read-back: `gh api repos/KINGMAKER-SYSTEMS/ocean/branches/main/protection --jq '.required_pull_request_reviews'` must be non-null with `required_approving_review_count` >= 1, `dismiss_stale_reviews` and `require_last_push_approval` true; a stored count with null review protection is not enforced. Confirm with `gh api repos/KINGMAKER-SYSTEMS/ocean/rules/branches/main` that no ruleset adds bypass actors.
 
 ## Child devlog Index
 
