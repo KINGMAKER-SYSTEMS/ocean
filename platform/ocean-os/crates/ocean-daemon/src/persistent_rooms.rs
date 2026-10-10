@@ -1424,7 +1424,9 @@ pub(super) async fn room_search(
     }) {
         Ok(results) => (
             StatusCode::OK,
-            Json(json!({ "ok": true, "results": results })),
+            // Same human-read projection as every transcript response, so a
+            // row whose author id fails the bound reads `[filtered]` here too.
+            Json(json!({ "ok": true, "results": projected_transcript(results) })),
         ),
         Err(e) => room_store_error_response(e),
     }
@@ -1522,7 +1524,7 @@ pub(super) async fn room_inbox(
                             .map(|m| m.display_name.clone())
                     })
                     .filter(|n| !n.trim().is_empty())
-                    .unwrap_or_else(|| id.to_string())
+                    .unwrap_or_else(|| rendered_author_id(id.to_string()))
             };
             for (message, parent_author) in
                 store.recent_room_messages_with_parent_author(&key, ROOM_INBOX_SCAN_PER_ROOM)?
@@ -1533,7 +1535,7 @@ pub(super) async fn room_inbox(
                         room_name: name.clone(),
                         reason,
                         author_name: display(&message.author_id),
-                        message,
+                        message: projected_room_message(message),
                     });
                 }
             }
@@ -5983,6 +5985,46 @@ mod tests {
             .unwrap()
             .iter()
             .all(|i| i["room_id"] == json!(room.as_str())));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn p6_search_and_inbox_project_unbounded_author_ids() {
+        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _env = TestEnvRestore::capture(&[
+            "OCEAN_AUTH_FILE",
+            "OCEAN_CODEX_AUTH_FILE",
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let state = crate::tests::isolated_room_fixture_state(&tmp);
+        seed_owner(&state, "ada", "Ada");
+        let key = RoomKey::new("p6-projection");
+        create_plain_room(&state, &key);
+        // A row the store accepted from an in-process or federated writer
+        // whose author id fails the bound every human read applies.
+        let raw = "[click](https://evil.example)";
+        p6_post(&state, &key, raw, "@ada needle", None);
+
+        let (status, Json(body)) = room_search(
+            State(state.clone()),
+            Path(key.as_str().to_string()),
+            p6_search(Some("needle"), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["results"][0]["author_id"], json!("[filtered]"));
+
+        let (status, Json(body)) =
+            room_inbox(State(state.clone()), Query(RoomInboxQuery { limit: None })).await;
+        assert_eq!(status, StatusCode::OK);
+        let item = &body["items"][0];
+        assert_eq!(item["reason"], json!("mention"));
+        assert_eq!(item["message"]["author_id"], json!("[filtered]"));
+        assert_eq!(item["author_name"], json!("[filtered]"));
+        assert!(!body.to_string().contains("evil.example"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

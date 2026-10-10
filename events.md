@@ -1137,3 +1137,13 @@ Fixed three review findings on the Rooms P5-P6 port (PR #69). The mentions inbox
 
 Validation: in platform/ocean-os, `cargo fmt --all -- --check`, `cargo check --workspace --tests` and docs-check pass; `cargo test -p ocean-daemon --locked room` is 268 passed, 2 failed, both the alias-envelope fixtures that fail on main. The new route-precedence, inbox-cap and search-cap tests were each confirmed to fail with their fix reverted. In apps/ocean-surface, fmt, `cargo test -p ocean-surface-ui` (866 unit tests plus integration suites), WASM clippy with warnings denied, `cargo check -p ocean-surface-proxy` and the new proxy inbox routing test (fails without the route) pass. No live daemon, browser or desktop run.
 _________________________________________________________________________________
+time: [10:40pm] [09-10-26]
+agent: [claude] [claude-opus-5-5]
+worktree: [port/rooms-visual-attention] [/Users/risingtidesdev/dev/oceanwork/wt-pr69]
+type: [bug report]
+area: [backend] [review] [testing]
+
+Review fix on the Rooms P5-P6 port (PR #69). Room search and the mentions inbox returned stored message rows raw, skipping the human-read projection every transcript response applies, so a row whose author id fails the member-id bound (a pre-guard row or a federated row carrying brackets, control characters or an oversize id) came back verbatim. Search results now go through projected_transcript, inbox messages through projected_room_message, and the inbox author_name fallback uses rendered_author_id; mention and reply matching still runs on the raw row. New test p6_search_and_inbox_project_unbounded_author_ids fails with the fix reverted.
+
+Validation: in platform/ocean-os, `cargo fmt --all -- --check`, `cargo test -p ocean-store --locked` (291), and `cargo test -p ocean-daemon --locked` filtered to p6_, inbox, search, prefs, mute and router_contract pass. In apps/ocean-surface, `cargo test -p ocean-surface-ui -p ocean-surface-proxy` pass. No live daemon, browser or desktop run.
+_________________________________________________________________________________
