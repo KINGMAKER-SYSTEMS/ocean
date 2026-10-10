@@ -380,6 +380,56 @@ Web surface session UI:
   `min-height: 0` with vertical overflow so long room lists scroll instead of
   pushing status/actions outside the viewport.
 
+### Native Room agent consent consumer (ocean-private #65)
+
+- Base: `port/room-agent-consent` (daemon digest guard + invited-Member
+  own-agent consent). Owned targets: new `crates/ocean-tauri/src/room_consent.rs`,
+  `crates/ocean-tauri/src/lib.rs` registration, its `Cargo.toml`/`Cargo.lock`
+  (`libc`, `uuid` v4 only), `crates/ocean-surface-ui/src/{host.rs,rooms.rs,
+  rooms_workspace.rs,daemon.rs}`, existing `styles/rooms-workspace.css` and this
+  contract. No daemon, proxy, store, policy or provider change.
+- `room_consent.rs` is the only native holder of Room-agent operator custody.
+  Rust fetches the preview itself and freezes room, package, agent, owner,
+  digest, policies and a fresh UUIDv4 decision id; the page gets a projection
+  and an opaque consent id, never a digest it can supply. At most 4 consents
+  live for 120 s; a newer preview supersedes an idle one for the same agent.
+- Authorize/reauthorize require a native dialog (`tauri-plugin-dialog`, Rust
+  side; the webview gains no dialog permission) and always send the frozen
+  non-null `expected_definition_digest`. Decline, cancel, expiry, navigation
+  invalidation (`room_consent_cancel(None)` from the shared room reset) or an
+  invalidation racing the dialog sends zero privileged requests. A definitive
+  reply consumes the consent; a lost acknowledgement is `unknown`, is never
+  retried automatically, and an explicit re-confirmed retry replays the same
+  decision id. Revoke is natively confirmed with a fresh decision id.
+- Transport: raw HTTP/1.1 to a numeric-loopback `OCEAN_DAEMON_URL` only
+  (hostnames, `localhost`, userinfo, TLS, paths refused); fixed typed intents;
+  no Origin/Cookie, redirects refused, replies bounded to 256 KiB JSON objects.
+  The key is read per request through `O_NOFOLLOW`, must be the inspected
+  regular file owned by the effective uid with no group/other bits and a
+  header-safe token, and never reaches JS, errors or logs. Commands also refuse
+  any webview other than `main`.
+- Surface: `host.rs` wrappers are absent off-Tauri, so browser/extension hosts
+  render bindings but never emulate consent. `rooms.rs` owns the bindings
+  client (`GET .../agents`), the consent draft (room generation + ticket
+  guarded; committed or unknown outcomes refresh authoritative bindings even
+  when navigation raced) and explicit invocation. Invocation needs the
+  daemon-projected `caller_member_id` naming a User in Live/Recovering access,
+  a committed Human message by that caller and an active binding; it runs once
+  per (agent, message), mints a fresh CSPRNG token held only in memory, binds
+  it to the acknowledged request/session/generation, and leaves a lost
+  acknowledgement `unknown`. Local rooms have no invoker until the daemon
+  projects a Human identity there.
+- UI: one consent sheet (name, short digest, requested capabilities, one
+  primary action, dismiss) at the top of the right rail; bound agent rows get a
+  single overflow holding Review/Revoke; the message action rail gets one
+  invoke trigger listing active agents with their invocation state. Federated
+  `+ agent` registration is mounted only on native consent hosts.
+- Verification: `cd crates/ocean-tauri && cargo test room_consent` (disposable
+  loopback daemons and key fixtures), `cargo test -p ocean-surface-ui rooms`,
+  WASM check/Clippy. Remaining: Room permission-card adapter using
+  `RoomInvocation::token_for`, own-agent status/cancellation rendering, Local
+  bootstrap intent, workspace selection on create, served native acceptance.
+
 ## Workspace Map
 
 | Path | Role |
