@@ -753,6 +753,23 @@ impl ocean_agent::RoomHistorySource for DurableRoomHistorySource {
     }
 }
 
+/// Wrap a 404 room response with the additive `room_not_open` flag (and a
+/// `code` default) so a client can branch on one field on every route.
+/// `/transcript` and `/snapshot` are the deliberate exception: they answer a
+/// soft-closed room 200 as an audit view and say so with `closed: true`.
+pub(super) fn room_not_open(
+    (status, Json(mut body)): (StatusCode, Json<serde_json::Value>),
+) -> (StatusCode, Json<serde_json::Value>) {
+    if let Some(object) = body.as_object_mut() {
+        object.insert("room_not_open".into(), json!(true));
+        object
+            .entry("code")
+            .or_insert_with(|| json!("room_not_found"));
+    }
+    debug_assert_eq!(status, StatusCode::NOT_FOUND);
+    (StatusCode::NOT_FOUND, Json(body))
+}
+
 /// Map a store error onto an HTTP status + typed JSON body.
 pub(super) fn room_store_error_response(
     err: ocean_store::RoomStoreError,
@@ -795,7 +812,9 @@ pub(super) fn room_store_error_response(
         UnknownAttachment { .. } => StatusCode::NOT_FOUND,
         // Same rule as an artifact author: a file attributed to somebody who is
         // not in the room is a lie, not a server fault.
-        AttachmentUploaderNotInRoster { .. } => StatusCode::FORBIDDEN,
+        AttachmentUploaderNotInRoster { .. } | AttachmentActorNotHuman { .. } => {
+            StatusCode::FORBIDDEN
+        }
         // And the same rule again for the person the close marker names. The
         // room exists and the act is well formed; the caller is claiming to be
         // somebody who is not in it.
@@ -2371,7 +2390,7 @@ pub(super) async fn room_agent_invoke(
     }
 }
 
-fn invalid_request_response() -> (StatusCode, Json<serde_json::Value>) {
+pub(super) fn invalid_request_response() -> (StatusCode, Json<serde_json::Value>) {
     (
         StatusCode::BAD_REQUEST,
         Json(json!({"ok": false, "error": "invalid_request"})),

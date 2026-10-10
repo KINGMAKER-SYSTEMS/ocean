@@ -270,10 +270,58 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   new synthetic capture-bound and per-call memory-revocation checks. Root runs
   locked focused/full daemon tests, denied-warning Clippy and workspace test
   compilation remotely; independent exact-source review is required.
-- Deferred: Room metrics/sampler, attachments/context, profile/resource writes,
-  retirement/summary/maintenance/workspace bridge, client onboarding/UI, extension
-  scheduling, Unknown build execution and CI orchestration. Keep #22/#48 holds;
+- Deferred: Room metrics/sampler, attachment context, profile/resource writes,
+  retirement/summary/workspace bridge, client onboarding/UI, extension
+  scheduling, Unknown build execution and CI orchestration. Keep live migration/installation acceptance holds;
   automated CI remains only Build Ocean and Build Surface.
+
+### Durable room attachment bytes
+
+- `room_attachments.rs` owns the four durable-room attachment routes: raw upload,
+  metadata list, verified download and delete. HTTP authors remain caller-asserted;
+  only human roster identities may mutate, checked inside the store transaction.
+- Uploads are capped at 8 MiB. Unix attachment root/room/file access uses retained
+  no-follow directory descriptors; final files must be regular, bounded and match
+  stored length/hash. Unsupported platforms fail closed for attachment byte I/O.
+- Create private exclusive temporary files (0600), publish without replacing an
+  existing id, then sync the containing directory before committing metadata.
+  Failed SQL uploads unlink through the retained descriptor. Delete commits the
+  row/marker first, then best-effort unlinks through captured directory custody.
+- Declared content type is metadata only. Downloads use verified image signatures
+  or octet-stream, always with nosniff and attachment disposition.
+- Prompt/context assembly remains a dependent stage; attachment maintenance is
+  owned below. Neither feature lifts live migration/installation acceptance holds.
+- Verify `cargo test --locked -p ocean-daemon room_attachments::` and attachment
+  store regressions; run a locked daemon/store check for interface changes.
+
+### Room retention and orphan maintenance
+
+- `room_maintenance.rs` owns the configured background sweep, operator-only
+  `POST /v1/rooms/maintenance/run`, and bounded health/report errors. Retention
+  defaults off and cuts closed-room rows before reclaiming captured blob bytes.
+- Uploads hold shared daemon-local publication custody from before temporary
+  creation through SQL commit or rollback cleanup. Retention/GC acquire exclusive
+  custody before the room-store guard. GC defers a busy publisher; no supported
+  cross-process blob publisher is part of this contract.
+- Fix the orphan cutoff before the pass. Directory listings are candidates only:
+  recheck live room-hash ownership and attachment rows under the store guard
+  through each unlink. Enumerate outside that guard; never cross an await with it.
+- Reuse attachment no-follow directory capabilities. Only flat regular files are
+  collectable; nested/special/symlink entries fail closed. Verify file identity,
+  size and mtime before unlink, and captured directory identity before empty-dir
+  removal. No recursive or path-following maintenance deletion is permitted.
+- Count observed bytes only after successful unlink; report a failed durability
+  barrier separately without losing successful unlink accounting. Preserve
+  row-first retention and live migration/installation acceptance holds.
+- Maintenance attempts retain their sweep permit through worker and join-fallback
+  publication even if the HTTP waiter is cancelled. Report fixed classification,
+  stage, in-progress start and complete/incomplete/unknown accounting. Keep known
+  committed counts after failures; incomplete counts are lower bounds. Terminal
+  publication is exactly once and must not call logging or other fallible hooks.
+  Catch sweep/stage/logging panics without publishing payloads; a subsequent
+  scheduler tick must recover. No timeout may admit overlapping blocking cleanup.
+- Verify focused `room_maintenance::`, `room_attachments::` and router-contract
+  tests plus locked daemon compilation; fixtures use hooks/clocks, never sleeps.
 
 ### Rooms persistence migration boundary
 

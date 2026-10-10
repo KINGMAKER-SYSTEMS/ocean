@@ -1046,6 +1046,62 @@ Closed the leftovers from the review that acknowledged the thinking-binding reco
 Validation: ocean-protocol (187 plus 5) passes; clippy with warnings denied on ocean-protocol and ocean-agent tests, rustfmt check pass. The strip test covers the thinking-only assistant turn. No provider was called.
 _________________________________________________________________________________
 _________________________________________________________________________________
+time: [14:38] [06-10-26]
+agent: [zcode] [glm-5.3]
+worktree: [port/rooms-attachments]
+type: [feature-request]
+area: [backend] reconciliation: room attachments
+
+Eighth bounded Track B port: durable room attachments. Attachment BYTES live
+beside the DB that indexes them (per-room subdirectories under the resolved
+root, carried on AppState), so a moved OCEAN_DB_PATH carries a room's files
+with its metadata. Four route methods land: upload (typed attachment_too_large
+via sized cap + slack on the body-limit layer; uploader must be a roster
+human — a forged agent author is 403 and leaves no bytes), list, download
+(verified reads: bytes must match the recorded digest; served content type is
+proven by the bytes, never the declared one), and delete (row + bytes + a
+transcript marker in one store transaction). Traversal defence: one blob-path
+derivation with the id validator in one place; hostile room keys never become
+paths. Adaptations: room_not_open ported into persistent_rooms and
+invalid_request_response widened; AppState gained room_attachments_root with a
+unique-per-call test root after cross-test contamination showed up in the
+first run (17/17 after). Trimmed for sibling PRs: attachment_bytes and
+write_blob_for_test ride the room_context port (their consumer).
+Router-contract parity moved 119 → 123.
+
+Validation: room_attachments tests (17) pass; router-contract parity (123)
+green; cargo test -p ocean-daemon 925 passed / 2 deterministic issue-#42
+failures reproduced on clean main; rustfmt; denied-warning Clippy zero;
+cargo check --workspace --tests; cargo xtask docs-check PASS.
+_________________________________________________________________________________
+time: [15:02] [06-10-26]
+agent: [zcode] [glm-5.3]
+worktree: [port/rooms-maintenance] (stacked on port/rooms-attachments #46)
+type: [feature-request]
+area: [backend] reconciliation: room maintenance sweeps
+
+Ninth bounded Track B port (STACKED on #46 — the sweep's orphan cleanup walks
+room_attachments' blob layout, so the branch rebases onto the attachments
+head rather than main): retention and orphan maintenance for closed rooms.
+MaintenanceConfig resolves retention window / sweep interval / orphan grace
+from env once at startup; the loop sweeps on its own cadence until shutdown;
+POST /v1/rooms/maintenance/run (operator lane) runs a sweep now. A sweep cuts
+rooms closed past the retention window (row + transcript + attachments +
+cursors + federation index in one store transaction), reclaims attachment
+bytes and directories, and removes orphaned blobs/dirs past their grace —
+never touching open rooms. GET /health gains the room_maintenance card via a
+poison-recovering snapshot: it carries the CONFIGURATION and not just counts,
+because the failure it exists to catch (a retention window that never got
+set) is silent by construction. Adaptations: write_blob_for_test restored on
+this branch (trimmed from #46 as room_context-only, but the sweep tests also
+consume it — the trim moves to whichever PR lands second); the personal-only
+main.rs fixture helper record_sweep_for_test was not ported. Router-contract
+parity 123 → 124 on the stack.
+
+Validation: room_maintenance tests (15) pass; router-contract parity green;
+cargo test -p ocean-daemon 940 passed / 2 deterministic issue-#42 failures
+reproduced on clean main; rustfmt; denied-warning Clippy zero; cargo check
+--workspace --tests; cargo xtask docs-check PASS.
 time: [15:42] [06-10-26]
 agent: [codex] [gpt-6]
 worktree: [port/output-economy] [/Users/risingtidesdev/.codex/worktrees/factory-pr49-artifact-debug/ocean]
@@ -1156,3 +1212,36 @@ Round 5: round-4 review follow-ups on model reroute fidelity. (F2) Selection-tim
 
 Validation: ocean-agent 280 passed / 0 failed / 2 ignored; ocean-daemon 908 passed / 2 failed (only the two known pre-existing persistent_room envelope-key assertions); clippy -p ocean-agent --all-targets -D warnings clean; fmt --all --check clean; git diff --check clean.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [23:34] [09-10-26]
+agent: [codex] [factory release]
+worktree: [codex/pr46-attachment-reconcile]
+type: [bug report]
+area: [backend] [testing] [review]
+
+PR #46 / issue #83: reconciled durable attachments with canonical main f1b22bd8 and preserved both public ledger histories. Reads reject oversized/nonregular blobs before bounded allocation and verify bytes against recorded metadata. No-follow root/room/blob descriptor custody, private exclusive temporary files, non-overwriting publication and directory sync protect bytes before indexing; retained directory custody confines rollback and post-commit cleanup. HTTP upload/delete recheck human authors inside their store transaction while generic agent-capable APIs remain intact. Returning known committed metadata eliminates the fallible post-commit lookup that could trigger cleanup of committed bytes. Relative database-path configuration remains supported.
+
+Validation: daemon attachment tests 21/21, store attachment tests 9/9, locked daemon/store check, formatting and diff checks pass. Removing both transactional human guards makes the deterministic absent-to-Agent/System author regression fail; exact source restoration passes all 21 daemon attachment tests. Remote hashes match all five changed source/docs files. Independent source review ACKed 19c24c16; this receipt precedes final exact-head review and required hosted builds. Daemon/store contracts updated; parent ownership/indexes unchanged. Safe byte I/O is Unix-only; unsupported platforms fail closed. Existing caller-asserted room authority remains unchanged. PR #47 stays held under #84 pending maintenance custody/snapshot repair and stack reconciliation. Maintainer approval and existing live-migration acceptance remain separate. No deployment, installation or live data/provider access.
+
+_________________________________________________________________________________
+time: [23:54] [09-10-26]
+agent: [codex]
+worktree: [codex/pr47-maintenance-custody]
+type: [bug report] [PR #47]
+area: [backend] [testing] [review]
+
+Reconciled maintenance with reviewed attachment PR #46 and preserved both ledger histories. Issue #84 repair coordinates upload publication with cleanup, fixes the sweep cutoff before enumeration, and rechecks live room/attachment references under the store guard through descriptor-relative unlink. Cleanup is row-first; filesystem and SQL effects are not one transaction. Flat regular files only, actual unlinked-byte accounting, verified empty-directory identity, and a fused directory iterator preserve bounded cleanup. Ambiguous inherited tracker references now name the actual live migration/installation boundary.
+
+Validation: maintenance 20/20, attachments 23/23 and router 5/5 passed, plus clean locked daemon check, formatting and diff check. Deterministic in-flight publication, new-room, delayed-cutoff, directory-replacement and iterator-error fixtures passed. Independent source review acknowledged 74e4a1c1. The nearest daemon contract is updated; parent ownership/indexes are unchanged. Final-head review, required builds, independent maintainer approval and release after #46 remain gates. No live sweep, merge or deployment is claimed.
+
+_________________________________________________________________________________
+time: [00:12] [10-10-26]
+agent: [codex] [gpt-6]
+worktree: [codex/pr47-maintenance-reporting] (PR #47, issue #30)
+type: [bug report] [workflow]
+area: [backend] maintenance failure accounting and recovery
+
+Independent review reproduced the proposed maintenance publisher counting one failed sweep twice and replacing known committed counts with zeros. The bounded repair retains cleanup custody and accumulated progress across worker/join failures, reports fixed stage/classification plus complete/incomplete/unknown accounting and in-progress start, and publishes terminal facts once without calling the failing logger. A later scheduler tick recovers; blocked workers retain custody rather than admitting overlapping cleanup.
+
+Validation at source8171961: maintenance24/24, attachments23/23 and router5/5 fixtures passed; locked daemon compilation, formatting, diff and docs checks passed (30 packages,153 active Markdown files,170 local links). Local and remote changed-source hashes matched; exact-source independent review ACK received. The daemon devlog records the changed reporting contract; parent ownership/index contracts are unchanged. Fixtures cover queued cancellation, exceptional join failure, committed retention before panic, publication panic, next-tick recovery and dropped-waiter custody. No live sweep, incident-cause attribution, installation or deployment occurred. Final-head review/builds, maintainer approval, #46 dependency and live migration/installation acceptance remain separate gates.

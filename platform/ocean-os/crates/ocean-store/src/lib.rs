@@ -465,6 +465,8 @@ pub enum RoomStoreError {
     /// Same rule as an artifact author: a file attributed to somebody who is
     /// not in the room is a lie.
     AttachmentUploaderNotInRoster { room: RoomKey, uploader: String },
+    /// HTTP attachment mutations require a human inside the write transaction.
+    AttachmentActorNotHuman { room: RoomKey, actor: String },
     /// The member closing a room is not on its roster. Same rule as an artifact
     /// author and an attachment uploader, and it earns its own variant rather
     /// than borrowing theirs because the close marker names this person in the
@@ -612,6 +614,9 @@ impl std::fmt::Display for RoomStoreError {
             }
             Self::AttachmentUploaderNotInRoster { room, uploader } => {
                 write!(f, "room '{room}' has no participant '{uploader}'")
+            }
+            Self::AttachmentActorNotHuman { room, actor } => {
+                write!(f, "participant '{actor}' in room '{room}' is not human")
             }
             Self::RoomCloserNotInRoster { room, closer } => {
                 write!(f, "room '{room}' has no participant '{closer}'")
@@ -2987,6 +2992,58 @@ impl SqliteRoomStore {
         uploader: &str,
         now: DateTime<Utc>,
     ) -> Result<(RoomAttachment, RoomMessage)> {
+        self.add_attachment_checked(
+            key,
+            attachment_id,
+            filename,
+            content_type,
+            byte_len,
+            sha256,
+            uploader,
+            now,
+            false,
+        )
+    }
+
+    /// Caller-asserted HTTP identity must still be human when the mutation commits.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_human_attachment(
+        &mut self,
+        key: &RoomKey,
+        attachment_id: &str,
+        filename: &str,
+        content_type: &str,
+        byte_len: u64,
+        sha256: &str,
+        uploader: &str,
+        now: DateTime<Utc>,
+    ) -> Result<(RoomAttachment, RoomMessage)> {
+        self.add_attachment_checked(
+            key,
+            attachment_id,
+            filename,
+            content_type,
+            byte_len,
+            sha256,
+            uploader,
+            now,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn add_attachment_checked(
+        &mut self,
+        key: &RoomKey,
+        attachment_id: &str,
+        filename: &str,
+        content_type: &str,
+        byte_len: u64,
+        sha256: &str,
+        uploader: &str,
+        now: DateTime<Utc>,
+        require_human: bool,
+    ) -> Result<(RoomAttachment, RoomMessage)> {
         if !self.room_is_open(key)? {
             return Err(RoomStoreError::UnknownRoom(key.clone()));
         }
@@ -3009,6 +3066,19 @@ impl SqliteRoomStore {
                 room: key.clone(),
                 uploader: uploader.to_string(),
             });
+        }
+        if require_human {
+            let kind: String = tx.query_row(
+                "SELECT kind FROM participants WHERE room_id = ?1 AND id = ?2",
+                params![key.as_str(), uploader],
+                |row| row.get(0),
+            )?;
+            if kind != "human" {
+                return Err(RoomStoreError::AttachmentActorNotHuman {
+                    room: key.clone(),
+                    actor: uploader.to_string(),
+                });
+            }
         }
         let on_behalf_of = Self::acting_for_on(&tx, key, uploader)?;
         tx.execute(
@@ -3053,10 +3123,17 @@ impl SqliteRoomStore {
             now,
         )?;
         Self::touch_on(&tx, key, now)?;
+        let attachment = RoomAttachment {
+            id: attachment_id.to_string(),
+            filename: filename.to_string(),
+            content_type: content_type.to_string(),
+            byte_len,
+            sha256: sha256.to_string(),
+            uploaded_by: uploader.to_string(),
+            uploaded_at: now.to_rfc3339(),
+            on_behalf_of,
+        };
         tx.commit()?;
-        let attachment = self
-            .attachment(key, attachment_id)?
-            .expect("attachment just inserted");
         Ok((attachment, message))
     }
 
@@ -3075,6 +3152,30 @@ impl SqliteRoomStore {
         remover: &str,
         now: DateTime<Utc>,
     ) -> Result<(RoomAttachment, RoomMessage)> {
+        self.remove_attachment_checked(key, attachment_id, remover, now, false)
+    }
+
+    /// Caller-asserted HTTP identity must still be human when the mutation commits.
+    #[allow(clippy::too_many_arguments)]
+    pub fn remove_human_attachment(
+        &mut self,
+        key: &RoomKey,
+        attachment_id: &str,
+        remover: &str,
+        now: DateTime<Utc>,
+    ) -> Result<(RoomAttachment, RoomMessage)> {
+        self.remove_attachment_checked(key, attachment_id, remover, now, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn remove_attachment_checked(
+        &mut self,
+        key: &RoomKey,
+        attachment_id: &str,
+        remover: &str,
+        now: DateTime<Utc>,
+        require_human: bool,
+    ) -> Result<(RoomAttachment, RoomMessage)> {
         if !self.room_is_open(key)? {
             return Err(RoomStoreError::UnknownRoom(key.clone()));
         }
@@ -3089,6 +3190,19 @@ impl SqliteRoomStore {
                 room: key.clone(),
                 uploader: remover.to_string(),
             });
+        }
+        if require_human {
+            let kind: String = tx.query_row(
+                "SELECT kind FROM participants WHERE room_id = ?1 AND id = ?2",
+                params![key.as_str(), remover],
+                |row| row.get(0),
+            )?;
+            if kind != "human" {
+                return Err(RoomStoreError::AttachmentActorNotHuman {
+                    room: key.clone(),
+                    actor: remover.to_string(),
+                });
+            }
         }
         // Read the row before deleting it: the caller needs the filename for the
         // marker and the id for the unlink, and reading inside this transaction
@@ -10627,6 +10741,48 @@ mod tests {
     /// attachment tests read by.
     fn attachment_room() -> (SqliteRoomStore, RoomKey) {
         artifact_room()
+    }
+
+    #[test]
+    fn attachment_committed_result_matches_metadata_and_marker_failure_rolls_back() {
+        let (mut s, key) = attachment_room();
+        let (saved, _) = s
+            .add_human_attachment(
+                &key,
+                "returned",
+                "spec.md",
+                "text/markdown",
+                12,
+                "digest",
+                "alice",
+                now(),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&saved).unwrap(),
+            serde_json::to_value(s.attachment(&key, "returned").unwrap().unwrap()).unwrap()
+        );
+        let before = s.get(&key).unwrap().unwrap().transcript.len();
+        s.conn
+            .execute_batch(
+                "CREATE TRIGGER refuse_attachment_marker BEFORE INSERT ON messages
+            BEGIN SELECT RAISE(ABORT, 'synthetic marker failure'); END;",
+            )
+            .unwrap();
+        assert!(s
+            .add_human_attachment(
+                &key,
+                "rollback",
+                "other.md",
+                "text/markdown",
+                12,
+                "digest",
+                "alice",
+                now()
+            )
+            .is_err());
+        assert!(s.attachment(&key, "rollback").unwrap().is_none());
+        assert_eq!(s.get(&key).unwrap().unwrap().transcript.len(), before);
     }
 
     /// A file attributed to somebody who is not in the room is the same lie an
