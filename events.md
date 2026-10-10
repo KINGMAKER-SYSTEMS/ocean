@@ -1156,3 +1156,46 @@ Round 5: round-4 review follow-ups on model reroute fidelity. (F2) Selection-tim
 
 Validation: ocean-agent 280 passed / 0 failed / 2 ignored; ocean-daemon 908 passed / 2 failed (only the two known pre-existing persistent_room envelope-key assertions); clippy -p ocean-agent --all-targets -D warnings clean; fmt --all --check clean; git diff --check clean.
 _________________________________________________________________________________
+_________________________________________________________________________________
+time: [14:12] [06-10-26]
+agent: [zcode] [glm-5.3]
+worktree: [port/rooms-summarize]
+type: [feature-request]
+area: [backend] reconciliation: room summarize
+
+Sixth bounded Track B port: POST /v1/rooms/persistent/{key}/summarize — one
+bounded model turn over the room's transcript tail, folded into the room's
+single well-known room-summary artifact (compare-and-swap versioned, amended
+in place, announced on the SSE tail post-commit). The 1019-line room_summary.rs
+lands with its closure-injected model seam (testable without provider env;
+the route supplies AgentRuntime::complete_once, the same fresh-context
+no-session seam the advisor uses), role-based alias resolution (summarize >
+fast > the bound model, so the feature works with zero config), turn-permit
+backpressure shared with agent_turn/compact, and 10 tests. The route handler
+(request struct + handler + response mapping) was extracted verbatim from the
+personal persistent_rooms rework into the monorepo's unchanged file; the only
+adaptations were a sibling-module import and widening
+read_transcript_page to pub(super). Router-contract parity moved 119 → 120.
+The fixed 502 never carries provider text; artifact authorship demands a real
+roster participant.
+
+Issue #42 flakiness update (comment posted): the room-tail test is FLAKY
+(fails ~2/3, passes ~1/3 on an unchanged tree) while the HTTP lifecycle and
+audit-asymmetry pair is deterministic (3/3 failed) — two distinct problems,
+not one.
+
+Validation: room_summary tests (10) pass; router-contract parity (120) green;
+cargo test -p ocean-daemon 926 passed / 2 deterministic failures — the
+issue-#42 pair, reproduced on clean main before any of my changes; rustfmt;
+denied-warning Clippy zero; cargo xtask docs-check PASS.
+
+_________________________________________________________________________________
+time: [23:12] [09-10-26]
+agent: [codex] [factory release]
+worktree: [codex/pr44-reviewed-summary]
+type: [bug report]
+area: [backend] [testing] [review]
+
+PR #44 / issue #81: reconciled the existing summarize route with canonical main f1b22bd8, preserving both public ledger histories. Captured artifact absence/version now fences publication across provider latency against concurrent creation, summaries and human amendments, including identical-output races. Identical generated model/prose keeps the prior artifact and its original coverage/timestamp without claiming newer coverage; a real default-tail repeat appends no artifact audit. Partial-window reporting covers omitted rows on either side, and unknown authors are rejected before provider invocation. The default summary path preserves the selected provider/model pair while explicit summarize/fast roles retain precedence.
+
+Validation: four initial correctness cases reproduced before repair; a separate resolver regression demonstrated selected OpenAI incorrectly becoming Codex before the fallback repair. Final summary 24/24, router contracts 5/5, locked daemon check, formatting and diff checks pass with disposable auth/config/XDG fixtures and unchanged HOME. Docs-check passed on the initial summary repair; final fallback follow-up adds no documentation links. Independent source review ACKed c0f01eb1; this canonical receipt precedes final exact-head review and hosted checks. Nearest daemon contract updated; parent ownership/indexes unchanged. Maintainer approval and independent acceptance/live-migration holds remain. No live provider calls, installation or deployment.

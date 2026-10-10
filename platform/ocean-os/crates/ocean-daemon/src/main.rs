@@ -164,6 +164,8 @@ mod room_profile;
 mod room_resources;
 /// Rooms S0 — retire a placeholder human into a real member (operator lane).
 mod room_retirement;
+/// Room summarize: one model turn folded into the room's summary artifact.
+mod room_summary;
 /// Host fulfillment lifecycle retained for the external `ocean-slack` extension.
 mod slack_canvas_fulfillment;
 /// Ephemeral OpenAI Realtime client-secret mint (voice phases 2/3) — the
@@ -1596,6 +1598,7 @@ fn banner_routes() -> &'static [&'static str] {
         "POST /v1/rooms/persistent/{key}/participants",
         "DELETE /v1/rooms/persistent/{key}/participants/{participant_id}",
         "POST /v1/rooms/persistent/{key}/participants/{participant_id}/retire",
+        "POST /v1/rooms/persistent/{key}/summarize",
         "POST /v1/rooms/persistent/{key}/messages",
         "POST /v1/rooms/persistent/{key}/invites",
         "POST /v1/rooms/persistent/invites/redeem",
@@ -2887,6 +2890,12 @@ fn room_routes() -> Router<AppState> {
         .route(
             "/v1/rooms/persistent/{key}/participants/{participant_id}/retire",
             post(room_retirement::room_participant_retire),
+        )
+        // Room summarize: one bounded model turn folded into the room's
+        // single well-known summary artifact.
+        .route(
+            "/v1/rooms/persistent/{key}/summarize",
+            post(persistent_rooms::room_summarize),
         )
         .route(
             "/v1/rooms/persistent/{key}/messages",
@@ -25755,7 +25764,7 @@ mod tests {
         assert_eq!(admission_routes, expected_admission_routes);
         assert_eq!(
             banner.len(),
-            119,
+            120,
             "route baseline changed; review the manifest"
         );
 

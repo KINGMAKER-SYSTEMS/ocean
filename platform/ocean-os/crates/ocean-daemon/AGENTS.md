@@ -270,8 +270,20 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   new synthetic capture-bound and per-call memory-revocation checks. Root runs
   locked focused/full daemon tests, denied-warning Clippy and workspace test
   compilation remotely; independent exact-source review is required.
+- `room_summary.rs` owns the bounded summarize candidate: one timed, permit-
+  limited provider call, no tools/session creation, then post-commit artifact
+  wake publication. Prefer explicit `summarize`, then `fast` roles; otherwise
+  preserve the bound provider/model pair through qualified runtime resolution,
+  including fake and custom endpoint models. Capture artifact absence/version
+  before the provider and preserve that expectation through store CAS,
+  including unchanged results.
+  Reject unknown/agent/system requesters before provider work. Identical model
+  and prose in an exact generated header preserve the stored artifact and its
+  original coverage/timestamp; a no-op does not claim newly read coverage.
+  `has_more` and the partial-window warning report omitted rows on either side.
+  This repair does not lift independent acceptance or live-migration holds.
 - Deferred: Room metrics/sampler, attachments/context, profile/resource writes,
-  retirement/summary/maintenance/workspace bridge, client onboarding/UI, extension
+  retirement/maintenance/workspace bridge, client onboarding/UI, extension
   scheduling, Unknown build execution and CI orchestration. Keep #22/#48 holds;
   automated CI remains only Build Ocean and Build Surface.
 
@@ -371,6 +383,8 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   stage authority, production activation or release of migration hold #22.
 
 ## Verification
+
+- `cargo test -p ocean-daemon room_summary --locked -- --test-threads=1`
 
 - `cargo test -p ocean-daemon provider_auth:: --locked -- --test-threads=1`
 
