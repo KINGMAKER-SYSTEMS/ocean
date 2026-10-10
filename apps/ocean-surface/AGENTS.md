@@ -377,7 +377,11 @@ Web surface session UI:
   owner's agent session (`daemon::fetch_session_turns`, sliced by the
   `[#seq] ... «— mention` prompt marker) and render through the
   own `AssistantTurn` (`detached`). Card colors come only from
-  tokens (`styles/rooms-cards.css`).
+  tokens (`styles/rooms-cards.css`). Live projections retain the daemon's 50 most
+  recent runs, ordered by start time and run id. Card-step fetches publish
+  success or error only for the latest request while open, with matching
+  daemon origin and unchanged run projection (including session and trigger);
+  closing or disposal invalidates pending work.
 - In-room approvals (P4): a card in `awaiting_permission` with a
   `pending_permission` shows the tool label plus Approve/Deny icon buttons,
   which call `POST /v1/rooms/persistent/{key}/runs/{run_id}/permission` with
