@@ -313,6 +313,13 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
 - Count observed bytes only after successful unlink; report a failed durability
   barrier separately without losing successful unlink accounting. Preserve
   row-first retention and live migration/installation acceptance holds.
+- Maintenance attempts retain their sweep permit through worker and join-fallback
+  publication even if the HTTP waiter is cancelled. Report fixed classification,
+  stage, in-progress start and complete/incomplete/unknown accounting. Keep known
+  committed counts after failures; incomplete counts are lower bounds. Terminal
+  publication is exactly once and must not call logging or other fallible hooks.
+  Catch sweep/stage/logging panics without publishing payloads; a subsequent
+  scheduler tick must recover. No timeout may admit overlapping blocking cleanup.
 - Verify focused `room_maintenance::`, `room_attachments::` and router-contract
   tests plus locked daemon compilation; fixtures use hooks/clocks, never sleeps.
 

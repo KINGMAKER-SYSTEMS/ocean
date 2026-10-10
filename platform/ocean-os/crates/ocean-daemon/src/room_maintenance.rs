@@ -211,6 +211,14 @@ pub(super) struct RoomMaintenanceReport {
     /// errors being reported elsewhere: a clean sweep sets it to `None`, so a
     /// non-null value always describes the most recent sweep.
     pub(super) last_error: Option<String>,
+    /// Current stage while running, otherwise the last completion/failure stage.
+    pub(super) stage: MaintenanceStage,
+    /// Classification and accounting describe the last completed attempt.
+    pub(super) classification: MaintenanceClassification,
+    pub(super) accounting: MaintenanceAccounting,
+    /// Set before queueing blocking work; a stalled worker remains visible and
+    /// retains its permit. Counts remain the last completed attempt's counts.
+    pub(super) in_progress_since: Option<String>,
 }
 
 impl RoomMaintenanceReport {
@@ -232,8 +240,43 @@ impl RoomMaintenanceReport {
             blobs_unlink_failed: 0,
             bytes_reclaimed: 0,
             last_error: None,
+            stage: MaintenanceStage::Queued,
+            classification: MaintenanceClassification::NotRun,
+            accounting: MaintenanceAccounting::Unknown,
+            in_progress_since: None,
         }
     }
+}
+
+/// Fixed report vocabulary; never classify using error or panic payload text.
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum MaintenanceStage {
+    #[default]
+    Queued,
+    Retention,
+    OrphanGc,
+    Publication,
+}
+
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum MaintenanceClassification {
+    #[default]
+    NotRun,
+    Ok,
+    Failed,
+    Cancelled,
+    Panicked,
+}
+
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum MaintenanceAccounting {
+    #[default]
+    Unknown,
+    Complete,
+    Incomplete,
 }
 
 /// The live report, shared between the sweep loop, the on-demand route, and
@@ -276,6 +319,10 @@ pub(super) struct SweepOutcome {
     pub(super) blobs_unlink_failed: u64,
     pub(super) bytes_reclaimed: u64,
     pub(super) error: Option<String>,
+    stage: MaintenanceStage,
+    failure_stage: Option<MaintenanceStage>,
+    failure: Option<MaintenanceClassification>,
+    accounting_unknown: bool,
 }
 
 // ---- The sweep --------------------------------------------------------------
@@ -291,32 +338,53 @@ pub(super) struct SweepOutcome {
 /// `now` is a parameter and not `Utc::now()` so retention is testable against a
 /// fixed clock: a test that had to sleep past a real window could only ever
 /// exercise a window of zero days, which is the one value that means "off".
+#[cfg(test)]
 pub(super) fn run_sweep(
     rooms: &RoomStoreHandle,
     blob_root: &Path,
     config: &MaintenanceConfig,
     now: DateTime<Utc>,
 ) -> SweepOutcome {
-    let orphan_started = std::time::SystemTime::now();
     let mut outcome = SweepOutcome::default();
-    if let Err(error) = run_retention(rooms, blob_root, config, now, &mut outcome) {
+    run_sweep_into(rooms, blob_root, config, now, &mut outcome, &mut |_| {});
+    outcome
+}
+
+/// The caller owns this accumulator outside its unwind boundary. Every known
+/// committed count survives a later panic; incomplete counts are lower bounds.
+fn run_sweep_into(
+    rooms: &RoomStoreHandle,
+    blob_root: &Path,
+    config: &MaintenanceConfig,
+    now: DateTime<Utc>,
+    outcome: &mut SweepOutcome,
+    stage_changed: &mut dyn FnMut(MaintenanceStage),
+) {
+    let orphan_started = std::time::SystemTime::now();
+    outcome.stage = MaintenanceStage::Retention;
+    stage_changed(outcome.stage);
+    if let Err(error) = run_retention(rooms, blob_root, config, now, outcome) {
         outcome.error = Some(error);
     }
+    if outcome.error.is_some() {
+        outcome.failure_stage = Some(outcome.stage);
+    }
+    outcome.stage = MaintenanceStage::OrphanGc;
+    stage_changed(outcome.stage);
     if let Err(error) = run_orphan_gc_at(
         rooms,
         blob_root,
         config,
-        &mut outcome,
+        outcome,
         orphan_started,
         |_| {},
         |_| {},
     ) {
-        // First error wins: the retention failure is the more consequential of
-        // the two to report, and a card that can hold one string should hold
-        // the one an operator acts on.
         outcome.error.get_or_insert(error);
     }
-    outcome
+    if outcome.error.is_some() {
+        outcome.failure_stage.get_or_insert(outcome.stage);
+    }
 }
 
 /// Cut every room closed longer than the window.
@@ -635,8 +703,7 @@ fn gc_inspected<T>(
 
 // ---- Loop + on-demand route -------------------------------------------------
 
-/// Fold one sweep's counts into the shared report and log the line an operator
-/// greps for.
+/// Publish terminal facts only. No logging or external callbacks may run here.
 fn record_sweep(
     handle: &MaintenanceHandle,
     outcome: &SweepOutcome,
@@ -660,7 +727,24 @@ fn record_sweep(
     guard.blobs_unlink_failed = outcome.blobs_unlink_failed;
     guard.bytes_reclaimed = outcome.bytes_reclaimed;
     guard.last_error = outcome.error.clone();
+    guard.stage = outcome.failure_stage.unwrap_or(outcome.stage);
+    guard.classification = outcome.failure.unwrap_or(if outcome.error.is_some() {
+        MaintenanceClassification::Failed
+    } else {
+        MaintenanceClassification::Ok
+    });
+    guard.accounting = if outcome.accounting_unknown {
+        MaintenanceAccounting::Unknown
+    } else if outcome.error.is_some() {
+        MaintenanceAccounting::Incomplete
+    } else {
+        MaintenanceAccounting::Complete
+    };
+    guard.in_progress_since = None;
+    guard.clone()
+}
 
+fn log_sweep(outcome: &SweepOutcome, retention_days: u32, elapsed: Duration) {
     // One line per run, at info, with every number the card carries. The card
     // says what is true NOW; this line is the history, and it is what an
     // operator has when the question is "when did the disk actually come back".
@@ -674,12 +758,11 @@ fn record_sweep(
         orphan_dirs_removed = outcome.orphan_dirs_removed,
         blobs_unlink_failed = outcome.blobs_unlink_failed,
         bytes_reclaimed = outcome.bytes_reclaimed,
-        retention_days = guard.retention_days,
-        elapsed_ms = guard.last_run_ms,
+        retention_days,
+        elapsed_ms = elapsed.as_millis().min(u128::from(u64::MAX)) as u64,
         error = outcome.error.as_deref().unwrap_or("none"),
         "room maintenance sweep finished"
     );
-    guard.clone()
 }
 
 /// Run one sweep off the runtime workers and record it.
@@ -687,65 +770,177 @@ fn record_sweep(
 /// `spawn_blocking` because the sweep takes a `std::sync::Mutex` and walks a
 /// directory tree; doing that on a runtime worker is how a large blob tree
 /// becomes a stalled daemon.
+struct SweepRun {
+    // Shared with the join waiter: even a worker panic cannot release custody
+    // before its fallback publishes. Caller cancellation still leaves the
+    // blocking worker owning both the permit and its completion.
+    _permit: tokio::sync::OwnedMutexGuard<()>,
+    started: std::time::Instant,
+    progress: Mutex<SweepProgress>,
+}
+
+#[derive(Default)]
+struct SweepProgress {
+    outcome: SweepOutcome,
+    recorded: bool,
+}
+
+async fn start_sweep(handle: &MaintenanceHandle) -> Arc<SweepRun> {
+    let permit = handle.sweep.clone().lock_owned().await;
+    let run = Arc::new(SweepRun {
+        _permit: permit,
+        started: std::time::Instant::now(),
+        progress: Mutex::new(SweepProgress::default()),
+    });
+    let mut report = handle
+        .report
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    report.in_progress_since = Some(Utc::now().to_rfc3339());
+    report.stage = MaintenanceStage::Queued;
+    run
+}
+
+fn finish_sweep(
+    handle: &MaintenanceHandle,
+    run: &SweepRun,
+    progress: &mut SweepProgress,
+) -> RoomMaintenanceReport {
+    if progress.recorded {
+        return report_snapshot(handle);
+    }
+    progress.recorded = true;
+    record_sweep(handle, &progress.outcome, Utc::now(), run.started.elapsed())
+}
+
+fn sweep_worker(
+    handle: &MaintenanceHandle,
+    run: &SweepRun,
+    work: impl FnOnce(&mut SweepOutcome, &mut dyn FnMut(MaintenanceStage)),
+    publish_log: impl FnOnce(&SweepOutcome, Duration),
+) -> RoomMaintenanceReport {
+    let mut progress = run
+        .progress
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut stage_changed = |stage| {
+        handle
+            .report
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .stage = stage;
+    };
+    // Sweep, stage publication and logging share the boundary. The accumulator
+    // lives outside it, and terminal fallback never calls the failing logger.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        work(&mut progress.outcome, &mut stage_changed);
+        progress.outcome.stage = MaintenanceStage::Publication;
+        stage_changed(MaintenanceStage::Publication);
+        publish_log(&progress.outcome, run.started.elapsed());
+    }));
+    if result.is_err() {
+        let outcome = &mut progress.outcome;
+        outcome.error = Some("room maintenance worker panicked".into());
+        outcome.failure = Some(MaintenanceClassification::Panicked);
+        outcome.failure_stage = Some(outcome.stage);
+    }
+    finish_sweep(handle, run, &mut progress)
+}
+
+async fn await_sweep(
+    handle: &MaintenanceHandle,
+    run: &SweepRun,
+    worker: tokio::task::JoinHandle<RoomMaintenanceReport>,
+) -> RoomMaintenanceReport {
+    match worker.await {
+        Ok(report) => report,
+        Err(error) => {
+            let mut progress = run
+                .progress
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            // A queued cancellation or exceptional worker failure cannot assert
+            // complete accounting. Preserve whatever progress is known, publish
+            // exactly once, and never run tracing on this fallback path.
+            progress.outcome.error = Some(if error.is_cancelled() {
+                "room maintenance worker cancelled".into()
+            } else {
+                "room maintenance worker panicked".into()
+            });
+            progress.outcome.failure = Some(if error.is_cancelled() {
+                MaintenanceClassification::Cancelled
+            } else {
+                MaintenanceClassification::Panicked
+            });
+            progress.outcome.failure_stage = Some(progress.outcome.stage);
+            progress.outcome.accounting_unknown = true;
+            finish_sweep(handle, run, &mut progress)
+        }
+    }
+}
+
+async fn sweep_once_with(
+    handle: MaintenanceHandle,
+    work: impl FnOnce(&mut SweepOutcome, &mut dyn FnMut(MaintenanceStage)) + Send + 'static,
+    publish_log: impl FnOnce(&SweepOutcome, Duration) + Send + 'static,
+) -> RoomMaintenanceReport {
+    let run = start_sweep(&handle).await;
+    let worker_run = run.clone();
+    let worker_handle = handle.clone();
+    let worker = tokio::task::spawn_blocking(move || {
+        sweep_worker(&worker_handle, &worker_run, work, publish_log)
+    });
+    await_sweep(&handle, &run, worker).await
+}
+
 async fn sweep_once(
     rooms: RoomStoreHandle,
     blob_root: Arc<PathBuf>,
     config: MaintenanceConfig,
     handle: MaintenanceHandle,
 ) -> RoomMaintenanceReport {
-    let permit = handle.sweep.clone().lock_owned().await;
-    let started = std::time::Instant::now();
-    let worker_handle = handle.clone();
-    let report = tokio::task::spawn_blocking(move || {
-        // The worker owns serialization and publication even if the HTTP
-        // request goes away while filesystem work is still running.
-        let _permit = permit;
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            run_sweep(&rooms, blob_root.as_path(), &config, Utc::now())
-        }))
-        .unwrap_or_else(|_| SweepOutcome {
-            error: Some("room maintenance sweep panicked".to_string()),
-            ..SweepOutcome::default()
-        });
-        record_sweep(&worker_handle, &outcome, Utc::now(), started.elapsed())
-    })
-    .await;
-    match report {
-        Ok(report) => report,
-        Err(_) => record_sweep(
-            &handle,
-            &SweepOutcome {
-                error: Some("room maintenance sweep task failed".to_string()),
-                ..SweepOutcome::default()
-            },
-            Utc::now(),
-            started.elapsed(),
-        ),
+    sweep_once_with(
+        handle,
+        move |outcome, stage_changed| {
+            run_sweep_into(
+                &rooms,
+                &blob_root,
+                &config,
+                Utc::now(),
+                outcome,
+                stage_changed,
+            );
+        },
+        move |outcome, elapsed| log_sweep(outcome, config.retention_days, elapsed),
+    )
+    .await
+}
+
+/// A blocked worker remains visibly in progress and retains cleanup custody.
+/// Do not add a timeout which admits another sweep while that worker runs.
+async fn maintenance_loop<F, R>(interval: Duration, mut sweep: F)
+where
+    F: FnMut() -> R,
+    R: std::future::Future<Output = RoomMaintenanceReport>,
+{
+    let mut ticker = tokio::time::interval(interval);
+    ticker.tick().await;
+    loop {
+        ticker.tick().await;
+        sweep().await;
     }
 }
 
-/// Start the maintenance loop.
-///
-/// One task per sweep, the shape `gc_registries`' loop already uses and for the
-/// same reason: a panic inside a sweep comes back as a `JoinError` that this
-/// loop records and keeps going from, instead of killing the loop and leaving
-/// the store to grow silently for the daemon's whole lifetime.
-///
-/// The first sweep happens one interval in, not at startup: a daemon restarting
-/// under load should not open by taking the room-store write lock for every
-/// closed room it holds.
 pub(super) fn spawn_maintenance_loop(state: &AppState) {
     let rooms = state.rooms.clone();
     let blob_root = state.room_attachments_root.clone();
     let config = state.room_maintenance_config;
     let handle = state.room_maintenance.clone();
     tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(config.interval);
-        ticker.tick().await;
-        loop {
-            ticker.tick().await;
-            sweep_once(rooms.clone(), blob_root.clone(), config, handle.clone()).await;
-        }
+        maintenance_loop(config.interval, || {
+            sweep_once(rooms.clone(), blob_root.clone(), config, handle.clone())
+        })
+        .await;
     });
 }
 
@@ -791,6 +986,203 @@ mod tests {
     use super::*;
     use ocean_core::{RoomKey, RoomMessageKind, RoomParticipant, RoomParticipantKind};
     use ocean_store::{RoomCloser, RoomStore, SqliteRoomStore};
+
+    fn test_log_sweep(outcome: &SweepOutcome, elapsed: Duration) {
+        log_sweep(outcome, 0, elapsed);
+    }
+
+    #[tokio::test]
+    async fn partial_committed_retention_survives_panic_and_clean_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let (rooms, root) = fixture(dir.path());
+        let now = Utc::now();
+        let old = now - chrono::Duration::days(40);
+        let key = RoomKey::new("private-fixture-room");
+        seed_room(&rooms, &key, old);
+        with_rooms_handle(&rooms, |store| {
+            store.close_with_marker(&key, RoomCloser::Member("alice"), old)
+        })
+        .unwrap();
+        let config = MaintenanceConfig {
+            retention_days: 30,
+            ..MaintenanceConfig::default()
+        };
+        let handle = new_handle(&config);
+        let worker_rooms = rooms.clone();
+        let worker_root = root.clone();
+        let report = sweep_once_with(
+            handle.clone(),
+            move |outcome, changed| {
+                run_sweep_into(
+                    &worker_rooms,
+                    &worker_root,
+                    &config,
+                    now,
+                    outcome,
+                    &mut |stage| {
+                        changed(stage);
+                        if stage == MaintenanceStage::OrphanGc {
+                            panic!("fixture private payload must not be reported");
+                        }
+                    },
+                );
+            },
+            test_log_sweep,
+        )
+        .await;
+        assert_eq!(report.runs_total, 1);
+        assert_eq!(report.rooms_cut, 1);
+        assert_eq!(report.messages_removed, 3);
+        assert_eq!(report.stage, MaintenanceStage::OrphanGc);
+        assert_eq!(report.classification, MaintenanceClassification::Panicked);
+        assert_eq!(report.accounting, MaintenanceAccounting::Incomplete);
+        assert!(report.in_progress_since.is_none());
+        let wire = serde_json::to_string(&report).unwrap();
+        assert!(!wire.contains("private"));
+        with_rooms_handle(&rooms, |store| {
+            assert!(store
+                .transcript_page_including_closed(&key, None, None)?
+                .messages
+                .is_empty());
+            Ok::<_, ocean_store::RoomStoreError>(())
+        })
+        .unwrap();
+        let clean = sweep_once(rooms, Arc::new(root), config, handle).await;
+        assert_eq!(clean.runs_total, 2);
+        assert_eq!(clean.classification, MaintenanceClassification::Ok);
+        assert_eq!(clean.accounting, MaintenanceAccounting::Complete);
+        assert_eq!(clean.last_error, None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn publication_panic_does_not_double_count_or_stop_next_scheduler_tick() {
+        let config = MaintenanceConfig::default();
+        let handle = new_handle(&config);
+        let task_handle = handle.clone();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut attempt = 0;
+        let task = tokio::spawn(async move {
+            maintenance_loop(Duration::from_secs(60), || {
+                attempt += 1;
+                let first = attempt == 1;
+                let handle = task_handle.clone();
+                let tx = tx.clone();
+                async move {
+                    let report = sweep_once_with(
+                        handle,
+                        |outcome, _| {
+                            outcome.rooms_cut = 2;
+                            outcome.messages_removed = 17;
+                            outcome.bytes_reclaimed = 4096;
+                        },
+                        move |_, _| {
+                            if first {
+                                panic!("fixed publication fixture");
+                            }
+                        },
+                    )
+                    .await;
+                    tx.send(report.clone()).unwrap();
+                    report
+                }
+            })
+            .await;
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(60)).await;
+        let failed = rx.recv().await.unwrap();
+        assert_eq!(
+            (
+                failed.runs_total,
+                failed.rooms_cut,
+                failed.messages_removed,
+                failed.bytes_reclaimed
+            ),
+            (1, 2, 17, 4096)
+        );
+        assert_eq!(failed.stage, MaintenanceStage::Publication);
+        assert_eq!(failed.classification, MaintenanceClassification::Panicked);
+        assert_eq!(failed.accounting, MaintenanceAccounting::Incomplete);
+        tokio::time::advance(Duration::from_secs(60)).await;
+        let clean = rx.recv().await.unwrap();
+        assert_eq!(clean.runs_total, 2);
+        assert_eq!(clean.last_error, None);
+        assert_eq!(clean.accounting, MaintenanceAccounting::Complete);
+        assert_eq!(clean.classification, MaintenanceClassification::Ok);
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn exceptional_join_panic_keeps_progress_and_finishes_only_once() {
+        let handle = new_handle(&MaintenanceConfig::default());
+        let run = start_sweep(&handle).await;
+        let worker_run = run.clone();
+        let worker = tokio::task::spawn_blocking(move || -> RoomMaintenanceReport {
+            let mut progress = worker_run.progress.lock().unwrap();
+            progress.outcome.rooms_cut = 1;
+            progress.outcome.stage = MaintenanceStage::Retention;
+            panic!("private join failure payload");
+        });
+        let report = await_sweep(&handle, &run, worker).await;
+        assert_eq!((report.runs_total, report.rooms_cut), (1, 1));
+        assert_eq!(report.classification, MaintenanceClassification::Panicked);
+        assert_eq!(report.stage, MaintenanceStage::Retention);
+        assert_eq!(report.accounting, MaintenanceAccounting::Unknown);
+        assert!(!serde_json::to_string(&report).unwrap().contains("private"));
+        let mut progress = run
+            .progress
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        assert_eq!(finish_sweep(&handle, &run, &mut progress), report);
+        assert!(
+            handle.sweep.try_lock().is_err(),
+            "fallback retains custody through completion"
+        );
+    }
+
+    #[test]
+    fn cancelled_queued_worker_reports_fixed_unknown_and_allows_next_sweep() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let blocker = tokio::task::spawn_blocking(move || {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            });
+            started_rx.recv().unwrap();
+            let handle = new_handle(&MaintenanceConfig::default());
+            let run = start_sweep(&handle).await;
+            assert!(report_snapshot(&handle).in_progress_since.is_some());
+            let worker = tokio::task::spawn_blocking(|| -> RoomMaintenanceReport {
+                panic!("aborted queued fixture must not execute");
+            });
+            worker.abort();
+            // Abort while queued, then let the blocking pool dequeue it so the
+            // JoinHandle can settle without depending on cancellation timing.
+            release_tx.send(()).unwrap();
+            let cancelled = await_sweep(&handle, &run, worker).await;
+            assert_eq!(cancelled.runs_total, 1);
+            assert_eq!(
+                cancelled.classification,
+                MaintenanceClassification::Cancelled
+            );
+            assert_eq!(cancelled.stage, MaintenanceStage::Queued);
+            assert_eq!(cancelled.accounting, MaintenanceAccounting::Unknown);
+            assert_eq!(cancelled.rooms_cut, 0);
+            assert!(cancelled.in_progress_since.is_none());
+            drop(run);
+            blocker.await.unwrap();
+            let clean = sweep_once_with(handle, |_, _| {}, test_log_sweep).await;
+            assert_eq!(clean.runs_total, 2);
+            assert_eq!(clean.classification, MaintenanceClassification::Ok);
+        });
+    }
 
     #[test]
     fn enumeration_failure_is_bounded_and_does_not_skip_later_entries() {
@@ -873,6 +1265,7 @@ mod tests {
             "the detached worker still owns the sweep"
         );
         assert_eq!(report_snapshot(&handle).runs_total, 0);
+        assert!(report_snapshot(&handle).in_progress_since.is_some());
         release_tx.send(()).unwrap();
         holder.join().unwrap();
         let next = sweep_once(rooms, root, config, handle.clone()).await;
