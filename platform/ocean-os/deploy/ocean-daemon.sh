@@ -69,7 +69,13 @@ load_federation_env() {
     echo "WARNING: ignoring $file: not a readable regular file owned by this user." >&2
     return 0
   fi
-  mode="$(stat -f %Lp "$file" 2>/dev/null || stat -c %a "$file" 2>/dev/null || echo 777)"
+  # Pick the stat dialect explicitly: GNU `stat -f` means --file-system, so a
+  # BSD-then-GNU fallback chain would capture filesystem data plus the mode.
+  if stat -c %a "$file" >/dev/null 2>&1; then
+    mode="$(stat -c %a "$file" 2>/dev/null || true)"
+  else
+    mode="$(stat -f %Lp "$file" 2>/dev/null || true)"
+  fi
   [[ "$mode" =~ $mode_re ]] || mode=777
   if (( 8#$mode & 8#022 )); then
     echo "WARNING: ignoring $file: group/other-writable (mode $mode); chmod 600 it." >&2
