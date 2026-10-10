@@ -12,6 +12,12 @@
 //!   DELETE /v1/rooms/persistent/{key}/participants/{id}→ leave
 //!   POST   /v1/rooms/persistent/{key}/messages        → post a message
 //!   GET    /v1/rooms/persistent/{key}/events           → live SSE tail (TASK-10)
+//!   GET    /v1/rooms/persistent/{key}/agents           → agent bindings
+//!   POST   /v1/rooms/persistent/{key}/agents/{id}/invoke → explicit invocation
+//!
+//! Agent consent (preview → native confirm → digest-guarded authorize,
+//! revoke) is brokered by the native shell through `crate::host`; browser
+//! hosts render bindings but never emulate consent.
 //!
 //! Live updates: the daemon's room-scoped SSE (TASK-10, `GET
 //! /v1/rooms/persistent/{key}/events`) streams every transcript row as a
@@ -618,6 +624,15 @@ pub struct Rooms {
     pub pending_invite: RwSignal<Option<PendingRoomInvite>>,
     pending_invite_revision: RwSignal<u64>,
     pending_invite_redemption: RwSignal<Option<PendingInviteRedemption>>,
+    /// Daemon agent bindings for the open room.
+    pub agent_bindings: RwSignal<Vec<RoomAgentBinding>>,
+    /// Native-frozen consent awaiting explicit authorization, if any.
+    pub consent: RwSignal<Option<RoomConsentDraft>>,
+    /// Ticket owning the latest preview/authorize completion.
+    consent_ticket: RwSignal<u64>,
+    /// Explicit invocations in this room admission. Memory-only: decision
+    /// tokens never leave this signal except in their one invoke request.
+    pub invocations: RwSignal<Vec<RoomInvocation>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -674,6 +689,10 @@ impl Rooms {
             pending_invite: RwSignal::new(None),
             pending_invite_revision: RwSignal::new(0),
             pending_invite_redemption: RwSignal::new(None),
+            agent_bindings: RwSignal::new(Vec::new()),
+            consent: RwSignal::new(None),
+            consent_ticket: RwSignal::new(0),
+            invocations: RwSignal::new(Vec::new()),
         }
     }
 
@@ -728,6 +747,13 @@ impl Rooms {
         self.invite_loading.set(false);
         self.invite_error.set(None);
         self.pending_invite_redemption.set(None);
+        self.agent_bindings.set(Vec::new());
+        self.invocations.set(Vec::new());
+        self.consent_ticket.update(|t| *t = t.wrapping_add(1));
+        if self.consent.get_untracked().is_some() {
+            crate::host::room_consent_cancel(None);
+        }
+        self.consent.set(None);
     }
 
     /// Whether the current identity is joined according to the room's explicit
@@ -1186,6 +1212,7 @@ impl Rooms {
                     );
                     me.status.set(String::new());
                     me.fetch_agents();
+                    me.fetch_agent_bindings();
                     me.start_live_tail(key, generation_id);
                 }
                 Err(error) => me.status.set(error),
@@ -1362,12 +1389,245 @@ impl Rooms {
             match result {
                 Ok(access) => {
                     me.access.set(Some(access));
-                    me.status.set(format!(
-                        "agent '{agent_id}' registered — mention @{agent_id}"
-                    ));
+                    me.status.set(format!("agent '{agent_id}' registered"));
+                    me.review_agent(agent_id);
                 }
                 Err(error) => me.status.set(error),
             }
+        });
+    }
+
+    /// Refresh the open room's agent bindings from the daemon.
+    pub fn fetch_agent_bindings(&self) {
+        let Some(key) = self.open_key.get_untracked() else {
+            return;
+        };
+        let base = self.base();
+        let me = *self;
+        let generation_id = self.generation.get_untracked();
+        spawn_local(async move {
+            let url = format!("{base}/v1/rooms/persistent/{}/agents", encode(&key));
+            let Ok(resp) = Request::get(&url).send().await else {
+                return;
+            };
+            let Ok(body) = resp.json::<serde_json::Value>().await else {
+                return;
+            };
+            let Some(bindings) = parse_agent_bindings(&body) else {
+                return;
+            };
+            if me.room_is_current(generation_id, &key) {
+                me.agent_bindings.set(bindings);
+            }
+        });
+    }
+
+    /// Ask the native shell to fetch and freeze a consent preview for
+    /// `package_id` in the open room. Absent off-Tauri.
+    pub fn review_agent(&self, package_id: String) {
+        if !crate::host::room_consent_supported() {
+            return;
+        }
+        let Some(key) = self.open_key.get_untracked() else {
+            return;
+        };
+        let me = *self;
+        let generation_id = self.generation.get_untracked();
+        if let Some(previous) = self.consent.get_untracked() {
+            crate::host::room_consent_cancel(Some(&previous.preview.consent_id));
+        }
+        self.consent.set(None);
+        let ticket = self.consent_ticket.get_untracked().wrapping_add(1);
+        self.consent_ticket.set(ticket);
+        spawn_local(async move {
+            let Some(result) = crate::host::room_consent_preview(&key, &package_id).await else {
+                return;
+            };
+            let current = me.room_is_current(generation_id, &key)
+                && me.consent_ticket.get_untracked() == ticket;
+            match result {
+                Ok(preview) if current => me.consent.set(Some(RoomConsentDraft {
+                    preview,
+                    room_generation: generation_id,
+                    busy: false,
+                })),
+                Ok(preview) => crate::host::room_consent_cancel(Some(&preview.consent_id)),
+                Err(code) if current => me.status.set(consent_error_text(&code)),
+                Err(_) => {}
+            }
+        });
+    }
+
+    /// Run native confirmation + digest-guarded authorization for the frozen
+    /// consent. A committed or unknown outcome always refreshes authoritative
+    /// bindings for the room it was decided in.
+    pub fn authorize_consent(&self) {
+        let Some(draft) = self.consent.get_untracked() else {
+            return;
+        };
+        if draft.busy {
+            return;
+        }
+        let key = draft.preview.room.clone();
+        if !self.room_is_current(draft.room_generation, &key) {
+            self.dismiss_consent();
+            return;
+        }
+        let me = *self;
+        let ticket = self.consent_ticket.get_untracked();
+        let generation_id = draft.room_generation;
+        self.consent.update(|c| {
+            if let Some(c) = c {
+                c.busy = true;
+            }
+        });
+        spawn_local(async move {
+            let Some(result) = crate::host::room_consent_authorize(&draft.preview.consent_id).await
+            else {
+                return;
+            };
+            let room_current = me.room_is_current(generation_id, &key);
+            let owns_draft = room_current && me.consent_ticket.get_untracked() == ticket;
+            let step = consent_step(&result);
+            if step.refresh && room_current {
+                me.fetch_agent_bindings();
+            }
+            if owns_draft {
+                if step.keep_draft {
+                    me.consent.update(|c| {
+                        if let Some(c) = c {
+                            c.busy = false;
+                        }
+                    });
+                } else {
+                    me.consent.set(None);
+                }
+                if let Some(text) = step.status {
+                    me.status.set(text);
+                }
+            }
+        });
+    }
+
+    /// Discard the frozen consent without sending anything privileged.
+    pub fn dismiss_consent(&self) {
+        if let Some(draft) = self.consent.get_untracked() {
+            crate::host::room_consent_cancel(Some(&draft.preview.consent_id));
+        }
+        self.consent_ticket.update(|t| *t = t.wrapping_add(1));
+        self.consent.set(None);
+    }
+
+    /// Natively confirm and revoke an own agent's binding.
+    pub fn revoke_agent(&self, binding: RoomAgentBinding) {
+        let Some(key) = self.open_key.get_untracked() else {
+            return;
+        };
+        let me = *self;
+        let generation_id = self.generation.get_untracked();
+        spawn_local(async move {
+            let Some(result) = crate::host::room_agent_revoke(
+                &key,
+                &binding.agent_member_id,
+                &binding.display_name,
+            )
+            .await
+            else {
+                return;
+            };
+            if !me.room_is_current(generation_id, &key) {
+                return;
+            }
+            let step = consent_step(&result);
+            if step.refresh {
+                me.fetch_agent_bindings();
+            }
+            if let Some(text) = step.status {
+                me.status.set(text);
+            }
+        });
+    }
+
+    /// Invoke an active agent exactly once from a committed message authored
+    /// by the daemon-projected caller. Each invocation mints its own decision
+    /// token; a lost acknowledgement stays `Unknown` and is never retried.
+    pub fn invoke_agent(&self, agent_member_id: String, message_seq: u64) {
+        let Some(key) = self.open_key.get_untracked() else {
+            return;
+        };
+        let Some(caller) = invoke_caller(self.access.get_untracked().as_ref()) else {
+            return;
+        };
+        let transcript = self.transcript.get_untracked();
+        let Some(message) = transcript.iter().find(|m| m.seq == message_seq) else {
+            return;
+        };
+        if !message_invocable(message, &caller)
+            || !invocable_bindings(&self.agent_bindings.get_untracked())
+                .iter()
+                .any(|b| b.agent_member_id == agent_member_id)
+            || !may_invoke(
+                &self.invocations.get_untracked(),
+                &agent_member_id,
+                message_seq,
+            )
+        {
+            return;
+        }
+        let Some(token) = crate::daemon::try_mint_decision_token() else {
+            self.status.set("Ocean could not start the agent.".into());
+            return;
+        };
+        let generation_id = self.generation.get_untracked();
+        self.invocations.update(|list| {
+            list.push(RoomInvocation {
+                agent_member_id: agent_member_id.clone(),
+                message_seq,
+                decision_token: token.clone(),
+                state: InvocationState::Pending,
+            })
+        });
+        let base = self.base();
+        let me = *self;
+        spawn_local(async move {
+            let url = format!(
+                "{base}/v1/rooms/persistent/{}/agents/{}/invoke",
+                encode(&key),
+                encode(&agent_member_id)
+            );
+            let body = serde_json::json!({
+                "invoked_by": caller,
+                "message_seq": message_seq,
+                "decision_token": token,
+            });
+            let state = match Request::post(&url)
+                .header("content-type", "application/json")
+                .json(&body)
+            {
+                Ok(req) => match req.send().await {
+                    Ok(resp) => {
+                        let status = resp.status();
+                        match resp.json::<serde_json::Value>().await {
+                            Ok(body) => invocation_state_from(status, &body),
+                            Err(_) if (200..300).contains(&status) => InvocationState::Unknown,
+                            Err(_) => InvocationState::Refused("invoke_refused".into()),
+                        }
+                    }
+                    Err(_) => InvocationState::Unknown,
+                },
+                Err(_) => InvocationState::Refused("invalid_request".into()),
+            };
+            if !me.room_is_current(generation_id, &key) {
+                return;
+            }
+            me.invocations.update(|list| {
+                if let Some(entry) = list
+                    .iter_mut()
+                    .find(|i| i.agent_member_id == agent_member_id && i.message_seq == message_seq)
+                {
+                    entry.state = state;
+                }
+            });
         });
     }
 
@@ -2556,6 +2816,222 @@ fn short_time(ts: &str) -> String {
     // "2026-06-05T12:34:56.789Z" → "2026-06-05 12:34"
     let trimmed = ts.split('.').next().unwrap_or(ts).replace('T', " ");
     trimmed.chars().take(16).collect()
+}
+
+// ---- Room agent bindings, consent and invocation (ocean-private #65) -------
+
+/// One daemon Room agent binding (`binding_projection`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct RoomAgentBinding {
+    pub agent_member_id: String,
+    pub agent_package_id: String,
+    #[serde(default)]
+    pub agent_definition_digest: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub owner_member_id: String,
+    pub status: String,
+    #[serde(default)]
+    pub generation: String,
+    #[serde(default)]
+    pub owner_eligible: bool,
+}
+
+/// Decode `GET .../agents`. `None` for refusals or malformed payloads so a
+/// failed refresh never erases the last authoritative projection.
+pub(crate) fn parse_agent_bindings(body: &serde_json::Value) -> Option<Vec<RoomAgentBinding>> {
+    if body.get("ok") != Some(&serde_json::Value::Bool(true)) {
+        return None;
+    }
+    serde_json::from_value(body.get("bindings")?.clone()).ok()
+}
+
+/// Bindings that can be invoked right now.
+pub(crate) fn invocable_bindings(bindings: &[RoomAgentBinding]) -> Vec<RoomAgentBinding> {
+    bindings
+        .iter()
+        .filter(|b| b.status == "active")
+        .cloned()
+        .collect()
+}
+
+/// A frozen native consent preview held for explicit authorization.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RoomConsentDraft {
+    pub preview: crate::host::RoomConsentPreview,
+    room_generation: u64,
+    pub busy: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InvocationState {
+    Pending,
+    /// The daemon queued the turn; the token is bound to exactly this
+    /// request/session/generation.
+    Acknowledged {
+        request_id: String,
+        session_id: String,
+        generation: String,
+    },
+    Refused(String),
+    /// The acknowledgement was lost. Never retried or inferred.
+    Unknown,
+}
+
+/// One explicit invocation in the current room admission.
+#[derive(Clone, PartialEq, Eq)]
+pub struct RoomInvocation {
+    pub agent_member_id: String,
+    pub message_seq: u64,
+    decision_token: String,
+    pub state: InvocationState,
+}
+
+impl RoomInvocation {
+    /// The decision token for a permission card naming exactly this
+    /// acknowledged request and session; foreign, tokenless or unacknowledged
+    /// cards get nothing.
+    #[allow(dead_code)]
+    pub(crate) fn token_for(&self, request_id: &str, session_id: &str) -> Option<&str> {
+        match &self.state {
+            InvocationState::Acknowledged {
+                request_id: r,
+                session_id: s,
+                ..
+            } if r == request_id && s == session_id => Some(&self.decision_token),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Debug for RoomInvocation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RoomInvocation")
+            .field("agent_member_id", &self.agent_member_id)
+            .field("message_seq", &self.message_seq)
+            .field("decision_token", &"[redacted]")
+            .field("state", &self.state)
+            .finish()
+    }
+}
+
+/// Authoritative invoking Human: only the daemon credential's caller in a
+/// Live/Recovering room, and only when it names a projected User. Browser
+/// identity is never authority, so Local rooms have no invoker until the
+/// daemon projects a Human identity there.
+pub(crate) fn invoke_caller(access: Option<&RoomAccessProjection>) -> Option<String> {
+    let access = access?;
+    if !matches!(
+        access.state,
+        RoomAccessState::Live | RoomAccessState::Recovering
+    ) {
+        return None;
+    }
+    let caller = access.caller_member_id.as_deref()?;
+    access
+        .members
+        .iter()
+        .any(|m| m.member_id == caller && m.actor_type == FederatedActorType::User)
+        .then(|| caller.to_string())
+}
+
+/// A committed, confirmed message authored by `caller` as a Human.
+pub(crate) fn message_invocable(message: &RoomMessage, caller: &str) -> bool {
+    message.author_id == caller && message.author_kind == RoomParticipantKind::Human
+}
+
+/// Exactly once per (agent, message): any prior attempt, including an
+/// unknown one, blocks another.
+pub(crate) fn may_invoke(invocations: &[RoomInvocation], agent: &str, seq: u64) -> bool {
+    !invocations
+        .iter()
+        .any(|i| i.agent_member_id == agent && i.message_seq == seq)
+}
+
+pub(crate) fn invocation_state_from(status: u16, body: &serde_json::Value) -> InvocationState {
+    let text = |field: &str| {
+        body.get(field)
+            .and_then(serde_json::Value::as_str)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+    };
+    if (200..300).contains(&status) {
+        return match (
+            body.get("ok") == Some(&serde_json::Value::Bool(true)),
+            text("request_id"),
+            text("session_id"),
+            text("generation"),
+        ) {
+            (true, Some(request_id), Some(session_id), Some(generation)) => {
+                InvocationState::Acknowledged {
+                    request_id,
+                    session_id,
+                    generation,
+                }
+            }
+            _ => InvocationState::Unknown,
+        };
+    }
+    InvocationState::Refused(text("error").unwrap_or_else(|| "invoke_refused".into()))
+}
+
+/// What a native consent result means for the page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ConsentStep {
+    pub refresh: bool,
+    pub keep_draft: bool,
+    pub status: Option<String>,
+}
+
+pub(crate) fn consent_step(
+    result: &Result<crate::host::RoomConsentOutcome, String>,
+) -> ConsentStep {
+    match result {
+        Ok(outcome) => match outcome.state.as_str() {
+            "applied" => ConsentStep {
+                refresh: true,
+                keep_draft: false,
+                status: None,
+            },
+            "declined" => ConsentStep {
+                refresh: false,
+                keep_draft: false,
+                status: None,
+            },
+            "unknown" => ConsentStep {
+                refresh: true,
+                keep_draft: true,
+                status: Some("Ocean did not hear back from the daemon.".into()),
+            },
+            _ => ConsentStep {
+                refresh: true,
+                keep_draft: false,
+                status: Some(consent_error_text(
+                    outcome.code.as_deref().unwrap_or("refused"),
+                )),
+            },
+        },
+        Err(code) => ConsentStep {
+            refresh: false,
+            keep_draft: false,
+            status: Some(consent_error_text(code)),
+        },
+    }
+}
+
+pub(crate) fn consent_error_text(code: &str) -> String {
+    match code {
+        "definition_digest_mismatch" => "The agent changed since this review.",
+        "owner_not_eligible" | "room_owner_required" => "Only the agent's owner can authorize it.",
+        "agent_binding_exists" => "This agent is already authorized.",
+        "consent_expired" | "consent_invalidated" => "This review expired.",
+        "daemon_unreachable" => "Ocean could not reach the daemon.",
+        "consent_unavailable" => "Agent authorization is unavailable here.",
+        code if code.starts_with("operator_") => "The operator credential is unavailable.",
+        _ => "Ocean could not authorize the agent.",
+    }
+    .to_string()
 }
 
 /// Build the per-room LiveKit token path, percent-encoding the room key.
@@ -3767,5 +4243,218 @@ mod tests {
             latest_seq: Some(5),
             read_seq: Some(5),
         })));
+    }
+
+    // ---- Room agent consent + invocation (ocean-private #65) ----
+
+    fn consent_member(id: &str, actor: FederatedActorType) -> FederatedRoomMemberProjection {
+        FederatedRoomMemberProjection {
+            member_id: id.into(),
+            owner_member_id: None,
+            actor_type: actor,
+            role_in_room: FederatedRoomRole::Member,
+            display_name: id.into(),
+            public_agent_descriptor: None,
+            joined_at: String::new(),
+            derived_presence: None,
+            local_binding_available: None,
+        }
+    }
+
+    fn consent_access(state: RoomAccessState, caller: Option<&str>) -> RoomAccessProjection {
+        RoomAccessProjection {
+            state,
+            caller_member_id: caller.map(str::to_string),
+            last_confirmed_global_sequence: None,
+            members: vec![
+                consent_member("human-a", FederatedActorType::User),
+                consent_member("agent-x", FederatedActorType::Agent),
+            ],
+            outbox: Vec::new(),
+        }
+    }
+
+    fn consent_message(seq: u64, author: &str, kind: RoomParticipantKind) -> RoomMessage {
+        RoomMessage {
+            seq,
+            author_id: author.into(),
+            author_kind: kind,
+            kind: RoomMessageKind::Message,
+            body: "do it".into(),
+            created_at: String::new(),
+            federated: None,
+            thread_parent_seq: None,
+        }
+    }
+
+    fn invocation(agent: &str, seq: u64, state: InvocationState) -> RoomInvocation {
+        RoomInvocation {
+            agent_member_id: agent.into(),
+            message_seq: seq,
+            decision_token: "secret-token-value".into(),
+            state,
+        }
+    }
+
+    #[test]
+    fn agent_bindings_decode_and_refusals_keep_the_last_projection() {
+        let body = serde_json::json!({
+            "ok": true,
+            "owner_member_id": "human-a",
+            "bindings": [{
+                "room_id": "r", "agent_member_id": "agent-x", "agent_package_id": "scout",
+                "agent_definition_digest": "sha256:ab", "display_name": "Scout",
+                "owner_member_id": "human-a", "status": "active", "generation": "3",
+                "owner_eligible": true, "effective_capabilities": []
+            }, {
+                "agent_member_id": "agent-y", "agent_package_id": "y", "status": "suspended"
+            }]
+        });
+        let bindings = parse_agent_bindings(&body).unwrap();
+        assert_eq!(bindings.len(), 2);
+        assert_eq!(bindings[0].generation, "3");
+        assert!(bindings[0].owner_eligible);
+        assert_eq!(invocable_bindings(&bindings).len(), 1);
+        assert_eq!(
+            parse_agent_bindings(&serde_json::json!({"ok": false, "error": "room_not_found"})),
+            None
+        );
+        assert_eq!(
+            parse_agent_bindings(&serde_json::json!({"ok": true, "bindings": 7})),
+            None
+        );
+    }
+
+    #[test]
+    fn only_the_daemon_projected_human_caller_may_invoke() {
+        let live = consent_access(RoomAccessState::Live, Some("human-a"));
+        assert_eq!(invoke_caller(Some(&live)).as_deref(), Some("human-a"));
+        let recovering = consent_access(RoomAccessState::Recovering, Some("human-a"));
+        assert_eq!(invoke_caller(Some(&recovering)).as_deref(), Some("human-a"));
+        for access in [
+            consent_access(RoomAccessState::Local, Some("human-a")),
+            consent_access(RoomAccessState::Connecting, Some("human-a")),
+            consent_access(RoomAccessState::Revoked, Some("human-a")),
+            consent_access(RoomAccessState::Live, None),
+            consent_access(RoomAccessState::Live, Some("agent-x")),
+            consent_access(RoomAccessState::Live, Some("stranger")),
+        ] {
+            assert_eq!(invoke_caller(Some(&access)), None, "{access:?}");
+        }
+        assert_eq!(invoke_caller(None), None);
+
+        assert!(message_invocable(
+            &consent_message(4, "human-a", RoomParticipantKind::Human),
+            "human-a"
+        ));
+        assert!(!message_invocable(
+            &consent_message(4, "human-b", RoomParticipantKind::Human),
+            "human-a"
+        ));
+        assert!(!message_invocable(
+            &consent_message(4, "human-a", RoomParticipantKind::Agent),
+            "human-a"
+        ));
+    }
+
+    #[test]
+    fn invocation_is_once_per_message_and_lost_acks_stay_unknown() {
+        let list = vec![invocation("agent-x", 4, InvocationState::Unknown)];
+        assert!(!may_invoke(&list, "agent-x", 4), "unknown never retries");
+        assert!(may_invoke(&list, "agent-x", 5));
+        assert!(may_invoke(&list, "agent-y", 4));
+
+        let ack = serde_json::json!({
+            "ok": true, "status": "queued", "admission_id": "adm",
+            "request_id": "req-1", "generation": "3", "session_id": "sess-1"
+        });
+        assert_eq!(
+            invocation_state_from(202, &ack),
+            InvocationState::Acknowledged {
+                request_id: "req-1".into(),
+                session_id: "sess-1".into(),
+                generation: "3".into(),
+            }
+        );
+        let partial = serde_json::json!({"ok": true, "request_id": "req-1"});
+        assert_eq!(
+            invocation_state_from(202, &partial),
+            InvocationState::Unknown
+        );
+        assert_eq!(
+            invocation_state_from(
+                403,
+                &serde_json::json!({"ok": false, "error": "invoke_author_mismatch"})
+            ),
+            InvocationState::Refused("invoke_author_mismatch".into())
+        );
+        assert_eq!(
+            invocation_state_from(500, &serde_json::json!({})),
+            InvocationState::Refused("invoke_refused".into())
+        );
+    }
+
+    #[test]
+    fn invocation_tokens_bind_only_to_their_exact_acknowledged_request() {
+        let acked = invocation(
+            "agent-x",
+            4,
+            InvocationState::Acknowledged {
+                request_id: "req-1".into(),
+                session_id: "sess-1".into(),
+                generation: "3".into(),
+            },
+        );
+        assert_eq!(
+            acked.token_for("req-1", "sess-1"),
+            Some("secret-token-value")
+        );
+        assert_eq!(acked.token_for("req-2", "sess-1"), None);
+        assert_eq!(acked.token_for("req-1", "sess-2"), None);
+        let pending = invocation("agent-x", 5, InvocationState::Pending);
+        assert_eq!(pending.token_for("req-1", "sess-1"), None);
+        let other = invocation(
+            "agent-y",
+            6,
+            InvocationState::Acknowledged {
+                request_id: "req-9".into(),
+                session_id: "sess-9".into(),
+                generation: "1".into(),
+            },
+        );
+        assert_ne!(
+            acked.token_for("req-1", "sess-1"),
+            other.token_for("req-1", "sess-1")
+        );
+        assert!(!format!("{acked:?}").contains("secret-token-value"));
+    }
+
+    #[test]
+    fn consent_results_map_to_exact_page_steps() {
+        let outcome = |state: &str, code: Option<&str>| {
+            Ok(crate::host::RoomConsentOutcome {
+                state: state.into(),
+                status: None,
+                code: code.map(str::to_string),
+            })
+        };
+        let applied = consent_step(&outcome("applied", None));
+        assert!(applied.refresh && !applied.keep_draft && applied.status.is_none());
+        let declined = consent_step(&outcome("declined", None));
+        assert!(!declined.refresh && !declined.keep_draft && declined.status.is_none());
+        let unknown = consent_step(&outcome("unknown", None));
+        assert!(unknown.refresh && unknown.keep_draft);
+        let stale = consent_step(&outcome("refused", Some("definition_digest_mismatch")));
+        assert!(stale.refresh && !stale.keep_draft);
+        assert_eq!(
+            stale.status.as_deref(),
+            Some("The agent changed since this review.")
+        );
+        let broken = consent_step(&Err("operator_credential_not_private".into()));
+        assert!(!broken.refresh);
+        assert_eq!(
+            broken.status.as_deref(),
+            Some("The operator credential is unavailable.")
+        );
     }
 }
