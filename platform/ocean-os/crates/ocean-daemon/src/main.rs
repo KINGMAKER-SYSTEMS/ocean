@@ -13084,6 +13084,8 @@ mod tests {
             &[
                 "access",
                 "agent_owners",
+                "aliases",
+                "aliases_truncated",
                 "ok",
                 "room",
                 "transcript",
@@ -13091,6 +13093,8 @@ mod tests {
                 "next_seq",
             ],
         );
+        assert_eq!(detail["aliases"], json!([]));
+        assert_eq!(detail["aliases_truncated"], false);
         assert_eq!(detail["ok"], true);
         assert_eq!(detail["has_more"], false);
         assert!(detail["next_seq"].is_null());
@@ -13171,6 +13175,8 @@ mod tests {
             &[
                 "access",
                 "agent_owners",
+                "aliases",
+                "aliases_truncated",
                 "ok",
                 "room",
                 "transcript",
@@ -13178,6 +13184,8 @@ mod tests {
                 "next_seq",
             ],
         );
+        assert_eq!(detail["aliases"], json!([]));
+        assert_eq!(detail["aliases_truncated"], false);
         assert_eq!(detail["ok"], true);
         assert_eq!(detail["has_more"], false);
         assert!(detail["next_seq"].is_null());
@@ -21319,6 +21327,8 @@ mod tests {
             &snapshot,
             &[
                 "access",
+                "aliases",
+                "aliases_truncated",
                 "closed",
                 "ok",
                 "room",
@@ -21329,6 +21339,8 @@ mod tests {
                 "has_more",
             ],
         );
+        assert_eq!(snapshot["aliases"], json!([]));
+        assert_eq!(snapshot["aliases_truncated"], false);
         assert_eq!(snapshot["ok"], true);
         assert_eq!(snapshot["closed"], true);
         assert_eq!(snapshot["room"]["id"], "closed-audit");
