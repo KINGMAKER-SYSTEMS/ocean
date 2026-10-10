@@ -1117,3 +1117,21 @@ Fixed the second-round review findings on the Rooms P2-P4 port (#68) and recorde
 
 Validation: in platform/ocean-os, `cargo fmt --all -- --check`, `cargo test -p ocean-daemon --locked room` (274 passed, 2 failed: the alias-envelope fixtures that fail on main, #42), `cargo test -p ocean-store --locked` (287), `cargo check --workspace --tests` and docs-check pass. In apps/ocean-surface, fmt, `cargo test -p ocean-surface-ui` (859 unit plus integration suites), `cargo test -p ocean-surface-proxy` (31) and WASM clippy with warnings denied pass; in crates/ocean-tauri, `cargo test` (34) and clippy with warnings denied pass against a placeholder dist. No live daemon, browser or desktop run.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [21:51] [10-09-26]
+agent: [Codex] [PR68 persistence repair]
+worktree: [codex/pr68-durable-run-transitions]
+type: [bug report] PR68 / issue71
+area: [backend] [testing]
+
+Run admission propagates initial work-card store failures before spawning execution.
+room_ask returns a failed-park error without terminating or retaining an uncommitted
+parked state; its already-posted question remains in the append-only transcript.
+Added real SQLite abort-trigger regressions for both failure points and retained
+success, claim and authority coverage. Owning daemon AGENTS now states the durable
+transition contract; parent ownership/index contracts remain unchanged.
+Validation on isolated Mac mini: ten p4_ tests and locked daemon check passed.
+Both new regressions fail with swallowed-error behavior restored; fixed sources
+restored byte-identically and all ten passed again. Formatting and diff checks pass.
+No live daemon changes. Other PR68 review findings remain outside this repair.
