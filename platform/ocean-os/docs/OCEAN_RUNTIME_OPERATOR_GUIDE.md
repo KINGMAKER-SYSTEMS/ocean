@@ -228,12 +228,13 @@ room. With credentialed rooms but no URL, startup warns
 If a credentialed room stays `recovering` while Bedrock answers, replay the
 receiver's two reads with the room bearer (`GET /api/v1/rooms/{key}/events`,
 expecting a `hello` frame, then `GET /api/v1/rooms/{key}/members`) and compare
-both against the daemon's strict wire structs. Read the bearer with a read-only query
-(`sqlite3 -readonly`) straight into a shell variable rather than typing it or
-copying `rooms.db`, so it stays out of shell history and off disk. A roster that fails to parse or project logs
-`outcome="roster_rejected"` at warn; a roster whose `caller_member_ids`
-omit the credential's local member warns `outcome="credential_member_mismatch"`
-(possible stale credential, still allowed Live); every failed epoch also logs
+both against the daemon's strict wire structs. Read the bearer with a
+read-only query (`sqlite3 -readonly`) straight into a shell variable rather
+than typing it or copying `rooms.db`, so it stays out of shell history and off
+disk. A roster that fails to parse or project logs `outcome="roster_rejected"`
+at warn; a roster whose `caller_member_ids` omit the credential's local member
+warns `outcome="credential_member_mismatch"` (possible stale credential, once
+per connection epoch, still allowed Live); every failed epoch also logs
 `outcome="epoch_recover"` with attempt and backoff under
 `RUST_LOG=ocean_daemon::room_federation=debug`.
 

@@ -2133,11 +2133,12 @@ async fn run_epoch(
     };
 
     // Roster is committed before the first room_event of every connection epoch.
-    let members = match fetch_roster(&inner, &client, &credential, &live_human_member_ids).await {
-        Ok(members) => members,
-        Err(EpochOutcome::Revoked) => return EpochOutcome::Revoked,
-        Err(outcome) => return outcome,
-    };
+    let members =
+        match fetch_roster(&inner, &client, &credential, &live_human_member_ids, true).await {
+            Ok(members) => members,
+            Err(EpochOutcome::Revoked) => return EpochOutcome::Revoked,
+            Err(outcome) => return outcome,
+        };
     let state = access_state_for_hello(cursor, high_water);
     if !commit_access(&inner, &key, state, Some(&members), None) {
         return EpochOutcome::Recover;
@@ -2273,7 +2274,9 @@ async fn run_epoch(
                         if sequence != last_accepted {
                             break EpochOutcome::Recover;
                         }
-                        match fetch_roster(&inner, &client, &credential, &live_human_member_ids).await {
+                        match fetch_roster(&inner, &client, &credential, &live_human_member_ids, false)
+                            .await
+                        {
                             Ok(members) => {
                                 let Ok(current_state) = durable_state(&inner.rooms, &key) else {
                                     break EpochOutcome::Recover;
@@ -2753,6 +2756,9 @@ async fn fetch_roster(
     client: &FederationClient,
     credential: &RoomCredential,
     live_human_member_ids: &HashSet<String>,
+    // True only for the first roster of a connection epoch, so the stale-
+    // credential warning fires once per epoch, not on every heartbeat refresh.
+    diagnose_caller: bool,
 ) -> Result<Vec<FederatedRoomMemberProjection>, EpochOutcome> {
     let url = client
         .room_endpoint(&credential.room_id, "members")
@@ -2783,7 +2789,7 @@ async fn fetch_roster(
             return Err(EpochOutcome::Recover);
         }
     };
-    if caller_lacks_credential_member(&envelope, credential) {
+    if diagnose_caller && caller_lacks_credential_member(&envelope, credential) {
         tracing::warn!(
             room = %credential.room_id,
             outcome = "credential_member_mismatch",
@@ -2903,7 +2909,7 @@ async fn ingest_message_row(
                 // or presence frame would, instead of an empty set that
                 // would mark every human member Unavailable.
                 let current_state = durable_state(&inner.rooms, &credential.room_id)?;
-                let members = fetch_roster(inner, client, credential, live_human_member_ids)
+                let members = fetch_roster(inner, client, credential, live_human_member_ids, false)
                     .await
                     .map_err(|outcome| match outcome {
                         EpochOutcome::Revoked => BridgeError::Revoked,
@@ -7763,10 +7769,6 @@ mod tests {
         server.abort();
     }
 
-    /// Production Bedrock's `GET /members` carries `caller_member_ids` beside
-    /// the roster (and `operator_id` on operator-room members). The strict
-    /// envelope once rejected it, so every epoch returned Recover after a
-    /// valid hello and rooms never reached Live.
     #[test]
     fn caller_member_mismatch_is_detected_only_when_bedrock_names_callers() {
         let credential = RoomCredential {
@@ -7789,6 +7791,10 @@ mod tests {
         ));
     }
 
+    /// Production Bedrock's `GET /members` carries `caller_member_ids` beside
+    /// the roster (and `operator_id` on operator-room members). The strict
+    /// envelope once rejected it, so every epoch returned Recover after a
+    /// valid hello and rooms never reached Live.
     #[tokio::test]
     async fn roster_with_caller_member_ids_reaches_live() {
         let key = RoomKey::new("caller-ids".to_owned());
