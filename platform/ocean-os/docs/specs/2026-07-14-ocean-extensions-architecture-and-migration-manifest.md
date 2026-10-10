@@ -539,6 +539,8 @@ ordered A1 → A2a → A2b sequence and binding review/stop gates.
 
 **Gate:** untrusted project package tests, offline path install, Git revision pinning, rollback/uninstall tests, no-code-execution-on-inspect proof.
 
+**Stage A status (2026-10-06):** In this monorepo, A1–A2b are accepted and A3a is the next authorized slice. Phases 2–3 remain unaccepted; later-stage status advances only from public implementation, review, and operator-acceptance evidence.
+
 ### Phase 4 — `ocean-herdr` reference package
 
 1. Create the `ocean-extensions` repository only after Phases 1–3 establish a host it can target, unless a scaffold-only repository is explicitly approved earlier.
