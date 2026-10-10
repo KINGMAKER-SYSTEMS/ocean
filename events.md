@@ -1291,3 +1291,12 @@ The daemon now serves PUT (`/v1/me`, room agent settings, and P6 prefs in the ne
 
 Validation on the Mac mini (dedicated target dir): `cargo fmt -p ocean-daemon -- --check`, `cargo test -p ocean-daemon --locked -- cors router_contract` (14 passed), the new test fails with PUT removed, `cargo clippy -p ocean-daemon --locked --all-targets -- -D warnings`, `cargo xtask docs-check` PASS. No live daemon or Tauri run.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [19:00] [10-10-26]
+agent: [claude code] [claude-opus-5-5]
+worktree: [fix/daemon-cors-put] (detached wt-w2a-cors, stacked on port/rooms-identity-cards-agents)
+type: [workflow]
+area: [backend] [testing]
+
+PR #77 reconciliation: merged current port/rooms-identity-cards-agents (de09e349) into fix/daemon-cors-put. The only conflict was this append-only ledger; both histories are kept, base entries first. daemon main.rs and AGENTS.md merged cleanly; the CORS method contract is unchanged. Validation on the Mac mini (dedicated target dir): `cargo test -p ocean-daemon --locked -- cors router` 28 passed (including router_contract_preflight_admits_every_served_method), `cargo fmt -p ocean-daemon -- --check` clean. No live daemon run.
