@@ -16,7 +16,7 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   Serialize start, cancel, and logout under an independent per-provider
   operation lease through cancel/bind/register or removal. Retain each attempt's
   OAuth publication fence even when an HTTP future drops; revoke and settle it
-  before replacement/logout. Blocking removal retains its operation lease.
+  before replacement/logout. Logout retains its operation lease in an owned task through local credential removal and bounded remote revocation even if the HTTP waiter drops. The response exposes `remote_revocation` and a fixed message so local sign-out never implies confirmed remote revocation.
   Status runs custody/native reads off Tokio workers and projects the shared
   runtime resolver's token-free origin separately from stored OAuth facts.
   Login failure logs and responses contain only fixed classifications/provider
@@ -31,6 +31,13 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   selections. Session creation/config accept both legacy ids and qualified
   catalog routes, persist the wire model/provider pair, and reconstruct the
   qualified route for resumed turns through `SessionModelConfig::model_spec`.
+- ChatGPT-plan choices are account-specific: query public `/v1/models` with
+  the `openai-chatgpt` bearer token, preserve the response's listed order and
+  `display_name`, and expose only `models[]` entries with
+  `visibility:"list"` as provider-qualified routes. These routes may use
+  dynamically listed slugs that are absent from the bundled catalog. Failure
+  to fetch leaves bundled ChatGPT routes unready; a stored credential alone
+  never proves model entitlement.
 - Restart the daemon only by specific PID; do not use blind `pkill` sweeps.
 - HTTP turn routes must resolve effective cwd from client cwd/project metadata and must never fall back to daemon process cwd.
 - Do not bypass runtime permission gates from daemon route code.

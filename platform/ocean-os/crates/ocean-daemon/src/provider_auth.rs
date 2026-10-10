@@ -11,7 +11,7 @@
 //! | `POST /v1/auth/providers/{provider}/login` | starts a login: `attempt_id`, `authorize_url` |
 //! | `GET /v1/auth/providers/{provider}/login/{attempt_id}` | `pending` / `succeeded` / `failed` / `cancelled` |
 //! | `DELETE /v1/auth/providers/{provider}/login/{attempt_id}` | cancels a pending attempt |
-//! | `POST /v1/auth/providers/{provider}/logout` | removes the provider's auth-file block |
+//! | `POST /v1/auth/providers/{provider}/logout` | clears credentials and reports remote revocation status |
 //!
 //! Every route is operator-authenticated through the same fail-closed
 //! principal as room authority mutations ([`crate::room_operator`]): a Cookie
@@ -84,7 +84,7 @@ pub(crate) struct ProviderLogins {
     /// (`OCEAN_AUTH_FILE`, then the default config path). Tests pin a temp file.
     auth_file: Option<PathBuf>,
     attempts: Mutex<HashMap<&'static str, Attempt>>,
-    operations: [Arc<tokio::sync::Mutex<()>>; 2],
+    operations: [Arc<tokio::sync::Mutex<()>>; 3],
     #[cfg(test)]
     provider_env: ProviderEnv,
 }
@@ -107,6 +107,7 @@ impl ProviderLogins {
             &self.operations[match provider {
                 OAuthProvider::Claude => 0,
                 OAuthProvider::Codex => 1,
+                OAuthProvider::ChatGptPlan => 2,
             }],
         )
     }
@@ -227,13 +228,15 @@ fn provider_id(provider: OAuthProvider) -> ProviderId {
     match provider {
         OAuthProvider::Claude => ProviderId::ClaudeCode,
         OAuthProvider::Codex => ProviderId::OpenAiCodex,
+        OAuthProvider::ChatGptPlan => ProviderId::OpenAiChatGpt,
     }
 }
 
 fn display_label(provider: OAuthProvider) -> &'static str {
     match provider {
         OAuthProvider::Claude => "Claude (Pro/Max plan)",
-        OAuthProvider::Codex => "Codex (ChatGPT plan)",
+        OAuthProvider::Codex => "Codex OAuth",
+        OAuthProvider::ChatGptPlan => "ChatGPT plan",
     }
 }
 
@@ -480,26 +483,36 @@ pub(crate) async fn logout_inner(
     // the removal below rather than after it.
     cancel_and_settle(logins, provider).await;
     let auth_file = logins.auth_file.clone();
-    let removed = tokio::task::spawn_blocking(move || {
-        // Request cancellation must not release the operation lease while the
-        // blocking removal can still race a subsequent login.
+    let outcome = spawn_logout_with_custody(operation, ocean_oauth::logout(provider, auth_file))
+        .await
+        .map_err(|_| ApiError::internal("logout_failed").response())?
+        .map_err(|_| {
+            tracing::warn!(
+                provider = provider.label(),
+                classification = "logout_failed",
+                "provider logout failed"
+            );
+            ApiError::internal("logout_failed").response()
+        })?;
+    Ok((StatusCode::OK, Json(logout_response(provider, &outcome))))
+}
+
+fn spawn_logout_with_custody(
+    operation: tokio::sync::OwnedMutexGuard<()>,
+    logout: impl std::future::Future<Output = anyhow::Result<ocean_oauth::LogoutOutcome>>
+        + Send
+        + 'static,
+) -> tokio::task::JoinHandle<anyhow::Result<ocean_oauth::LogoutOutcome>> {
+    tokio::spawn(async move {
+        // Dropping the HTTP waiter cannot detach removal/revocation from its lease.
         let _operation = operation;
-        ocean_oauth::logout(provider, auth_file)
+        logout.await
     })
-    .await
-    .map_err(|_| ApiError::internal("logout_failed").response())?
-    .map_err(|_| {
-        tracing::warn!(
-            provider = provider.label(),
-            classification = "logout_failed",
-            "provider logout failed"
-        );
-        ApiError::internal("logout_failed").response()
-    })?;
-    Ok((
-        StatusCode::OK,
-        Json(json!({"ok": true, "provider": provider.label(), "removed": removed})),
-    ))
+}
+
+fn logout_response(provider: OAuthProvider, outcome: &ocean_oauth::LogoutOutcome) -> Value {
+    json!({"ok": true, "provider": provider.label(), "removed": outcome.removed,
+        "remote_revocation": outcome.remote_revocation, "message": outcome.message()})
 }
 
 fn flatten(result: RouteResult) -> (StatusCode, Json<Value>) {
@@ -613,6 +626,82 @@ mod tests {
     fn body(result: RouteResult) -> (StatusCode, Value) {
         let (status, Json(value)) = flatten(result);
         (status, value)
+    }
+
+    #[tokio::test]
+    async fn dropped_logout_waiter_keeps_lease_through_async_revocation() {
+        let (_dir, logins) = logins(None);
+        let operation = logins
+            .operation(OAuthProvider::ChatGptPlan)
+            .lock_owned()
+            .await;
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+        let request = tokio::spawn(async move {
+            spawn_logout_with_custody(operation, async move {
+                // Synthetic revocation pending after local credential detachment.
+                started_tx.send(()).unwrap();
+                finish_rx.await.unwrap();
+                Ok(ocean_oauth::LogoutOutcome {
+                    removed: true,
+                    remote_revocation: ocean_oauth::RemoteRevocation::Confirmed,
+                })
+            })
+            .await
+        });
+        started_rx.await.unwrap();
+        request.abort();
+        let _ = request.await;
+        assert!(logins
+            .operation(OAuthProvider::ChatGptPlan)
+            .try_lock()
+            .is_err());
+        assert!(logins.operation(OAuthProvider::Codex).try_lock().is_ok());
+        finish_tx.send(()).unwrap();
+        let _settled = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            logins.operation(OAuthProvider::ChatGptPlan).lock_owned(),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn chatgpt_logout_route_preserves_registration_and_reports_unconfirmed() {
+        let (_dir, logins) = logins(Some(
+            r#"{"openai-chatgpt":{"client_id":"dynamic_agent_client","refresh":"synthetic-refresh","subject":"synthetic-account","ext_agent_host_id":"urn:uuid:synthetic"},"openai-codex":{"access":"synthetic-codex"}}"#,
+        ));
+        let (status, response) =
+            body(logout_inner(&operator(), &logins, &authed(), "chatgpt").await);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["remote_revocation"], "unconfirmed");
+        assert_eq!(response["removed"], true);
+        assert!(response["message"]
+            .as_str()
+            .unwrap()
+            .contains("not confirmed"));
+        let root: Value =
+            serde_json::from_slice(&std::fs::read(logins.auth_file.as_ref().unwrap()).unwrap())
+                .unwrap();
+        assert_eq!(root["openai-chatgpt"]["subject"], "synthetic-account");
+        assert!(root["openai-chatgpt"].get("refresh").is_none());
+        assert_eq!(root["openai-codex"]["access"], "synthetic-codex");
+    }
+
+    #[test]
+    fn chatgpt_logout_response_distinguishes_local_clear_from_remote_revocation() {
+        let outcome = ocean_oauth::LogoutOutcome {
+            removed: true,
+            remote_revocation: ocean_oauth::RemoteRevocation::Unconfirmed,
+        };
+        let body = logout_response(OAuthProvider::ChatGptPlan, &outcome);
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["removed"], true);
+        assert_eq!(body["remote_revocation"], "unconfirmed");
+        assert!(body["message"]
+            .as_str()
+            .unwrap()
+            .contains("ChatGPT Settings"));
     }
 
     #[tokio::test]

@@ -1077,6 +1077,58 @@ ChatGPT sign-in: gpt-6.1-sol, glm-5.3 and deepseek-v4-pro each ran a bash tool
 call and answered; session model = requested, no reroute. ocean-protocol codex
 tests 36/36, ocean-providers 67/67.
 _________________________________________________________________________________
+time: [17:42] [10-07-26]
+agent: [Codex] [GPT-6.1]
+worktree: [codex/chatgpt-plan-responses-provider]
+type: [fix]
+area: [backend]: ChatGPT-plan OAuth and model routing
+
+Investigated Ocean TUI model failures for issue #61. Added a distinct Sign in
+with ChatGPT OAuth registration, token refresh, and public Responses route while
+leaving Codex OAuth separate. The model picker now reads the account's
+`models[].slug`, `display_name`, and `visibility` catalog, supports dynamically
+listed slugs, and refreshes an expired ChatGPT token before discovery. Live
+account sign-in/inference remains unverified pending user authorization.
+
+Validation: `cargo fmt --all -- --check`; targeted OAuth, provider, protocol,
+agent refresh, daemon model-catalog, and TUI login tests; scoped `cargo check`
+for ocean-oauth, ocean-providers, ocean-protocol, ocean-agent, ocean-daemon, and
+ocean-tui. All recorded checks passed.
+_________________________________________________________________________________
+
+time: [17:45] [10-07-26]
+agent: [Codex] [GPT-6.1]
+worktree: [codex/chatgpt-plan-responses-provider]
+type: [fix]
+area: [testing]: OAuth callback recovery
+
+Follow-up to issue #61: a forged callback with the wrong OAuth state returned an
+error but also consumed the pending login's one-shot result sender. It now rejects
+the request without ending the login, and regression tests prove a subsequent
+valid callback still completes. `cargo test --locked -p ocean-oauth
+server::tests:: -- --test-threads=1`, formatting check, and `git diff --check` pass.
+_________________________________________________________________________________
+
+time: [04:30pm] [10-09-26]
+agent: [claude-code] [claude-opus-5-5]
+worktree: [codex/chatgpt-plan-responses-provider]
+type: [bug report]: PR #62 review fix
+area: [backend]: ChatGPT-plan route resolution
+
+Review of #62 found two routing bugs. The new early qualified-route branch in
+`resolve_model_selection` sent every catalog route to `model_for_explicit_provider`,
+which has no `kimi-coding` arm, so `kimi-coding/k3` stopped resolving (failing
+`qualified_routes_round_trip_wire_id_provider_and_efforts` and, via the new
+`provider/model` last_model persistence, a daemon restart after selecting it).
+The branch is now limited to `openai-chatgpt`. Dynamically listed ChatGPT-plan
+slugs were picker-ready but rejected by session create/config PATCH and dropped
+to a bare id by `model_spec`, because `catalog_model` did not know them;
+`catalog_model` now accepts validated `openai-chatgpt/<slug>` routes. Added a
+last_model round-trip regression test. `cargo fmt --all -- --check` passes;
+ocean-oauth, ocean-providers, ocean-protocol, ocean-agent pass; ocean-daemon's two
+persistent-room alias tests fail identically without this change.
+_________________________________________________________________________________
+
 time: [14:16] [06-10-26]
 agent: [codex]
 worktree: [fix/report-model-reroute-in-session] [/Users/seenorising/dev/ocean-org-sub]
@@ -1156,3 +1208,14 @@ Round 5: round-4 review follow-ups on model reroute fidelity. (F2) Selection-tim
 
 Validation: ocean-agent 280 passed / 0 failed / 2 ignored; ocean-daemon 908 passed / 2 failed (only the two known pre-existing persistent_room envelope-key assertions); clippy -p ocean-agent --all-targets -D warnings clean; fmt --all --check clean; git diff --check clean.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [23:02] [09-10-26]
+agent: [codex] [factory release]
+worktree: [codex/pr62-reviewed-lifecycle]
+type: [bug report]
+area: [backend] [testing] [review]
+
+PR #62 / issue #80: reconciled the separate ChatGPT-plan Responses provider with canonical main f1b22bd8. Persist host identity before initial authorization, retain selected account/client registration after sign-out, detach usable credentials under custody before bounded trusted-origin refresh-token revocation, and return explicit confirmed/unconfirmed status. Detached credentials stay only with the bounded revocation operation; daemon operation ownership survives HTTP cancellation and refresh cannot republish the detached block. Codex and ChatGPT provider flows remain separate. Both public ledger histories preserved.
+
+Validation: repaired source OAuth 54 unit + 2 integration, daemon auth 17 (including blocked removal and dropped-waiter remote-phase custody), agent refresh 10, locked six-crate check, formatting and diff checks pass. Host-retention regression fails without repair and passes restored. Prior reconciled source also passed providers 70, protocol 3, agent route/model constructors 2, catalog 3 and TUI login 13. Synthetic isolated fixtures only; four changed Rust hashes match the remotely validated copy. Independent review ACKed 7c9a120e; final receipt precedes exact-head review and required builds. OAuth/daemon contracts updated, parent ownership/indexes unchanged. No live authentication, installation, inference, deployment or live acceptance; issue #61 stays open for real-account proof. Maintainer approval remains required.

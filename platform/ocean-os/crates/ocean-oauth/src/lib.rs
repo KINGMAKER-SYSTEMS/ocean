@@ -6,8 +6,11 @@
 //! auth file in the exact shape [`ocean_providers`] (and the turn-time refresh
 //! pass in `ocean-agent`) already consume.
 //!
-//! This crate performs fresh logins only — token refresh already exists
+//! This crate performs fresh logins and sign-out — token refresh already exists
 //! (`ocean-agent::oauth_refresh`) and reuses the block shape written here.
+
+mod logout;
+pub use logout::{logout, LogoutOutcome, RemoteRevocation};
 
 mod pkce;
 mod providers;
@@ -37,6 +40,8 @@ const ENV_ANTHROPIC_TOKEN_URL: &str = "OCEAN_OAUTH_ANTHROPIC_TOKEN_URL";
 /// Environment override for the OpenAI Codex token endpoint. See
 /// [`ENV_ANTHROPIC_TOKEN_URL`].
 const ENV_OPENAI_TOKEN_URL: &str = "OCEAN_OAUTH_OPENAI_TOKEN_URL";
+/// Environment override for the public ChatGPT-plan token endpoint.
+const ENV_CHATGPT_TOKEN_URL: &str = "OCEAN_OAUTH_CHATGPT_TOKEN_URL";
 
 /// The provider whose OAuth flow is being driven.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +50,8 @@ pub enum OAuthProvider {
     Claude,
     /// OpenAI Codex — ChatGPT plan (`openai-codex` auth block).
     Codex,
+    /// Sign in with ChatGPT plan for the public Responses API.
+    ChatGptPlan,
 }
 
 impl OAuthProvider {
@@ -53,6 +60,7 @@ impl OAuthProvider {
         match self {
             OAuthProvider::Claude => "claude",
             OAuthProvider::Codex => "codex",
+            OAuthProvider::ChatGptPlan => "chatgpt",
         }
     }
 
@@ -62,6 +70,7 @@ impl OAuthProvider {
         match self {
             OAuthProvider::Claude => "claude-code",
             OAuthProvider::Codex => "openai-codex",
+            OAuthProvider::ChatGptPlan => "openai-chatgpt",
         }
     }
 
@@ -70,17 +79,23 @@ impl OAuthProvider {
         match label {
             "claude" => Some(OAuthProvider::Claude),
             "codex" => Some(OAuthProvider::Codex),
+            "chatgpt" | "openai-chatgpt" => Some(OAuthProvider::ChatGptPlan),
             _ => None,
         }
     }
 
     /// Every provider this crate can log in, in display order.
-    pub const ALL: [OAuthProvider; 2] = [OAuthProvider::Claude, OAuthProvider::Codex];
+    pub const ALL: [OAuthProvider; 3] = [
+        OAuthProvider::Claude,
+        OAuthProvider::Codex,
+        OAuthProvider::ChatGptPlan,
+    ];
 
     fn token_url_env(self) -> &'static str {
         match self {
             OAuthProvider::Claude => ENV_ANTHROPIC_TOKEN_URL,
             OAuthProvider::Codex => ENV_OPENAI_TOKEN_URL,
+            OAuthProvider::ChatGptPlan => ENV_CHATGPT_TOKEN_URL,
         }
     }
 }
@@ -156,6 +171,15 @@ pub struct LoginSession {
     /// Token endpoint override (from the per-provider env var); `None` falls
     /// back to the provider's public default. Read once at [`begin`] time.
     token_url_override: Option<String>,
+    chatgpt: Option<ChatGptLogin>,
+}
+
+struct ChatGptLogin {
+    client_id: Option<String>,
+    host_id: String,
+    nonce: String,
+    id_token_hint: Option<String>,
+    expected_subject: Option<String>,
 }
 
 /// Result of a completed login.
@@ -225,13 +249,6 @@ pub fn oauth_block_status(
     })
 }
 
-/// Sign `provider` out by removing its block from the auth file, preserving
-/// every other block. Returns whether a block was removed.
-pub fn logout(provider: OAuthProvider, auth_file: Option<PathBuf>) -> Result<bool> {
-    let path = resolve_auth_path(auth_file)?;
-    store::remove_and_write(&path, provider.auth_json_key())
-}
-
 /// Resolve the Ocean auth file path: an explicit argument wins, otherwise the
 /// configured environment location (`ocean_providers::ProviderEnv`).
 fn resolve_auth_path(auth_file: Option<PathBuf>) -> Result<PathBuf> {
@@ -281,11 +298,59 @@ pub async fn begin(provider: OAuthProvider, auth_file: Option<PathBuf>) -> Resul
     let auth_path = resolve_auth_path(auth_file)?;
     let token_url_override = env_token_url(provider);
 
+    let chatgpt = if provider == OAuthProvider::ChatGptPlan {
+        let path = auth_path.clone();
+        let prior = tokio::task::spawn_blocking(move || store::ensure_chatgpt_host(&path))
+            .await
+            .map_err(|_| anyhow!("ChatGPT registration persistence failed"))??;
+        let client_id = prior
+            .get("client_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_owned);
+        let host_id = prior
+            .get("ext_agent_host_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("urn:uuid:{}", uuid::Uuid::new_v4()));
+        let id_token_hint = prior
+            .get("id_token")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_owned);
+        let expected_subject = prior
+            .get("subject")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_owned);
+        Some(ChatGptLogin {
+            client_id,
+            host_id,
+            nonce: pkce::generate_state(),
+            id_token_hint,
+            expected_subject,
+        })
+    } else {
+        None
+    };
     let spec = bind_spec(provider);
     let server = CallbackServer::bind(&spec, state.clone()).await?;
     let redirect_uri = server.redirect_uri.clone();
     let launch_url = server.launch_url.clone();
-    let authorize_url = build_authorize_url(provider, &state, &pkce_pair.challenge, &redirect_uri);
+    let authorize_url = if let Some(chatgpt) = &chatgpt {
+        providers::build_chatgpt_authorize_url(
+            chatgpt.client_id.as_deref(),
+            &chatgpt.host_id,
+            chatgpt.id_token_hint.as_deref(),
+            &chatgpt.nonce,
+            &state,
+            &pkce_pair.challenge,
+            &redirect_uri,
+        )
+    } else {
+        build_authorize_url(provider, &state, &pkce_pair.challenge, &redirect_uri)
+    };
     server.set_pending_url(authorize_url.clone());
 
     Ok(LoginSession {
@@ -297,6 +362,7 @@ pub async fn begin(provider: OAuthProvider, auth_file: Option<PathBuf>) -> Resul
         redirect_uri,
         auth_path,
         token_url_override,
+        chatgpt,
     })
 }
 
@@ -329,8 +395,12 @@ impl LoginSession {
         // `/launch` is no longer active once the flow has resolved.
         self.server.clear_pending();
 
-        let (code, state) = match callback {
-            CallbackResult::Ok { code, state } => (code, state),
+        let (code, state, callback_client_id) = match callback {
+            CallbackResult::Ok {
+                code,
+                state,
+                client_id,
+            } => (code, state, client_id),
             CallbackResult::Err(message) => bail!("{message}"),
         };
 
@@ -338,15 +408,30 @@ impl LoginSession {
             .token_url_override
             .as_deref()
             .unwrap_or_else(|| consts(self.provider).token_url);
-        let token = exchange(
-            self.provider,
-            token_url,
-            &code,
-            &state,
-            &self.redirect_uri,
-            &self.verifier,
-        )
-        .await?;
+        let token = if let Some(chatgpt) = &self.chatgpt {
+            providers::exchange_chatgpt(
+                token_url,
+                &code,
+                callback_client_id.as_deref(),
+                chatgpt.client_id.as_deref(),
+                &self.redirect_uri,
+                &self.verifier,
+                &chatgpt.nonce,
+                &chatgpt.host_id,
+                chatgpt.expected_subject.as_deref(),
+            )
+            .await?
+        } else {
+            exchange(
+                self.provider,
+                token_url,
+                &code,
+                &state,
+                &self.redirect_uri,
+                &self.verifier,
+            )
+            .await?
+        };
         let block = build_block(self.provider, &token);
         let auth_path = self.auth_path.clone();
         let provider_key = self.provider.auth_json_key();
@@ -516,32 +601,156 @@ mod status_tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    #[test]
-    fn missing_file_is_signed_out_and_logout_preserves_other_blocks() {
+    #[tokio::test]
+    async fn missing_file_is_signed_out_and_logout_preserves_other_blocks() {
         let missing = std::env::temp_dir().join("ocean-oauth-status-missing/auth.json");
         assert!(
             !oauth_block_status(OAuthProvider::Claude, Some(missing.clone()))
                 .unwrap()
                 .present
         );
-        assert!(!logout(OAuthProvider::Claude, Some(missing.clone())).unwrap());
+        assert!(
+            !logout(OAuthProvider::Claude, Some(missing.clone()))
+                .await
+                .unwrap()
+                .removed
+        );
         assert!(!missing.exists(), "logout must not create an auth file");
 
         let (dir, path) = auth_file(
             r#"{"claude-code":{"type":"oauth","access":"a"},"deepseek":{"api_key":"k"},"x":1}"#,
         );
-        assert!(logout(OAuthProvider::Claude, Some(path.clone())).unwrap());
+        assert!(
+            logout(OAuthProvider::Claude, Some(path.clone()))
+                .await
+                .unwrap()
+                .removed
+        );
         let root: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert!(root.get("claude-code").is_none());
         assert_eq!(root["deepseek"]["api_key"], "k");
-        assert!(!logout(OAuthProvider::Claude, Some(path.clone())).unwrap());
+        assert!(
+            !logout(OAuthProvider::Claude, Some(path.clone()))
+                .await
+                .unwrap()
+                .removed
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600);
         }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn chatgpt_cancel_restart_and_logout_reuse_registration() {
+        let (dir, path) = auth_file(r#"{"deepseek":{"api_key":"synthetic-other"}}"#);
+        let first = super::begin(OAuthProvider::ChatGptPlan, Some(path.clone()))
+            .await
+            .unwrap();
+        let first_host = first.chatgpt.as_ref().unwrap().host_id.clone();
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(persisted["openai-chatgpt"]["ext_agent_host_id"], first_host);
+        assert!(
+            !oauth_block_status(OAuthProvider::ChatGptPlan, Some(path.clone()))
+                .unwrap()
+                .present
+        );
+        drop(first); // cancellation before any callback/exchange
+        let restarted = super::begin(OAuthProvider::ChatGptPlan, Some(path.clone()))
+            .await
+            .unwrap();
+        assert_eq!(restarted.chatgpt.as_ref().unwrap().host_id, first_host);
+        drop(restarted);
+        super::store::merge_and_write(&path, "openai-chatgpt", serde_json::json!({
+            "ext_agent_host_id":first_host, "client_id":"issued-synthetic", "issuer":"https://auth.openai.com", "subject":"synthetic-account", "email":"synthetic@example.invalid",
+            "type":"oauth", "access":"synthetic-access", "id_token":"synthetic-id", "expires":100,
+            "unexpected_secret":"synthetic-secret"
+        })).unwrap();
+        // No refresh token: sign out without any network call.
+        let outcome = logout(OAuthProvider::ChatGptPlan, Some(path.clone()))
+            .await
+            .unwrap();
+        assert!(outcome.removed);
+        assert_eq!(
+            outcome.remote_revocation,
+            super::RemoteRevocation::NotRequired
+        );
+        let root: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(root["deepseek"]["api_key"], "synthetic-other");
+        assert_eq!(root["openai-chatgpt"].as_object().unwrap().len(), 5);
+        assert!(
+            !oauth_block_status(OAuthProvider::ChatGptPlan, Some(path.clone()))
+                .unwrap()
+                .present
+        );
+        let returning = super::begin(OAuthProvider::ChatGptPlan, Some(path.clone()))
+            .await
+            .unwrap();
+        let registration = returning.chatgpt.as_ref().unwrap();
+        assert_eq!(registration.client_id.as_deref(), Some("issued-synthetic"));
+        assert_eq!(
+            registration.expected_subject.as_deref(),
+            Some("synthetic-account")
+        );
+        assert_eq!(registration.host_id, first_host);
+        assert!(registration.id_token_hint.is_none());
+        assert!(!returning.authorize_url.contains("dynamic_agent_client"));
+        drop(returning);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn chatgpt_failed_first_callback_retains_host_identity() {
+        let (dir, path) = auth_file("{}");
+        let session = super::begin(OAuthProvider::ChatGptPlan, Some(path.clone()))
+            .await
+            .unwrap();
+        let host = session.chatgpt.as_ref().unwrap().host_id.clone();
+        let url = reqwest::Url::parse(&session.authorize_url).unwrap();
+        let state = url
+            .query_pairs()
+            .find(|(key, _)| key == "state")
+            .unwrap()
+            .1
+            .into_owned();
+        let callback = format!("{}?error=access_denied&state={state}", session.redirect_uri);
+        let task = tokio::spawn(session.finish());
+        let _ = reqwest::get(callback).await.unwrap();
+        assert!(task.await.unwrap().is_err());
+        let retry = super::begin(OAuthProvider::ChatGptPlan, Some(path.clone()))
+            .await
+            .unwrap();
+        assert_eq!(retry.chatgpt.as_ref().unwrap().host_id, host);
+        drop(retry);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn chatgpt_unrevocable_session_reports_unconfirmed_after_local_clear() {
+        let (dir, path) = auth_file(
+            r#"{"openai-chatgpt":{"refresh":"synthetic","client_id":"dynamic_agent_client","ext_agent_host_id":"urn:uuid:synthetic"},"openai-codex":{"access":"synthetic-codex"}}"#,
+        );
+        let outcome = logout(OAuthProvider::ChatGptPlan, Some(path.clone()))
+            .await
+            .unwrap();
+        assert!(outcome.removed);
+        assert_eq!(
+            outcome.remote_revocation,
+            super::RemoteRevocation::Unconfirmed
+        );
+        assert!(outcome
+            .message()
+            .contains("Remote revocation was not confirmed"));
+        let root: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(root["openai-chatgpt"].get("refresh").is_none());
+        assert_eq!(root["openai-codex"]["access"], "synthetic-codex");
         std::fs::remove_dir_all(dir).unwrap();
     }
 

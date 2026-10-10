@@ -25,6 +25,12 @@ This crate owns the multi-provider LLM wire protocol layer for Anthropic, OpenAI
   originator, beta, version, session and account headers. The API-key route
   replays encrypted reasoning only from its recorded API/provider; foreign thinking
   remains absent. Local HTTP/SSE fixtures verify endpoint, tools and completion.
+- ChatGPT-plan OAuth uses the public `openai-responses` route at
+  `https://api.openai.com/v1/responses` with bearer auth, `store:false`, and
+  streaming completion. It must not inherit Codex originator/version/session/
+  account headers or API-key credentials. Refresh uses the issuer's
+  form-encoded public-client grant with the issued client id and
+  `resource=https://api.openai.com/v1`.
 - Codex OAuth requests using the `codex_cli_rs` originator must carry a current
   `version` header; ChatGPT version-gates newly released Codex models.
 - Current Fable/Opus/Sonnet adaptive models use `thinking.type=adaptive` and
