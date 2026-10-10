@@ -677,6 +677,7 @@ impl FederationSupervisor {
             tracing::error!("federation startup could not enumerate credentialed rooms");
             return;
         };
+        let mut unconfigured = 0usize;
         for credential in credentials {
             let state = with_rooms_handle(&self.inner.rooms, |store| {
                 store.room_access(&credential.room_id).map(|p| p.state)
@@ -696,6 +697,7 @@ impl FederationSupervisor {
             }
             if self.inner.client.is_none() {
                 let _ = self.persist_lease_lost(&credential.room_id, RoomAccessState::Recovering);
+                unconfigured += 1;
                 continue;
             }
             // A configured client is not an authenticated lease. Atomically
@@ -710,6 +712,12 @@ impl FederationSupervisor {
         }
         if self.inner.invalid_config {
             tracing::warn!("federation client configuration is invalid; rooms set Recovering");
+        } else if unconfigured > 0 {
+            tracing::warn!(
+                rooms = unconfigured,
+                outcome = "federation_unconfigured",
+                "OCEAN_FEDERATION_URL is not set; credentialed rooms set Recovering"
+            );
         }
         let pending =
             with_rooms_handle(&self.inner.rooms, |store| store.list_pending_redemptions());
@@ -2041,6 +2049,13 @@ async fn run_room(
         }
         attempt = attempt.saturating_add(1);
         let delay = reconnect_delay(attempt, generation);
+        tracing::debug!(
+            room = %key,
+            attempt,
+            delay_ms = delay.as_millis() as u64,
+            outcome = "epoch_recover",
+            "federation epoch ended; reconnecting"
+        );
         tokio::select! {
             _ = cancel.cancelled() => return,
             _ = inner.shutdown.cancelled() => return,
@@ -2118,11 +2133,12 @@ async fn run_epoch(
     };
 
     // Roster is committed before the first room_event of every connection epoch.
-    let members = match fetch_roster(&inner, &client, &credential, &live_human_member_ids).await {
-        Ok(members) => members,
-        Err(EpochOutcome::Revoked) => return EpochOutcome::Revoked,
-        Err(outcome) => return outcome,
-    };
+    let members =
+        match fetch_roster(&inner, &client, &credential, &live_human_member_ids, true).await {
+            Ok(members) => members,
+            Err(EpochOutcome::Revoked) => return EpochOutcome::Revoked,
+            Err(outcome) => return outcome,
+        };
     let state = access_state_for_hello(cursor, high_water);
     if !commit_access(&inner, &key, state, Some(&members), None) {
         return EpochOutcome::Recover;
@@ -2258,7 +2274,9 @@ async fn run_epoch(
                         if sequence != last_accepted {
                             break EpochOutcome::Recover;
                         }
-                        match fetch_roster(&inner, &client, &credential, &live_human_member_ids).await {
+                        match fetch_roster(&inner, &client, &credential, &live_human_member_ids, false)
+                            .await
+                        {
                             Ok(members) => {
                                 let Ok(current_state) = durable_state(&inner.rooms, &key) else {
                                     break EpochOutcome::Recover;
@@ -2456,6 +2474,23 @@ struct MessagePayload {
 #[serde(deny_unknown_fields)]
 struct MembersEnvelope {
     members: Vec<WireMember>,
+    /// Bedrock returns the caller's own member ids beside the roster. Local
+    /// identity still comes from the durable room credential; this is used only
+    /// for a warn-only stale-credential diagnostic. Rejecting it failed every
+    /// receiver epoch silently (stuck Recovering).
+    #[serde(default)]
+    caller_member_ids: Vec<String>,
+}
+
+/// True when Bedrock names the caller's memberships and the credential's local
+/// human is not among them (for example a stale credential after the member was
+/// removed and readmitted). Diagnostic only: never blocks Live.
+fn caller_lacks_credential_member(envelope: &MembersEnvelope, credential: &RoomCredential) -> bool {
+    !envelope.caller_member_ids.is_empty()
+        && !envelope
+            .caller_member_ids
+            .iter()
+            .any(|id| id == &credential.local_human_member_id)
 }
 
 #[derive(Debug, Deserialize)]
@@ -2470,6 +2505,11 @@ struct WireMember {
     #[serde(default)]
     public_agent_descriptor: Option<PublicAgentDescriptor>,
     joined_at: String,
+    /// Bedrock projects `operator_id` on members of operator rooms. Accepted
+    /// and ignored for the same reason as `MembersEnvelope::caller_member_ids`.
+    #[serde(default)]
+    #[allow(dead_code)]
+    operator_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2716,6 +2756,9 @@ async fn fetch_roster(
     client: &FederationClient,
     credential: &RoomCredential,
     live_human_member_ids: &HashSet<String>,
+    // True only for the first roster of a connection epoch, so the stale-
+    // credential warning fires once per epoch, not on every heartbeat refresh.
+    diagnose_caller: bool,
 ) -> Result<Vec<FederatedRoomMemberProjection>, EpochOutcome> {
     let url = client
         .room_endpoint(&credential.room_id, "members")
@@ -2733,11 +2776,39 @@ async fn fetch_roster(
         StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => return Err(EpochOutcome::Revoked),
         _ => return Err(EpochOutcome::Recover),
     }
-    let envelope: MembersEnvelope = read_bounded_json(response, BODY_LIMIT)
-        .await
-        .map_err(|_| EpochOutcome::Recover)?;
-    project_roster(inner, credential, envelope, live_human_member_ids)
-        .map_err(|_| EpochOutcome::Recover)
+    let envelope: MembersEnvelope = match read_bounded_json(response, BODY_LIMIT).await {
+        Ok(envelope) => envelope,
+        Err(error) => {
+            if error != BridgeError::Transport {
+                tracing::warn!(
+                    room = %credential.room_id,
+                    outcome = "roster_rejected",
+                    "federation roster did not match the Bedrock contract; room stays recovering"
+                );
+            }
+            return Err(EpochOutcome::Recover);
+        }
+    };
+    if diagnose_caller && caller_lacks_credential_member(&envelope, credential) {
+        tracing::warn!(
+            room = %credential.room_id,
+            outcome = "credential_member_mismatch",
+            "Bedrock does not list this credential's local member as the caller; credential may be stale"
+        );
+    }
+    project_roster(inner, credential, envelope, live_human_member_ids).map_err(|error| {
+        let outcome = if error == BridgeError::Store {
+            "roster_store_failed"
+        } else {
+            "roster_rejected"
+        };
+        tracing::warn!(
+            room = %credential.room_id,
+            outcome,
+            "federation roster could not be projected; room stays recovering"
+        );
+        EpochOutcome::Recover
+    })
 }
 
 fn project_roster(
@@ -2838,7 +2909,7 @@ async fn ingest_message_row(
                 // or presence frame would, instead of an empty set that
                 // would mark every human member Unavailable.
                 let current_state = durable_state(&inner.rooms, &credential.room_id)?;
-                let members = fetch_roster(inner, client, credential, live_human_member_ids)
+                let members = fetch_roster(inner, client, credential, live_human_member_ids, false)
                     .await
                     .map_err(|outcome| match outcome {
                         EpochOutcome::Revoked => BridgeError::Revoked,
@@ -7694,6 +7765,86 @@ mod tests {
         })
         .await
         .expect("control divergence recovered from durable cursor");
+        supervisor.shutdown().await;
+        server.abort();
+    }
+
+    #[test]
+    fn caller_member_mismatch_is_detected_only_when_bedrock_names_callers() {
+        let credential = RoomCredential {
+            room_id: RoomKey::new("mismatch".to_owned()),
+            bearer_token: "bearer".to_owned(),
+            local_human_member_id: "me".to_owned(),
+        };
+        let envelope = |ids: &[&str]| MembersEnvelope {
+            members: Vec::new(),
+            caller_member_ids: ids.iter().map(|id| (*id).to_owned()).collect(),
+        };
+        assert!(!caller_lacks_credential_member(&envelope(&[]), &credential));
+        assert!(!caller_lacks_credential_member(
+            &envelope(&["agent", "me"]),
+            &credential
+        ));
+        assert!(caller_lacks_credential_member(
+            &envelope(&["someone-else"]),
+            &credential
+        ));
+    }
+
+    /// Production Bedrock's `GET /members` carries `caller_member_ids` beside
+    /// the roster (and `operator_id` on operator-room members). The strict
+    /// envelope once rejected it, so every epoch returned Recover after a
+    /// valid hello and rooms never reached Live.
+    #[tokio::test]
+    async fn roster_with_caller_member_ids_reaches_live() {
+        let key = RoomKey::new("caller-ids".to_owned());
+        let human = "11111111-1111-4111-8111-111111111111";
+        let mut store = ocean_store::SqliteRoomStore::open_in_memory().unwrap();
+        store
+            .create(key.clone(), "Caller ids", None, chrono::Utc::now())
+            .unwrap();
+        store
+            .install_room_credential(&key, "caller-bearer", human)
+            .unwrap();
+        let rooms = Arc::new(std::sync::Mutex::new(store));
+        let fake = FakeBedrock::new(key.as_str(), "caller-bearer");
+        // A fresh room: hello high-water 0 against cursor 0 is immediately Live.
+        fake.snapshot_high_water.store(0, Ordering::Release);
+        *fake.members.lock().await = json!({
+            "members":[{
+                "member_id":human,
+                "actor_type":"user",
+                "role_in_room":"owner",
+                "display_name":"Human",
+                "joined_at":"2026-10-09T19:40:15.041Z",
+                "operator_id":"op_1"
+            }],
+            "caller_member_ids":[human]
+        });
+        let (base, server) = start_fake_bedrock(fake.clone()).await;
+        let supervisor = FederationSupervisor::for_test(
+            &base,
+            rooms.clone(),
+            RoomWakeBus::default(),
+            RoomAccessWakeBus::default(),
+            RoomReadCursorWakeBus::default(),
+            CancellationToken::new(),
+            Duration::from_millis(20),
+        );
+        supervisor.startup().await;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let projection = with_rooms_handle(&rooms, |s| s.room_access(&key)).unwrap();
+                if projection.state == RoomAccessState::Live
+                    && projection.members.iter().any(|m| m.member_id == human)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("roster with caller_member_ids reaches Live");
         supervisor.shutdown().await;
         server.abort();
     }

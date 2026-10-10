@@ -48,7 +48,57 @@ fi
 #   OCEAN_ASSISTANTS_DIR    -> optional; defaults to ~/.config/ocean-rs/assistants.
 #   OCEAN_PROMPT_CAPTURE_DIR -> optional owner-only local JSON request captures;
 #                               includes private prompt/transcript/tool content.
+#   ~/.config/ocean-rs/federation.env -> optional KEY=VALUE file for the
+#                               federated-room Bedrock bridge: OCEAN_FEDERATION_URL
+#                               (origin only) and, on an owner daemon only,
+#                               OCEAN_FEDERATION_OWNER_TOKEN. Parsed as data, never
+#                               executed: it must be owned by this user and not
+#                               group/other-writable, only OCEAN_FEDERATION_* keys
+#                               are read, and values already set (plist or caller)
+#                               win. Without it every credentialed room sits in
+#                               `recovering`.
 export OCEAN_YOLO="${OCEAN_YOLO:-1}"
+load_federation_env() {
+  local file="$1" mode line key value
+  local blank_re='^[[:space:]]*(#|$)'
+  local pair_re='^(OCEAN_FEDERATION_[A-Z0-9_]+)=(.*)$'
+  local dq_re='^"(.*)"$' sq_re="^'(.*)'$"
+  local mode_re='^[0-7]{3,4}$'
+  [[ -e "$file" ]] || return 0
+  if [[ ! -f "$file" || ! -r "$file" || ! -O "$file" ]]; then
+    echo "WARNING: ignoring $file: not a readable regular file owned by this user." >&2
+    return 0
+  fi
+  # Pick the stat dialect explicitly: GNU `stat -f` means --file-system, so a
+  # BSD-then-GNU fallback chain would capture filesystem data plus the mode.
+  if stat -c %a "$file" >/dev/null 2>&1; then
+    mode="$(stat -c %a "$file" 2>/dev/null || true)"
+  else
+    mode="$(stat -f %Lp "$file" 2>/dev/null || true)"
+  fi
+  [[ "$mode" =~ $mode_re ]] || mode=777
+  if (( 8#$mode & 8#022 )); then
+    echo "WARNING: ignoring $file: group/other-writable (mode $mode); chmod 600 it." >&2
+    return 0
+  fi
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    [[ "$line" =~ $blank_re ]] && continue
+    line="${line#export }"
+    if [[ ! "$line" =~ $pair_re ]]; then
+      echo "WARNING: $file: skipped a line that is not OCEAN_FEDERATION_*=value." >&2
+      continue
+    fi
+    key="${BASH_REMATCH[1]}"
+    value="${BASH_REMATCH[2]}"
+    if [[ "$value" =~ $dq_re || "$value" =~ $sq_re ]]; then value="${BASH_REMATCH[1]}"; fi
+    [[ -n "${!key+x}" ]] && continue
+    export "$key=$value"
+  done < "$file"
+}
+load_federation_env "${HOME:-}/.config/ocean-rs/federation.env"
+FEDERATION_STATE=off
+if [[ -n "${OCEAN_FEDERATION_URL:-}" ]]; then FEDERATION_STATE=on; fi
 
 # Run from a NEUTRAL cwd so the startup guard's repo-cwd check passes and the
 # unbound-turn fallback anchor is harmless (home, not ocean-os).
@@ -67,6 +117,6 @@ if [[ ! -d "$NEUTRAL_CWD" ]]; then
   echo "FATAL: neutral cwd '$NEUTRAL_CWD' does not exist (check OCEAN_DAEMON_CWD)." >&2
   exit 78 # EX_CONFIG
 fi
-echo "==> ocean-daemon: cwd=$NEUTRAL_CWD (neutral) bin=$BIN yolo=$OCEAN_YOLO bind=${OCEAN_BIND:-127.0.0.1:4780}"
+echo "==> ocean-daemon: cwd=$NEUTRAL_CWD (neutral) bin=$BIN yolo=$OCEAN_YOLO bind=${OCEAN_BIND:-127.0.0.1:4780} federation=$FEDERATION_STATE"
 cd "$NEUTRAL_CWD"
 exec "$BIN"
