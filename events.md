@@ -1046,6 +1046,72 @@ Closed the leftovers from the review that acknowledged the thinking-binding reco
 Validation: ocean-protocol (187 plus 5) passes; clippy with warnings denied on ocean-protocol and ocean-agent tests, rustfmt check pass. The strip test covers the thinking-only assistant turn. No provider was called.
 _________________________________________________________________________________
 _________________________________________________________________________________
+time: [16:24] [06-10-26]
+agent: [zcode] [glm-5.3]
+worktree: [docs/reconciliation-ledger-20261006]
+type: [workflow]
+area: [docs] reconciliation ledger
+
+PR #25 (Rooms S0 participant retirement) merged at 03:06Z and PR #31
+(observatory durability cluster) merged at 04:28Z — Track B's second and
+third bounded ports to land, each with Build scope, Build Ocean, and
+`validate package (macos-arm64)` successful before merge; Build Surface was
+path-skipped. PR #31's final head included the retention-boundary replay and
+Observatory cursor-consistency fixes added during parallel work before merge;
+they were not post-merge deltas. Updated the Reconciled slices section in
+docs/SOURCE_RECONCILIATION.md to record both landings and their scope
+boundaries, per the contract to keep the table current when reconciliation
+actually lands.
+
+Validation: cargo xtask docs-check PASS. Docs-only.
+_________________________________________________________________________________
+time: [17:29] [06-10-26]
+agent: [codex] [gpt-6]
+worktree: [codex/factory-ledger-accuracy] (PR #40)
+type: [review] [documentation]
+area: [analysis] source reconciliation ledger
+
+Independent review found that the PR #25 entry understated its landed
+ocean-store changes and the PR #31 entry called fixes already included in its
+final pre-merge head post-merge deltas. Corrected both claims from the merged
+PR diffs and commit history. `git diff --check` and `cargo xtask docs-check`
+pass (30 packages, 153 active Markdown files, 170 local links). The docs check
+compiled only xtask with 1.9 GiB free; no Ocean release build was run. The PR
+needs fresh review and hosted checks at the amended head before merge; no
+deployment was made.
+_________________________________________________________________________________
+time: [17:39] [06-10-26]
+agent: [codex] [gpt-6]
+worktree: [codex/factory-ledger-accuracy] (PR #40 ledger)
+type: [review] [issues]
+area: [review] daemon identity and room-profile contracts
+
+Independent review of exact PR #41/#43 heads found malformed identity values
+accepted by `unquote`, an operator-guide liveness label attached to the wrong
+endpoint, resolver metadata beyond PR #43's stated credential-slot response,
+and whole-file auth.json parsing despite its token-isolation claim. Posted
+these findings as PR review comments; source branches remain with their
+owners. Both PRs' hosted Build Ocean checks pass and Build Surface is
+path-skipped. No code tests ran here: free disk was 821 MiB. The review is not
+approval or merge; no deployment was made.
+time: [16:12] [06-10-26]
+agent: [zcode] [glm-5.3]
+worktree: [docs/reconciliation-ledger-20261006]
+type: [workflow]
+area: [docs] reconciliation ledger
+
+PR #49 (minimizer M2 output economy — the first conflict-class three-way
+merge) MERGED at 19:54Z: Track B's sixth landed port and the program's proof
+that both-changed conflict files reconcile cleanly with Kingmaker fixes
+preserved. Appended #49 to the Reconciled slices ledger on this branch (the
+open ledger PR #40), per the contract to keep the table current when
+reconciliation lands. The remaining Rooms queue (#41/#43/#44/#45/#46/#47) is
+unaffected by #49's file set (ocean-runtime/agent/lsp/longhouse — no daemon
+main.rs overlap), so the repaired-stack reconciles (baseline 136) stand
+unchanged.
+
+Validation: cargo xtask docs-check PASS.
+_________________________________________________________________________________
 time: [15:42] [06-10-26]
 agent: [codex] [gpt-6]
 worktree: [port/output-economy] [/Users/risingtidesdev/.codex/worktrees/factory-pr49-artifact-debug/ocean]
@@ -1156,3 +1222,14 @@ Round 5: round-4 review follow-ups on model reroute fidelity. (F2) Selection-tim
 
 Validation: ocean-agent 280 passed / 0 failed / 2 ignored; ocean-daemon 908 passed / 2 failed (only the two known pre-existing persistent_room envelope-key assertions); clippy -p ocean-agent --all-targets -D warnings clean; fmt --all --check clean; git diff --check clean.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [00:04] [10-10-26]
+agent: [codex] [gpt-6]
+worktree: [codex/pr40-reconciliation-ledger] (PR #40)
+type: [workflow]
+area: [review] public reconciliation receipts
+
+Reconciled existing PR #40 onto f1b22bd8 and verified the public merge commits for #25, #31 and #49. The record now includes bounded alias inspection, retention/replay and snapshot consistency, and the redacted artifact Debug regression. Removed unsupported source-history absolutes from the active documentation; inherited chronological event entries remain historical observations, not renewed claims of source parity or current stack compatibility. Both parent ledger histories are preserved.
+
+Validation: docs-check passed (30 packages, 153 active Markdown files, 170 local links), and diff-check passed. Root/docs AGENTS are intentionally unchanged because scope, ownership and verification contracts remain unchanged. Documentation only; no new implementation merge, install, deployment or live verification is claimed. Final-head independent review and required hosted gates remain required.
