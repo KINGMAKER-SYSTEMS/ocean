@@ -1,22 +1,21 @@
 # Generic Plugin Process Ownership and Quiescence Manifest
 
 **Status: PROPOSED — design review required.** This document defines a candidate
-generic subprocess lifecycle contract for issue88. It records a design for
+generic subprocess lifecycle contract. It records a design for
 review; it does not authorize source changes, daemon installation, plugin-state
-adoption, or a claim that any implementation is complete. Issue88, issue85 and
-PR94 are ocean-private tracker numbers (`KINGMAKER-SYSTEMS/ocean-private`
-#88, #85 and #94); this monorepo has no items of its own under those numbers.
+adoption, or a claim that any implementation is complete. Record explicit design
+acceptance in this canonical public proposal or a linked public decision record
+before source work; private records do not establish public acceptance.
 
 ## Problem and current evidence
 
-Issue88 requires generic ownership, launch fencing, and observed quiescence for
-every supported subprocess-plugin path. The owner must retain responsibility
+The proposed contract requires generic ownership, launch fencing, and observed
+quiescence for every supported subprocess-plugin path. The owner must retain responsibility
 through cancellation, shutdown, timeout, restart, and failure. EOF, a closed
 pipe, `start_kill`, a dropped future, a request timeout, a daemon label, or a
 PID read by itself is not proof that a child or descendant has exited.
 
-On the frozen private main `81eb9fff5e438858e8ada8b7651c8e5609c838b4`, the
-content this monorepo was published from,
+In the public source reviewed for this proposal,
 `ocean-agent` starts global plugins during capability-registry construction
 (`crates/ocean-agent/src/lib.rs::discover_plugin_providers`) and starts
 folder-agent subprocess capabilities per turn in
@@ -30,8 +29,8 @@ await a transport write inside `select!`; closing the transport calls
 `start_kill`, ignores its result, and does not wait for the child. `kill_on_drop`
 covers the direct child drop behavior, not an observed wait or descendant
 quiescence. The subagent installer copies plugin files over their destinations
-without fencing already-loaded interpreters. These behaviors are not an issue88
-quiescence rail.
+without fencing already-loaded interpreters. These behaviors are not the proposed
+quiescence mechanism.
 
 Relevant anchors in the reviewed snapshot:
 
@@ -172,7 +171,7 @@ affected participant set until it obtains a verified recovery receipt or an
 operator-approved containment decision that does not claim quiescence.
 
 The implementation manifest must choose and validate an owner that can survive
-the daemon failure modes required by issue88. This proposal does not assume that
+the daemon failure modes covered by this contract. This proposal does not assume that
 Tokio `kill_on_drop`, daemon shutdown hooks, a detached Tokio task, a Unix
 process group, Windows job assignment, an environment flag, or a filesystem lock
 alone provides that guarantee. Each OS adapter must document the exact evidence
@@ -202,22 +201,22 @@ resurrect a second state owner. If safe rollback cannot be demonstrated, leave
 launches disabled and retain the recovery record for an explicit operator
 decision.
 
-This is a design dependency for issue85. Issue85's full custody/schema
-implementation and adoption stay held until the complete issue88 launch,
+Shared subagent lifecycle-state custody/schema implementation and adoption
+stay held until the complete generic subprocess launch,
 termination, descendant, restart and legacy-retirement acceptance passes.
 
 ## Proposed implementation sequence
 
-These stages order the complete issue88 work; finishing an earlier stage does
-not close issue88 or authorize issue85.
+These stages order the complete generic subprocess work; finishing an earlier
+stage does not complete this contract or authorize shared lifecycle-state adoption.
 
 | Stage | Outcome | Required evidence before the next stage |
 | --- | --- | --- |
-| D0 — reviewed contract | Independently review this manifest and reconcile its interfaces with the extension architecture and issue85 custody proposal. | Exact reviewed document; settled ownership, failure and adoption semantics. |
+| D0 — reviewed contract | Independently review this manifest and reconcile its interfaces with the extension architecture and shared lifecycle-state custody requirements. | Exact reviewed document; settled ownership, failure and adoption semantics. |
 | D1 — launch enrollment | Implement the coordinator/owner seam and route every global, per-turn, named/direct and dedup-discarded plugin process through it. | Source audit shows no bypass; real-spawn tests prove closed-gate and startup-failure behavior. |
 | D2 — retained lifecycle | Implement cancellation-safe transport/task ownership, timeout behavior, graceful/forced termination, wait/reap and descendant results. | Real child/descendant tests prove held I/O, delivered request, EOF, timeout, cancellation, shutdown, failure cleanup and no orphan owner. |
 | D3 — restart recovery | Implement independently supervised ownership and exact-generation reattachment or fail-closed quarantine. | Kill/restart tests prove owner interruption, same-identity recovery, unknown-effect non-replay, and one terminal receipt. |
-| D4 — legacy migration | Implement launch fencing, old/untracked writer retirement, clean adoption and rollback. | Cross-platform real census/recovery evidence proves no old writer or duplicate owner before issue85 state adoption. |
+| D4 — legacy migration | Implement launch fencing, old/untracked writer retirement, clean adoption and rollback. | Cross-platform real census/recovery evidence proves no old writer or duplicate owner before shared lifecycle-state adoption. |
 
 Each stage requires a fresh exact-source review and the owning project checks.
 Cross-stage work remains one ordered dependency chain unless a reviewer proves
@@ -227,7 +226,7 @@ installation.
 
 ## Acceptance matrix
 
-| Issue88 requirement | Required proof |
+| Lifecycle requirement | Required proof |
 | --- | --- |
 | Global discovery, per-turn/named/direct launch, startup failure, tool-list timeout, and de-dup-discarded providers are all enrolled. | Source call-site inventory plus real-spawn fixtures for each path; no constructor bypass. |
 | Child identity, task, transport and cleanup remain owned through last-handle drop, delivered/queued RPC, cancellation, daemon stop and errors. | Receipts bind exact process identity and actual wait/reap; tests retain owners after timeout, future drop and failed writes. |
@@ -254,12 +253,13 @@ acceptance evidence.
 
 This proposal may be independently reviewed and published as documentation.
 Source work begins only after the exact lifecycle/interface and migration design
-is accepted under issue88 and a separate implementation change is reviewed.
-Issue85 source/schema/adoption remains blocked until all issue88 acceptance is
-proven. Every code PR requires the current protected `Build Ocean` and
-`Build Surface` checks. The current hosted-runner billing/spending denial is a
-separate delivery blocker; local tests or a reviewed manifest do not replace
-those required checks. Production installation requires clean merged-main
+is explicitly accepted in a canonical public decision record and a separate
+implementation change is reviewed. Shared lifecycle-state source/schema/adoption
+remains blocked until all lifecycle acceptance in this manifest is proven. Every
+code PR requires the current protected `Build Ocean` and `Build Surface` checks.
+Any hosted-runner billing/spending denial is a separate delivery blocker; local
+tests or a reviewed manifest do not replace those required checks. Production
+installation requires clean merged-main
 content, the existing quiet-intake boundary, rollback safety, and exact running
 revision/readiness evidence.
 
@@ -269,7 +269,7 @@ revision/readiness evidence.
 - This does not mean a close request, EOF, PID lookup, daemon exit, or parent
   process wait proves descendants are gone.
 - This does not solve provider-side exactly-once effects or create a scheduler.
-- This does not close issue88, issue85, or PR94, or authorize plugin-state
-  migration/adoption.
+- This does not complete lifecycle or shared-state custody work, or authorize
+  plugin-state migration/adoption.
 - The bounded pre-body `RefusedBytes` V3 is a separate design-only transport
   proposal; it does not satisfy lifecycle, restart or legacy acceptance.

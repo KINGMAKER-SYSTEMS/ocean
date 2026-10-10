@@ -4,11 +4,11 @@
 
 **Status:** PROPOSED — neither decision is operator-ratified.
 
-**Decision record:** [ocean-private issue #71](https://github.com/KINGMAKER-SYSTEMS/ocean-private/issues/71).
+**Decision record:** Pending. Record explicit operator rulings for both decisions in §5 or a linked canonical public decision record before implementation.
 
 **Parent:** [accepted Stage A implementation manifest](2026-07-27-ocean-extension-stage-a-implementation-manifest.md), especially §§10.1, 12.3, 14–18 and 21.
 
-**Evidence base:** frozen private main `81eb9fff5e438858e8ada8b7651c8e5609c838b4`, the content this monorepo was published from; A3a [ocean-private PR #56](https://github.com/KINGMAKER-SYSTEMS/ocean-private/pull/56), merged at `0b55d17f280a5964a156297e2e21221bb98382ca` and included in that snapshot.
+**Evidence base:** The public A3a registry writer in `crates/ocean-daemon/src/extension_registry/transaction.rs` preserves independently optional commit and revision facts. Source presence does not establish slice acceptance.
 
 ## 1. Authority and concrete conflicts
 
@@ -26,7 +26,7 @@ the live supervisor; it authorizes no source implementation by itself.
    trust. Existing enabled scopes can survive a grant change; a confirmed grant
    can therefore make a service newly effective without a new enable mutation.
 
-Both decisions require explicit operator rulings recorded in ocean-private issue #71 before
+Both decisions require explicit operator rulings recorded in the canonical public decision record before
 A3b source begins. Review acknowledgement or merging this proposal does not
 ratify either choice. Silence grants no authority. No startup-only substitute
 or inferred disable-before-trust restriction completes the accepted A3b slice.
