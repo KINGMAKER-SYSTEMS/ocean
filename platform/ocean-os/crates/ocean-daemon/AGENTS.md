@@ -272,7 +272,7 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   compilation remotely; independent exact-source review is required.
 - Deferred: Room metrics/sampler, attachment context, profile/resource writes,
   retirement/summary/workspace bridge, client onboarding/UI, extension
-  scheduling, Unknown build execution and CI orchestration. Keep #22/#48 holds;
+  scheduling, Unknown build execution and CI orchestration. Keep live migration/installation acceptance holds;
   automated CI remains only Build Ocean and Build Surface.
 
 ### Durable room attachment bytes
@@ -290,7 +290,7 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
 - Declared content type is metadata only. Downloads use verified image signatures
   or octet-stream, always with nosniff and attachment disposition.
 - Prompt/context assembly remains a dependent stage; attachment maintenance is
-  owned below. Neither feature lifts #22/#48 live migration holds.
+  owned below. Neither feature lifts live migration/installation acceptance holds.
 - Verify `cargo test --locked -p ocean-daemon room_attachments::` and attachment
   store regressions; run a locked daemon/store check for interface changes.
 
@@ -312,7 +312,7 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   removal. No recursive or path-following maintenance deletion is permitted.
 - Count observed bytes only after successful unlink; report a failed durability
   barrier separately without losing successful unlink accounting. Preserve
-  row-first retention and existing #22/#48 deployment holds.
+  row-first retention and live migration/installation acceptance holds.
 - Verify focused `room_maintenance::`, `room_attachments::` and router-contract
   tests plus locked daemon compilation; fixtures use hooks/clocks, never sleeps.
 
