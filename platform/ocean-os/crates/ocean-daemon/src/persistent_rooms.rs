@@ -812,7 +812,9 @@ pub(super) fn room_store_error_response(
         UnknownAttachment { .. } => StatusCode::NOT_FOUND,
         // Same rule as an artifact author: a file attributed to somebody who is
         // not in the room is a lie, not a server fault.
-        AttachmentUploaderNotInRoster { .. } => StatusCode::FORBIDDEN,
+        AttachmentUploaderNotInRoster { .. } | AttachmentActorNotHuman { .. } => {
+            StatusCode::FORBIDDEN
+        }
         // And the same rule again for the person the close marker names. The
         // room exists and the act is well formed; the caller is claiming to be
         // somebody who is not in it.
