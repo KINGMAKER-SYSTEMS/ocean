@@ -1188,3 +1188,14 @@ Validation: room_summary tests (10) pass; router-contract parity (120) green;
 cargo test -p ocean-daemon 926 passed / 2 deterministic failures — the
 issue-#42 pair, reproduced on clean main before any of my changes; rustfmt;
 denied-warning Clippy zero; cargo xtask docs-check PASS.
+
+_________________________________________________________________________________
+time: [23:12] [09-10-26]
+agent: [codex] [factory release]
+worktree: [codex/pr44-reviewed-summary]
+type: [bug report]
+area: [backend] [testing] [review]
+
+PR #44 / issue #81: reconciled the existing summarize route with canonical main f1b22bd8, preserving both public ledger histories. Captured artifact absence/version now fences publication across provider latency against concurrent creation, summaries and human amendments, including identical-output races. Identical generated model/prose keeps the prior artifact and its original coverage/timestamp without claiming newer coverage; a real default-tail repeat appends no artifact audit. Partial-window reporting covers omitted rows on either side, and unknown authors are rejected before provider invocation. The default summary path preserves the selected provider/model pair while explicit summarize/fast roles retain precedence.
+
+Validation: four initial correctness cases reproduced before repair; a separate resolver regression demonstrated selected OpenAI incorrectly becoming Codex before the fallback repair. Final summary 24/24, router contracts 5/5, locked daemon check, formatting and diff checks pass with disposable auth/config/XDG fixtures and unchanged HOME. Docs-check passed on the initial summary repair; final fallback follow-up adds no documentation links. Independent source review ACKed c0f01eb1; this canonical receipt precedes final exact-head review and hosted checks. Nearest daemon contract updated; parent ownership/indexes unchanged. Maintainer approval and independent acceptance/live-migration holds remain. No live provider calls, installation or deployment.
