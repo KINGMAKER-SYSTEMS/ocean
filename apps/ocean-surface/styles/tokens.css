@@ -215,6 +215,8 @@
   --ctl-h: 34px;
   --ctl-h-sm: 28px;
   --focus-ring: 0 0 0 2px var(--accent-ring);
-  --shell-max: 1120px;
+  /* The shell is full-bleed on every host; reading surfaces (transcript,
+     permissions, composer) ride this one centered rail inside it. */
+  --content-rail: 860px;
   --titlebar-inset: 82px;  /* desktop: brand clears the macOS traffic lights */
 }

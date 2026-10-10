@@ -59,7 +59,6 @@
   white-space: nowrap;
 }
 /* Header controls and per-turn selectors use compact control height. */
-  .ocean-surface--extension .ocean-sessions-trigger,
   .ocean-surface--extension .ocean-model-control__trigger {
     min-height: var(--ctl-h-sm);
     height: var(--ctl-h-sm);
@@ -196,7 +195,6 @@
   }
 
   /* Controls: compact height, capped chip widths ---------------------- */
-  .ocean-surface .ocean-sessions-trigger,
   .ocean-surface .ocean-model-control__trigger {
     min-height: var(--ctl-h-sm);
     height: var(--ctl-h-sm);

@@ -1,24 +1,25 @@
-//! Workspace pane — the permanent RIGHT-side desktop shell pane (Tauri only).
+//! Workspace pane — the permanent RIGHT-side shell pane on every host.
 //!
 //! Codex-desktop-style: a tab strip (Files empty-state · Preview tabs · Browser
-//! slot) over a body that splits into an active-tab content region and a
-//! docked, always-visible file tree. The tree lists the session cwd (same
-//! `daemon.cwd` source the deck files panel uses), lazy-expands folders via
-//! `GET /v1/fs/dirs?path=..&files=1`, and opens a file's contents in a Preview
-//! tab via `GET /v1/fs/file?path=..`.
+//! · Repo) over a body that splits into an active-tab content region and a
+//! docked, always-visible file tree. The tree lists the session cwd
+//! (`daemon.cwd`), lazy-expands folders via `GET /v1/fs/dirs?path=..&files=1`,
+//! and opens a file's contents in a Preview tab via `GET /v1/fs/file?path=..`.
 //!
-//! Mounting is integrator-owned (app.rs) and gated on
-//! [`crate::host::running_in_tauri`]; on the browser PWA and Chrome extension
-//! this component never mounts, so the transcript-first layout is untouched.
-//! The Browser tab is a STUB only — it renders `<div id="workspace-browser-slot">`
-//! and a sibling agent (BrowserPaneTab) fills that slot; this module builds no
-//! browser UI of its own.
+//! Mounting is integrator-owned (app.rs). Native-only capabilities (path
+//! watching, open-externally) go through `crate::host`, which no-ops off
+//! Tauri, so the pane renders identically on the PWA, extension, and desktop.
+//! The Browser tab mounts `crate::workspace_browser::WorkspaceBrowser`.
 //!
 //! Pure helpers (`name_matches`, `sort_files`, `open_or_focus`, `close_tab`,
 //! `format_kib`) are unit-testable without WASM.
 
+use leptos::reactive::effect::ImmediateEffect;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use leptos::ev;
 use leptos::portal::Portal;
@@ -30,9 +31,8 @@ use crate::daemon::{
     fetch_fs_dirs_with_files, fetch_fs_file, Daemon, FsDirEntry, FsDirsResponse, FsFileEntry,
     FsFileResponse,
 };
-// Reuse the deck files panel's shared helpers rather than forking the
-// sorting / refresh / basename logic — single source of truth for the
-// session-cwd tree contract.
+// Shared file-tree helpers — single source of truth for the session-cwd tree
+// contract.
 use crate::deck::files::{basename, browsable_root, is_secret_file, refresh_target, sort_entries};
 
 // ---------------------------------------------------------------------------
@@ -50,9 +50,9 @@ pub enum TabKind {
     Files,
     /// A preview of one file, keyed by its absolute path. Closable.
     Preview(String),
-    /// Persistent stub tab — renders the slot a sibling agent fills.
+    /// Persistent live browser tab (`WorkspaceBrowser`).
     Browser,
-    /// Persistent repo-state tab — mounts the deck's RepoPanel. Never closable;
+    /// Persistent repo-state tab — mounts RepoPanel. Never closable;
     /// sits last in the strip (after Browser).
     Repo,
 }
@@ -68,8 +68,7 @@ pub struct WorkspaceTab {
 
 /// A one-shot intent to focus a specific workspace surface. Set on the pane's
 /// `focus_intent` prop by the command layer (app.rs) when a toggle-* command
-/// fires on Tauri — where Files/Browser/Repo live in THIS pane, not the deck.
-/// The pane's Effect opens or focuses the matching persistent tab, makes it
+/// fires. The pane's Effect opens or focuses the matching persistent tab, makes it
 /// active, then resets the signal to `None` so a repeat of the same intent
 /// re-fires.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -78,8 +77,8 @@ pub enum WorkspaceFocus {
     Browser,
     Repo,
     /// File-preview intent from a file-tree click or host deep-link. The
-    /// workspace rail opens the deck, selects the Files tab, and the
-    /// FilesPanel picks up the preview from the daemon's intent signal.
+    /// pane opens (or focuses) a Preview tab for `path`, fetching on cache
+    /// miss.
     Preview {
         path: String,
         generation: u64,
@@ -101,7 +100,7 @@ pub(crate) fn name_matches(name: &str, filter: &str) -> bool {
 }
 
 /// Sort file entries alphabetically by name (case-insensitive). Directories
-/// keep the deck's repo-first ordering via [`sort_entries`]; files are a flat
+/// keep the repo-first ordering via [`sort_entries`]; files are a flat
 /// alphabetical run beneath them.
 pub(crate) fn sort_files(files: &mut [FsFileEntry]) {
     files.sort_by_key(|a| a.name.to_lowercase());
@@ -231,6 +230,41 @@ pub(crate) fn read_is_current(issued_generation: u64, live_generation: u64) -> b
     issued_generation == live_generation
 }
 
+fn workspace_task_is_current(alive: &AtomicBool, issued: u64, generation: RwSignal<u64>) -> bool {
+    alive.load(Ordering::Relaxed)
+        && generation
+            .try_get_untracked()
+            .is_some_and(|current| read_is_current(issued, current))
+}
+
+type WorkspaceContext = (Option<String>, String, u64);
+
+/// Observe every focus/root mutation synchronously, before queued reads or
+/// native picker/watch responses can publish under the previous context.
+fn track_workspace_context(
+    read: impl Fn() -> WorkspaceContext + Send + Sync + 'static,
+) -> RwSignal<u64> {
+    let epoch = RwSignal::new(0u64);
+    let previous = RwSignal::new(untrack(&read));
+    ImmediateEffect::new_scoped(move || {
+        let next = read();
+        if previous.get_untracked() != next {
+            previous.set(next);
+            epoch.update(|epoch| *epoch += 1);
+        }
+    });
+    epoch
+}
+
+/// Component-aware containment avoids refreshing /repo on events in /repo-other.
+fn path_is_within(root: &str, path: &str) -> bool {
+    let root = root.trim_end_matches('/');
+    path == root
+        || path
+            .strip_prefix(root)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
 // ---------------------------------------------------------------------------
 // Shared callback types
 // ---------------------------------------------------------------------------
@@ -304,19 +338,19 @@ fn workspace_focus_tab_kind(focus: &WorkspaceFocus) -> TabKind {
     }
 }
 
-/// The permanent right-side desktop pane. `open` is the shared collapse state
+/// The permanent right-side pane. `open` is the shared collapse state
 /// owned by the app shell (header toggle + ⌘K command flip the same signal);
 /// the pane renders `is-collapsed` from it and the shell adjusts its layout
 /// gutter to match. `focus_intent` is a one-shot set by the command layer
-/// (app.rs) to surface a specific tab when a toggle-* command fires on Tauri —
-/// the Effect below opens/focuses the matching tab and resets it to `None`.
+/// (app.rs) to surface a specific tab when a toggle-* command fires — the
+/// Effect below opens/focuses the matching tab and resets it to `None`.
 #[component]
 pub fn WorkspacePane(
     daemon: Daemon,
     open: RwSignal<bool>,
     focus_intent: RwSignal<Option<WorkspaceFocus>>,
 ) -> impl IntoView {
-    // Root = session cwd, the same source the deck files panel reads. A
+    // Root = session cwd. A
     // non-browsable cwd (unset, "/", or the projectless-chat /tmp pin)
     // leaves the tree empty until a real project session lands.
     let tree_root: RwSignal<Option<String>> =
@@ -344,7 +378,7 @@ pub fn WorkspacePane(
     ]);
     let active_tab: RwSignal<usize> = RwSignal::new(0);
 
-    // Tree state — mirrors the deck files panel exactly.
+    // Tree state.
     let dir_cache: RwSignal<HashMap<String, FsDirsResponse>> = RwSignal::new(HashMap::new());
     let loading_path: RwSignal<Option<String>> = RwSignal::new(None);
     let load_error: RwSignal<Option<String>> = RwSignal::new(None);
@@ -366,6 +400,27 @@ pub fn WorkspacePane(
     let preview_session: RwSignal<Option<String>> =
         RwSignal::new(daemon.session_id.get_untracked());
 
+    let alive = Arc::new(AtomicBool::new(true));
+    let context_daemon = daemon.clone();
+    let context_epoch = track_workspace_context(move || {
+        (
+            context_daemon.session_id.get(),
+            context_daemon.cwd.get(),
+            context_daemon.session_intent_epoch(),
+        )
+    });
+    let picked_root: RwSignal<Option<(u64, String)>> = RwSignal::new(None);
+    let preview_context_epoch = RwSignal::new(0u64);
+    let watch: RwSignal<Option<crate::host::PathWatch>> = RwSignal::new(None);
+    let picker_pending = RwSignal::new(false);
+    {
+        let alive = alive.clone();
+        on_cleanup(move || {
+            alive.store(false, Ordering::Relaxed);
+            watch.set(None);
+        });
+    }
+
     // Context menu (B0: Open Externally). (path, pointer_x, pointer_y).
     // Root is resolved from tree_root at render time.
     let context_menu: RwSignal<Option<(String, f64, f64)>> = RwSignal::new(None);
@@ -385,21 +440,28 @@ pub fn WorkspacePane(
         });
     }
 
-    // ---- Tree load / expand / collapse (mirror deck::files::FilesPanel) ----
+    // ---- Tree load / expand / collapse ----
 
     let load_dir: DirCallback = {
+        let alive = alive.clone();
         Arc::new(move |path: String| {
+            let alive = alive.clone();
+            let issued_generation = preview_generation.get_untracked();
             let url = daemon_url.get_untracked();
             loading_path.set(Some(path.clone()));
             load_error.set(None);
             spawn_local(async move {
-                if let Some(resp) = fetch_fs_dirs_with_files(&url, &path).await {
+                let fetched = fetch_fs_dirs_with_files(&url, &path).await;
+                if !workspace_task_is_current(&alive, issued_generation, preview_generation) {
+                    return;
+                }
+                if let Some(resp) = fetched {
                     // Daemon success responses carry no `ok` field (serde
                     // default = false) — failure is signalled by `error`, so
                     // THAT is the success predicate (same as the files panel).
                     if resp.error.is_none() {
                         dir_cache.update(|cache| {
-                            cache.insert(path, resp);
+                            cache.insert(path.clone(), resp);
                         });
                     } else {
                         load_error.set(resp.error);
@@ -407,7 +469,9 @@ pub fn WorkspacePane(
                 } else {
                     load_error.set(Some("Failed to reach daemon".into()));
                 }
-                loading_path.set(None);
+                if loading_path.get_untracked().as_deref() == Some(&path) {
+                    loading_path.set(None);
+                }
             });
         })
     };
@@ -437,7 +501,9 @@ pub fn WorkspacePane(
     // ---- File content fetch (shared by open + watcher refetch) ----
 
     let fetch_file_content: FileCallback = {
+        let alive = alive.clone();
         Arc::new(move |path: String| {
+            let alive = alive.clone();
             let url = daemon_url.get_untracked();
             // Capture the generation this read is issued under; its completion
             // is admitted only if the session/root has not changed meanwhile.
@@ -448,7 +514,7 @@ pub fn WorkspacePane(
                 let fetched = fetch_fs_file(&url, &path).await;
                 // Discard a completion from a retired generation so a stale read
                 // cannot repopulate the prior session's preview state.
-                if !read_is_current(issued_generation, preview_generation.get_untracked()) {
+                if !workspace_task_is_current(&alive, issued_generation, preview_generation) {
                     return;
                 }
                 if let Some(resp) = fetched {
@@ -465,7 +531,9 @@ pub fn WorkspacePane(
                 } else {
                     preview_error.set(Some((path.clone(), "Failed to reach daemon".into())));
                 }
-                preview_loading.set(None);
+                if preview_loading.get_untracked().as_deref() == Some(&path) {
+                    preview_loading.set(None);
+                }
             });
         })
     };
@@ -494,9 +562,18 @@ pub fn WorkspacePane(
         let load_dir = Arc::clone(&load_dir);
 
         let fetch_file_content = Arc::clone(&fetch_file_content);
-        crate::host::on_path_changed(move |ev| {
-            // Tree: re-list the parent of the changed path (the deck pattern).
-            if let Some(root) = tree_root.get() {
+        let unsubscribe = crate::host::subscribe_path_changed(move |mut ev| {
+            let Some(path) = watch
+                .with_untracked(|watch| watch.as_ref().and_then(|watch| watch.event_path(&ev)))
+            else {
+                return;
+            };
+            ev.path = path;
+            // Tree: re-list the parent of the changed path.
+            if let Some(root) = tree_root.get_untracked() {
+                if !path_is_within(&root, &ev.path) {
+                    return;
+                }
                 match refresh_target(&root, &ev.path, &ev.kind) {
                     Some(dir) => load_dir(dir),
                     // refresh_target returns None when the event IS the root
@@ -517,31 +594,46 @@ pub fn WorkspacePane(
                 fetch_file_content(ev.path.clone());
             }
         });
+        on_cleanup(unsubscribe);
     }
 
-    // ---- Initial root load + session-cwd follow (mirror deck) ----
+    // ---- Initial root load + session-cwd follow ----
 
     {
         let load_dir = Arc::clone(&load_dir);
         let cwd_sig = daemon.cwd;
         let session_sig = daemon.session_id;
-        Effect::new(move |_| {
+        let alive = alive.clone();
+        ImmediateEffect::new_scoped(move || {
             // Subscribe to BOTH session identity and cwd: a change to either
             // retires the current preview generation. (Reads are ordered so the
             // effect re-runs whenever either signal changes.)
-            let session = session_sig.get();
-            let cwd = cwd_sig.get();
-            let new_root = browsable_root(&cwd).map(str::to_string);
+            let epoch = context_epoch.get();
+            let session = session_sig.get_untracked();
+            let cwd = cwd_sig.get_untracked();
+            let new_root = picked_root
+                .get()
+                .filter(|(picked_epoch, _)| *picked_epoch == epoch)
+                .map(|(_, root)| root)
+                .or_else(|| browsable_root(&cwd).map(str::to_string));
 
             // Session identity or browsable-root change → wipe preview surface
             // state and retire in-flight reads, so no docked Preview tab or late
             // completion carries the prior session's file forward (TASK-27).
-            if preview_gen_should_retire(
-                &preview_session.get_untracked(),
-                &session,
-                &tree_root.get_untracked(),
-                &new_root,
-            ) {
+            let changed = preview_context_epoch.get_untracked() != epoch
+                || preview_gen_should_retire(
+                    &preview_session.get_untracked(),
+                    &session,
+                    &tree_root.get_untracked(),
+                    &new_root,
+                );
+            if changed {
+                preview_context_epoch.set(epoch);
+                watch.set(None);
+                dir_cache.set(HashMap::new());
+                expanded.set(HashSet::new());
+                loading_path.set(None);
+                picker_pending.set(false);
                 preview_generation.update(|g| *g += 1);
                 preview_session.set(session);
                 preview_cache.set(HashMap::new());
@@ -569,15 +661,53 @@ pub fn WorkspacePane(
                 tree_root.set(Some(root.clone()));
                 load_error.set(None);
             }
+            if changed || watch.with_untracked(|watch| watch.is_none()) {
+                let issued_generation = preview_generation.get_untracked();
+                let root = root.clone();
+                let alive = alive.clone();
+                spawn_local(async move {
+                    let admitted = crate::host::watch_workspace_root(&root).await;
+                    if workspace_task_is_current(&alive, issued_generation, preview_generation) {
+                        watch.set(admitted);
+                    } // stale lease drops only its own native watch
+                });
+            }
             if !dir_cache.with_untracked(|c| c.contains_key(&root)) {
                 load_dir(root);
             }
         });
     }
 
+    let choose_folder = {
+        let alive = alive.clone();
+        move |_| {
+            if picker_pending.get_untracked() {
+                return;
+            }
+            picker_pending.set(true);
+            let issued_generation = preview_generation.get_untracked();
+            let epoch = context_epoch.get_untracked();
+            let alive = alive.clone();
+            spawn_local(async move {
+                let picked = crate::host::pick_folder().await;
+                if !workspace_task_is_current(&alive, issued_generation, preview_generation)
+                    || context_epoch.get_untracked() != epoch
+                {
+                    return;
+                }
+                picker_pending.set(false);
+                if let Some(path) = picked.and_then(|path| browsable_root(&path).map(str::to_owned))
+                {
+                    picked_root.set(Some((epoch, path)));
+                }
+            });
+        }
+    };
+    let choose_folder = Callback::new(choose_folder);
+    let in_tauri = crate::host::running_in_tauri();
+
     // ---- Command-layer focus intent (one-shot) ----
-    // app.rs sets focus_intent when a toggle-* command fires on Tauri (where
-    // the Files/Browser/Repo surfaces live in THIS pane, not the deck).
+    // app.rs sets focus_intent when a toggle-* command fires.
     // Routes through workspace_focus_tab_kind (shared helper) so the
     // WorkspaceFocus → TabKind mapping is unit-testable.
     Effect::new({
@@ -619,8 +749,7 @@ pub fn WorkspacePane(
     let tab_entries = move || tabs.get().into_iter().enumerate().collect::<Vec<_>>();
     // Dedicated clones for the tab-content closures below (FnMut, re-runs):
     // the Browser tab renders the sibling module's live screencast component,
-    // and the Repo tab mounts the deck's RepoPanel (same component the deck
-    // uses — the workspace is its home on Tauri).
+    // and the Repo tab mounts RepoPanel.
     let daemon_browser = daemon.clone();
     let daemon_repo = daemon.clone();
 
@@ -902,9 +1031,7 @@ pub fn WorkspacePane(
                         .into_any(),
                         TabKind::Repo => view! {
                             <div class="workspace-repo">
-                                // Repo state (branch, dirty/staged, commits) —
-                                // the same RepoPanel the deck mounts; the
-                                // workspace is its home on Tauri.
+                                // Repo state (branch, dirty/staged, commits).
                                 <crate::deck::repo::RepoPanel daemon=daemon_repo.clone() />
                             </div>
                         }
@@ -1003,7 +1130,9 @@ pub fn WorkspacePane(
                             let Some(root) = tree_root.get() else {
                                 return view! {
                                     <div class="workspace-empty">
-                                        "No folder — start a session to explore."
+                                        <Show when=move || in_tauri fallback=|| "No folder — start a session to explore.">
+                                            <button type="button" class="workspace-tab" disabled=move || picker_pending.get() on:click=move |ev| choose_folder.run(ev)>"Open folder"</button>
+                                        </Show>
                                     </div>
                                 }
                                 .into_any();
@@ -1336,6 +1465,48 @@ mod tests {
     }
 
     // -- workspace_focus_tab_kind (shared helper, production + tests) ---------
+
+    #[test]
+    fn workspace_disposal_refuses_late_picker_watch_and_reads() {
+        let owner = Owner::new();
+        let alive = Arc::new(AtomicBool::new(true));
+        let generation = owner.with(|| {
+            let alive = alive.clone();
+            on_cleanup(move || alive.store(false, Ordering::Relaxed));
+            RwSignal::new(1u64)
+        });
+        assert!(workspace_task_is_current(&alive, 1, generation));
+        assert!(!workspace_task_is_current(&alive, 0, generation));
+        owner.cleanup();
+        assert!(!workspace_task_is_current(&alive, 1, generation));
+    }
+
+    #[test]
+    fn workspace_context_retires_picker_watch_and_reads_on_a_b_a() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let context = RwSignal::new((Some("a".into()), "/root/a".into(), 0));
+            let epoch = track_workspace_context(move || context.get());
+            let first_a = epoch.get_untracked();
+            context.set((Some("b".into()), "/root/b".into(), 1));
+            context.set((Some("a".into()), "/root/a".into(), 2));
+            assert!(!read_is_current(first_a, epoch.get_untracked()));
+            let second_a = epoch.get_untracked();
+            context.update(|context| context.1 = "/root/other".into());
+            context.update(|context| context.1 = "/root/a".into());
+            assert!(!read_is_current(second_a, epoch.get_untracked()));
+            assert_eq!(epoch.get_untracked(), 4);
+        });
+        owner.cleanup();
+    }
+
+    #[test]
+    fn workspace_events_ignore_neighbor_roots() {
+        assert!(path_is_within("/root/a", "/root/a"));
+        assert!(path_is_within("/root/a/", "/root/a/file"));
+        assert!(!path_is_within("/root/a", "/root/ab/file"));
+        assert!(!path_is_within("/root/a", "/root/b/file"));
+    }
 
     #[test]
     fn focus_tab_kind_files() {

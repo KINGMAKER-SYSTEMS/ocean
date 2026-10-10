@@ -45,52 +45,6 @@ extern "C" {
 // Path resolver — resolves file paths relative to cwd and workspace root.
 // ---------------------------------------------------------------------------
 
-/// Map a file extension to an icon label. Used by the deck file-tree rows.
-/// Returns `"code"` for most extensions, `"folder"` for directories, and
-/// `"git"` for git-related names.
-pub fn file_icon_label(name: &str) -> &'static str {
-    // Check for git-related files.
-    if name == ".gitignore" || name == ".gitattributes" || name == ".gitmodules" {
-        return "git";
-    }
-    // Code extensions.
-    if let Some(dot) = name.rfind('.') {
-        let ext = &name[dot + 1..];
-        match ext {
-            "rs" | "toml" | "lock" | "md" | "json" | "yaml" | "yml" | "css" | "html" | "js"
-            | "ts" | "jsx" | "tsx" | "py" | "go" | "c" | "h" | "cpp" | "hpp" | "java" | "kt"
-            | "swift" | "rb" | "pl" | "sh" | "bash" | "zsh" | "fish" | "Dockerfile" | "sql"
-            | "graphql" | "proto" | "xml" | "svg" | "txt" => "code",
-            _ => "code",
-        }
-    } else {
-        "code"
-    }
-}
-
-/// Resolve a relative or absolute file path. Rules:
-///   1. Absolute path → returned as-is.
-///   2. Path starting with `~` → home-relative, returned as-is (daemon resolves `~`).
-///   3. Relative path: join with `cwd` first; if that doesn't start with
-///      `workspace_root`, join with `workspace_root` instead.
-///   4. Fallback: join with `workspace_root`.
-pub fn resolve_file_path(workspace_root: &str, cwd: Option<&str>, file_path: &str) -> String {
-    // Rule 1: absolute.
-    if file_path.starts_with('/') {
-        return file_path.to_string();
-    }
-    // Rule 2: home-relative.
-    if file_path.starts_with('~') {
-        return file_path.to_string();
-    }
-    // Rule 3: cwd-first for relative paths (authoritative; no starts_with guard).
-    if let Some(cwd) = cwd {
-        return join_path(cwd.trim_end_matches('/'), file_path);
-    }
-    // Rule 4: fallback to workspace_root when cwd is absent.
-    join_path(workspace_root.trim_end_matches('/'), file_path)
-}
-
 /// Join a base path and a relative segment, normalizing `..` and `.`.
 /// Does not resolve symlinks — purely syntactic.
 pub fn join_path(base: &str, segment: &str) -> String {
@@ -149,8 +103,8 @@ fn normalize_path(path: &str) -> String {
 ///   relative.
 ///
 /// This is the pure function backing the FileTreeNode on-click callback.
-/// It replaces the split `ancestor_path` + `resolve_file_path` so the
-/// explicit-vs-absent provenance is not lost before resolution.
+/// Resolving the whole entry at once keeps the explicit-vs-absent provenance
+/// from being lost before resolution.
 pub fn resolve_file_tree_path(
     entry_path: Option<&str>,
     ancestor_prefix: &str,
@@ -2109,48 +2063,6 @@ mod tests {
     // ── Path resolver tests ───────────────────────────────────────────
 
     #[test]
-    fn resolve_absolute_path_returns_as_is() {
-        assert_eq!(
-            resolve_file_path("/workspace", Some("/workspace"), "/home/user/file.rs"),
-            "/home/user/file.rs"
-        );
-    }
-
-    #[test]
-    fn resolve_home_relative_returns_as_is() {
-        assert_eq!(
-            resolve_file_path("/workspace", Some("/workspace"), "~/file.rs"),
-            "~/file.rs"
-        );
-    }
-
-    #[test]
-    fn resolve_relative_with_cwd_match() {
-        assert_eq!(
-            resolve_file_path("/workspace", Some("/workspace/src"), "main.rs"),
-            "/workspace/src/main.rs"
-        );
-    }
-
-    #[test]
-    fn resolve_relative_cwd_authoritative_even_outside_root() {
-        // cwd is somewhere outside workspace_root — cwd is still authoritative
-        // for relative paths per the frozen contract.
-        assert_eq!(
-            resolve_file_path("/workspace", Some("/other/project"), "lib.rs"),
-            "/other/project/lib.rs"
-        );
-    }
-
-    #[test]
-    fn resolve_relative_no_cwd_uses_workspace_root() {
-        assert_eq!(
-            resolve_file_path("/workspace", None, "lib.rs"),
-            "/workspace/lib.rs"
-        );
-    }
-
-    #[test]
     fn normalize_path_collapses_dot_segments() {
         assert_eq!(normalize_path("/a/b/./c"), "/a/b/c");
         assert_eq!(normalize_path("/a/./b/./c"), "/a/b/c");
@@ -2181,16 +2093,6 @@ mod tests {
         assert_eq!(join_path("/a/b", "c"), "/a/b/c");
         assert_eq!(join_path("/a/b/", "c"), "/a/b/c");
         assert_eq!(join_path("/a", "b/../c"), "/a/c");
-    }
-
-    #[test]
-    fn file_icon_labels() {
-        assert_eq!(file_icon_label("main.rs"), "code");
-        assert_eq!(file_icon_label("Cargo.toml"), "code");
-        assert_eq!(file_icon_label("README.md"), "code");
-        assert_eq!(file_icon_label(".gitignore"), "git");
-        assert_eq!(file_icon_label("Dockerfile"), "code");
-        assert_eq!(file_icon_label("unknown.xyz"), "code");
     }
 
     // -- Production routing: resolve_file_tree_path (unified) -------------------

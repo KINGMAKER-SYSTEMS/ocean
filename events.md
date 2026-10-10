@@ -1156,3 +1156,32 @@ Round 5: round-4 review follow-ups on model reroute fidelity. (F2) Selection-tim
 
 Validation: ocean-agent 280 passed / 0 failed / 2 ignored; ocean-daemon 908 passed / 2 failed (only the two known pre-existing persistent_room envelope-key assertions); clippy -p ocean-agent --all-targets -D warnings clean; fmt --all --check clean; git diff --check clean.
 _________________________________________________________________________________
+time: [22:24] [08-10-26]
+agent: [claude] [claude code]
+worktree: [port/rooms-shell] [/Users/risingtidesdev/dev/port-rooms]
+type: [feature-request]
+area: [frontend] [backend] [testing]
+
+Ported the Rooms team-platform P0/P1 shell onto public main: the spec amendment (each coworker owns their daemon, shared Rooms federate), one full-bleed shell on every host with the Dynamic Island as the Sessions entry and WorkspacePane as the only Files/Repo/Browser surface, and the retired web-only deck and Sessions button. Native Tauri keeps Cmd/Ctrl+P for Sessions while web/PWA leaves it to browser Print. Reconciled against public main's newer token-footprint import, compact model-control selectors, the sessions_chrome.rs test rename, and its earlier removal of the unused Rooms search helpers (so the helper-removal port is an empty commit). The P1 host-gating test now skips the documented shortcut seam, which the original Print fix tripped.
+
+Validation: in apps/ocean-surface, `cargo fmt --all -- --check`, `cargo test -p ocean-surface-ui` (847 unit plus integration suites), WASM clippy with warnings denied, WASM check, WASM test compilation, `cargo check -p ocean-surface-proxy`, and `git diff --check` pass. No live browser or desktop run.
+_________________________________________________________________________________
+time: [11:40] [09-10-26]
+agent: [claude] [claude-opus-5-5]
+worktree: [port/rooms-shell] [~/dev/oceanwork/wt-pr66]
+type: [bug report]
+area: [frontend] [review]
+
+PR #66 review fix: the palette's "Switch Session…" command still advertised the ⌘P hint on web/PWA, where Cmd/Ctrl+P is left to browser Print and does not open Sessions. The hint now renders only in native Tauri, matching the amendment's "native-only shortcut hint is hidden on web" rule (the Island hint already did). Validation: `cargo fmt --all -- --check`, `cargo test -p ocean-surface-ui`, WASM clippy with warnings denied pass.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [22:28] [09-10-26]
+agent: [codex] [factory release]
+worktree: [codex/pr66-reviewed-repairs] [factory-pr66-reviewed-repairs/ocean]
+type: [bug report]
+area: [frontend] [testing] [review]
+
+PR #66 / issue #75: restored native-only Sessions and Recall shortcut hints and interception, bounded Unicode tool previews, horizontal pinned cards while Workspace is open, and pane-local Files picker/watch refresh. Files uses generation and disposal fencing, canonical owner leases isolated by native window, and page-Started retirement preserving Repo and other windows. Shared Tauri 2 event adapter now uses the pinned IPC API with synchronous cancellation and late-admission cleanup. Preserved concurrent palette repair 51cd328c and reconciled canonical main f1b22bd8; source matches builder 698431ad except its explanatory shortcut comment.
+
+Validation: native watcher tests 11/11 (real notify aliases, peer and legacy survival), locked native lib check; workspace tests 146/146, sessions chrome 5/5, shortcuts 2/2, previews 3/3, final host tests 14/14, WASM check, executable production event-adapter Node tests 4/4. Native compilation used an ignored disposable frontendDist fixture, not a served bundle. No installation, native UI smoke, deployment or live verification. Final integration review and hosted builds remain required; release owner is this factory chat.
