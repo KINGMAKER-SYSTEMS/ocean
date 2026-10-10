@@ -494,6 +494,7 @@ pub(super) async fn room_upload_attachment(
         return refusal;
     }
 
+    let _publication = publication_guard();
     let id = mint_attachment_id();
     let sha256 = format!("{:x}", Sha256::digest(&body));
     let byte_len = body.len() as u64;
@@ -705,7 +706,7 @@ pub(super) async fn room_delete_attachment(
 /// Directory capability: all blob names are resolved relative to this descriptor.
 /// The configured parent is trusted; attachment root/room components never follow links.
 #[cfg(unix)]
-struct BlobDir(std::fs::File);
+pub(super) struct BlobDir(std::fs::File);
 
 #[cfg(unix)]
 impl BlobDir {
@@ -776,33 +777,141 @@ impl BlobDir {
         }
     }
 
-    fn open(room_dir: &std::path::Path, create: bool) -> std::io::Result<Self> {
+    pub(super) fn open(room_dir: &std::path::Path, create: bool) -> std::io::Result<Self> {
         let root = room_dir
             .parent()
             .ok_or_else(|| std::io::Error::other("missing attachment root"))?;
+        let parent = Self::open_root(root, create)?;
+        Ok(Self(Self::child(
+            &parent.0,
+            room_dir
+                .file_name()
+                .ok_or_else(|| std::io::Error::other("missing room name"))?,
+            create,
+        )?))
+    }
+
+    pub(super) fn open_root(root: &std::path::Path, create: bool) -> std::io::Result<Self> {
         let parent = Self::storage_parent(root)?;
-        // Canonicalize only the trusted configured parent (e.g. macOS /var).
-        // Then walk descriptors, so even a later ancestor replacement is not followed.
         let mut descriptor = std::fs::File::open("/")?;
         for component in parent.components() {
             if let std::path::Component::Normal(name) = component {
                 descriptor = Self::child(&descriptor, name, false)?;
             }
         }
-        let root = Self::child(
+        Ok(Self(Self::child(
             &descriptor,
             root.file_name()
                 .ok_or_else(|| std::io::Error::other("missing root name"))?,
             create,
+        )?))
+    }
+
+    pub(super) fn open_child(&self, name: &std::ffi::OsStr) -> std::io::Result<Self> {
+        Ok(Self(Self::child(&self.0, name, false)?))
+    }
+
+    pub(super) fn metadata(&self) -> std::io::Result<std::fs::Metadata> {
+        self.0.metadata()
+    }
+
+    pub(super) fn matches_metadata(&self, expected: &std::fs::Metadata) -> std::io::Result<bool> {
+        use std::os::unix::fs::MetadataExt;
+        let current = self.metadata()?;
+        Ok(current.dev() == expected.dev() && current.ino() == expected.ino())
+    }
+
+    pub(super) fn entry_metadata(
+        &self,
+        name: &std::ffi::OsStr,
+    ) -> std::io::Result<std::fs::Metadata> {
+        use std::os::{fd::AsRawFd, unix::fs::MetadataExt};
+        let name = Self::name(name)?;
+        let mut prior = std::mem::MaybeUninit::<libc::stat>::uninit();
+        if unsafe {
+            libc::fstatat(
+                self.0.as_raw_fd(),
+                name.as_ptr(),
+                prior.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        } < 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        let prior = unsafe { prior.assume_init() };
+        let kind = prior.st_mode & libc::S_IFMT;
+        if kind != libc::S_IFREG && kind != libc::S_IFDIR {
+            return Err(std::io::Error::other("unsupported attachment entry"));
+        }
+        let file = Self::open_at(
+            &self.0,
+            &name,
+            libc::O_RDONLY | libc::O_NONBLOCK | libc::O_NOCTTY,
+            0,
         )?;
-        let room = Self::child(
-            &root,
-            room_dir
-                .file_name()
-                .ok_or_else(|| std::io::Error::other("missing room name"))?,
-            create,
-        )?;
-        Ok(Self(room))
+        let metadata = file.metadata()?;
+        if metadata.dev() != prior.st_dev as u64 || metadata.ino() != prior.st_ino as u64 {
+            return Err(std::io::Error::other("attachment entry changed"));
+        }
+        Ok(metadata)
+    }
+
+    pub(super) fn remove_measured(
+        &self,
+        name: &std::ffi::OsStr,
+        expected: &std::fs::Metadata,
+    ) -> std::io::Result<(u64, bool)> {
+        use std::os::unix::fs::MetadataExt;
+        let current = self.entry_metadata(name)?;
+        if !current.is_file()
+            || current.dev() != expected.dev()
+            || current.ino() != expected.ino()
+            || current.len() != expected.len()
+            || current.modified()? != expected.modified()?
+        {
+            return Err(std::io::Error::other("attachment entry changed"));
+        }
+        self.unlink(&Self::name(name)?)?;
+        // The unlink succeeded even if the durability barrier fails; accounting
+        // describes removed bytes. A later GC can safely repeat after a crash.
+        Ok((current.len(), self.0.sync_all().is_ok()))
+    }
+
+    pub(super) fn remove_empty_child(
+        &self,
+        name: &std::ffi::OsStr,
+        expected: &Self,
+    ) -> std::io::Result<bool> {
+        use std::os::{fd::AsRawFd, unix::fs::MetadataExt};
+        let current = self.entry_metadata(name)?;
+        let expected = expected.metadata()?;
+        if !current.is_dir() || current.dev() != expected.dev() || current.ino() != expected.ino() {
+            return Err(std::io::Error::other("attachment directory changed"));
+        }
+        let name = Self::name(name)?;
+        if unsafe { libc::unlinkat(self.0.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(self.0.sync_all().is_ok())
+    }
+
+    pub(super) fn names(&self) -> std::io::Result<BlobNames> {
+        use std::os::fd::IntoRawFd;
+        // Separate open description, so enumerating again does not inherit a
+        // previous stream's offset; the literal dot cannot escape this handle.
+        let name = std::ffi::CString::new(".").expect("literal");
+        let fd =
+            Self::open_at(&self.0, &name, libc::O_RDONLY | libc::O_DIRECTORY, 0)?.into_raw_fd();
+        let stream = unsafe { libc::fdopendir(fd) };
+        if stream.is_null() {
+            let error = std::io::Error::last_os_error();
+            unsafe {
+                libc::close(fd);
+            }
+            return Err(error);
+        }
+        Ok(BlobNames(stream))
     }
 
     fn unlink(&self, name: &std::ffi::CStr) -> std::io::Result<()> {
@@ -911,12 +1020,133 @@ impl BlobDir {
     }
 }
 
+#[cfg(unix)]
+pub(super) struct BlobNames(*mut libc::DIR);
+#[cfg(unix)]
+impl BlobNames {
+    fn finish(
+        &mut self,
+        error: Option<std::io::Error>,
+    ) -> Option<std::io::Result<std::ffi::OsString>> {
+        if !self.0.is_null() {
+            unsafe {
+                libc::closedir(self.0);
+            }
+            self.0 = std::ptr::null_mut();
+        }
+        error.map(Err)
+    }
+}
+#[cfg(unix)]
+impl Drop for BlobNames {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe {
+                libc::closedir(self.0);
+            }
+        }
+    }
+}
+#[cfg(unix)]
+impl Iterator for BlobNames {
+    type Item = std::io::Result<std::ffi::OsString>;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.0.is_null() {
+            return None;
+        }
+        use std::os::unix::ffi::OsStringExt;
+        loop {
+            #[cfg(target_os = "macos")]
+            let errno = unsafe { libc::__error() };
+            #[cfg(target_os = "linux")]
+            let errno = unsafe { libc::__errno_location() };
+            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+            let errno: *mut libc::c_int = std::ptr::null_mut();
+            if !errno.is_null() {
+                unsafe {
+                    *errno = 0;
+                }
+            }
+            let entry = unsafe { libc::readdir(self.0) };
+            if entry.is_null() {
+                let error = if !errno.is_null() && unsafe { *errno } != 0 {
+                    Some(std::io::Error::last_os_error())
+                } else {
+                    None
+                };
+                return self.finish(error);
+            }
+            let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+            if name == b"." || name == b".." {
+                continue;
+            }
+            return Some(Ok(std::ffi::OsString::from_vec(name.to_vec())));
+        }
+    }
+}
+
+/// Single-daemon attachment publication custody. Uploads hold shared custody
+/// from before temp creation through SQL/rollback; cleanup takes exclusive
+/// custody before live store revalidation. Always acquire this before rooms.
+static PUBLICATION: std::sync::RwLock<()> = std::sync::RwLock::new(());
+pub(super) fn publication_guard() -> std::sync::RwLockReadGuard<'static, ()> {
+    PUBLICATION
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+pub(super) fn try_cleanup_guard() -> Option<std::sync::RwLockWriteGuard<'static, ()>> {
+    match PUBLICATION.try_write() {
+        Ok(guard) => Some(guard),
+        Err(std::sync::TryLockError::Poisoned(error)) => Some(error.into_inner()),
+        Err(std::sync::TryLockError::WouldBlock) => None,
+    }
+}
+pub(super) fn cleanup_guard() -> std::sync::RwLockWriteGuard<'static, ()> {
+    PUBLICATION
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 // Unsupported platforms fail closed rather than reverting to path-following I/O.
 #[cfg(not(unix))]
-struct BlobDir;
+pub(super) struct BlobDir;
 #[cfg(not(unix))]
 impl BlobDir {
-    fn open(_: &std::path::Path, _: bool) -> std::io::Result<Self> {
+    pub(super) fn open_root(_: &std::path::Path, _: bool) -> std::io::Result<Self> {
+        Self::open(std::path::Path::new(""), false)
+    }
+    pub(super) fn open_child(&self, _: &std::ffi::OsStr) -> std::io::Result<Self> {
+        Self::open(std::path::Path::new(""), false)
+    }
+    pub(super) fn metadata(&self) -> std::io::Result<std::fs::Metadata> {
+        Err(std::io::Error::other("unsupported attachment storage"))
+    }
+    pub(super) fn matches_metadata(&self, _: &std::fs::Metadata) -> std::io::Result<bool> {
+        Err(std::io::Error::other("unsupported attachment storage"))
+    }
+    pub(super) fn entry_metadata(&self, _: &std::ffi::OsStr) -> std::io::Result<std::fs::Metadata> {
+        self.metadata()
+    }
+    pub(super) fn remove_measured(
+        &self,
+        _: &std::ffi::OsStr,
+        _: &std::fs::Metadata,
+    ) -> std::io::Result<(u64, bool)> {
+        Err(std::io::Error::other("unsupported attachment storage"))
+    }
+    pub(super) fn remove_empty_child(
+        &self,
+        _: &std::ffi::OsStr,
+        _: &Self,
+    ) -> std::io::Result<bool> {
+        Err(std::io::Error::other("unsupported attachment storage"))
+    }
+    pub(super) fn names(
+        &self,
+    ) -> std::io::Result<std::vec::IntoIter<std::io::Result<std::ffi::OsString>>> {
+        Err(std::io::Error::other("unsupported attachment storage"))
+    }
+    pub(super) fn open(_: &std::path::Path, _: bool) -> std::io::Result<Self> {
         Err(std::io::Error::other(
             "safe attachment storage requires Unix directory capabilities",
         ))
@@ -1139,6 +1369,41 @@ mod tests {
         std::fs::create_dir(&path).unwrap();
         assert!(custody.read(id, 4).is_err());
         assert_eq!(std::fs::read(&outside).unwrap(), b"sentinel");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn blob_directory_iteration_fuses_after_read_failure_or_eof() {
+        let temp = tempfile::tempdir().unwrap();
+        let root_path = temp.path().join("attachments");
+        let root = BlobDir::open_root(&root_path, true).unwrap();
+        let mut names = root.names().unwrap();
+        assert!(names
+            .finish(Some(std::io::Error::other("injected readdir failure")))
+            .unwrap()
+            .is_err());
+        assert!(names.next().is_none());
+        assert!(names.next().is_none());
+        let mut empty = root.names().unwrap();
+        assert!(empty.next().is_none());
+        assert!(empty.next().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_does_not_remove_a_replacement_empty_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let root_path = temp.path().join("attachments");
+        let key = RoomKey::new("empty-swap");
+        let dir_path = room_dir(&root_path, &key);
+        let captured = BlobDir::open(&dir_path, true).unwrap();
+        let root = BlobDir::open_root(&root_path, false).unwrap();
+        std::fs::rename(&dir_path, temp.path().join("captured")).unwrap();
+        std::fs::create_dir(&dir_path).unwrap();
+        assert!(root
+            .remove_empty_child(dir_path.file_name().unwrap(), &captured)
+            .is_err());
+        assert!(dir_path.is_dir());
     }
 
     #[cfg(unix)]

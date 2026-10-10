@@ -11,8 +11,9 @@
 //! Two jobs, one loop:
 //!
 //! 1. **Transcript retention.** A room CLOSED longer than the operator's window
-//!    loses its transcript, its attachment rows and blobs, its read cursors and
-//!    its federation dedup index, in one IMMEDIATE store transaction per room.
+//!    loses its transcript, its attachment rows, its read cursors and
+//!    its federation dedup index in one IMMEDIATE store transaction per room;
+//!    captured blob cleanup follows the row commit.
 //!    Never an open room, at any age: the window is measured from the close, so
 //!    a live room is not eligible however long it has been running. Off unless
 //!    the operator turns it on — see [`DEFAULT_ROOM_RETENTION_DAYS`].
@@ -35,14 +36,12 @@
 //! "retention_days: 0" learns why nothing was cut without going to the process
 //! environment to find out.
 
-use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::{extract::State, http::HeaderMap, http::StatusCode, Json};
 use chrono::{DateTime, Utc};
-use ocean_core::RoomKey;
 use serde_json::json;
 
 use crate::persistent_rooms::{with_rooms_handle, RoomStoreHandle};
@@ -71,30 +70,15 @@ pub(super) const DEFAULT_ROOM_RETENTION_DAYS: u32 = 0;
 
 /// How often the maintenance loop sweeps.
 ///
-/// Six hours. Both jobs are bounded by how much the store grew since the last
-/// run rather than by its size, so the interval is not a performance knob; what
-/// it actually sets is the worst-case lag between an operator's window elapsing
-/// and the disk coming back. Four sweeps a day makes "cut within a day of the
-/// window" true without a sweep ever being the thing an operator waits on, and
-/// keeps the orphan GC's directory walk — the only part that touches every room
-/// — off the daemon's hot hours by not running it every few minutes.
+/// Six hours. Each pass enumerates the current blob tree; the interval bounds
+/// cleanup lag without placing that walk on every upload's hot path.
 pub(super) const ROOM_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 
 /// How new a blob has to be for the orphan sweep to leave it alone.
 ///
-/// One hour, and it is a correctness bound rather than caution. `room_attachments`
-/// writes and fsyncs the bytes BEFORE the row commits — deliberately, because an
-/// orphan blob is collectable garbage while an orphan row is a download that
-/// 500s forever — so there is a window in every successful upload during which
-/// the file on disk is genuinely unreferenced. A sweep with no grace would race
-/// that window and delete the bytes of an upload that was about to succeed,
-/// leaving exactly the orphan row the write order exists to prevent.
-///
-/// An hour is far longer than that window (the row commits within one store
-/// transaction of the write) and far longer than the 8 MiB upload that produced
-/// it can take. It also covers the `.tmp` file `write_blob` renames from: a
-/// crash mid-upload leaves one, and an hour is long enough that a live upload's
-/// temp file is never mistaken for that crash's.
+/// One hour of recovery grace. A fixed sweep-start cutoff prevents aging-in;
+/// publication custody and live reference checks protect in-flight writes even
+/// when filesystem or store work stalls longer than this interval.
 pub(super) const ATTACHMENT_ORPHAN_GRACE: Duration = Duration::from_secs(60 * 60);
 
 /// Read the retention window once, at startup.
@@ -300,9 +284,9 @@ pub(super) struct SweepOutcome {
 ///
 /// Synchronous and blocking: it takes the store lock repeatedly and walks a
 /// directory tree, so callers put it on a blocking thread rather than a runtime
-/// worker. It never holds the store guard across filesystem work — every
-/// `with_rooms_handle` closure returns before a file is touched, which is the
-/// same rule the rest of the room code follows about awaits.
+/// worker. Enumeration runs outside the store lock. Each destructive orphan
+/// decision retains the store guard through its descriptor-relative unlink;
+/// no store guard crosses an await.
 ///
 /// `now` is a parameter and not `Utc::now()` so retention is testable against a
 /// fixed clock: a test that had to sleep past a real window could only ever
@@ -313,11 +297,20 @@ pub(super) fn run_sweep(
     config: &MaintenanceConfig,
     now: DateTime<Utc>,
 ) -> SweepOutcome {
+    let orphan_started = std::time::SystemTime::now();
     let mut outcome = SweepOutcome::default();
     if let Err(error) = run_retention(rooms, blob_root, config, now, &mut outcome) {
         outcome.error = Some(error);
     }
-    if let Err(error) = run_orphan_gc(rooms, blob_root, config, &mut outcome) {
+    if let Err(error) = run_orphan_gc_at(
+        rooms,
+        blob_root,
+        config,
+        &mut outcome,
+        orphan_started,
+        |_| {},
+        |_| {},
+    ) {
         // First error wins: the retention failure is the more consequential of
         // the two to report, and a card that can hold one string should hold
         // the one an operator acts on.
@@ -349,6 +342,13 @@ fn run_retention(
         // transaction would hold the write lock across every room's deletes and
         // block live traffic for the whole sweep, and a failure on room 40 would
         // roll back the 39 cuts that were already correct.
+        let _custody = crate::room_attachments::cleanup_guard();
+        let dir_path = crate::room_attachments::room_dir(blob_root, &key);
+        let root = crate::room_attachments::BlobDir::open_root(blob_root, false);
+        let dir = root.as_ref().ok().and_then(|root| {
+            root.open_child(dir_path.file_name().expect("hashed name"))
+                .ok()
+        });
         let cut = match with_rooms_handle(rooms, |store| store.cut_closed_room(&key)) {
             Ok(cut) => cut,
             Err(_) => {
@@ -373,286 +373,248 @@ fn run_retention(
         // discard the error, and the byte total is not allowed to claim it.
         //
         // `bytes_reclaimed` counts a blob only when the file is actually gone
-        // (unlinked here, or already absent). Adding the row's recorded
+        // (unlinked here; already absent earns zero). Adding the row's recorded
         // `byte_len` unconditionally would let the report announce reclaimed
         // disk on a tree that never gave any back, which is the exact failure
         // this card exists to make visible rather than to paper over.
-        let dir = crate::room_attachments::room_dir(blob_root, &key);
-        for (id, byte_len) in cut.attachment_blobs {
-            let Some(path) = crate::room_attachments::blob_path(blob_root, &key, &id) else {
+        for (id, _recorded_len) in cut.attachment_blobs {
+            if crate::room_attachments::blob_path(blob_root, &key, &id).is_none() {
                 outcome.blobs_unlink_failed += 1;
                 outcome.error.get_or_insert_with(|| {
-                    "retention refused a malformed stored attachment id".to_string()
+                    "retention refused a malformed stored attachment id".into()
                 });
                 continue;
+            }
+            let removed = match &dir {
+                Some(dir) => dir
+                    .entry_metadata(id.as_ref())
+                    .and_then(|metadata| dir.remove_measured(id.as_ref(), &metadata)),
+                None => match &root {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Ok(root) => {
+                        match root.entry_metadata(dir_path.file_name().expect("hashed name")) {
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                            _ => Err(std::io::Error::other("unsafe room directory")),
+                        }
+                    }
+                    _ => Err(std::io::Error::other("unsafe attachment root")),
+                },
             };
-            match std::fs::remove_file(&path) {
-                Ok(()) => outcome.bytes_reclaimed += byte_len,
-                // Already gone: nothing to reclaim, and nothing wrong.
+            match removed {
+                Ok((bytes, synced)) => {
+                    outcome.bytes_reclaimed += bytes;
+                    if !synced {
+                        outcome.error.get_or_insert_with(|| {
+                            "retention could not sync attachment cleanup".into()
+                        });
+                    }
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(_) => {
                     outcome.blobs_unlink_failed += 1;
                     outcome.error.get_or_insert_with(|| {
-                        "retention could not unlink a cut room's attachment bytes".to_string()
+                        "retention could not unlink a cut room's attachment bytes".into()
                     });
                 }
             }
         }
-        // The room's directory is empty now and no room will ever file anything
-        // under it again. `remove_dir` (not `remove_dir_all`) so a file the
-        // unlinks above failed to remove keeps the directory alive for the
-        // orphan sweep to look at rather than being deleted unexamined.
-        let _ = std::fs::remove_dir(&dir);
+        if let (Ok(root), Some(dir)) = (&root, &dir) {
+            let _ = root.remove_empty_child(dir_path.file_name().expect("hashed name"), dir);
+        }
     }
     Ok(())
 }
 
-/// Unlink blob bytes no `room_attachments` row claims.
-fn run_orphan_gc(
+/// Classifications are refreshed under publication exclusion and the store guard
+/// immediately before removal. The directory walk never authorizes deletion.
+fn run_orphan_gc_at(
     rooms: &RoomStoreHandle,
     blob_root: &Path,
     config: &MaintenanceConfig,
     outcome: &mut SweepOutcome,
+    started: std::time::SystemTime,
+    mut before_candidate: impl FnMut(&Path),
+    mut after_capture: impl FnMut(&Path),
 ) -> Result<(), String> {
-    // The room directory is a ONE-WAY hash of the room key and is never stored,
-    // so there is no way to read a directory name and learn whose it is. The
-    // only question the tree can answer is the one asked in the other
-    // direction: derive the expected directory of every room the store knows —
-    // closed rooms included, because a frozen room still owns its files and
-    // `/snapshot` still serves the transcript naming them — and anything the
-    // tree holds that is not in that set belongs to nobody.
-    let keys = with_rooms_handle(rooms, |store| store.room_keys_including_closed())
-        .map_err(|_| "orphan GC could not list rooms".to_string())?;
-
-    let mut expected: HashMap<PathBuf, RoomKey> = HashMap::new();
-    for key in keys {
-        expected.insert(crate::room_attachments::room_dir(blob_root, &key), key);
-    }
-
-    let entries = match std::fs::read_dir(blob_root) {
-        Ok(entries) => entries,
-        // No tree yet is the ordinary state of a daemon nobody has attached a
-        // file to. Not an error, and not something to report every six hours.
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(_) => return Err("orphan GC could not read the attachment root".to_string()),
+    let Some(cutoff) = started.checked_sub(config.orphan_grace) else {
+        return Ok(());
     };
-
+    let root = match crate::room_attachments::BlobDir::open_root(blob_root, false) {
+        Ok(root) => root,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err("orphan GC could not read the attachment root".into()),
+    };
+    let entries = root
+        .names()
+        .map_err(|_| "orphan GC could not enumerate attachment root".to_string())?;
     for entry in entries {
-        let Some(entry) = gc_inspected(
+        let Some(name) = gc_inspected(
             entry,
             outcome,
             "orphan GC could not enumerate an attachment root entry",
         ) else {
             continue;
         };
-        let path = entry.path();
-        let Some(file_type) = gc_inspected(
-            entry.file_type(),
+        let path = blob_root.join(&name);
+        before_candidate(&path);
+        // Busy publication is a reason to defer cleanup, never to infer orphanhood.
+        let Some(_custody) = crate::room_attachments::try_cleanup_guard() else {
+            continue;
+        };
+        let Some(metadata) = gc_inspected(
+            root.entry_metadata(&name),
             outcome,
-            "orphan GC could not inspect an attachment root entry",
+            "orphan GC refused an unsafe attachment root entry",
         ) else {
             continue;
         };
-        // Only directories are ours. A stray file at the root is left alone
-        // rather than deleted: this sweep's authority is "the tree this daemon
-        // writes", and this daemon writes only room directories here.
-        if !file_type.is_dir() {
+        if !metadata.is_dir() {
             continue;
         }
-        match expected.get(&path) {
-            None => {
-                // A directory matching no room the store knows. Nothing can ever
-                // reach it again — the only way back in is the hash of a key the
-                // store no longer holds.
-                if !older_than_grace(&path, config.orphan_grace) {
-                    continue;
-                }
-                remove_orphan_dir_with(&path, outcome, |path| std::fs::remove_dir_all(path));
+        let Some(dir) = gc_inspected(
+            root.open_child(&name),
+            outcome,
+            "orphan GC could not open a room directory",
+        ) else {
+            continue;
+        };
+        if !dir.matches_metadata(&metadata).unwrap_or(false) {
+            outcome
+                .error
+                .get_or_insert_with(|| "orphan GC refused a replaced room directory".into());
+            continue;
+        }
+        after_capture(&path);
+        let Some(entries) = gc_inspected(
+            dir.names(),
+            outcome,
+            "orphan GC could not read a room directory",
+        ) else {
+            continue;
+        };
+        for entry in entries {
+            let Some(file) = gc_inspected(
+                entry,
+                outcome,
+                "orphan GC could not enumerate a room directory entry",
+            ) else {
+                continue;
+            };
+            let Some(metadata) = gc_inspected(
+                dir.entry_metadata(&file),
+                outcome,
+                "orphan GC refused an unsafe room entry",
+            ) else {
+                continue;
+            };
+            if !metadata.is_file() {
+                outcome
+                    .error
+                    .get_or_insert_with(|| "orphan GC refused an unsafe room entry".into());
+                continue;
             }
-            Some(key) => {
-                let referenced = match with_rooms_handle(rooms, |store| store.attachments(key)) {
-                    Ok(rows) => rows.into_iter().map(|row| row.id).collect::<HashSet<_>>(),
-                    Err(_) => {
-                        // Fail CLOSED: a room whose rows could not be read has
-                        // no known references, and treating "unknown" as
-                        // "unreferenced" would delete a live room's files on a
-                        // transient store error.
-                        outcome.error.get_or_insert_with(|| {
-                            "orphan GC could not read a room's attachment rows".to_string()
-                        });
-                        continue;
+            if !older_than_cutoff(&metadata, cutoff) {
+                continue;
+            }
+            let removed = with_rooms_handle(rooms, |store| {
+                // Re-derive even unknown ownership for each destructive decision:
+                // a room may have been created since directory enumeration.
+                let key = store.room_keys_including_closed()?.into_iter().find(|key| {
+                    crate::room_attachments::room_dir(blob_root, key).file_name()
+                        == Some(name.as_os_str())
+                });
+                if let Some(key) = key {
+                    if let Some(id) = file.to_str() {
+                        if store.attachment(&key, id)?.is_some() {
+                            return Ok(None);
+                        }
                     }
-                };
-                sweep_room_dir(&path, &referenced, config.orphan_grace, outcome);
+                }
+                Ok::<_, ocean_store::RoomStoreError>(Some(dir.remove_measured(&file, &metadata)))
+            });
+            match removed {
+                Ok(Some(Ok((bytes, synced)))) => {
+                    outcome.orphan_files_removed += 1;
+                    outcome.bytes_reclaimed += bytes;
+                    if !synced {
+                        outcome
+                            .error
+                            .get_or_insert_with(|| "orphan GC could not sync blob cleanup".into());
+                    }
+                }
+                Ok(Some(Err(error))) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Ok(Some(Err(_))) => {
+                    outcome.blobs_unlink_failed += 1;
+                    outcome
+                        .error
+                        .get_or_insert_with(|| "orphan GC could not unlink a blob".into());
+                }
+                Ok(None) => {}
+                Err(_) => {
+                    outcome.error.get_or_insert_with(|| {
+                        "orphan GC could not read live attachment references".into()
+                    });
+                }
+            }
+        }
+        // Young, referenced or unsafe entries can legitimately keep a directory
+        // nonempty. Do not report a removal failure for intentionally kept bytes.
+        match dir
+            .names()
+            .and_then(|mut entries| entries.next().transpose())
+        {
+            Ok(Some(_)) => continue,
+            Err(_) => {
+                outcome.error.get_or_insert_with(|| {
+                    "orphan GC could not confirm an empty room directory".into()
+                });
+                continue;
+            }
+            Ok(None) => {}
+        }
+        // Removing only an empty captured directory cannot recursively consume a
+        // newly published file. Unknown ownership is rechecked while store-locked.
+        let result = with_rooms_handle(rooms, |store| {
+            let known = store.room_keys_including_closed()?.iter().any(|key| {
+                crate::room_attachments::room_dir(blob_root, key).file_name()
+                    == Some(name.as_os_str())
+            });
+            if known || !older_than_cutoff(&metadata, cutoff) {
+                return Ok(None);
+            }
+            Ok::<_, ocean_store::RoomStoreError>(Some(root.remove_empty_child(&name, &dir)))
+        });
+        match result {
+            Ok(Some(Ok(synced))) => {
+                outcome.orphan_dirs_removed += 1;
+                if !synced {
+                    outcome
+                        .error
+                        .get_or_insert_with(|| "orphan GC could not sync directory cleanup".into());
+                }
+            }
+            Ok(Some(Err(error))) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(Some(Err(_))) => {
+                outcome.error.get_or_insert_with(|| {
+                    "orphan GC could not remove an unrecognized room directory".into()
+                });
+            }
+            Ok(None) => {}
+            Err(_) => {
+                outcome
+                    .error
+                    .get_or_insert_with(|| "orphan GC could not read live room ownership".into());
             }
         }
     }
     Ok(())
 }
 
-/// Remove one whole directory the store cannot name and attribute only bytes
-/// the filesystem confirms are gone.
-///
-/// The remover is injected so the failure path has a deterministic regression:
-/// permission fixtures are not reliable when the test runner is root.
-fn remove_orphan_dir_with(
-    path: &Path,
-    outcome: &mut SweepOutcome,
-    remove_dir_all: impl FnOnce(&Path) -> std::io::Result<()>,
-) {
-    let bytes = directory_bytes(path, outcome);
-    match remove_dir_all(path) {
-        Ok(()) => {
-            outcome.orphan_dirs_removed += 1;
-            outcome.bytes_reclaimed += bytes;
-        }
-        // Somebody else removed it between the listing and here. Nothing was
-        // reclaimed by this sweep, but the intended state already holds.
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => {
-            outcome.error.get_or_insert_with(|| {
-                "orphan GC could not remove an unrecognized room directory".to_string()
-            });
-        }
-    }
-}
-
-/// Unlink every file in one room's directory that its row set does not name.
-///
-/// This is where the `.tmp` residue goes too: `write_blob` renames from
-/// `<id>.tmp`, which is not an attachment id, so a crash mid-upload leaves a
-/// file no row can ever claim and the same rule collects it.
-fn sweep_room_dir(
-    dir: &Path,
-    referenced: &HashSet<String>,
-    grace: Duration,
-    outcome: &mut SweepOutcome,
-) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        outcome
-            .error
-            .get_or_insert_with(|| "orphan GC could not read a room directory".to_string());
-        return;
-    };
-    for entry in entries {
-        let Some(entry) = gc_inspected(
-            entry,
-            outcome,
-            "orphan GC could not enumerate a room directory entry",
-        ) else {
-            continue;
-        };
-        let path = entry.path();
-        let Some(file_type) = gc_inspected(
-            entry.file_type(),
-            outcome,
-            "orphan GC could not inspect a room directory entry",
-        ) else {
-            continue;
-        };
-        if !file_type.is_file() {
-            continue;
-        }
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        if is_referenced(name, referenced) {
-            continue;
-        }
-        if !older_than_grace(&path, grace) {
-            continue;
-        }
-        let Some(metadata) = gc_inspected(
-            entry.metadata(),
-            outcome,
-            "orphan GC could not measure a blob",
-        ) else {
-            continue;
-        };
-        let size = metadata.len();
-        match std::fs::remove_file(&path) {
-            Ok(()) => {
-                outcome.orphan_files_removed += 1;
-                outcome.bytes_reclaimed += size;
-            }
-            // Somebody else removed it between the listing and here. Not a
-            // failure: the file is gone, which is what was wanted.
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            // A directory that refuses deletion — wrong permissions, a
-            // read-only mount — is the failure mode this whole module exists to
-            // make visible: disk keeps growing while every sweep reports a
-            // clean run. Counted and surfaced, never swallowed.
-            Err(_) => {
-                outcome.blobs_unlink_failed += 1;
-                outcome
-                    .error
-                    .get_or_insert_with(|| "orphan GC could not unlink a blob".to_string());
-            }
-        }
-    }
-}
-
-/// Does a row claim the file under this name?
-///
-/// Its own function so the GC test can MUTATE exactly this decision — force it
-/// to say referenced for everything, or for nothing — and watch the assertions
-/// fall the two opposite ways. A sweep whose reference check is inlined into its
-/// loop can only be tested by outcome, and an outcome test passes just as well
-/// against a sweep that deletes nothing at all.
-fn is_referenced(file_name: &str, referenced: &HashSet<String>) -> bool {
-    referenced.contains(file_name)
-}
-
-/// Is this path older than the grace window?
-///
-/// Fail CLOSED on every uncertainty: an unreadable mtime, a clock that puts the
-/// file in the future, an elapsed-time error — all answer `false`, meaning "do
-/// not delete". The cost of a false negative is that a genuine orphan survives
-/// until the next sweep; the cost of a false positive is somebody's file.
-fn older_than_grace(path: &Path, grace: Duration) -> bool {
-    let Ok(metadata) = std::fs::metadata(path) else {
-        return false;
-    };
-    let Ok(modified) = metadata.modified() else {
-        return false;
-    };
-    modified.elapsed().map(|age| age >= grace).unwrap_or(false)
-}
-
-/// Total bytes of the regular files directly inside a directory.
-///
-/// Used only to report what removing an orphan directory reclaimed. Non-
-/// recursive because the tree is flat by construction: a room directory holds
-/// blob files and nothing else.
-fn directory_bytes(dir: &Path, outcome: &mut SweepOutcome) -> u64 {
-    let Some(entries) = gc_inspected(
-        std::fs::read_dir(dir),
-        outcome,
-        "orphan GC could not measure an orphan directory",
-    ) else {
-        return 0;
-    };
-    let mut bytes = 0;
-    for entry in entries {
-        let Some(entry) = gc_inspected(
-            entry,
-            outcome,
-            "orphan GC could not enumerate an orphan directory entry",
-        ) else {
-            continue;
-        };
-        let Some(metadata) = gc_inspected(
-            entry.metadata(),
-            outcome,
-            "orphan GC could not measure an orphan directory entry",
-        ) else {
-            continue;
-        };
-        if metadata.is_file() {
-            bytes += metadata.len();
-        }
-    }
-    bytes
+fn older_than_cutoff(metadata: &std::fs::Metadata, cutoff: std::time::SystemTime) -> bool {
+    metadata
+        .modified()
+        .map(|modified| modified <= cutoff)
+        .unwrap_or(false)
 }
 
 /// Preserve the first bounded failure while allowing unrelated entries to be
@@ -827,7 +789,7 @@ pub(super) async fn room_maintenance_run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ocean_core::{RoomMessageKind, RoomParticipant, RoomParticipantKind};
+    use ocean_core::{RoomKey, RoomMessageKind, RoomParticipant, RoomParticipantKind};
     use ocean_store::{RoomCloser, RoomStore, SqliteRoomStore};
 
     #[test]
@@ -878,6 +840,7 @@ mod tests {
     async fn cancelled_sweep_request_retains_worker_ownership_and_records_completion() {
         let dir = tempfile::tempdir().unwrap();
         let (rooms, root) = fixture(dir.path());
+        std::fs::create_dir_all(root.join("0".repeat(64))).unwrap();
         let root = Arc::new(root);
         let config = MaintenanceConfig::default();
         let handle = new_handle(&config);
@@ -1130,88 +1093,34 @@ mod tests {
         });
     }
 
-    /// The orphan sweep takes the unreferenced blob and leaves the referenced
-    /// one intact — and this test PROVES that by mutation rather than by
-    /// outcome.
-    ///
-    /// MUTATION RESULT, recorded here because an outcome-only assertion passes
-    /// against a sweep that deletes nothing: [`is_referenced`] is the whole
-    /// decision, so the test drives `sweep_room_dir` three times against the
-    /// same directory with three reference sets.
-    ///
-    /// * Say **referenced for everything** (the mutant that never deletes): the
-    ///   orphan survives, and `orphan_files_removed` stays 0 — the first
-    ///   assertion below fails.
-    /// * Say **nothing is referenced** (the mutant that deletes indiscriminately):
-    ///   the live attachment's bytes go too — the last assertion fails.
-    /// * Say the truth: only the orphan goes, and the referenced blob still
-    ///   reads back byte-for-byte.
-    ///
-    /// Both mutants are exercised for real below, not described: each is a
-    /// doctored `HashSet` handed to the same function the real sweep calls, so
-    /// neither can pass while the true run also passes.
     #[test]
     fn orphan_gc_takes_the_unreferenced_blob_and_only_that_one() {
         let tmp = tempfile::tempdir().unwrap();
         let (rooms, blob_root) = fixture(tmp.path());
-        let now = Utc::now();
         let key = RoomKey::new("gc-room");
-        seed_room(&rooms, &key, now);
-
+        seed_room(&rooms, &key, Utc::now());
         let live = "c".repeat(32);
         let orphan = "d".repeat(32);
-        seed_attachment(&rooms, &blob_root, &key, &live, b"referenced bytes", now);
-        // Bytes with no row: exactly the residue the upload path's
-        // write-then-commit order leaves when the commit never happens.
-        crate::room_attachments::write_blob_for_test(&blob_root, &key, &orphan, b"orphan bytes");
-        let dir = crate::room_attachments::room_dir(&blob_root, &key);
-
-        // MUTANT 1 — "referenced for everything". Nothing may be deleted.
-        let everything: HashSet<String> = [live.clone(), orphan.clone()].into_iter().collect();
-        let mut mutant = SweepOutcome::default();
-        sweep_room_dir(&dir, &everything, Duration::ZERO, &mut mutant);
-        assert_eq!(
-            mutant.orphan_files_removed, 0,
-            "a sweep that believes everything is referenced must remove nothing"
+        seed_attachment(
+            &rooms,
+            &blob_root,
+            &key,
+            &live,
+            b"referenced bytes",
+            Utc::now(),
         );
-        assert!(dir.join(&orphan).exists(), "mutant 1 left the orphan");
-
-        // The TRUE run, through the real entry point, with the real row set.
+        crate::room_attachments::write_blob_for_test(&blob_root, &key, &orphan, b"orphan bytes");
         let config = MaintenanceConfig {
             orphan_grace: Duration::ZERO,
             ..MaintenanceConfig::default()
         };
-        let outcome = run_sweep(&rooms, &blob_root, &config, now);
+        let outcome = run_sweep(&rooms, &blob_root, &config, Utc::now());
         assert_eq!(outcome.error, None);
-        assert_eq!(outcome.orphan_files_removed, 1, "exactly the orphan");
+        assert_eq!(outcome.orphan_files_removed, 1);
         assert_eq!(outcome.bytes_reclaimed, b"orphan bytes".len() as u64);
-        assert!(!dir.join(&orphan).exists(), "the orphan is gone");
-        assert_eq!(
-            std::fs::read(dir.join(&live)).unwrap(),
-            b"referenced bytes",
-            "the referenced blob's bytes are untouched, byte-for-byte"
-        );
-        with_rooms_handle(&rooms, |store| {
-            assert_eq!(
-                store.attachments(&key).unwrap().len(),
-                1,
-                "the GC never touches the index; it only reads it"
-            );
-        });
-
-        // MUTANT 2 — "nothing is referenced". The live blob goes too, which is
-        // the failure the true run above must not have.
-        let nothing: HashSet<String> = HashSet::new();
-        let mut mutant = SweepOutcome::default();
-        sweep_room_dir(&dir, &nothing, Duration::ZERO, &mut mutant);
-        assert_eq!(
-            mutant.orphan_files_removed, 1,
-            "with no references the live blob is what is left to take"
-        );
-        assert!(
-            !dir.join(&live).exists(),
-            "mutant 2 deletes the referenced blob — the behaviour the true run must not have"
-        );
+        let dir = crate::room_attachments::room_dir(&blob_root, &key);
+        assert!(!dir.join(orphan).exists());
+        assert_eq!(std::fs::read(dir.join(live)).unwrap(), b"referenced bytes");
     }
 
     /// A blob younger than the grace window survives.
@@ -1288,30 +1197,245 @@ mod tests {
         );
     }
 
-    /// A failed whole-directory removal is visible and never credited as
-    /// reclaimed bytes. The injected error keeps this deterministic under root.
     #[test]
-    fn an_unknown_directory_that_cannot_be_removed_reclaims_nothing() {
+    fn orphan_gc_rechecks_new_room_and_attachment_after_enumeration() {
         let tmp = tempfile::tempdir().unwrap();
-        let stranger = tmp.path().join("unrecognized-room");
-        std::fs::create_dir_all(&stranger).unwrap();
-        std::fs::write(stranger.join("blob"), b"still here").unwrap();
+        let (rooms, root) = fixture(tmp.path());
+        let key = RoomKey::new("adopted-after-listing");
+        let id = "a".repeat(32);
+        crate::room_attachments::write_blob_for_test(&root, &key, &id, b"keep");
         let mut outcome = SweepOutcome::default();
+        run_orphan_gc_at(
+            &rooms,
+            &root,
+            &MaintenanceConfig {
+                orphan_grace: Duration::ZERO,
+                ..MaintenanceConfig::default()
+            },
+            &mut outcome,
+            std::time::SystemTime::now(),
+            |_| {
+                seed_room(&rooms, &key, Utc::now());
+                with_rooms_handle(&rooms, |store| {
+                    store.add_attachment(
+                        &key,
+                        &id,
+                        "keep",
+                        "text/plain",
+                        4,
+                        "digest",
+                        "alice",
+                        Utc::now(),
+                    )
+                })
+                .unwrap();
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(outcome.error, None);
+        assert_eq!(outcome.bytes_reclaimed, 0);
+        assert_eq!(outcome.orphan_dirs_removed, 0);
+        assert_eq!(
+            std::fs::read(crate::room_attachments::room_dir(&root, &key).join(id)).unwrap(),
+            b"keep"
+        );
+    }
 
-        remove_orphan_dir_with(&stranger, &mut outcome, |_| {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "injected removal refusal",
-            ))
-        });
+    #[test]
+    fn orphan_gc_defers_an_old_inflight_publication_until_its_row_commits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (rooms, root) = fixture(tmp.path());
+        let key = RoomKey::new("inflight");
+        let id = "b".repeat(32);
+        seed_room(&rooms, &key, Utc::now());
+        let publication = crate::room_attachments::publication_guard();
+        crate::room_attachments::write_blob_for_test(&root, &key, &id, b"old pending");
+        let started = std::time::SystemTime::now();
+        let file = crate::room_attachments::room_dir(&root, &key).join(&id);
+        let old = started - Duration::from_secs(7200);
+        std::fs::File::open(&file)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(old))
+            .unwrap();
+        let mut outcome = SweepOutcome::default();
+        run_orphan_gc_at(
+            &rooms,
+            &root,
+            &MaintenanceConfig::default(),
+            &mut outcome,
+            started,
+            |_| {},
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(outcome.bytes_reclaimed, 0);
+        assert_eq!(std::fs::read(&file).unwrap(), b"old pending");
+        with_rooms_handle(&rooms, |store| {
+            store.add_attachment(
+                &key,
+                &id,
+                "pending",
+                "text/plain",
+                11,
+                "digest",
+                "alice",
+                Utc::now(),
+            )
+        })
+        .unwrap();
+        drop(publication);
+        run_orphan_gc_at(
+            &rooms,
+            &root,
+            &MaintenanceConfig::default(),
+            &mut outcome,
+            started,
+            |_| {},
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(outcome.bytes_reclaimed, 0);
+        assert_eq!(std::fs::read(&file).unwrap(), b"old pending");
+    }
 
+    #[test]
+    fn orphan_gc_cutoff_does_not_age_in_files_during_a_delayed_walk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (rooms, root) = fixture(tmp.path());
+        let key = RoomKey::new("fixed-cutoff");
+        seed_room(&rooms, &key, Utc::now());
+        let id = "c".repeat(32);
+        crate::room_attachments::write_blob_for_test(&root, &key, &id, b"new at start");
+        // The file is old relative to the actual clock but was young relative
+        // to this sweep's injected start. No sleeping or deletion-time clock.
+        let started = std::time::SystemTime::now() - Duration::from_secs(7200);
+        let file = crate::room_attachments::room_dir(&root, &key).join(&id);
+        std::fs::File::open(&file)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(started))
+            .unwrap();
+        let mut outcome = SweepOutcome::default();
+        run_orphan_gc_at(
+            &rooms,
+            &root,
+            &MaintenanceConfig::default(),
+            &mut outcome,
+            started,
+            |_| {},
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(outcome.bytes_reclaimed, 0);
+        assert!(file.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn orphan_gc_uses_captured_directory_after_symlink_swap() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let (rooms, root) = fixture(tmp.path());
+        let key = RoomKey::new("swapped");
+        seed_room(&rooms, &key, Utc::now());
+        let id = "d".repeat(32);
+        crate::room_attachments::write_blob_for_test(&root, &key, &id, b"orphan");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join(&id), b"sentinel").unwrap();
+        let moved = tmp.path().join("captured");
+        let mut outcome = SweepOutcome::default();
+        run_orphan_gc_at(
+            &rooms,
+            &root,
+            &MaintenanceConfig {
+                orphan_grace: Duration::ZERO,
+                ..MaintenanceConfig::default()
+            },
+            &mut outcome,
+            std::time::SystemTime::now(),
+            |_| {},
+            |path| {
+                std::fs::rename(path, &moved).unwrap();
+                symlink(&outside, path).unwrap();
+            },
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(outside.join(&id)).unwrap(), b"sentinel");
+        assert!(!moved.join(&id).exists());
+        assert_eq!(outcome.bytes_reclaimed, 6);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retention_refuses_replaced_directory_and_counts_actual_blob_length() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let (rooms, root) = fixture(tmp.path());
+        let now = Utc::now();
+        let old = now - chrono::Duration::days(40);
+        let key = RoomKey::new("retention-swap");
+        seed_room(&rooms, &key, old);
+        let id = "e".repeat(32);
+        seed_attachment(&rooms, &root, &key, &id, b"actual", old);
+        let dir = crate::room_attachments::room_dir(&root, &key);
+        let outside = tmp.path().join("outside");
+        std::fs::rename(&dir, &outside).unwrap();
+        symlink(&outside, &dir).unwrap();
+        with_rooms_handle(&rooms, |store| {
+            store.close_with_marker(&key, RoomCloser::Member("alice"), old)
+        })
+        .unwrap();
+        let config = MaintenanceConfig {
+            retention_days: 30,
+            ..MaintenanceConfig::default()
+        };
+        let mut outcome = SweepOutcome::default();
+        run_retention(&rooms, &root, &config, now, &mut outcome).unwrap();
+        assert_eq!(outcome.rooms_cut, 1);
+        assert_eq!(outcome.bytes_reclaimed, 0);
+        assert_eq!(outcome.blobs_unlink_failed, 1);
+        assert_eq!(std::fs::read(outside.join(&id)).unwrap(), b"actual");
+        // An ordinary blob changed since indexing is measured at unlink, not
+        // credited using the stale metadata row's length.
+        std::fs::remove_file(&dir).unwrap();
+        let other = RoomKey::new("actual-size");
+        seed_room(&rooms, &other, old);
+        seed_attachment(&rooms, &root, &other, &id, b"short", old);
+        std::fs::write(
+            crate::room_attachments::room_dir(&root, &other).join(&id),
+            b"larger replacement",
+        )
+        .unwrap();
+        with_rooms_handle(&rooms, |store| {
+            store.close_with_marker(&other, RoomCloser::Member("alice"), old)
+        })
+        .unwrap();
+        let mut outcome = SweepOutcome::default();
+        run_retention(&rooms, &root, &config, now, &mut outcome).unwrap();
+        assert_eq!(outcome.bytes_reclaimed, b"larger replacement".len() as u64);
+    }
+
+    #[test]
+    fn orphan_gc_leaves_nested_entries_instead_of_recursing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (rooms, root) = fixture(tmp.path());
+        let dir = crate::room_attachments::room_dir(&root, &RoomKey::new("unknown"));
+        std::fs::create_dir_all(dir.join("nested")).unwrap();
+        std::fs::write(dir.join("nested/sentinel"), b"keep").unwrap();
+        let outcome = run_sweep(
+            &rooms,
+            &root,
+            &MaintenanceConfig {
+                orphan_grace: Duration::ZERO,
+                ..MaintenanceConfig::default()
+            },
+            Utc::now(),
+        );
         assert_eq!(outcome.orphan_dirs_removed, 0);
         assert_eq!(outcome.bytes_reclaimed, 0);
-        assert_eq!(
-            outcome.error.as_deref(),
-            Some("orphan GC could not remove an unrecognized room directory")
-        );
-        assert!(stranger.exists(), "the failed removal left bytes on disk");
+        assert!(outcome.error.is_some());
+        assert_eq!(std::fs::read(dir.join("nested/sentinel")).unwrap(), b"keep");
     }
 
     /// The window parse refuses to guess. Every unusable value is OFF, because
