@@ -1156,3 +1156,34 @@ Round 5: round-4 review follow-ups on model reroute fidelity. (F2) Selection-tim
 
 Validation: ocean-agent 280 passed / 0 failed / 2 ignored; ocean-daemon 908 passed / 2 failed (only the two known pre-existing persistent_room envelope-key assertions); clippy -p ocean-agent --all-targets -D warnings clean; fmt --all --check clean; git diff --check clean.
 _________________________________________________________________________________
+time: [22:20] [08-10-26]
+agent: [claude] [claude code]
+worktree: [port/room-agent-consent] [/Users/risingtidesdev/dev/port-misc]
+type: [refactor]
+area: [backend] [testing]
+
+Ported the daemon half of ocean-private #59 so Room-agent consent can no longer bind a package that changed after it was previewed. The authorize and reauthorize routes accept an optional expected_definition_digest, compared against the same immutable package capture used for decision hashing and the binding; a mismatch returns a fixed 409 definition_digest_mismatch before any decision is consumed, binding or audit row written, or live request cancelled. Omitting it or sending null keeps today's callers working. Both routes now take only JSON objects through a map-only decoder that still hands every original key to the strict body type, so positional arrays are refused with 400 invalid_request while duplicate and unknown fields stay rejected. The source diff applied three-way without conflict; the only adaptation is the ocean-daemon contract text, which names ocean-private #55/#59 instead of private-repo-relative numbers and drops the private frozen-base hash.
+
+Validation: `cargo test -p ocean-daemon room_reviewed_digest_ --locked -- --test-threads=1` (3 passed) on this commit; full gates are recorded with the follow-up #66 port entry.
+_________________________________________________________________________________
+time: [22:41] [08-10-26]
+agent: [claude] [claude code]
+worktree: [port/room-agent-consent] [/Users/risingtidesdev/dev/port-misc]
+type: [refactor]
+area: [backend] [testing]
+
+Ported the daemon half of ocean-private #66 so an invited Room Member can review and authorize its own locally bound agents. The proof behind consent now accepts the credential-owning human as Owner or Member, but only while federated access is Live or Recovering, and the exact target must still be an Agent owned by that human with the captured local package binding. Room administration, Local bootstrap, the digest precondition from the previous commit, generation and lifetime checks and per-turn tool permissions keep their existing boundaries. The source diff applied three-way without conflict on top of the #59 port, including the registered-route fixtures for two disposable node identities and the fake-provider federation dispatch proof parameterized for Owner and invited Member. The only adaptation is the ocean-daemon contract text, which names ocean-private issue numbers and drops the private base hash.
+
+Validation: `cargo fmt --all -- --check`, `cargo check --workspace --tests --locked`, `cargo run -q -p xtask -- docs-check` (PASS; 30 packages, 153 Markdown files, 170 local links) and `git diff --check` pass. `cargo test -p ocean-daemon --locked`: 918 passed, 2 failed; the two failures are the alias-envelope fixtures already failing on main (issue #42, fixed by open PR #58). Focused `room_reviewed_digest_` 3, `room_sovereign_` 6 and `p2c_` 40 passed. No external provider was called.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [23:30] [09-10-26]
+agent: [codex] [factory release]
+worktree: [codex/pr65-consent-reconcile]
+type: [workflow]
+area: [backend] [testing] [review]
+
+PR #65 reconciled own-agent consent with canonical main f1b22bd8 and preserved both public ledger histories. Original consent and federation source remains unchanged; main's request fixture additions merged cleanly. Resolved the outstanding review finding by removing the private frozen-base identifier from the public consent manifest. Optional reviewed-digest consent remains exact and object-only; invited federated Members may consent only to their own locally bound agents while access is Live/Recovering. Existing Connecting/Revoked refusal, operator authority and Local bootstrap semantics remain unchanged.
+
+Validation: focused reviewed-digest, sovereign-consent and federation p2c groups passed (3, 6 and 40 tests), plus locked daemon check, formatting, diff and docs checks (30 packages, 153 docs, 170 links). Synthetic absolute auth/config/XDG fixtures only; HOME unchanged. Independent source review ACKed 307a316f. This receipt precedes final exact-head review and required hosted checks. Nearest owning contract corrected; parent ownership/indexes unchanged. Maintainer approval, client adoption of the optional digest and actual two-human/live-migration acceptance remain separate. No installation, deployment or live provider calls.

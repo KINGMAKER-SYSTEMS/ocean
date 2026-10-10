@@ -6162,6 +6162,15 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn p2c_dispatch_uses_local_name_but_agent_reply_reenters_outbox() {
+        sovereign_federated_dispatch_fixture(ocean_core::FederatedRoomRole::Owner).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn p2c_invited_member_dispatch_uses_own_agent_and_reply_reenters_outbox() {
+        sovereign_federated_dispatch_fixture(ocean_core::FederatedRoomRole::Member).await;
+    }
+
+    async fn sovereign_federated_dispatch_fixture(local_role: ocean_core::FederatedRoomRole) {
         let _yolo_guard = crate::tests::yolo_env_guard_async().await;
         let _env = AUTO_CONVENE_ENV_LOCK.lock().await;
         let tmp = tempfile::tempdir().unwrap();
@@ -6187,8 +6196,19 @@ mod tests {
         let key = RoomKey::new("p2c-dispatch-room");
         let human = "11111111-1111-4111-8111-111111111111";
         let member = "33333333-3333-4333-8333-333333333333";
-        let mut owner = dispatch_human_projection(human);
-        owner.role_in_room = ocean_core::FederatedRoomRole::Owner;
+        let mut local_human = dispatch_human_projection(human);
+        local_human.role_in_room = local_role;
+        let foreign_human = "22222222-2222-4222-8222-222222222222";
+        let mut other_human = dispatch_human_projection(foreign_human);
+        other_human.role_in_room = if local_role == ocean_core::FederatedRoomRole::Owner {
+            ocean_core::FederatedRoomRole::Member
+        } else {
+            ocean_core::FederatedRoomRole::Owner
+        };
+        let foreign_agent = "44444444-4444-4444-8444-444444444444";
+        let mut other_agent =
+            dispatch_agent_projection(foreign_agent, foreign_human, "foreign-agent");
+        other_agent.local_binding_available = Some(false);
         with_rooms(&state, |store| {
             store.create_in_workspace(
                 key.clone(),
@@ -6204,7 +6224,9 @@ mod tests {
                 Some(RoomAccessState::Live),
                 Some(&[
                     dispatch_agent_projection(member, human, "bound-agent"),
-                    owner,
+                    local_human,
+                    other_human,
+                    other_agent,
                 ]),
                 None,
             )?;
@@ -6225,7 +6247,7 @@ mod tests {
             })
             .unwrap()
             .is_some(),
-            "sovereign fixture must have current owner/binding authority"
+            "sovereign fixture must have exact local human/binding authority"
         );
         let (tx, rx) = mpsc::unbounded_channel();
         let cancel = CancellationToken::new();

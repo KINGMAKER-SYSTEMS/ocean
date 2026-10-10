@@ -58,6 +58,35 @@ const DECISION_DIGEST_DOMAIN: &[u8] = b"ocean-room-agent-decision-v1\0";
 // are separately admitted and never widen this ambient intersection.
 const PHASE1_SAFE_CAPABILITIES: &[&str] = &[];
 
+// Derived structs accept positional arrays as well as maps. Keep the route
+// object-only while letting the strict DTO see every original map entry,
+// including duplicate keys that a Value intermediary would collapse.
+#[derive(Debug)]
+pub(super) struct MapOnly<T>(T);
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for MapOnly<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct MapOnlyVisitor<T>(std::marker::PhantomData<T>);
+
+        impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for MapOnlyVisitor<T> {
+            type Value = MapOnly<T>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a JSON object")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> Result<Self::Value, A::Error> {
+                T::deserialize(serde::de::value::MapAccessDeserializer::new(map)).map(MapOnly)
+            }
+        }
+
+        deserializer.deserialize_map(MapOnlyVisitor(std::marker::PhantomData))
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct AuthorizeAgentBody {
@@ -65,6 +94,8 @@ pub(super) struct AuthorizeAgentBody {
     agent_package_id: String,
     owner_member_id: String,
     decision_id: String,
+    #[serde(default)]
+    expected_definition_digest: Option<String>,
     #[serde(default = "default_activation_policy")]
     activation_policy: String,
     #[serde(default = "default_context_policy")]
@@ -86,6 +117,8 @@ pub(super) struct BootstrapRoomAgentBody {
 #[serde(deny_unknown_fields)]
 pub(super) struct ReauthorizeAgentBody {
     decision_id: String,
+    #[serde(default)]
+    expected_definition_digest: Option<String>,
     #[serde(default = "default_activation_policy")]
     activation_policy: String,
     #[serde(default = "default_context_policy")]
@@ -793,10 +826,19 @@ fn room_owner_proof(
     let Some(credential) = store.room_credential(room)? else {
         return Ok(None);
     };
-    let eligible = access.members.iter().any(|member| {
+    // This is sovereign agent custody on the credential-owning node, not
+    // shared Room administration. An invited Member may authorize its own
+    // locally bound Agent; the exact target/owner proof below still applies.
+    let eligible = matches!(
+        access.state,
+        RoomAccessState::Live | RoomAccessState::Recovering
+    ) && access.members.iter().any(|member| {
         member.member_id == credential.local_human_member_id
             && member.actor_type == FederatedActorType::User
-            && member.role_in_room == FederatedRoomRole::Owner
+            && matches!(
+                member.role_in_room,
+                FederatedRoomRole::Owner | FederatedRoomRole::Member
+            )
     });
     Ok(Some(RoomOwnerProof {
         member_id: credential.local_human_member_id,
@@ -1292,11 +1334,21 @@ pub(super) async fn room_agent_binding(
     }
 }
 
+fn validate_expected_definition_digest(
+    package: &ResolvedPackage,
+    expected: Option<&str>,
+) -> Result<(), ApiError> {
+    if expected.is_some_and(|digest| digest != package.definition_digest) {
+        return Err(ApiError::conflict("definition_digest_mismatch"));
+    }
+    Ok(())
+}
+
 pub(super) async fn room_agent_authorize(
     State(state): State<AppState>,
     Path(key): Path<String>,
     headers: HeaderMap,
-    body: Result<Json<AuthorizeAgentBody>, JsonRejection>,
+    body: Result<Json<MapOnly<AuthorizeAgentBody>>, JsonRejection>,
 ) -> (StatusCode, Json<Value>) {
     if let Err(error) = operator(&state, &headers) {
         return error.response();
@@ -1308,7 +1360,7 @@ pub(super) async fn room_agent_authorize(
     let requests = state.requests.write().await;
     let result = (|| {
         let principal = operator(&state, &headers)?;
-        let Json(mut body) = body.map_err(|_| ApiError::bad_request("invalid_request"))?;
+        let Json(MapOnly(mut body)) = body.map_err(|_| ApiError::bad_request("invalid_request"))?;
         let room = RoomKey::new(key.trim());
         let agent_member_id = validate_member_id(&body.agent_member_id, "invalid_agent_member_id")?;
         let owner_member_id = validate_member_id(&body.owner_member_id, "invalid_owner_member_id")?;
@@ -1318,6 +1370,7 @@ pub(super) async fn room_agent_authorize(
         let decision_id = validate_decision_id(&body.decision_id)?;
         canonicalize(&mut body.room_capability_grants)?;
         let package = resolve_package(&body.agent_package_id)?;
+        validate_expected_definition_digest(&package, body.expected_definition_digest.as_deref())?;
         validate_capability_grants(&package, &body.room_capability_grants)?;
         let activation = parse_activation(&body.activation_policy)?;
         let context = parse_context(&body.context_policy)?;
@@ -1399,7 +1452,7 @@ pub(super) async fn room_agent_reauthorize(
     State(state): State<AppState>,
     Path((key, agent_member_id)): Path<(String, String)>,
     headers: HeaderMap,
-    body: Result<Json<ReauthorizeAgentBody>, JsonRejection>,
+    body: Result<Json<MapOnly<ReauthorizeAgentBody>>, JsonRejection>,
 ) -> (StatusCode, Json<Value>) {
     if let Err(error) = operator(&state, &headers) {
         return error.response();
@@ -1411,7 +1464,7 @@ pub(super) async fn room_agent_reauthorize(
     let requests = state.requests.write().await;
     let result = (|| {
         let principal = operator(&state, &headers)?;
-        let Json(mut body) = body.map_err(|_| ApiError::bad_request("invalid_request"))?;
+        let Json(MapOnly(mut body)) = body.map_err(|_| ApiError::bad_request("invalid_request"))?;
         let room = RoomKey::new(key.trim());
         let agent_member_id = agent_member_id.trim().to_string();
         let current = with_rooms(&state, |store| {
@@ -1422,6 +1475,7 @@ pub(super) async fn room_agent_reauthorize(
         let decision_id = validate_decision_id(&body.decision_id)?;
         canonicalize(&mut body.room_capability_grants)?;
         let package = resolve_package(&current.agent_package_id)?;
+        validate_expected_definition_digest(&package, body.expected_definition_digest.as_deref())?;
         validate_capability_grants(&package, &body.room_capability_grants)?;
         let activation = parse_activation(&body.activation_policy)?;
         let context = parse_context(&body.context_policy)?;
