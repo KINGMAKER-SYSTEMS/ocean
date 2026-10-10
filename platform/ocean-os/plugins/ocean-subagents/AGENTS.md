@@ -10,6 +10,7 @@ Provide working, permission-gated subagent tools inside ordinary Ocean turns by 
 - `plugin.toml` owns the model-visible tool contract.
 - `agent/ocean-subagent-worker/` owns the fixed child profile that excludes the subagent plugin and prevents recursive delegation.
 - `install.sh` installs only this plugin and fixed worker agent under the Ocean config root.
+- `CUSTODY.md` owns the proposed (not authorized) manifest for single-owner state custody, unresolved-dispatch holds, storage budgets, migration and rollback. Its acceptance does not authorize source work on its own; the host quiescence prerequisite it names must be proven first.
 
 ## Local Contracts
 
@@ -17,16 +18,20 @@ Provide working, permission-gated subagent tools inside ordinary Ocean turns by 
 - Spawn returns immediately with durable run, turn, and session identifiers.
 - Child execution remains an ordinary Ocean session with normal tool permissions; every child turn carries a private decision token, and the plugin accepts permission decisions only for the exact run/request/session/tool tuple.
 - Enforce fixed worker-profile binding, maximum four active runs, bounded output, and an elapsed-time watchdog.
+- `spawn` and `send` share one admission lock held from the capacity check through publishing the accepted turn, so concurrent admissions cannot both take the last slot or start two follow-ups for one run. Queued, running, waiting-for-permission and cancelling runs hold slots; a failed observation keeps its slot. A refused admission starts no turn and leaves a finished target unchanged, and an unknown or refused turn reply is never replayed or published. Lifecycle reads never take the admission lock. Admission is per plugin instance: it is not a cross-process or restart-safe limit (see `CUSTODY.md`).
 - The recursion guard fails closed: before every child turn (`spawn` and `send`), confirm the worker profile resolves in the daemon with an allowlist (`config.tools` plus `tools/`) that names at least one always-present built-in tool and no subagent tool, and binds no subprocess capability. The daemon keeps every tool for an unresolved named agent, an empty allowlist, or an allowlist that matches nothing, and adds subprocess-capability tools after narrowing.
-- Persist metadata atomically under `~/.local/state/ocean/subagents` by default. Refreshing an unchanged run writes nothing; finished runs are settled and only the newest 200 are retained.
+- Persist metadata atomically under `~/.local/state/ocean/subagents` by default. Refreshing an unchanged run writes nothing; inserting a run prunes finished history to the newest 200. Terminal updates do not prune, so newly finished runs can temporarily exceed 200 until the next insertion; active runs are never pruned.
 - Do not claim exactly-once execution; daemon request/session truth wins during refresh.
 - No path may leave a run active once the daemon cannot finish it. The request registry is volatile, so an active run whose request is absent settles as `lost` from session truth after a short grace, and a cancel answered `ok:false` settles from daemon truth. A run settles even when its session cannot be read; a settled run with no output re-reads the session on later refreshes. A request list that is not a list is an error, never "no requests". The watchdog retries a failed attempt because plugins start before the daemon's listener binds, survives a malformed response, and is re-armed by `refresh` if it gave up; a run already `cancelling` is not cancelled again. A failed watchdog attempt records its error only when the run has none, so the reason a run was being cancelled survives a daemon restart.
+- A run becomes `cancelling` only on the daemon's exact acknowledgement: `ok` exactly `true`, the same `request_id`, and `state: cancelling`. `ok:false` is a refusal and settles from daemon truth; any other answer is an error that writes nothing, from both `cancel` and the watchdog. Cancellation errors, including failed registry reads during refusal reconciliation, never carry a daemon response body into tool replies or watchdog state.
+- Every lifecycle write that follows daemon I/O names the request it observed (`JsonStore.update(run_id, expect_request=...)`); the check and the write happen under the store lock, so a refresh, cancel acknowledgement, or watchdog result for a turn a follow-up has replaced writes nothing. A watchdog only ever cancels the request it was armed for. Daemon I/O stays outside the store lock.
 - Output is the latest turn's text only: the projection stops at the newest user row, so a run never reports an earlier turn's answer as its own.
 - `--check` reads state only; it must never start watchdogs or call the daemon.
 
 ## Work Guidance
 
 - Keep the implementation Python-standard-library only.
+- Request fencing and the admission lock work inside one process only. Two plugin processes on one state root can still erase each other's runs; do not claim shared custody until `CUSTODY.md` is accepted and implemented. Keep `CUSTODY.md` describing the plugin as it is when these contracts change.
 - Stdout is exclusively JSON-RPC; diagnostics go to stderr.
 - Keep names, descriptions, and schemas identical between `plugin.toml` and live `list_tools`.
 - The test daemon mirrors the real control contract (volatile registry, HTTP 200 `ok:false` cancel refusals, `cancelling` before `cancelled`, 404 for an unknown session). Change it only alongside the daemon.

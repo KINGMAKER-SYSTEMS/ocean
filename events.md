@@ -1156,3 +1156,32 @@ Round 5: round-4 review follow-ups on model reroute fidelity. (F2) Selection-tim
 
 Validation: ocean-agent 280 passed / 0 failed / 2 ignored; ocean-daemon 908 passed / 2 failed (only the two known pre-existing persistent_room envelope-key assertions); clippy -p ocean-agent --all-targets -D warnings clean; fmt --all --check clean; git diff --check clean.
 _________________________________________________________________________________
+
+time:      [00:15] [07-10-26]
+agent:     [claude] [claude code]
+worktree:  [port/private-subagent-chain] [/Users/risingtidesdev/dev/port-subagents]
+type:      [refactor]
+area:      [backend] [testing]
+
+Ported the ocean-private subagent chain (#77, #82, #86, #94) onto public main, reconciled with the rework that landed in #5. Strict cancellation acknowledgement was missing: a run now becomes cancelling only on `ok` exactly true with the same request id and state cancelling, any other answer is an error that writes nothing from both cancel and the watchdog, and a failed cancel no longer repeats the daemon's response body; main's settle-from-daemon-truth handling of `ok:false` was kept over the private raise-and-stay-running. Request fencing was already on main (`JsonStore.update(expect_request=...)`), so only the late-response race regressions were ported. The send-side cap was already on main; the shared admission lock across spawn and send was ported so concurrent admissions cannot both take the last slot or start two follow-ups for one run, while main's lost settlement of a request the daemon no longer tracks was kept over the private hold-forever. The custody design doc was ported as `CUSTODY.md`, rewritten to describe the plugin as it is on main (retention pruning, lost settlement, admission lock), and remains a proposal that authorizes nothing.
+
+Validation: `python3 -m unittest test_ocean_subagents -v` (47 passed, up from 33), `python3 ocean-subagents.py --check`, `python3 test_wire.py`, `python3 -m py_compile ocean-subagents.py`, `sh -n install.sh`, `git diff --check`, `cargo xtask docs-check` (PASS, 154 files; it does not scan plugin Markdown, so the one new link, README to CUSTODY.md, was checked by hand). New cancellation tests fail on main's source; the three admission race tests fail without the lock; five fence tests fail with the request fence removed.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [21:47] [10-09-26]
+agent: [Codex] [PR64 review repair]
+worktree: [codex/pr64-review-repairs] factory-pr64-review-repairs/ocean
+type: [bug report] PR #64 cancellation refusal reconciliation
+area: [backend] Ocean subagent plugin
+
+Reproduced private daemon HTTP bodies escaping the first refusal registry lookup
+and nested refresh lookup. Sanitize reconciliation PluginError before tool responses
+or watchdog persistence; preserve request fencing and refusal settlement. Regression
+covers both failure positions, durable watchdog state and real stdio responses;
+both fail against unchanged adc14bc9. Retention docs now describe existing
+prune-on-insertion behavior and temporary terminal excess, without redesigning pruning.
+Validation: 48 Python tests, real stdio wire, py_compile, disposable-state --check,
+sh -n, diff check, and xtask docs-check (30 packages,154 Markdown,171 links) passed.
+No install or live daemon change. Parent devlogs unchanged because ownership, indexes
+and build contracts are unchanged; plugin owning docs updated.
