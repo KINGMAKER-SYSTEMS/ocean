@@ -235,11 +235,20 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   clones cannot schedule later I/O. An already-running memory operation is not
   atomically revoked. Preserve existing session leases and permission gates.
 - `room_profile.rs` is only a read-only required-slot status adapter against
-  runtime-captured config authority. `room_resources.rs` is only cwd/catalog
+  runtime-captured config authority. `room_resources.rs` owns cwd/catalog
   selection plus scoped list/read authority and content-free audit callbacks.
   Return the stored canonical grant root unchanged to #24 descriptor I/O;
-  catalog/handle issuance alone is not an in-flight operation proof. No profile
-  or grant mutation/preview routes are opened.
+  catalog/handle issuance alone is not an in-flight operation proof. Profile
+  mutation routes remain a separate candidate. The resource-management candidate
+  adds header-authorized grant/status and operator-preview routes; preserve the
+  admitted-turn scope, digest, cancellation, and current owner/access checks.
+  Previews capture their own current binding and request-lifetime token, reuse
+  per-call checks, and never cancel an executing turn. All outcomes use fixed
+  error classifications. Normalize grant request spelling without filesystem
+  reads; consumed decisions reach transactional exact/mismatch/cross-ledger
+  replay before mutable expiry/root validation. Fresh requests still reject
+  dangerous, unavailable or symlinked roots. Public projections omit local roots.
+  This candidate does not lift architecture acceptance or live-migration holds.
 - Approved consumer fanout: Agent `memory_tools.rs` adds a private optional
   operation callback on the opaque admitted handle, with fixed typed refusal;
   Agent `lib.rs` only reexports that interface and Agent `AGENTS.md` records it.
@@ -270,7 +279,7 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   new synthetic capture-bound and per-call memory-revocation checks. Root runs
   locked focused/full daemon tests, denied-warning Clippy and workspace test
   compilation remotely; independent exact-source review is required.
-- Deferred: Room metrics/sampler, attachments/context, profile/resource writes,
+- Deferred: Room metrics/sampler, attachments/context, profile writes,
   retirement/summary/maintenance/workspace bridge, client onboarding/UI, extension
   scheduling, Unknown build execution and CI orchestration. Keep #22/#48 holds;
   automated CI remains only Build Ocean and Build Surface.
@@ -404,6 +413,7 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
 - `cargo test -p ocean-daemon persistent_room_http_ -- --nocapture`
 - `cargo test -p ocean-daemon room_read_cursor_ --locked -- --nocapture`
 - `cargo test -p ocean-daemon room_ -- --nocapture`
+- `cargo test -p ocean-daemon room_resources::tests --locked -- --nocapture`
 - `cargo test -p ocean-daemon at_mention_queues_turn_and_posts_reply_back -- --nocapture`
 - `cargo test -p ocean-daemon closed_persistent_room_preserves_audit_http_asymmetry -- --nocapture`
 - `cargo test -p ocean-daemon workspace_policy::tests:: -- --nocapture`

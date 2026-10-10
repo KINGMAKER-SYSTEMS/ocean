@@ -1,7 +1,7 @@
 //! Rooms Phase 2 Stage 2c — local contributed folders.
 //!
-//! See `docs/specs/2026-09-08-ocean-rooms-phase2-room-profile-and-contributed-folders-manifest.md`
-//! §2.2, §4, §5, §7.
+//! Public candidate scope is recorded in this crate's `AGENTS.md`; imported
+//! stage labels do not establish architecture acceptance or deployment approval.
 //!
 //! # What this module owns
 //!
@@ -161,7 +161,7 @@ fn open_directory_handle(path: &FsPath) -> std::io::Result<std::fs::File> {
 /// that reaches its real directory through a symlink is refused, because the
 /// operator approved the name they typed and the grant would bind somewhere
 /// else.
-pub(super) fn canonical_grant_root(submitted: &str) -> Result<PathBuf, RootRefusal> {
+fn normalized_grant_root(submitted: &str) -> Result<PathBuf, RootRefusal> {
     let path = FsPath::new(submitted.trim());
     if !path.is_absolute() || submitted.trim().is_empty() {
         return Err(RootRefusal::NotAbsolute);
@@ -172,7 +172,12 @@ pub(super) fn canonical_grant_root(submitted: &str) -> Result<PathBuf, RootRefus
     {
         return Err(RootRefusal::NotAbsolute);
     }
-    let canonical = match std::fs::canonicalize(path) {
+    Ok(path.components().collect())
+}
+
+pub(super) fn canonical_grant_root(submitted: &str) -> Result<PathBuf, RootRefusal> {
+    let path = normalized_grant_root(submitted)?;
+    let canonical = match std::fs::canonicalize(&path) {
         Ok(canonical) => canonical,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Err(RootRefusal::NotFound)
@@ -392,20 +397,12 @@ pub(super) async fn room_resource_grant(
                 DateTime::parse_from_rfc3339(raw.trim())
                     .map(|t| t.with_timezone(&Utc))
                     .map_err(|_| ApiError::bad_request("invalid_expires_at"))
-                    .and_then(|t| {
-                        if t <= Utc::now() {
-                            Err(ApiError::bad_request("invalid_expires_at"))
-                        } else {
-                            Ok(t)
-                        }
-                    })
             })
             .transpose()?;
 
-        // The root is validated LAST so a body with a bad shape never
-        // touches the filesystem, and canonicalized ONCE so the digest, the
-        // store row, and the one-grant-per-root index all see the same bytes.
-        let canonical_root = canonical_grant_root(&body.local_root)
+        // Normalize accepted path spelling without touching the filesystem.
+        // Consumed decisions must replay even after expiry or root removal.
+        let canonical_root = normalized_grant_root(&body.local_root)
             .map_err(|refusal| ApiError::bad_request(refusal.code()))?;
         let local_root = canonical_root
             .to_str()
@@ -421,22 +418,32 @@ pub(super) async fn room_resource_grant(
             expires_at: expires_text.as_deref(),
         })?;
         let (grant, created, audit) = with_rooms(&state, |store| {
-            store.grant_room_resource(
-                &room,
-                GrantRoomResourceInput {
-                    display_name: display_name.to_string(),
-                    local_root,
-                    access_mode,
-                    authorized_agent_member_ids: agents,
-                    expires_at,
-                    granted_by: principal.id().to_string(),
-                    decision_id,
-                    request_digest: digest,
-                },
-                Utc::now(),
-            )
-        })
-        .map_err(ApiError::from)?;
+            // This lookup only selects fresh-request validation. The store's
+            // transaction still decides exact, mismatched and cross-ledger replay.
+            if store.room_decision_consumed(&room, &decision_id)?.is_none() {
+                if expires_at.is_some_and(|expires| expires <= Utc::now()) {
+                    return Err(ApiError::bad_request("invalid_expires_at"));
+                }
+                canonical_grant_root(&body.local_root)
+                    .map_err(|refusal| ApiError::bad_request(refusal.code()))?;
+            }
+            store
+                .grant_room_resource(
+                    &room,
+                    GrantRoomResourceInput {
+                        display_name: display_name.to_string(),
+                        local_root,
+                        access_mode,
+                        authorized_agent_member_ids: agents,
+                        expires_at,
+                        granted_by: principal.id().to_string(),
+                        decision_id,
+                        request_digest: digest,
+                    },
+                    Utc::now(),
+                )
+                .map_err(ApiError::from)
+        })?;
         if let Some(audit) = audit.as_ref() {
             publish_room_wake(&state, &room, audit);
         }
@@ -568,9 +575,8 @@ pub(super) async fn room_resource_revoke(
 /// access mode, and root liveness, then hands back the root for exactly one
 /// operation. Nothing is cached across calls (Decision 12).
 pub(super) struct DurableRoomResourceAuthority {
-    pub(super) rooms: crate::persistent_rooms::RoomStoreHandle,
-    /// `agent` inside an admitted turn; `operator_preview` from the preview
-    /// routes. Recorded on every audit row.
+    pub(super) authority: crate::room_agent_authority::RoomOperationAuthority,
+    /// Fixed `agent` classification for the admitted turn's audit row.
     pub(super) actor: &'static str,
 }
 
@@ -590,21 +596,31 @@ impl ocean_agent::RoomResourceAuthority for DurableRoomResourceAuthority {
         op: ocean_agent::RoomResourceOp,
     ) -> Result<ocean_agent::ResolvedResource, ocean_agent::RoomResourceError> {
         use ocean_agent::RoomResourceError as E;
+        if scope.room_key() != self.authority.room.as_str()
+            || scope.agent_member_id() != self.authority.member
+            || scope.binding_generation() != self.authority.generation
+        {
+            return Err(E::StaleGeneration);
+        }
         let room = RoomKey::new(scope.room_key());
-        crate::persistent_rooms::with_rooms_handle(&self.rooms, |store| {
-            let live = store
-                .room_agent_generation_is_active(
-                    &room,
-                    scope.agent_member_id(),
-                    scope.binding_generation(),
-                )
-                .map_err(|e| E::Unavailable(e.to_string()))?;
+        crate::persistent_rooms::with_rooms_handle(&self.authority.rooms, |store| {
+            if self.authority.cancel.is_cancelled() {
+                return Err(E::StaleGeneration);
+            }
+            let live = crate::room_agent_authority::current_binding_on(
+                store,
+                &room,
+                scope.agent_member_id(),
+                scope.binding_generation(),
+            )
+            .map_err(|_| E::Unavailable("room_store_unavailable".into()))?
+            .is_some_and(|binding| binding.agent_definition_digest == self.authority.digest);
             if !live {
                 return Err(E::StaleGeneration);
             }
             let grant = store
                 .room_resource_grant(&room, resource_id)
-                .map_err(|e| E::Unavailable(e.to_string()))?
+                .map_err(|_| E::Unavailable("room_store_unavailable".into()))?
                 .ok_or(E::NotFound)?;
             let now = Utc::now();
             if grant.effective_status(now) != ResourceStatus::Available {
@@ -616,9 +632,13 @@ impl ocean_agent::RoomResourceAuthority for DurableRoomResourceAuthority {
             if !grant.access_mode.allows(needed_mode(op)) {
                 return Err(E::ModeNotGranted);
             }
-            let Some(root) = persisted_room_workspace(&grant.local_root) else {
+            if !FsPath::new(&grant.local_root).is_absolute() {
                 return Err(E::NotAvailable);
-            };
+            }
+            let root = grant.local_root;
+            if self.authority.cancel.is_cancelled() {
+                return Err(E::StaleGeneration);
+            }
             Ok(ocean_agent::ResolvedResource {
                 local_root: PathBuf::from(root),
                 grant_generation: grant.generation,
@@ -632,7 +652,7 @@ impl ocean_agent::RoomResourceAuthority for DurableRoomResourceAuthority {
         fact: ocean_agent::RoomResourceAuditFact,
     ) {
         let room = RoomKey::new(scope.room_key());
-        let result = crate::persistent_rooms::with_rooms_handle(&self.rooms, |store| {
+        let result = crate::persistent_rooms::with_rooms_handle(&self.authority.rooms, |store| {
             store.append_room_resource_audit(
                 &room,
                 ocean_store::RoomResourceAuditInput {
@@ -650,8 +670,8 @@ impl ocean_agent::RoomResourceAuthority for DurableRoomResourceAuthority {
                 Utc::now(),
             )
         });
-        if let Err(error) = result {
-            tracing::warn!(room = %room, %error, "room resource audit row not recorded");
+        if result.is_err() {
+            tracing::warn!(room = %room, error_code = "resource_audit_failed", "room resource audit row not recorded");
         }
     }
 }
@@ -704,6 +724,29 @@ impl ocean_agent::RoomResourceAdmission for PreviewAdmission {
     }
 }
 
+/// Request-local preview custody; never borrows or cancels an agent turn.
+struct PreviewResourceAuthority(DurableRoomResourceAuthority);
+
+#[async_trait::async_trait]
+impl ocean_agent::RoomResourceAuthority for PreviewResourceAuthority {
+    async fn resolve(
+        &self,
+        scope: &ocean_agent::RoomResourceScope,
+        resource_id: &str,
+        op: ocean_agent::RoomResourceOp,
+    ) -> Result<ocean_agent::ResolvedResource, ocean_agent::RoomResourceError> {
+        self.0.resolve(scope, resource_id, op).await
+    }
+
+    async fn record(
+        &self,
+        scope: &ocean_agent::RoomResourceScope,
+        fact: ocean_agent::RoomResourceAuditFact,
+    ) {
+        self.0.record(scope, fact).await
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct PreviewBody {
@@ -732,16 +775,35 @@ async fn preview(
         if agent.is_empty() {
             return Err(ApiError::bad_request("invalid_request"));
         }
-        let (generation, catalog) = with_rooms(&state, |store| {
+        let (binding, catalog) = with_rooms(&state, |store| {
             let binding = store
                 .room_agent_binding(&room, &agent)?
-                .filter(|b| b.status == ocean_store::AgentBindingStatus::Active)
-                .map(|b| b.generation);
+                .map(|binding| {
+                    crate::room_agent_authority::current_binding_on(
+                        store,
+                        &room,
+                        &agent,
+                        binding.generation,
+                    )
+                })
+                .transpose()?
+                .flatten();
             let catalog = admitted_resource_catalog(store, &room, &agent)?;
             Ok::<_, RoomStoreError>((binding, catalog))
         })
         .map_err(ApiError::from)?;
-        let generation = generation.ok_or_else(|| ApiError::conflict("agent_binding_required"))?;
+        let binding = binding.ok_or_else(|| ApiError::conflict("agent_binding_required"))?;
+        let generation = binding.generation;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let cancel_on_drop = cancel.clone().drop_guard();
+        let authority = crate::room_agent_authority::RoomOperationAuthority {
+            rooms: state.rooms.clone(),
+            room: room.clone(),
+            member: agent.clone(),
+            generation,
+            digest: binding.agent_definition_digest,
+            cancel,
+        };
         let admitted = state
             .runtime
             .admit_room_resources(
@@ -750,10 +812,10 @@ async fn preview(
                     agent_member_id: agent.clone(),
                     generation,
                 },
-                std::sync::Arc::new(DurableRoomResourceAuthority {
-                    rooms: state.rooms.clone(),
+                std::sync::Arc::new(PreviewResourceAuthority(DurableRoomResourceAuthority {
+                    authority,
                     actor: "operator_preview",
-                }),
+                })),
                 catalog,
             )
             .map_err(|_| ApiError::internal("room_resources_unavailable"))?;
@@ -766,9 +828,9 @@ async fn preview(
                 args["max_bytes"] = json!(max_bytes);
             }
         }
-        Ok((admitted, args, agent, generation))
+        Ok((admitted, args, agent, generation, cancel_on_drop))
     })();
-    let (admitted, args, agent, generation) = match prepared {
+    let (admitted, args, agent, generation, _cancel_on_drop) = match prepared {
         Ok(prepared) => prepared,
         Err(error) => return error.response(),
     };
@@ -833,6 +895,651 @@ pub(super) async fn room_resource_preview_read(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use ocean_core::{RoomParticipant, RoomParticipantKind};
+    use ocean_store::{ActivationPolicy, AuthorizeAgentInput, ContextPolicy, MemoryScope};
+
+    fn operation_fixture() -> crate::room_agent_authority::RoomOperationAuthority {
+        let mut store = ocean_store::SqliteRoomStore::open_in_memory().unwrap();
+        let room = RoomKey::new("operation-authority");
+        store
+            .create(room.clone(), "Authority", None, Utc::now())
+            .unwrap();
+        store
+            .add_participant(
+                &room,
+                RoomParticipant {
+                    id: "human".into(),
+                    kind: RoomParticipantKind::Human,
+                    display_name: "Human".into(),
+                },
+                Utc::now(),
+            )
+            .unwrap();
+        store
+            .bootstrap_local_room_agent(
+                &room,
+                "human",
+                RoomParticipant {
+                    id: "builder".into(),
+                    kind: RoomParticipantKind::Agent,
+                    display_name: "Builder".into(),
+                },
+                "builder",
+                "fixture-operator",
+                Utc::now(),
+            )
+            .unwrap();
+        let (binding, _, _) = store
+            .authorize_room_agent(
+                &room,
+                AuthorizeAgentInput {
+                    agent_member_id: "builder".into(),
+                    agent_package_id: "builder".into(),
+                    agent_definition_digest: "sha256:fixture".into(),
+                    agent_definition_revision: None,
+                    display_name: "Builder".into(),
+                    owner_member_id: "human".into(),
+                    authorized_by: "fixture-operator".into(),
+                    activation_policy: ActivationPolicy::Mention,
+                    context_policy: ContextPolicy::InvocationOnly,
+                    memory_scope: MemoryScope::None,
+                    requested_capabilities: vec![],
+                    room_capability_grants: vec![],
+                    decision_id: "fixture-decision".into(),
+                    request_digest: "fixture-request".into(),
+                },
+                Utc::now(),
+            )
+            .unwrap();
+        crate::room_agent_authority::RoomOperationAuthority {
+            rooms: std::sync::Arc::new(std::sync::Mutex::new(store)),
+            room,
+            member: "builder".into(),
+            generation: binding.generation,
+            digest: binding.agent_definition_digest,
+            cancel: tokio_util::sync::CancellationToken::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn resource_authority_retains_turn_custody_and_preview_permissions() {
+        use crate::tests::{isolated_room_fixture_state, TestEnvRestore, AUTO_CONVENE_ENV_LOCK};
+        use ocean_agent::{RoomResourceAuthority, RoomResourceError, RoomResourceOp};
+        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _restore = TestEnvRestore::capture(&[
+            "OCEAN_AUTH_FILE",
+            "OCEAN_CODEX_AUTH_FILE",
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = isolated_room_fixture_state(&tmp);
+        for refusal in [
+            "cancel", "scope", "digest", "owner", "access", "revoke", "suspend",
+        ] {
+            let mut operation = operation_fixture();
+            state.rooms = operation.rooms.clone();
+            let resource = with_rooms(&state, |store| {
+                store
+                    .grant_room_resource(
+                        &operation.room,
+                        GrantRoomResourceInput {
+                            display_name: "source".into(),
+                            local_root: tmp
+                                .path()
+                                .canonicalize()
+                                .unwrap()
+                                .to_string_lossy()
+                                .into_owned(),
+                            access_mode: ResourceAccessMode::Read,
+                            authorized_agent_member_ids: vec!["builder".into()],
+                            expires_at: None,
+                            granted_by: "fixture-operator".into(),
+                            decision_id: "builder-grant".into(),
+                            request_digest: "builder-grant".into(),
+                        },
+                        Utc::now(),
+                    )
+                    .unwrap()
+                    .0
+            });
+            let authority = std::sync::Arc::new(DurableRoomResourceAuthority {
+                authority: operation.clone(),
+                actor: "agent",
+            });
+            let admitted = state
+                .runtime
+                .admit_room_resources(
+                    &PreviewAdmission {
+                        room: operation.room.to_string(),
+                        agent_member_id: operation.member.clone(),
+                        generation: operation.generation,
+                    },
+                    authority.clone(),
+                    vec![],
+                )
+                .unwrap();
+            assert!(authority
+                .resolve(
+                    admitted.scope(),
+                    &resource.resource_id,
+                    RoomResourceOp::Read
+                )
+                .await
+                .is_ok());
+            match refusal {
+                "cancel" => operation.cancel.cancel(),
+                "scope" => operation.member = "different-member".into(),
+                "digest" => operation.digest = "different-definition".into(),
+                "owner" => {
+                    with_rooms(&state, |store| {
+                        store.remove_participant(&operation.room, "human", Utc::now())
+                    })
+                    .unwrap();
+                }
+                "access" => {
+                    with_rooms(&state, |store| {
+                        let mut access = store.room_access(&operation.room).unwrap();
+                        access.state = ocean_core::RoomAccessState::Revoked;
+                        store.replace_room_access(&operation.room, &access)
+                    })
+                    .unwrap();
+                }
+                "revoke" | "suspend" => {
+                    with_rooms(&state, |store| {
+                        store.set_room_resource_status(
+                            &operation.room,
+                            &resource.resource_id,
+                            SetResourceStatusInput {
+                                status: if refusal == "revoke" {
+                                    ResourceStatus::Revoked
+                                } else {
+                                    ResourceStatus::Suspended
+                                },
+                                actor: "fixture-operator".into(),
+                                decision_id: refusal.into(),
+                                request_digest: refusal.into(),
+                            },
+                            Utc::now(),
+                        )
+                    })
+                    .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let authority = DurableRoomResourceAuthority {
+                authority: operation,
+                actor: "agent",
+            };
+            let result = authority
+                .resolve(
+                    admitted.scope(),
+                    &resource.resource_id,
+                    RoomResourceOp::Read,
+                )
+                .await;
+            if matches!(refusal, "revoke" | "suspend") {
+                assert!(
+                    matches!(result, Err(RoomResourceError::NotAvailable)),
+                    "{refusal}: {result:?}"
+                );
+            } else {
+                assert!(
+                    matches!(result, Err(RoomResourceError::StaleGeneration)),
+                    "{refusal}: {result:?}"
+                );
+            }
+        }
+
+        // Preview receives its own request custody and must pass the operator gate.
+        let operation = operation_fixture();
+        state.rooms = operation.rooms.clone();
+        std::fs::write(tmp.path().join("fixture.txt"), "fixture-content").unwrap();
+        let resource = with_rooms(&state, |store| {
+            store.grant_room_resource(
+                &operation.room,
+                GrantRoomResourceInput {
+                    display_name: "source".into(),
+                    local_root: tmp
+                        .path()
+                        .canonicalize()
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned(),
+                    access_mode: ResourceAccessMode::Read,
+                    authorized_agent_member_ids: vec!["builder".into()],
+                    expires_at: None,
+                    granted_by: "fixture-operator".into(),
+                    decision_id: "preview-grant".into(),
+                    request_digest: "preview-grant".into(),
+                },
+                Utc::now(),
+            )
+        })
+        .unwrap()
+        .0;
+        let app = crate::room_routes().with_state(state.clone());
+        let path = format!(
+            "/v1/rooms/persistent/{}/resources/{}/read",
+            operation.room, resource.resource_id
+        );
+        let body = json!({"agent_member_id": "builder", "path": "fixture.txt"});
+        assert_eq!(
+            route_request(
+                app.clone(),
+                axum::http::Method::POST,
+                &path,
+                body.clone(),
+                false
+            )
+            .await
+            .0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        let (status, reply) = route_request(
+            app.clone(),
+            axum::http::Method::POST,
+            &path,
+            body.clone(),
+            true,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{reply}");
+        assert_eq!(reply["ok"], true, "{reply}");
+        assert!(reply.to_string().contains("fixture-content"));
+        assert!(
+            !operation.cancel.is_cancelled(),
+            "preview must not cancel an agent's independent token"
+        );
+        with_rooms(&state, |store| {
+            store.remove_participant(&operation.room, "human", Utc::now())
+        })
+        .unwrap();
+        let (status, reply) = route_request(app, axum::http::Method::POST, &path, body, true).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{reply}");
+        assert_eq!(reply["error"], "agent_binding_required");
+    }
+
+    async fn route_request(
+        app: axum::Router,
+        method: axum::http::Method,
+        path: &str,
+        body: Value,
+        operator: bool,
+    ) -> (StatusCode, Value) {
+        use tower::ServiceExt;
+        let mut request = axum::http::Request::builder()
+            .method(method)
+            .uri(path)
+            .header("content-type", "application/json");
+        if operator {
+            request = request.header("x-ocean-operator", "test-room-operator");
+        }
+        let response = app
+            .oneshot(
+                request
+                    .body(axum::body::Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[tokio::test]
+    async fn grant_route_replays_after_root_removal_and_expiry() {
+        use crate::tests::{isolated_room_fixture_state, TestEnvRestore, AUTO_CONVENE_ENV_LOCK};
+        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _restore = TestEnvRestore::capture(&[
+            "OCEAN_AUTH_FILE",
+            "OCEAN_CODEX_AUTH_FILE",
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let state = isolated_room_fixture_state(&tmp);
+        let room = RoomKey::new("resource-replay-route");
+        with_rooms(&state, |store| {
+            store.create(room.clone(), "Replay", None, Utc::now())
+        })
+        .unwrap();
+        let app = crate::room_routes().with_state(state.clone());
+        let path = format!("/v1/rooms/persistent/{room}/resources");
+        let root = tmp.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        let root = root.canonicalize().unwrap().to_string_lossy().into_owned();
+        let body = json!({"decision_id": uuid::Uuid::new_v4().to_string(), "display_name": "source", "local_root": format!("{root}///"), "access_mode": "read"});
+        let (status, original) = route_request(
+            app.clone(),
+            axum::http::Method::POST,
+            &path,
+            body.clone(),
+            true,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{original}");
+        std::fs::remove_dir(&root).unwrap();
+        let before = with_rooms(&state, |store| store.transcript(&room, None)).unwrap();
+        let (status, replay) = route_request(
+            app.clone(),
+            axum::http::Method::POST,
+            &path,
+            body.clone(),
+            true,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{replay}");
+        assert_eq!(replay["created"], false);
+        assert_eq!(replay["resource"], original["resource"]);
+        let mut changed = body.clone();
+        changed["access_mode"] = json!("list");
+        let (status, rejected) =
+            route_request(app.clone(), axum::http::Method::POST, &path, changed, true).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
+        let mut fresh = body.clone();
+        let fresh_decision = uuid::Uuid::new_v4().to_string();
+        fresh["decision_id"] = json!(fresh_decision);
+        let (status, rejected) =
+            route_request(app.clone(), axum::http::Method::POST, &path, fresh, true).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected}");
+        assert_eq!(rejected["error"], "local_root_not_found");
+        with_rooms(&state, |store| {
+            assert!(store
+                .room_decision_consumed(&room, &fresh_decision)
+                .unwrap()
+                .is_none());
+            assert_eq!(store.transcript(&room, None).unwrap(), before);
+        });
+
+        // Even an identical digest from another authority ledger is not a grant.
+        let cross_decision = uuid::Uuid::new_v4().to_string();
+        let digest = decision_digest(&GrantDecisionDigestInput {
+            room_id: room.as_str(),
+            display_name: "source",
+            local_root: &root,
+            access_mode: "read",
+            authorized_agent_member_ids: &[],
+            expires_at: None,
+        })
+        .unwrap();
+        with_rooms(&state, |store| {
+            store.put_room_profile(
+                &room,
+                PutRoomProfileInput {
+                    repos: vec![],
+                    tools: vec![],
+                    credential_slots: vec![],
+                    default_resource_id: None,
+                    agent_defaults: BTreeMap::new(),
+                    updated_by: "fixture-operator".into(),
+                    decision_id: cross_decision.clone(),
+                    request_digest: digest,
+                },
+                Utc::now(),
+            )
+        })
+        .unwrap();
+        let before = with_rooms(&state, |store| store.transcript(&room, None)).unwrap();
+        let mut cross = body;
+        cross["decision_id"] = json!(cross_decision);
+        let (status, rejected) =
+            route_request(app.clone(), axum::http::Method::POST, &path, cross, true).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
+        assert_eq!(rejected["error"], "decision_replay_mismatch");
+        assert_eq!(
+            with_rooms(&state, |store| store.transcript(&room, None)).unwrap(),
+            before
+        );
+
+        // Seed a once-valid request in the past without a timing-dependent sleep.
+        std::fs::create_dir(&root).unwrap();
+        let expires = Utc::now() - chrono::Duration::hours(1);
+        let expires_text = expires.to_rfc3339();
+        let decision = uuid::Uuid::new_v4().to_string();
+        // A separate root avoids the original still-live grant's uniqueness constraint.
+        let expired_root = tmp.path().join("expired");
+        std::fs::create_dir(&expired_root).unwrap();
+        let expired_root = expired_root
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let digest = decision_digest(&GrantDecisionDigestInput {
+            room_id: room.as_str(),
+            display_name: "expired",
+            local_root: &expired_root,
+            access_mode: "read",
+            authorized_agent_member_ids: &[],
+            expires_at: Some(&expires_text),
+        })
+        .unwrap();
+        let original = with_rooms(&state, |store| {
+            store.grant_room_resource(
+                &room,
+                GrantRoomResourceInput {
+                    display_name: "expired".into(),
+                    local_root: expired_root.clone(),
+                    access_mode: ResourceAccessMode::Read,
+                    authorized_agent_member_ids: vec![],
+                    expires_at: Some(expires),
+                    granted_by: "fixture-operator".into(),
+                    decision_id: decision.clone(),
+                    request_digest: digest,
+                },
+                expires - chrono::Duration::hours(1),
+            )
+        })
+        .unwrap()
+        .0;
+        let before = with_rooms(&state, |store| store.transcript(&room, None)).unwrap();
+        let body = json!({"decision_id": decision, "display_name": "expired", "local_root": expired_root, "access_mode": "read", "expires_at": expires_text});
+        let (status, replay) = route_request(
+            app.clone(),
+            axum::http::Method::POST,
+            &path,
+            body.clone(),
+            true,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{replay}");
+        assert_eq!(replay["resource"]["resource_id"], original.resource_id);
+        assert_eq!(replay["resource"]["status"], "revoked");
+        let mut fresh_expired = body;
+        fresh_expired["decision_id"] = json!(uuid::Uuid::new_v4().to_string());
+        let (status, rejected) =
+            route_request(app, axum::http::Method::POST, &path, fresh_expired, true).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected}");
+        assert_eq!(rejected["error"], "invalid_expires_at");
+        assert_eq!(
+            with_rooms(&state, |store| store.transcript(&room, None)).unwrap(),
+            before
+        );
+    }
+
+    use ocean_store::PutRoomProfileInput;
+    use std::collections::BTreeMap;
+
+    fn grant(
+        store: &mut ocean_store::SqliteRoomStore,
+        room: &RoomKey,
+        root: &FsPath,
+        decision: &str,
+    ) -> ocean_store::RoomResourceGrant {
+        store
+            .grant_room_resource(
+                room,
+                GrantRoomResourceInput {
+                    display_name: decision.into(),
+                    local_root: std::fs::canonicalize(root)
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .into(),
+                    access_mode: ResourceAccessMode::Read,
+                    authorized_agent_member_ids: vec!["helper".into()],
+                    expires_at: None,
+                    granted_by: "fixture-operator".into(),
+                    decision_id: decision.into(),
+                    request_digest: decision.into(),
+                },
+                Utc::now(),
+            )
+            .unwrap()
+            .0
+    }
+
+    #[test]
+    fn cwd_prefers_authorized_agent_default_then_room_default_then_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        for name in ["agent", "room", "workspace"] {
+            std::fs::create_dir(tmp.path().join(name)).unwrap();
+        }
+        let mut store = ocean_store::SqliteRoomStore::open_in_memory().unwrap();
+        let room = RoomKey::new("cwd-precedence");
+        let workspace = std::fs::canonicalize(tmp.path().join("workspace"))
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        store
+            .create_in_workspace(
+                room.clone(),
+                "Cwd",
+                Some(workspace.clone()),
+                None,
+                Utc::now(),
+            )
+            .unwrap();
+        let agent_grant = grant(
+            &mut store,
+            &room,
+            &tmp.path().join("agent"),
+            "agent-default",
+        );
+        let room_grant = grant(&mut store, &room, &tmp.path().join("room"), "room-default");
+        store
+            .put_room_profile(
+                &room,
+                PutRoomProfileInput {
+                    repos: vec![],
+                    tools: vec![],
+                    credential_slots: vec![],
+                    default_resource_id: Some(room_grant.resource_id.clone()),
+                    agent_defaults: BTreeMap::from([(
+                        "helper".into(),
+                        agent_grant.resource_id.clone(),
+                    )]),
+                    updated_by: "fixture-operator".into(),
+                    decision_id: "profile-defaults".into(),
+                    request_digest: "profile-defaults".into(),
+                },
+                Utc::now(),
+            )
+            .unwrap();
+        assert!(
+            matches!(resolve_turn_cwd(&mut store, &room, "helper").unwrap(), TurnCwd::ResourceGrant { resource_id, .. } if resource_id == agent_grant.resource_id)
+        );
+        store
+            .set_room_resource_status(
+                &room,
+                &agent_grant.resource_id,
+                SetResourceStatusInput {
+                    status: ResourceStatus::Suspended,
+                    actor: "fixture-operator".into(),
+                    decision_id: "suspend-agent".into(),
+                    request_digest: "suspend-agent".into(),
+                },
+                Utc::now(),
+            )
+            .unwrap();
+        assert!(
+            matches!(resolve_turn_cwd(&mut store, &room, "helper").unwrap(), TurnCwd::ResourceGrant { resource_id, .. } if resource_id == room_grant.resource_id)
+        );
+        store
+            .set_room_resource_status(
+                &room,
+                &room_grant.resource_id,
+                SetResourceStatusInput {
+                    status: ResourceStatus::Suspended,
+                    actor: "fixture-operator".into(),
+                    decision_id: "suspend-room".into(),
+                    request_digest: "suspend-room".into(),
+                },
+                Utc::now(),
+            )
+            .unwrap();
+        assert_eq!(
+            resolve_turn_cwd(&mut store, &room, "helper").unwrap(),
+            TurnCwd::RoomWorkspaceRoot {
+                cwd: workspace.clone()
+            }
+        );
+        assert_eq!(
+            resolve_turn_cwd(&mut store, &room, "different-agent").unwrap(),
+            TurnCwd::RoomWorkspaceRoot { cwd: workspace }
+        );
+        std::fs::remove_dir(tmp.path().join("workspace")).unwrap();
+        assert_eq!(
+            resolve_turn_cwd(&mut store, &room, "helper").unwrap(),
+            TurnCwd::Unbound
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn readonly_catalog_omits_roots_and_cwd_refuses_root_symlink_substitution() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        let mut store = ocean_store::SqliteRoomStore::open_in_memory().unwrap();
+        let room = RoomKey::new("cwd-substitution");
+        store.create(room.clone(), "Cwd", None, Utc::now()).unwrap();
+        let resource = grant(&mut store, &room, &root, "default");
+        store
+            .put_room_profile(
+                &room,
+                PutRoomProfileInput {
+                    repos: vec![],
+                    tools: vec![],
+                    credential_slots: vec![],
+                    default_resource_id: Some(resource.resource_id.clone()),
+                    agent_defaults: BTreeMap::new(),
+                    updated_by: "fixture-operator".into(),
+                    decision_id: "profile".into(),
+                    request_digest: "profile".into(),
+                },
+                Utc::now(),
+            )
+            .unwrap();
+        let catalog = admitted_resource_catalog(&mut store, &room, "helper").unwrap();
+        assert_eq!(catalog.len(), 1);
+        assert_eq!(catalog[0].access_mode, "read");
+        assert!(admitted_resource_catalog(&mut store, &room, "other-agent")
+            .unwrap()
+            .is_empty());
+        assert!(matches!(
+            resolve_turn_cwd(&mut store, &room, "helper").unwrap(),
+            TurnCwd::ResourceGrant { .. }
+        ));
+        std::fs::rename(&root, tmp.path().join("moved-root")).unwrap();
+        symlink(&outside, &root).unwrap();
+        assert_eq!(
+            resolve_turn_cwd(&mut store, &room, "helper").unwrap(),
+            TurnCwd::Unbound
+        );
+    }
 
     fn canon(p: &FsPath) -> PathBuf {
         std::fs::canonicalize(p).unwrap()

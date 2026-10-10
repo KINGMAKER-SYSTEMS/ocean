@@ -3046,7 +3046,7 @@ async fn spawn_room_agent_turn(
         match state.runtime.admit_room_resources(
             &admission,
             Arc::new(crate::room_resources::DurableRoomResourceAuthority {
-                rooms: state.rooms.clone(),
+                authority: operation_authority.clone(),
                 actor: "agent",
             }),
             catalog,
