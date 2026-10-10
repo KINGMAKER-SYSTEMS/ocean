@@ -1181,3 +1181,14 @@ Round 5: round-4 review follow-ups on model reroute fidelity. (F2) Selection-tim
 
 Validation: ocean-agent 280 passed / 0 failed / 2 ignored; ocean-daemon 908 passed / 2 failed (only the two known pre-existing persistent_room envelope-key assertions); clippy -p ocean-agent --all-targets -D warnings clean; fmt --all --check clean; git diff --check clean.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [23:54] [09-10-26]
+agent: [codex]
+worktree: [codex/pr48-onboarding-reconcile]
+type: [bug report] [PR #48]
+area: [backend] [testing] [review]
+
+Reconciled onboarding preparation with canonical main and repaired issue #85. The port now prepares actual package commands and strict host identity, removes unsupported federation activation and alternate service promotion, and retains explicit identity/runtime installation prerequisites. Configuration uses no-follow directory descriptors, private atomic writes and successful credential-producer gating. Public documentation excludes organization-specific host/access inventory.
+
+Validation: 13 isolated mocked tests passed, including regressions that fail on the previous candidate for partial-output token failure and parent-directory substitution. Independent root review re-ran all 13 tests and acknowledged source 2da76c2d; shell syntax, diff check and docs-check (30 packages, 154 Markdown files, 174 links) passed. Owning component/docs contracts updated; root ownership/indexes unchanged. Final receipt review and required checks remain release gates. No actual package installation, credential lookup, service operation, federation activation, merge or deployment is claimed.
