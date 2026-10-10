@@ -889,7 +889,9 @@ pub fn DynamicIsland(
                                     <span class="island-stage__eyebrow">"Recall"</span>
                                     <strong>"Search transcript history"</strong>
                                 </div>
-                                <span class="island-stage__hint">"⌘⇧F"</span>
+                                <Show when=move || in_tauri>
+                                    <span class="island-stage__hint">"⌘⇧F"</span>
+                                </Show>
                             </header>
                             <div class="island-recall__search">
                                 <input

@@ -92,6 +92,46 @@ transcripts by session id.
 - Turn persistence is incremental: save the accepted user message before provider execution, then save only at provider-valid round boundaries where every assistant tool call has its ordered tool result. Never persist an orphan tool-call batch.
 - Spawned agent loops must remain owned by the parent turn future. Dropping the parent must abort the child; Tokio's default detached-on-`JoinHandle`-drop behavior is unsafe for side-effecting tools.
 - Pre-stream provider failover must pin one session id and hold one per-session turn lock across the complete primary/fallback transaction, reusing the primary attempt's durable accepted-user row; never allow an intervening turn, append the operator prompt twice, or orphan an acceptance-only session.
+- Selection-time and pre-stream failover reroutes persist additive optional
+  session fields `requested_model` and `reroute_reason` on both `Session` and
+  `SessionDetail` (serde default + skip-if-none; legacy files deserialize them
+  as `None`). `model`/`provider` are the session's AUTHORITATIVE pin (read by
+  `SessionModelConfig::from_session` for daemon turn selection) and are NEVER
+  overwritten by an existing-session turn; what actually ran is recorded
+  separately in `effective_model`/`effective_provider` (set every turn, the
+  ROUTE's provider — e.g. `claude-code` — not the wire model's protocol
+  provider). Both reroute fields are assigned unconditionally — an ordinary
+  turn clears them. A reroute is signalled by `requested_model`/`reroute_reason`
+  being PRESENT, not by `requested_model != model`: when a rerouted turn
+  CREATES the session, the pin is the requested route
+  (`Session::new_with_route`), so `requested_model` EQUALS `model`.
+  `reroute_reason` is a fixed typed class (`rate limited`, `server error`,
+  `connection failed`, `timed out`, `missing credential`, …), never a raw
+  provider error body; the operator's ORIGINAL requested model is preserved
+  across a second-stage (pre-stream) reroute. A failover substitution must
+  never become a durable selection change: the next turn re-selects the
+  pinned (requested) model, and an ordinary claude-code turn must not rewrite
+  the OAuth provider pin to the wire model's protocol provider.
+- Reroute detection compares the (provider, model) ROUTE pair, not the model
+  id alone: a same-model fallback through a different provider
+  (claude-code/claude-opus-5-5 → anthropic/claude-opus-5-5 via
+  `OCEAN_PROVIDER_FALLBACK`'s `provider/model` entries) IS a reroute — it is
+  recorded and emitted. When both routes carry the same model id, the
+  `ModelRerouted` event's requested/effective strings are provider-qualified
+  (`claude-code/claude-opus-5-5` → `anthropic/claude-opus-5-5`), never bare
+  identical ids; different-model reroutes keep bare model ids. Only fixed
+  route identifiers enter these strings.
+- Session creation pins the selection ROUTE everywhere: ordinary creation in
+  `run_prompt`/`run_fake_prompt`/`create_session_with_model` uses
+  `Session::new_with_route(id, snapshot.model.id, selection.provider)` — a
+  claude-code OAuth selection persists `provider = "claude-code"`, never the
+  wire model's protocol `anthropic`, even when a pre-stream failure makes the
+  accepted-user checkpoint the first durable write. `Session::new_with_id`
+  (protocol-provider pin) is test scaffolding only (`cfg(test)`).
+- The per-turn model override and the failover decisions read their
+  environment from the same source (`turn_env()`). Outside tests each call is a
+  fresh `ProviderEnv::from_process()` read (not one cached snapshot per turn);
+  under `cfg(test)` both see the injected hermetic env.
 - Observed primary or alternate provider 401/403 refusals suppress that provider
   as a fallback for 300 seconds in one runtime's clone-shared memory. Filter
   both selection-time and pre-stream fallback and their ready-label projection;
