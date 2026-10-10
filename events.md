@@ -1156,3 +1156,12 @@ Round 5: round-4 review follow-ups on model reroute fidelity. (F2) Selection-tim
 
 Validation: ocean-agent 280 passed / 0 failed / 2 ignored; ocean-daemon 908 passed / 2 failed (only the two known pre-existing persistent_room envelope-key assertions); clippy -p ocean-agent --all-targets -D warnings clean; fmt --all --check clean; git diff --check clean.
 _________________________________________________________________________________
+time: [22:26] [09-10-26]
+agent: [claude] [claude-opus-5-5]
+worktree: [fix/room-lifecycle-tests] [~/dev/oceanwork/wt-room-lifecycle-tests]
+type: [bug fix] [issue #42]
+area: [backend] [testing]
+
+Fixed the three persistent-room lifecycle failures from #42 on current `main` `f1b22bd`. Two exact-envelope fixtures (`persistent_room_http_lifecycle_preserves_envelopes_and_ordering`, `closed_persistent_room_preserves_audit_http_asymmetry`) now require the documented `aliases: []` / `aliases_truncated: false` projection. The flaky `closing_a_room_ends_the_message_tail_after_the_marker` exposed a real tail race: `close_with_marker` commits the marker and `closed_at` atomically, so a close landing between the tail's page read and its openness check ended the stream without the marker. `run_room_tail` now routes every openness check through `room_tail_still_open`, which runs one final durable catch-up on a closed room before ending. New regression `a_close_between_replay_and_openness_check_still_sends_the_marker` drives that exact interleaving (RED with the final catch-up removed, GREEN with it). Supersedes the conflicting test-only PR #58.
+
+Validation: close-tail test 9/30 failures before, 0/50 after (isolated target dir; the shared target dir was being overwritten by other worktrees' builds); the three issue tests pass; `cargo test -p ocean-daemon` 911 passed / 0 failed (one earlier full run hit an unrelated load flake in `extension_service::supervision_recovery_finished_owner_proof_survives_cleanup_before_stale_join`, 10/10 green in isolation); `cargo clippy -p ocean-daemon --all-targets -- -D warnings` clean; `cargo fmt --all -- --check` clean.
