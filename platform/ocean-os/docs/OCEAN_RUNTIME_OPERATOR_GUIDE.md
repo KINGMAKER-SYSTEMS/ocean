@@ -228,9 +228,9 @@ room. With credentialed rooms but no URL, startup warns
 If a credentialed room stays `recovering` while Bedrock answers, replay the
 receiver's two reads with the room bearer (`GET /api/v1/rooms/{key}/events`,
 expecting a `hello` frame, then `GET /api/v1/rooms/{key}/members`) and compare
-both against the daemon's strict wire structs. Read the bearer from a copy of
-`rooms.db` into a shell variable rather than typing it, so it stays out of
-shell history. A roster that fails to parse or project logs
+both against the daemon's strict wire structs. Read the bearer with a read-only query
+(`sqlite3 -readonly`) straight into a shell variable rather than typing it or
+copying `rooms.db`, so it stays out of shell history and off disk. A roster that fails to parse or project logs
 `outcome="roster_rejected"` at warn; every failed epoch also logs
 `outcome="epoch_recover"` with attempt and backoff under
 `RUST_LOG=ocean_daemon::room_federation=debug`.

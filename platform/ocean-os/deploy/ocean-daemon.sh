@@ -63,12 +63,14 @@ load_federation_env() {
   local blank_re='^[[:space:]]*(#|$)'
   local pair_re='^(OCEAN_FEDERATION_[A-Z0-9_]+)=(.*)$'
   local dq_re='^"(.*)"$' sq_re="^'(.*)'$"
+  local mode_re='^[0-7]{3,4}$'
   [[ -e "$file" ]] || return 0
   if [[ ! -f "$file" || ! -r "$file" || ! -O "$file" ]]; then
     echo "WARNING: ignoring $file: not a readable regular file owned by this user." >&2
     return 0
   fi
   mode="$(stat -f %Lp "$file" 2>/dev/null || stat -c %a "$file" 2>/dev/null || echo 777)"
+  [[ "$mode" =~ $mode_re ]] || mode=777
   if (( 8#$mode & 8#022 )); then
     echo "WARNING: ignoring $file: group/other-writable (mode $mode); chmod 600 it." >&2
     return 0
