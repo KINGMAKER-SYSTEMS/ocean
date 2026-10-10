@@ -1135,3 +1135,28 @@ Validation on isolated Mac mini: ten p4_ tests and locked daemon check passed.
 Both new regressions fail with swallowed-error behavior restored; fixed sources
 restored byte-identically and all ten passed again. Formatting and diff checks pass.
 No live daemon changes. Other PR68 review findings remain outside this repair.
+
+_________________________________________________________________________________
+time: [22:09] [2026-10-09] America/New_York
+agent: [Codex] [factory release owner]
+worktree: [codex/pr68-reviewed-repairs]
+type: [bug report]
+area: [backend] [frontend] [review]
+
+Resolved the five remaining PR68 review findings through issues73/74. Invalid
+room-model overrides retain the immutable admitted package fallback using the
+actual runtime resolver; valid overrides and explicit turn selection keep their
+priority. Fresh-owner identity documentation now matches member-id seeding and
+preserved persisted ids. Surface uses ordinary accessible agent-selection buttons,
+retains the newest50 work cards, and fences both transcript and error completions
+by request ticket, open lifecycle, daemon origin and the complete captured run.
+Independent review found an Effect-scheduling gap; full-run equality and a
+same-ticket Thinking-to-Done regression close it. Prior durable start/park repairs
+remain intact. Owning devlogs updated; parent ownership and child indexes unchanged.
+
+Validation: daemon P4 tests11/11, locked daemon check, format/diff checks pass;
+new model regression fails with its resolver filter removed. Cached P4 rerun also
+passes with disposable auth/config/XDG paths and unchanged HOME. Surface initial
+snapshot passed861 unit and28 integration tests; final work-card tests4/4, live-cap regression1/1 and
+WASM check pass. Independent exact integration review follows this
+ledger update. No merge, install, live provider call or two-machine outcome.
