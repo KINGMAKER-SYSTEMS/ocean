@@ -484,7 +484,7 @@ pub fn resolve_provider_config(env: &ProviderEnv) -> Result<ProviderConfig, Prov
 // environment, what ready providers could serve this request, in what order?".
 
 /// Env var holding the ordered fallback list (OCEAN-275), comma-separated model
-/// aliases — e.g. `claude-sonnet-4-6,gpt-5.4,deepseek-v4-pro`. Each alias is
+/// aliases — e.g. `claude-sonnet-5-5,gpt-6-astra,deepseek-v4-pro`. Each alias is
 /// resolved through the same [`resolve_provider_config`] path as a primary
 /// selection, so anything valid for `OCEAN_MODEL` is valid here. Unset ⇒
 /// [`DEFAULT_FALLBACK_ORDER`]. Unparseable/unknown entries are skipped (with a
@@ -501,13 +501,18 @@ pub const ENV_PROVIDER_FALLBACK: &str = "OCEAN_PROVIDER_FALLBACK";
 /// unavailable. `Fake` is intentionally excluded — failing a production turn over
 /// to a canned echo would hide an outage rather than route around it (an operator
 /// who wants that can still list `fake` explicitly in the env override).
+///
+/// Each entry must be a model the provider's subscription route still serves:
+/// a failover to a retired id turns an outage into a second, misleading error
+/// (`gpt-5.4` is refused for ChatGPT-account Codex, which is how an Anthropic
+/// rate limit surfaced as "The 'gpt-5.4' model is not supported").
 pub const DEFAULT_FALLBACK_ORDER: &[&str] = &[
-    "claude-sonnet-5",  // claude-code oauth
-    "gpt-5.4",          // openai-codex
-    "deepseek-v4-pro",  // deepseek
-    "gemini-2.0-flash", // google
-    "kimi-k2.6",        // kimi
-    "minimax-m2",       // minimax
+    "claude-sonnet-5-5", // claude-code oauth
+    "gpt-6-astra",       // openai-codex
+    "deepseek-v4-pro",   // deepseek
+    "gemini-2.0-flash",  // google
+    "kimi-k2.6",         // kimi
+    "MiniMax-M2.7",      // minimax
 ];
 
 /// Parse the configured fallback order into a list of model aliases.
@@ -2712,6 +2717,31 @@ mod tests {
         let alt = resolve_fallback_config(&e, &ProviderId::Google).unwrap();
         assert_eq!(alt.selection.provider, ProviderId::DeepSeek);
         assert_eq!(alt.selection.model, "deepseek-v4-pro");
+    }
+
+    #[test]
+    fn every_default_fallback_resolves_to_its_intended_provider() {
+        // A retired id here silently drops that provider from failover or, worse,
+        // routes a failed turn to a model the account cannot use.
+        let expected = [
+            ProviderId::ClaudeCode,
+            ProviderId::OpenAiCodex,
+            ProviderId::DeepSeek,
+            ProviderId::Google,
+            ProviderId::Kimi,
+            ProviderId::MiniMax,
+        ];
+        assert_eq!(DEFAULT_FALLBACK_ORDER.len(), expected.len());
+        for (alias, provider) in DEFAULT_FALLBACK_ORDER.iter().zip(expected) {
+            let e = env(&[("OCEAN_MODEL", alias)]);
+            let config = resolve_provider_config(&e)
+                .unwrap_or_else(|err| panic!("{alias} must resolve: {err:?}"));
+            assert_eq!(config.selection.provider, provider, "{alias}");
+            assert!(catalog_model(alias).is_some(), "{alias} is in the catalog");
+        }
+        assert!(!DEFAULT_FALLBACK_ORDER
+            .iter()
+            .any(|a| a.starts_with("gpt-5.4")));
     }
 
     #[test]

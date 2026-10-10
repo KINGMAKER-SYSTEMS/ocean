@@ -1077,6 +1077,17 @@ ChatGPT sign-in: gpt-6.1-sol, glm-5.3 and deepseek-v4-pro each ran a bash tool
 call and answered; session model = requested, no reroute. ocean-protocol codex
 tests 36/36, ocean-providers 67/67.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [18:43] [07-10-26]
+agent: [claude] [claude code]
+worktree: [fix/failover-current-models] [/Users/risingtidesdev/dev/ocean-fallback]
+type: [bug report]
+area: [backend] [testing]
+
+Fixed the cross-provider failover list after a live report: a Fable 5.1 turn hit the Anthropic account's rate limit and Ocean failed over to gpt-5.4, which ChatGPT-account Codex refuses, so the operator saw "The 'gpt-5.4' model is not supported" instead of the real cause. DEFAULT_FALLBACK_ORDER is a hard-coded list of one model per provider, and two entries had gone stale: the Codex entry gpt-5.4 and the MiniMax entry minimax-m2, which still resolves but is no longer in the model catalog. The list now uses gpt-6-astra and MiniMax-M2.7, and Claude Sonnet 5.5 instead of Sonnet 5 at the top; GPT-6 Astra and Sonnet 5.5 both completed live turns on the operator's subscription routes today. A new test requires every default entry to resolve to its intended provider and to be a catalog model, which is how the MiniMax entry was found.
+
+Validation: ocean-providers 68 tests pass, rustfmt check passes. No other crate reads the default list.
 time: [14:16] [06-10-26]
 agent: [codex]
 worktree: [fix/report-model-reroute-in-session] [/Users/seenorising/dev/ocean-org-sub]
@@ -1156,3 +1167,14 @@ Round 5: round-4 review follow-ups on model reroute fidelity. (F2) Selection-tim
 
 Validation: ocean-agent 280 passed / 0 failed / 2 ignored; ocean-daemon 908 passed / 2 failed (only the two known pre-existing persistent_room envelope-key assertions); clippy -p ocean-agent --all-targets -D warnings clean; fmt --all --check clean; git diff --check clean.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [23:08] [09-10-26]
+agent: [codex] [factory release]
+worktree: [codex/pr63-reviewed-fallback]
+type: [workflow]
+area: [backend] [testing] [review]
+
+PR #63 source reconciliation with canonical main f1b22bd8 preserved both public ledger histories. Provider source is unchanged from original bfa8965a: default fallback replacements include gpt-6-astra on openai-codex, Sonnet 5.5 and MiniMax M2.7. Provider tests 68/68, locked check, formatting and diff checks pass; remote validated provider hash matches the candidate. Existing owning contracts already distinguish catalog routing from account entitlement and remain unchanged; parent ownership/indexes unchanged. Final receipt precedes exact-head review and hosted checks.
+
+Explicit live-acceptance/promotion hold remains: issue #61's unsupported-GPT6 report and PR #63's later Astra-success claim lack matching exact-model/account/serving-revision receipts. Synthetic routing and catalog membership do not establish a remedy for the observed user failure. PR #62's separate public ChatGPT-plan provider does not change this bare model's Codex route. No live provider probe, installation or deployment; required maintainer approval and this evidence hold are not lifted.
