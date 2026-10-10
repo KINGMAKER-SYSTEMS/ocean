@@ -14,8 +14,8 @@ use crate::room_messages;
 use crate::rooms::{
     AgentSummary, CreateResolution, FederatedActorType, FederatedRoomMemberProjection,
     FederatedRoomRole, MemberPresence, OutboxItemState, Room, RoomAccessProjection,
-    RoomAccessState, RoomMessage, RoomMessageKind, RoomParticipant, RoomParticipantKind,
-    RoomReadCursorProjection, Rooms,
+    RoomAccessState, RoomAgentBinding, RoomMessage, RoomMessageKind, RoomParticipant,
+    RoomParticipantKind, RoomReadCursorProjection, Rooms,
 };
 
 // ── Production helpers (testable directly, called from Effects) ─
@@ -2010,6 +2010,7 @@ pub fn RoomsWorkspace(
                                                                     >
                                                                         {move || thread_label()}
                                                                     </button>
+                                                                    <InvokeMenu rooms=rooms message_seq=root_seq />
                                                                     </div>
                                                                 }.into_any()
                                                             } else {
@@ -2359,6 +2360,7 @@ pub fn RoomsWorkspace(
                     }}
                 </div>
 
+                <ConsentSheet rooms=rooms />
                 <div class="rooms-workspace__right-list">
                     {move || {
                         if let Some(root) = thread_root_for(&rooms.transcript.get(), selected_thread_root_seq.get()) {
@@ -2677,7 +2679,6 @@ pub fn RoomsWorkspace(
                                     let participants = rooms.open_room.get()
                                         .map(|r| r.participants)
                                         .unwrap_or_default();
-                                    let show_add_agent = RwSignal::new(false);
                                     view! {
                                         {if participants.is_empty() {
                                             view! {
@@ -2712,6 +2713,7 @@ pub fn RoomsWorkspace(
                                                                 <span class="rooms-workspace__member-kind">
                                                                     {participant_kind_label(p.kind)}
                                                                 </span>
+                                                                <AgentBindingMenu rooms=rooms member_id=p.id.clone() />
                                                             </div>
                                                         }
                                                     }
@@ -2720,54 +2722,7 @@ pub fn RoomsWorkspace(
                                             }.into_any()
                                         }}
 
-                                        <button
-                                            class="rooms-workspace__addagent"
-                                            type="button"
-                                            title="Add an agent participant"
-                                            aria-controls="rooms-workspace-agent-picker"
-                                            aria-expanded=move || show_add_agent.get().to_string()
-                                            on:click=move |_| show_add_agent.update(|v: &mut bool| *v = !*v)
-                                        >
-                                            "+ agent"
-                                        </button>
-                                        {move || {
-                                            if show_add_agent.get() {
-                                                view! {
-                                                    <div
-                                                        id="rooms-workspace-agent-picker"
-                                                        class="rooms-workspace__addagent-picker"
-                                                    >
-                                                        <select
-                                                            class="rooms-workspace__addagent-select"
-                                                            aria-label="Choose an agent to add"
-                                                            on:change=move |ev| {
-                                                                let val = event_target_value(&ev);
-                                                                if !val.is_empty() {
-                                                                    rooms.add_agent(val);
-                                                                    show_add_agent.set(false);
-                                                                }
-                                                            }
-                                                        >
-                                                            <option value="" selected=true>
-                                                                "-- pick an agent --"
-                                                            </option>
-                                                            <For
-                                                                each=move || rooms.available_agents.get()
-                                                                key=|agent: &AgentSummary| agent.name.clone()
-                                                                children=move |agent: AgentSummary| {
-                                                                    let v = agent.name.clone();
-                                                                    view! {
-                                                                        <option value=v disabled=agent.error.is_some()>{agent.name}</option>
-                                                                    }
-                                                                }
-                                                            />
-                                                        </select>
-                                                    </div>
-                                                }.into_any()
-                                            } else {
-                                                ().into_any()
-                                            }
-                                        }}
+                                        <AddAgentPicker rooms=rooms />
                                     }.into_any()
                                 }
                                 Some(ref access)
@@ -2788,6 +2743,11 @@ pub fn RoomsWorkspace(
                                     } else {
                                         let members = access.members.clone();
                                         let members_for_label = members.clone();
+                                        let can_add_agent = crate::host::room_consent_supported()
+                                            && matches!(
+                                                access.state,
+                                                RoomAccessState::Live | RoomAccessState::Recovering
+                                            );
                                         view! {
                                             // Roster is a real list: give AT an
                                             // item count + boundaries instead of
@@ -2873,6 +2833,7 @@ pub fn RoomsWorkspace(
                                                             <span class="rooms-workspace__member-role">
                                                                 {role_label}
                                                             </span>
+                                                            <AgentBindingMenu rooms=rooms member_id=member.member_id.clone() />
                                                             {if presence.is_some() {
                                                                 view! {
                                                                     <span
@@ -2895,6 +2856,7 @@ pub fn RoomsWorkspace(
                                                 }
                                             />
                                             </div>
+                                            {can_add_agent.then(|| view! { <AddAgentPicker rooms=rooms /> })}
                                         }.into_any()
                                     }
                                 }
@@ -2937,6 +2899,281 @@ pub fn RoomsWorkspace(
                 }}
             </div>
         </div>
+    }
+}
+
+// ── Room agent consent + invocation (ocean-private #65) ─────────────
+
+/// `sha256:` plus the first 12 hex digits; the full digest stays in the title.
+fn short_digest(digest: &str) -> String {
+    match digest.strip_prefix("sha256:") {
+        Some(hex) if hex.len() > 12 => format!("sha256:{}", &hex[..12]),
+        _ => digest.to_string(),
+    }
+}
+
+fn invocation_label(state: &crate::rooms::InvocationState) -> &'static str {
+    use crate::rooms::InvocationState;
+    match state {
+        InvocationState::Pending => "sending",
+        InvocationState::Acknowledged { .. } => "queued",
+        InvocationState::Refused(_) => "refused",
+        InvocationState::Unknown => "unknown",
+    }
+}
+
+/// Binding for a roster member, matched on the daemon agent member id.
+fn binding_for(bindings: &[RoomAgentBinding], member_id: &str) -> Option<RoomAgentBinding> {
+    bindings
+        .iter()
+        .find(|b| b.agent_member_id == member_id)
+        .cloned()
+}
+
+/// Agent picker: one ghost trigger, one select. Selecting registers (or
+/// adds) the agent; native hosts then open the consent sheet.
+#[component]
+fn AddAgentPicker(rooms: Rooms) -> impl IntoView {
+    let open = RwSignal::new(false);
+    view! {
+        <button
+            class="rooms-workspace__addagent"
+            type="button"
+            aria-controls="rooms-workspace-agent-picker"
+            aria-expanded=move || open.get().to_string()
+            on:click=move |_| open.update(|v| *v = !*v)
+        >
+            "+ agent"
+        </button>
+        {move || {
+            open.get().then(|| view! {
+                <div id="rooms-workspace-agent-picker" class="rooms-workspace__addagent-picker">
+                    <select
+                        class="rooms-workspace__addagent-select"
+                        aria-label="Agent"
+                        on:change=move |ev| {
+                            let val = event_target_value(&ev);
+                            if !val.is_empty() {
+                                rooms.add_agent(val);
+                                open.set(false);
+                            }
+                        }
+                    >
+                        <option value="" selected=true>"Agent"</option>
+                        <For
+                            each=move || rooms.available_agents.get()
+                            key=|agent: &AgentSummary| agent.name.clone()
+                            children=move |agent: AgentSummary| {
+                                let v = agent.name.clone();
+                                view! {
+                                    <option value=v disabled=agent.error.is_some()>{agent.name}</option>
+                                }
+                            }
+                        />
+                    </select>
+                </div>
+            })
+        }}
+    }
+}
+
+/// Frozen native consent: name, digest, requested capabilities, one primary
+/// action and a dismiss. Absent unless the native shell froze a preview.
+#[component]
+fn ConsentSheet(rooms: Rooms) -> impl IntoView {
+    move || {
+        let draft = rooms.consent.get()?;
+        let preview = draft.preview.clone();
+        let busy = draft.busy;
+        let initials = preview
+            .display_name
+            .chars()
+            .take(2)
+            .collect::<String>()
+            .to_uppercase();
+        let action = if preview.mode == "reauthorize" {
+            "Reauthorize"
+        } else {
+            "Authorize"
+        };
+        let caps = preview.requested_capabilities.clone();
+        Some(view! {
+            <div class="rooms-workspace__consent" role="group" aria-label=format!("{action} {}", preview.display_name)>
+                <div class="rooms-workspace__consent-head">
+                    <span class=format!(
+                        "rooms-workspace__member-avatar {}",
+                        avatar_identity_class(&preview.agent_member_id)
+                    )>{initials}</span>
+                    <span class="rooms-workspace__consent-name">{preview.display_name.clone()}</span>
+                    <button
+                        class="rooms-workspace__right-close"
+                        type="button"
+                        aria-label="Dismiss"
+                        disabled=busy
+                        on:click=move |_| rooms.dismiss_consent()
+                    >
+                        <svg viewBox="0 0 16 16" width="14" height="14"
+                            fill="none" stroke="currentColor" stroke-width="1.6"
+                            stroke-linecap="round">
+                            <path d="M3 3l10 10M13 3L3 13"/>
+                        </svg>
+                    </button>
+                </div>
+                <code class="rooms-workspace__consent-digest" title=preview.definition_digest.clone()>
+                    {short_digest(&preview.definition_digest)}
+                </code>
+                {(!caps.is_empty()).then(|| view! {
+                    <div class="rooms-workspace__consent-caps" role="list" aria-label="Capabilities">
+                        {caps.into_iter().map(|cap| view! {
+                            <span class="rooms-workspace__consent-cap" role="listitem">{cap}</span>
+                        }).collect_view()}
+                    </div>
+                })}
+                <button
+                    class="rooms-workspace__consent-primary"
+                    type="button"
+                    disabled=busy
+                    on:click=move |_| rooms.authorize_consent()
+                >
+                    {action}
+                </button>
+            </div>
+        })
+    }
+}
+
+/// One overflow per bound agent row; Review and Revoke live inside it.
+/// Native hosts only — browser hosts never emulate consent.
+#[component]
+fn AgentBindingMenu(rooms: Rooms, member_id: String) -> impl IntoView {
+    let open = RwSignal::new(false);
+    move || {
+        if !crate::host::room_consent_supported() {
+            return None;
+        }
+        let binding = binding_for(&rooms.agent_bindings.get(), &member_id)?;
+        let status = binding.status.clone();
+        let review_package = binding.agent_package_id.clone();
+        let revoke_binding = binding.clone();
+        let revocable = status != "revoked";
+        Some(view! {
+            {(status != "active").then(|| view! {
+                <span class="rooms-workspace__member-binding">{status.clone()}</span>
+            })}
+            <span class="rooms-workspace__overflow">
+                <button
+                    class="rooms-workspace__overflow-trigger"
+                    type="button"
+                    aria-label=format!("{} options", binding.display_name)
+                    aria-haspopup="menu"
+                    aria-expanded=move || open.get().to_string()
+                    on:click=move |_| open.update(|v| *v = !*v)
+                >
+                    "\u{22ef}"
+                </button>
+                {move || open.get().then(|| {
+                    let review_package = review_package.clone();
+                    let revoke_binding = revoke_binding.clone();
+                    view! {
+                        <div class="rooms-workspace__overflow-menu" role="menu">
+                            <button
+                                class="rooms-workspace__overflow-item"
+                                type="button"
+                                role="menuitem"
+                                on:click=move |_| {
+                                    open.set(false);
+                                    rooms.review_agent(review_package.clone());
+                                }
+                            >
+                                "Review"
+                            </button>
+                            {revocable.then(|| view! {
+                                <button
+                                    class="rooms-workspace__overflow-item rooms-workspace__overflow-item--danger"
+                                    type="button"
+                                    role="menuitem"
+                                    on:click=move |_| {
+                                        open.set(false);
+                                        rooms.revoke_agent(revoke_binding.clone());
+                                    }
+                                >
+                                    "Revoke"
+                                </button>
+                            })}
+                        </div>
+                    }
+                })}
+            </span>
+        })
+    }
+}
+
+/// Explicit invocation from a committed message the authoritative caller
+/// authored. One trigger; active agents and their invocation state inside.
+#[component]
+fn InvokeMenu(rooms: Rooms, message_seq: u64) -> impl IntoView {
+    let open = RwSignal::new(false);
+    move || {
+        let caller = crate::rooms::invoke_caller(rooms.access.get().as_ref())?;
+        let transcript = rooms.transcript.get();
+        let message = transcript.iter().find(|m| m.seq == message_seq)?;
+        if !crate::rooms::message_invocable(message, &caller) {
+            return None;
+        }
+        let agents = crate::rooms::invocable_bindings(&rooms.agent_bindings.get());
+        if agents.is_empty() {
+            return None;
+        }
+        Some(view! {
+            <span class="rooms-workspace__overflow">
+                <button
+                    class="rooms-workspace__thread-toggle rooms-workspace__invoke-trigger"
+                    type="button"
+                    aria-label=format!("Invoke an agent on message {message_seq}")
+                    aria-haspopup="menu"
+                    aria-expanded=move || open.get().to_string()
+                    on:click=move |_| open.update(|v| *v = !*v)
+                >
+                    <crate::icons::Robot />
+                </button>
+                {move || open.get().then(|| {
+                    let invocations = rooms.invocations.get();
+                    view! {
+                        <div class="rooms-workspace__overflow-menu" role="menu">
+                            {agents.iter().map(|agent| {
+                                let state = invocations
+                                    .iter()
+                                    .find(|i| i.agent_member_id == agent.agent_member_id && i.message_seq == message_seq)
+                                    .map(|i| invocation_label(&i.state));
+                                let agent_id = agent.agent_member_id.clone();
+                                let name = if agent.display_name.is_empty() {
+                                    agent.agent_member_id.clone()
+                                } else {
+                                    agent.display_name.clone()
+                                };
+                                view! {
+                                    <button
+                                        class="rooms-workspace__overflow-item"
+                                        type="button"
+                                        role="menuitem"
+                                        disabled=state.is_some()
+                                        on:click=move |_| {
+                                            open.set(false);
+                                            rooms.invoke_agent(agent_id.clone(), message_seq);
+                                        }
+                                    >
+                                        {name}
+                                        {state.map(|label| view! {
+                                            <span class="rooms-workspace__member-binding">{label}</span>
+                                        })}
+                                    </button>
+                                }
+                            }).collect_view()}
+                        </div>
+                    }
+                })}
+            </span>
+        })
     }
 }
 
@@ -4565,5 +4802,32 @@ mod tests {
     #[test]
     fn option_dom_id_is_prefix_stable() {
         assert_eq!(room_option_dom_id("r1"), "rooms-opt-r1");
+    }
+
+    #[test]
+    fn consent_digest_is_shortened_and_bindings_match_member_ids() {
+        assert_eq!(
+            short_digest("sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+            "sha256:0123456789ab"
+        );
+        assert_eq!(short_digest("sha256:abc"), "sha256:abc");
+        assert_eq!(short_digest("opaque"), "opaque");
+        let binding = RoomAgentBinding {
+            agent_member_id: "agent-x".into(),
+            agent_package_id: "scout".into(),
+            agent_definition_digest: String::new(),
+            display_name: "Scout".into(),
+            owner_member_id: "human-a".into(),
+            status: "active".into(),
+            generation: "1".into(),
+            owner_eligible: true,
+        };
+        let bindings = vec![binding.clone()];
+        assert_eq!(binding_for(&bindings, "agent-x"), Some(binding));
+        assert_eq!(binding_for(&bindings, "scout"), None);
+        assert_eq!(
+            invocation_label(&crate::rooms::InvocationState::Unknown),
+            "unknown"
+        );
     }
 }
