@@ -677,6 +677,7 @@ impl FederationSupervisor {
             tracing::error!("federation startup could not enumerate credentialed rooms");
             return;
         };
+        let mut unconfigured = 0usize;
         for credential in credentials {
             let state = with_rooms_handle(&self.inner.rooms, |store| {
                 store.room_access(&credential.room_id).map(|p| p.state)
@@ -696,6 +697,7 @@ impl FederationSupervisor {
             }
             if self.inner.client.is_none() {
                 let _ = self.persist_lease_lost(&credential.room_id, RoomAccessState::Recovering);
+                unconfigured += 1;
                 continue;
             }
             // A configured client is not an authenticated lease. Atomically
@@ -710,6 +712,12 @@ impl FederationSupervisor {
         }
         if self.inner.invalid_config {
             tracing::warn!("federation client configuration is invalid; rooms set Recovering");
+        } else if unconfigured > 0 {
+            tracing::warn!(
+                rooms = unconfigured,
+                outcome = "federation_unconfigured",
+                "OCEAN_FEDERATION_URL is not set; credentialed rooms set Recovering"
+            );
         }
         let pending =
             with_rooms_handle(&self.inner.rooms, |store| store.list_pending_redemptions());
@@ -2483,6 +2491,11 @@ struct WireMember {
     #[serde(default)]
     public_agent_descriptor: Option<PublicAgentDescriptor>,
     joined_at: String,
+    /// Bedrock projects `operator_id` on members of operator rooms. Accepted
+    /// and ignored for the same reason as `MembersEnvelope::caller_member_ids`.
+    #[serde(default)]
+    #[allow(dead_code)]
+    operator_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2759,8 +2772,19 @@ async fn fetch_roster(
             return Err(EpochOutcome::Recover);
         }
     };
-    project_roster(inner, credential, envelope, live_human_member_ids)
-        .map_err(|_| EpochOutcome::Recover)
+    project_roster(inner, credential, envelope, live_human_member_ids).map_err(|error| {
+        let outcome = if error == BridgeError::Store {
+            "roster_store_failed"
+        } else {
+            "roster_rejected"
+        };
+        tracing::warn!(
+            room = %credential.room_id,
+            outcome,
+            "federation roster could not be projected; room stays recovering"
+        );
+        EpochOutcome::Recover
+    })
 }
 
 fn project_roster(
@@ -7722,8 +7746,9 @@ mod tests {
     }
 
     /// Production Bedrock's `GET /members` carries `caller_member_ids` beside
-    /// the roster. The strict envelope once rejected it, so every epoch
-    /// returned Recover after a valid hello and rooms never reached Live.
+    /// the roster (and `operator_id` on operator-room members). The strict
+    /// envelope once rejected it, so every epoch returned Recover after a
+    /// valid hello and rooms never reached Live.
     #[tokio::test]
     async fn roster_with_caller_member_ids_reaches_live() {
         let key = RoomKey::new("caller-ids".to_owned());
@@ -7745,7 +7770,8 @@ mod tests {
                 "actor_type":"user",
                 "role_in_room":"owner",
                 "display_name":"Human",
-                "joined_at":"2026-10-09T19:40:15.041Z"
+                "joined_at":"2026-10-09T19:40:15.041Z",
+                "operator_id":"op_1"
             }],
             "caller_member_ids":[human]
         });

@@ -211,20 +211,26 @@ once at startup, never accepted from a surface request, and after registration
 is retained only in owner-only `rooms.db`. Missing owner token disables Local
 bootstrap only; existing credentialed rooms and invite redemption still work.
 
-The supervised launcher (`deploy/ocean-daemon.sh`) sources the owner-only
-`~/.config/ocean-rs/federation.env` (KEY=VALUE) when present and prints
-`federation=on|off` in its startup banner; launchd passes no shell profile, so
-exporting the variables elsewhere does not reach the daemon. Contributor
-daemons set only `OCEAN_FEDERATION_URL`. They join a room by redeeming the
-owner's invite through their own local `POST /v1/rooms/persistent/invites/redeem`
-so the room bearer lands in their `rooms.db`; redeeming directly against
-Bedrock and pasting the result into `OCEAN_FEDERATION_OWNER_TOKEN` gives the
-daemon nothing it can use for that room.
+The supervised launcher (`deploy/ocean-daemon.sh`) reads
+`~/.config/ocean-rs/federation.env` as data (never executed): the file must be
+owned by the daemon user and not group/other-writable, only
+`OCEAN_FEDERATION_*=value` lines are used, and values already present in the
+LaunchAgent plist's `EnvironmentVariables` win. The startup banner prints
+`federation=on|off`. Shell-profile exports never reach a launchd job.
+Contributor daemons set only `OCEAN_FEDERATION_URL`. They join a room by
+redeeming the owner's invite through their own local
+`POST /v1/rooms/persistent/invites/redeem`, so the room bearer lands in their
+`rooms.db`; redeeming directly against Bedrock and pasting the result into
+`OCEAN_FEDERATION_OWNER_TOKEN` gives the daemon nothing it can use for that
+room. With credentialed rooms but no URL, startup warns
+`outcome="federation_unconfigured"`.
 
 If a credentialed room stays `recovering` while Bedrock answers, replay the
 receiver's two reads with the room bearer (`GET /api/v1/rooms/{key}/events`,
 expecting a `hello` frame, then `GET /api/v1/rooms/{key}/members`) and compare
-both against the daemon's strict wire structs. A rejected roster logs
+both against the daemon's strict wire structs. Read the bearer from a copy of
+`rooms.db` into a shell variable rather than typing it, so it stays out of
+shell history. A roster that fails to parse or project logs
 `outcome="roster_rejected"` at warn; every failed epoch also logs
 `outcome="epoch_recover"` with attempt and backoff under
 `RUST_LOG=ocean_daemon::room_federation=debug`.
