@@ -277,9 +277,7 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
 
 ### Reviewed package consent manifest (ocean-private #55)
 
-- Base: ocean-private main `a4f24a4145ffeea60bd4fab75c11661fc00f0785`, which
-  precedes this monorepo's publication snapshot; ported here from
-  ocean-private #59. Targets are only `src/room_agent_authority.rs`, registered-route fixtures in
+- Ported from ocean-private #59 onto the public canonical source. Targets are only `src/room_agent_authority.rs`, registered-route fixtures in
   `src/main.rs`, and this contract. This additive consent boundary follows #33;
   it does not complete client onboarding or lift #22/#48 deployment holds.
 - Strict authorize/reauthorize bodies accept optional
