@@ -47,6 +47,11 @@ pub use memory_tools::{
 };
 pub use ocean_memory::RoomMemoryAdmission;
 mod oauth_refresh;
+/// Refresh an expiring provider OAuth block before a provider-specific
+/// operation that does not run through the normal turn lifecycle.
+pub async fn ensure_oauth_provider_fresh(auth_file: &Path, provider_block: &str) {
+    oauth_refresh::ensure_provider_fresh(auth_file, provider_block).await;
+}
 pub use agentdir::{AgentDef, ResolveError as AgentDirResolveError};
 mod project;
 pub use project::{git_head_info, WorktreeInfo};
@@ -777,7 +782,7 @@ impl AgentRuntime {
         *self.state.write().expect("runtime state poisoned") = state;
         // Remember this choice so the next daemon start resumes on it instead of
         // snapping back to a hardcoded default. Last-used wins.
-        persist_last_model(&self.config_dir, &label.1);
+        persist_last_model(&self.config_dir, &format!("{}/{}", label.0, label.1));
         Ok(label)
     }
 
@@ -4044,6 +4049,12 @@ fn model_from_provider_config(config: &ProviderConfig) -> anyhow::Result<Model> 
             selection.context_window,
             selection.max_output_tokens,
         )),
+        ProviderId::OpenAiChatGpt => Ok(Model::openai_responses(
+            selection.model.clone(),
+            selection.base_url.clone(),
+            selection.context_window,
+            selection.max_output_tokens,
+        )),
         ProviderId::KimiCoding => Ok(Model::kimi_coding_k3(
             selection.base_url.clone(),
             selection.context_window,
@@ -4112,12 +4123,12 @@ fn auth_method_for(config: &ProviderConfig) -> ocean_protocol::types::AuthMethod
     }
 }
 
-/// File under `config_dir` that remembers the last model the operator selected,
+/// File under `config_dir` that remembers the last qualified provider/model route,
 /// so the daemon resumes on it across restarts instead of snapping back to a
 /// hardcoded default.
 const LAST_MODEL_FILE: &str = "last_model";
 
-/// Persist the operator's current model choice (best-effort; a write failure is
+/// Persist the operator's current provider/model route (best-effort; a write failure is
 /// logged, never fatal — losing the hint just falls back to the default).
 fn persist_last_model(config_dir: &std::path::Path, model: &str) {
     let path = config_dir.join(LAST_MODEL_FILE);

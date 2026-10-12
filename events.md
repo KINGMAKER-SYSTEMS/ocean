@@ -1077,6 +1077,58 @@ ChatGPT sign-in: gpt-6.1-sol, glm-5.3 and deepseek-v4-pro each ran a bash tool
 call and answered; session model = requested, no reroute. ocean-protocol codex
 tests 36/36, ocean-providers 67/67.
 _________________________________________________________________________________
+time: [17:42] [10-07-26]
+agent: [Codex] [GPT-6.1]
+worktree: [codex/chatgpt-plan-responses-provider]
+type: [fix]
+area: [backend]: ChatGPT-plan OAuth and model routing
+
+Investigated Ocean TUI model failures for issue #61. Added a distinct Sign in
+with ChatGPT OAuth registration, token refresh, and public Responses route while
+leaving Codex OAuth separate. The model picker now reads the account's
+`models[].slug`, `display_name`, and `visibility` catalog, supports dynamically
+listed slugs, and refreshes an expired ChatGPT token before discovery. Live
+account sign-in/inference remains unverified pending user authorization.
+
+Validation: `cargo fmt --all -- --check`; targeted OAuth, provider, protocol,
+agent refresh, daemon model-catalog, and TUI login tests; scoped `cargo check`
+for ocean-oauth, ocean-providers, ocean-protocol, ocean-agent, ocean-daemon, and
+ocean-tui. All recorded checks passed.
+_________________________________________________________________________________
+
+time: [17:45] [10-07-26]
+agent: [Codex] [GPT-6.1]
+worktree: [codex/chatgpt-plan-responses-provider]
+type: [fix]
+area: [testing]: OAuth callback recovery
+
+Follow-up to issue #61: a forged callback with the wrong OAuth state returned an
+error but also consumed the pending login's one-shot result sender. It now rejects
+the request without ending the login, and regression tests prove a subsequent
+valid callback still completes. `cargo test --locked -p ocean-oauth
+server::tests:: -- --test-threads=1`, formatting check, and `git diff --check` pass.
+_________________________________________________________________________________
+
+time: [04:30pm] [10-09-26]
+agent: [claude-code] [claude-opus-5-5]
+worktree: [codex/chatgpt-plan-responses-provider]
+type: [bug report]: PR #62 review fix
+area: [backend]: ChatGPT-plan route resolution
+
+Review of #62 found two routing bugs. The new early qualified-route branch in
+`resolve_model_selection` sent every catalog route to `model_for_explicit_provider`,
+which has no `kimi-coding` arm, so `kimi-coding/k3` stopped resolving (failing
+`qualified_routes_round_trip_wire_id_provider_and_efforts` and, via the new
+`provider/model` last_model persistence, a daemon restart after selecting it).
+The branch is now limited to `openai-chatgpt`. Dynamically listed ChatGPT-plan
+slugs were picker-ready but rejected by session create/config PATCH and dropped
+to a bare id by `model_spec`, because `catalog_model` did not know them;
+`catalog_model` now accepts validated `openai-chatgpt/<slug>` routes. Added a
+last_model round-trip regression test. `cargo fmt --all -- --check` passes;
+ocean-oauth, ocean-providers, ocean-protocol, ocean-agent pass; ocean-daemon's two
+persistent-room alias tests fail identically without this change.
+_________________________________________________________________________________
+
 time: [14:16] [06-10-26]
 agent: [codex]
 worktree: [fix/report-model-reroute-in-session] [/Users/seenorising/dev/ocean-org-sub]
@@ -1166,6 +1218,16 @@ area: [backend] [infra]
 Federated rooms on smaths-mini (northstar, ocean-team) sat in `recovering` with Pending outbox rows and no log output. Replaying the receiver's reads against production Bedrock with the room bearer showed a valid `hello` (high-water 0) and a 200 roster, but the roster carries `caller_member_ids` (Bedrock since ocean-bedrock #137, 2026-09-02) and `MembersEnvelope` is `deny_unknown_fields`, so every epoch silently returned Recover after hello. Fix: accept and ignore `caller_member_ids` on the strict envelope, warn with `outcome="roster_rejected"` on non-transport roster parse failures, and regression test `roster_with_caller_member_ids_reaches_live` (red without the field, green with it). The supervised launcher `deploy/ocean-daemon.sh` now sources owner-only `~/.config/ocean-rs/federation.env` and prints `federation=on|off`; previously only a hand-edited installed copy did, which the installer would overwrite. Operator guide documents the env file, contributor-side local redemption, and the receiver replay diagnosis. Independent review round: `WireMember` also accepts Bedrock's `operator_id` (same failure class, operator rooms); roster projection failures warn too; startup warns `federation_unconfigured` when credentialed rooms exist without a URL; the launcher parses federation.env as data (owner-only, not group/other-writable, `OCEAN_FEDERATION_*` keys only, CR/quote tolerant, plist values win) instead of sourcing it, verified under macOS bash 3.2 against command substitution, foreign keys, spaces, CRLF, group-writable and unreadable files. End-to-end: the fixed release binary, run unsupervised on an isolated HOME with a copied rooms.db (outbox cleared), brought northstar and ocean-team to `live` against production Bedrock. Follow-up folded in before merge: warn-only `credential_member_mismatch` when Bedrock's `caller_member_ids` omit the credential's local member (stale-credential diagnostic; never blocks Live). Launcher mode check fails closed on unparseable `stat` output. Validation: room_federation 92/92; ocean-daemon 910 passed / 2 failed at 99be7a9 (the known persistent_room envelope-key assertions, identical on unmodified main); clippy -p ocean-daemon --all-targets -D warnings clean; fmt clean; docs-check PASS; installer fixtures 12/12. Runtime ops the same evening (not code): Jay's laptop federation.env reduced to OCEAN_FEDERATION_URL (the direct-redeem contributor token was removed and its backup deleted) and his daemon restarted; a fresh invite minted by John's daemon was redeemed through Jay's local /v1/rooms/persistent/invites/redeem (credential f9757e6e in his rooms.db); the stale direct-path Bedrock member db0367cd was removed by the room owner (old token now 403 membership_revoked); the empty local test room ns-taskforce was soft-closed on smaths-mini. Both daemons stay `recovering` until this fix is merged and installed.
 _________________________________________________________________________________
 
+_________________________________________________________________________________
+time: [23:02] [09-10-26]
+agent: [codex] [factory release]
+worktree: [codex/pr62-reviewed-lifecycle]
+type: [bug report]
+area: [backend] [testing] [review]
+
+PR #62 / issue #80: reconciled the separate ChatGPT-plan Responses provider with canonical main f1b22bd8. Persist host identity before initial authorization, retain selected account/client registration after sign-out, detach usable credentials under custody before bounded trusted-origin refresh-token revocation, and return explicit confirmed/unconfirmed status. Detached credentials stay only with the bounded revocation operation; daemon operation ownership survives HTTP cancellation and refresh cannot republish the detached block. Codex and ChatGPT provider flows remain separate. Both public ledger histories preserved.
+
+Validation: repaired source OAuth 54 unit + 2 integration, daemon auth 17 (including blocked removal and dropped-waiter remote-phase custody), agent refresh 10, locked six-crate check, formatting and diff checks pass. Host-retention regression fails without repair and passes restored. Prior reconciled source also passed providers 70, protocol 3, agent route/model constructors 2, catalog 3 and TUI login 13. Synthetic isolated fixtures only; four changed Rust hashes match the remotely validated copy. Independent review ACKed 7c9a120e; final receipt precedes exact-head review and required builds. OAuth/daemon contracts updated, parent ownership/indexes unchanged. No live authentication, installation, inference, deployment or live acceptance; issue #61 stays open for real-account proof. Maintainer approval remains required.
 time: [14:44] [10-12-26]
 agent: [claude] [opus 5.5]
 worktree: [fix/installer-launchctl-enabled-spelling] [~/dev/oceanwork/wt-installer-spelling]
@@ -1174,3 +1236,11 @@ area: [infra]
 
 `ops/install-ocean-daemon.sh` refused to install on macOS 26 with "cannot establish the prior supervision override": `launchctl print-disabled` now prints `"label" => enabled|disabled` instead of `true|false`, and the override parser only accepted the old spelling. It now accepts both, treating `disabled` like `true`, so operator disablement is still honored. Fixtures gained modern-spelling success and disabled-preservation cases (red on the old regex, 14/14 green). Also recorded: at john's direction, the `main` branch protection's required pull-request review (including last-push approval) and admin enforcement were removed; required status checks remain.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [15:07] [10-12-26]
+agent: [Codex]
+worktree: [PR62; factory-pr62-reviewed-lifecycle/ocean]
+type: [workflow]
+area: [review]
+Reconciled PR62 ba5abbeec049c68661a573548a018cae47aa6a26 with canonical main1dfc6802bb74fecdcf83f6f17732b671c892b632. Only events.md conflicted; both complete ordered parent histories preserved verbatim. Every non-ledger blob/mode matches automatic merge; candidate source remains unchanged and incoming release source retained. Diff-check and parent-tree comparisons pass. Installer/fixture/launcher bytes equal main already verified14/14, so no duplicate fixture execution or heavy builds. Root assumes exclusive finalhead custody; independent adversarial review and fresh hosted checks follow this receipt. Issue90 approvalpolicy and existing product acceptance gates remain. Applicable AGENTS contracts merge automatically or remain unchanged; no new ownership/behavior contract. No live authentication, inference, deployment or mainmerge.
