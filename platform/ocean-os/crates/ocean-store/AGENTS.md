@@ -168,6 +168,12 @@ participant retirement. One database file (`rooms.db`), one owning crate.
 - **Profiles and grants.** Profiles contain references only. One live grant per
   canonical root is enforced by a partial unique index; effective expiry is
   revoked, revocation is terminal, and grant generations/replay are exact.
+  New profile writes validate every repo, default-folder, and agent-default
+  resource reference inside the same IMMEDIATE transaction as decision replay
+  and profile persistence. Exact consumed profile replays are resolved before
+  reference validation, so revoking a referenced grant does not break an
+  identical retry; mismatched replay remains refused. Missing or effectively
+  revoked references are refused, while suspended grants remain resumable.
   Status changes and expired-root retirement parse canonical u64 TEXT and
   increment in Rust with checked arithmetic, including values above SQLite's
   signed range. Exhaustion rolls back the decision, grant/status, audit and

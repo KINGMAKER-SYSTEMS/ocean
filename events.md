@@ -1157,6 +1157,79 @@ Round 5: round-4 review follow-ups on model reroute fidelity. (F2) Selection-tim
 Validation: ocean-agent 280 passed / 0 failed / 2 ignored; ocean-daemon 908 passed / 2 failed (only the two known pre-existing persistent_room envelope-key assertions); clippy -p ocean-agent --all-targets -D warnings clean; fmt --all --check clean; git diff --check clean.
 _________________________________________________________________________________
 
+time: [16:53] [07-10-26]
+agent: [codex] [gpt-6]
+worktree: [codex/issue56-profile-grant-serialization]
+type: [bug fix] [issue #56]
+area: [backend] [testing]
+
+Moved room-profile resource-reference validation into the store's IMMEDIATE
+write transaction, after exact/cross-ledger replay checks and before profile
+persistence. New writes refuse missing or effectively revoked grants, while
+suspended grants remain resumable and an exact consumed retry remains
+idempotent after revocation. Updated the store contract and added replay,
+missing-reference, and lock-contention regressions. No daemon route or
+production runtime behavior was added; profile writes remain deferred on main.
+
+Validation: `cargo test -p ocean-store --locked` (279 passed),
+`cargo clippy -p ocean-store --all-targets --locked -- -D warnings`, and
+`cargo fmt --all -- --check` pass. The issue #54 global merge hold remains
+active; PR creation and hosted builds are pending final review.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [17:00] [10-07-26] America/New_York
+agent: [Codex desktop] [GPT-6]
+worktree: [codex/issue56-profile-grant-serialization]
+type: [review], [testing] [issue #56]
+area: [backend], [testing]
+
+Closed the independent review's P2 contention-test finding. The regression now
+uses a plain rusqlite busy-handler function pointer with test-local atomic
+synchronization: SQLite signals only after the profile writer's IMMEDIATE
+transaction actually encounters the revoker's held write lock; the test commits
+the revocation before releasing the handler. Adversarial re-review of the exact
+code diff passed. `cargo test -p ocean-store --locked` passed all 279 tests,
+`cargo clippy -p ocean-store --all-targets --locked -- -D warnings` passed, and
+`cargo fmt --all -- --check` passed. PR creation and required hosted builds remain
+pending final diff review; issue #54's repository-level merge hold remains active.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [17:01] [10-07-26] America/New_York
+agent: [Codex desktop] [GPT-6]
+worktree: [codex/issue56-profile-grant-serialization]
+type: [testing] [issue #56]
+area: [backend], [testing]
+
+Expanded the missing-reference regression to exercise repo, room-default, and
+per-agent-default references independently, proving each refusal leaves both
+profile and decision ledger unchanged. Final focused verification after this
+test-only extension: `cargo test -p ocean-store --locked` (279 passed),
+`cargo clippy -p ocean-store --all-targets --locked -- -D warnings`,
+`cargo fmt --all -- --check`, and `cargo xtask docs-check` (30 packages, 153
+active Markdown files, 170 local links) all pass. Exact final diff review is
+pending; issue #54 remains an explicit repository-level merge hold.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [17:03] [10-07-26] America/New_York
+agent: [Codex desktop] [GPT-6]
+worktree: [codex/issue56-profile-grant-serialization]
+type: [workflow] [throughput checkpoint]
+area: [analysis], [gh actions]
+
+Risingtides-dev account contribution calendar observed at 2026-10-07 21:01:51
+UTC: 2026-10-06 = 133, 2026-10-07 = 131 (account-wide; 169 below the 300
+daily target at observation). Separately, the Ocean repository has zero PRs
+merged by Risingtides-dev on 2026-10-07 UTC or America/New_York date so far.
+The GitHub deployments endpoint currently returns no records. The supervised
+daemon's health endpoint remains live-verified at revision aa1e317b2e25; that is
+separate from this unmerged issue #56 change, which is not deployed.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+
 time: [22:04] [10-09-26]
 agent: [claude] [opus 5.5]
 worktree: [fix/federation-roster-caller-member-ids] [~/dev/oceanwork/wt-fed-roster-envelope]
@@ -1164,6 +1237,15 @@ type: [bug-report]
 area: [backend] [infra]
 
 Federated rooms on smaths-mini (northstar, ocean-team) sat in `recovering` with Pending outbox rows and no log output. Replaying the receiver's reads against production Bedrock with the room bearer showed a valid `hello` (high-water 0) and a 200 roster, but the roster carries `caller_member_ids` (Bedrock since ocean-bedrock #137, 2026-09-02) and `MembersEnvelope` is `deny_unknown_fields`, so every epoch silently returned Recover after hello. Fix: accept and ignore `caller_member_ids` on the strict envelope, warn with `outcome="roster_rejected"` on non-transport roster parse failures, and regression test `roster_with_caller_member_ids_reaches_live` (red without the field, green with it). The supervised launcher `deploy/ocean-daemon.sh` now sources owner-only `~/.config/ocean-rs/federation.env` and prints `federation=on|off`; previously only a hand-edited installed copy did, which the installer would overwrite. Operator guide documents the env file, contributor-side local redemption, and the receiver replay diagnosis. Independent review round: `WireMember` also accepts Bedrock's `operator_id` (same failure class, operator rooms); roster projection failures warn too; startup warns `federation_unconfigured` when credentialed rooms exist without a URL; the launcher parses federation.env as data (owner-only, not group/other-writable, `OCEAN_FEDERATION_*` keys only, CR/quote tolerant, plist values win) instead of sourcing it, verified under macOS bash 3.2 against command substitution, foreign keys, spaces, CRLF, group-writable and unreadable files. End-to-end: the fixed release binary, run unsupervised on an isolated HOME with a copied rooms.db (outbox cleared), brought northstar and ocean-team to `live` against production Bedrock. Follow-up folded in before merge: warn-only `credential_member_mismatch` when Bedrock's `caller_member_ids` omit the credential's local member (stale-credential diagnostic; never blocks Live). Launcher mode check fails closed on unparseable `stat` output. Validation: room_federation 92/92; ocean-daemon 910 passed / 2 failed at 99be7a9 (the known persistent_room envelope-key assertions, identical on unmodified main); clippy -p ocean-daemon --all-targets -D warnings clean; fmt clean; docs-check PASS; installer fixtures 12/12. Runtime ops the same evening (not code): Jay's laptop federation.env reduced to OCEAN_FEDERATION_URL (the direct-redeem contributor token was removed and its backup deleted) and his daemon restarted; a fresh invite minted by John's daemon was redeemed through Jay's local /v1/rooms/persistent/invites/redeem (credential f9757e6e in his rooms.db); the stale direct-path Bedrock member db0367cd was removed by the room owner (old token now 403 membership_revoked); the empty local test room ns-taskforce was soft-closed on smaths-mini. Both daemons stay `recovering` until this fix is merged and installed.
+_________________________________________________________________________________
+
+time: [22:48] [09-10-26]
+agent: [codex] [factory release]
+worktree: [codex/pr60-reviewed-reconcile]
+type: [workflow]
+area: [backend] [testing] [review]
+
+Reconciled PR #60 store grant serialization with canonical main f1b22bd8. Only conflict was additive public ledger history; both sides retained. Store implementation and owning contract remain byte-identical to original head 72f089c4: exact/cross-ledger decision replay precedes reference validation inside the same IMMEDIATE transaction as a new profile write. Current-main store suite passes 279/279 with disposable auth/config/XDG paths and unchanged HOME. Final exact-head review and hosted checks follow this receipt. Issue #54 audit hold is resolved, but independent maintainer approval remains required. Issue #56 stays open for the separate PR #43 daemon retry path; this store PR alone does not finish its acceptance. No deployment or live database access. Parent ownership and indexes unchanged.
 _________________________________________________________________________________
 
 time: [14:44] [10-12-26]
@@ -1174,3 +1256,11 @@ area: [infra]
 
 `ops/install-ocean-daemon.sh` refused to install on macOS 26 with "cannot establish the prior supervision override": `launchctl print-disabled` now prints `"label" => enabled|disabled` instead of `true|false`, and the override parser only accepted the old spelling. It now accepts both, treating `disabled` like `true`, so operator disablement is still honored. Fixtures gained modern-spelling success and disabled-preservation cases (red on the old regex, 14/14 green). Also recorded: at john's direction, the `main` branch protection's required pull-request review (including last-push approval) and admin enforcement were removed; required status checks remain.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [14:59] [10-12-26]
+agent: [Codex]
+worktree: [PR60; factory-pr60-reviewed-reconcile/ocean]
+type: [workflow]
+area: [review]
+Reconciled reviewed PR60 a0c66c48fcd764a4bf6f469a4d9f9e3df40c354d with canonical main1dfc6802bb74fecdcf83f6f17732b671c892b632 after external79/89 release. Only events.md conflicted; both ordered parent histories preserved. All non-ledger index entries exactly match automatic merge; existing PR-specific source remains unchanged, incoming release source retained. Installer14/14, shell syntax, formatting and diff-check pass; no heavy build/live action. Root takes exclusive release custody for this candidate; fresh independent final-head review and required hosted builds follow this entry. Approval-policy issue90, stack rollout and live acceptance remain separate gates. Applicable AGENTS contracts intentionally unchanged: source behavior and ownership contracts unchanged.
