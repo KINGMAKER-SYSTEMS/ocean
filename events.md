@@ -1157,6 +1157,37 @@ Round 5: round-4 review follow-ups on model reroute fidelity. (F2) Selection-tim
 Validation: ocean-agent 280 passed / 0 failed / 2 ignored; ocean-daemon 908 passed / 2 failed (only the two known pre-existing persistent_room envelope-key assertions); clippy -p ocean-agent --all-targets -D warnings clean; fmt --all --check clean; git diff --check clean.
 _________________________________________________________________________________
 
+time:      [00:15] [07-10-26]
+agent:     [claude] [claude code]
+worktree:  [port/private-subagent-chain] [/Users/risingtidesdev/dev/port-subagents]
+type:      [refactor]
+area:      [backend] [testing]
+
+Ported the ocean-private subagent chain (#77, #82, #86, #94) onto public main, reconciled with the rework that landed in #5. Strict cancellation acknowledgement was missing: a run now becomes cancelling only on `ok` exactly true with the same request id and state cancelling, any other answer is an error that writes nothing from both cancel and the watchdog, and a failed cancel no longer repeats the daemon's response body; main's settle-from-daemon-truth handling of `ok:false` was kept over the private raise-and-stay-running. Request fencing was already on main (`JsonStore.update(expect_request=...)`), so only the late-response race regressions were ported. The send-side cap was already on main; the shared admission lock across spawn and send was ported so concurrent admissions cannot both take the last slot or start two follow-ups for one run, while main's lost settlement of a request the daemon no longer tracks was kept over the private hold-forever. The custody design doc was ported as `CUSTODY.md`, rewritten to describe the plugin as it is on main (retention pruning, lost settlement, admission lock), and remains a proposal that authorizes nothing.
+
+Validation: `python3 -m unittest test_ocean_subagents -v` (47 passed, up from 33), `python3 ocean-subagents.py --check`, `python3 test_wire.py`, `python3 -m py_compile ocean-subagents.py`, `sh -n install.sh`, `git diff --check`, `cargo xtask docs-check` (PASS, 154 files; it does not scan plugin Markdown, so the one new link, README to CUSTODY.md, was checked by hand). New cancellation tests fail on main's source; the three admission race tests fail without the lock; five fence tests fail with the request fence removed.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [21:47] [10-09-26]
+agent: [Codex] [PR64 review repair]
+worktree: [codex/pr64-review-repairs] factory-pr64-review-repairs/ocean
+type: [bug report] PR #64 cancellation refusal reconciliation
+area: [backend] Ocean subagent plugin
+
+Reproduced private daemon HTTP bodies escaping the first refusal registry lookup
+and nested refresh lookup. Sanitize reconciliation PluginError before tool responses
+or watchdog persistence; preserve request fencing and refusal settlement. Regression
+covers both failure positions, durable watchdog state and real stdio responses;
+both fail against unchanged adc14bc9. Retention docs now describe existing
+prune-on-insertion behavior and temporary terminal excess, without redesigning pruning.
+Validation: 48 Python tests, real stdio wire, py_compile, disposable-state --check,
+sh -n, diff check, and xtask docs-check (30 packages,154 Markdown,171 links) passed.
+No install or live daemon change. Parent devlogs unchanged because ownership, indexes
+and build contracts are unchanged; plugin owning docs updated.
+
+_________________________________________________________________________________
+
 time: [22:04] [10-09-26]
 agent: [claude] [opus 5.5]
 worktree: [fix/federation-roster-caller-member-ids] [~/dev/oceanwork/wt-fed-roster-envelope]
@@ -1174,3 +1205,11 @@ area: [infra]
 
 `ops/install-ocean-daemon.sh` refused to install on macOS 26 with "cannot establish the prior supervision override": `launchctl print-disabled` now prints `"label" => enabled|disabled` instead of `true|false`, and the override parser only accepted the old spelling. It now accepts both, treating `disabled` like `true`, so operator disablement is still honored. Fixtures gained modern-spelling success and disabled-preservation cases (red on the old regex, 14/14 green). Also recorded: at john's direction, the `main` branch protection's required pull-request review (including last-push approval) and admin enforcement were removed; required status checks remain.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [15:07] [10-12-26]
+agent: [Codex]
+worktree: [PR64; factory-pr64-review-repairs/ocean]
+type: [workflow]
+area: [review]
+Reconciled PR64 e67b210413c84873c8eca2ecc9bb60c23ffc35e1 with canonical main1dfc6802bb74fecdcf83f6f17732b671c892b632. Only events.md conflicted; both complete ordered parent histories preserved verbatim. Every non-ledger blob/mode matches automatic merge; candidate source remains unchanged and incoming release source retained. Diff-check and parent-tree comparisons pass. Installer/fixture/launcher bytes equal main already verified14/14, so no duplicate fixture execution or heavy builds. Root assumes exclusive finalhead custody; independent adversarial review and fresh hosted checks follow this receipt. Issue90 approvalpolicy and existing product acceptance gates remain. Applicable AGENTS contracts merge automatically or remain unchanged; no new ownership/behavior contract. No live authentication, inference, deployment or mainmerge.
