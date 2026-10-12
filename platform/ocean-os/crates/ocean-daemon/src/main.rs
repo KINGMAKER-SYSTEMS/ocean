@@ -157,6 +157,8 @@ mod recall_registry;
 /// In-memory request and permission control records plus bounded lifecycle mutations.
 mod request_control;
 mod room_agent_authority;
+/// Room agent work cards: per-turn run projections over agent-session events.
+mod room_agent_runs;
 /// Restart-safe outbound Bedrock room client and per-room supervisor (S2 P2-B).
 mod room_federation;
 mod room_operator;
@@ -164,6 +166,7 @@ mod room_profile;
 mod room_resources;
 /// Rooms S0 — retire a placeholder human into a real member (operator lane).
 mod room_retirement;
+mod room_tools;
 /// Host fulfillment lifecycle retained for the external `ocean-slack` extension.
 mod slack_canvas_fulfillment;
 /// Ephemeral OpenAI Realtime client-secret mint (voice phases 2/3) — the
@@ -209,11 +212,12 @@ use model_catalog::{model_get, model_set, models_list};
 use model_roles::resolve_effective_model_id;
 use model_roles::{load_model_roles, resolve_advisor_alias, resolve_turn_model};
 use persistent_rooms::{
-    resolve_named_agent, room_create, room_create_invite, room_db_path, room_events, room_get,
-    room_get_read_cursor, room_inspect, room_join, room_leave, room_patch_read_cursor,
-    room_post_message, room_redeem_invite, room_register_agents, room_retry_outbox, room_snapshot,
-    room_transcript, rooms_list_persistent, run_federated_trigger_dispatcher, with_rooms,
-    with_rooms_handle, RoomAccessWakeBus, RoomReadCursorWakeBus, RoomStoreHandle, RoomWakeBus,
+    me_get, me_put, resolve_named_agent, room_create, room_create_invite, room_db_path,
+    room_events, room_get, room_get_read_cursor, room_inspect, room_join, room_leave,
+    room_patch_read_cursor, room_post_message, room_redeem_invite, room_register_agents,
+    room_retry_outbox, room_snapshot, room_transcript, rooms_list_persistent,
+    run_federated_trigger_dispatcher, with_rooms, with_rooms_handle, RoomAccessWakeBus,
+    RoomReadCursorWakeBus, RoomStoreHandle, RoomWakeBus,
 };
 use project_registry::{
     canonical_git_common_dir, discover_project_worktrees, project_create, project_delete,
@@ -664,7 +668,14 @@ struct DaemonPermissionPolicy {
     /// turn was submitted without binding (legacy client). Never emitted on SSE.
     decision_token: Option<String>,
     lifecycle: Option<LifecyclePermissionContext>,
+    /// Observer for this turn's permission waits (team-platform P4 room work
+    /// cards): called with the request when a waiter is registered and with
+    /// `None` once it is decided or cancelled. Never decides anything.
+    wait_hook: Option<PermissionWaitHook>,
 }
+
+/// See [`DaemonPermissionPolicy::wait_hook`].
+type PermissionWaitHook = Arc<dyn Fn(Option<(PermissionId, &str, &Value)>) + Send + Sync>;
 
 /// Parse a `Last-Event-ID` SSE reconnect header (RFC: EventSource sets it to the
 /// last `id:` it saw) into a `Uuid`. Returns `None` when absent or unparseable.
@@ -979,8 +990,17 @@ async fn main() -> anyhow::Result<()> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating rooms DB directory {}", parent.display()))?;
     }
-    let room_store = ocean_store::SqliteRoomStore::open(&rooms_db_path)
+    let mut room_store = ocean_store::SqliteRoomStore::open(&rooms_db_path)
         .with_context(|| format!("opening rooms DB at {}", rooms_db_path.display()))?;
+    // Team-platform P3: agent-run cards whose turn died with the previous
+    // daemon end as Failed instead of spinning forever.
+    match room_store.interrupt_open_room_agent_runs(chrono::Utc::now()) {
+        Ok(runs) if !runs.is_empty() => {
+            tracing::info!(count = runs.len(), "interrupted open room agent runs");
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!(%e, "room agent run recovery failed"),
+    }
     tracing::info!(path = %rooms_db_path.display(), "persistent rooms store ready");
 
     // Persisted Longhouse title registry (OCEAN-246/272): open the durable escrow
@@ -1578,6 +1598,8 @@ fn banner_routes() -> &'static [&'static str] {
         "GET /v1/permissions",
         "POST /v1/permissions/{id}/decision",
         "POST /v1/rooms/{room_id}/livekit-token",
+        "GET /v1/me",
+        "PUT /v1/me",
         "GET /v1/rooms/persistent",
         "POST /v1/rooms/persistent",
         "GET /v1/rooms/persistent/{key}",
@@ -1606,6 +1628,14 @@ fn banner_routes() -> &'static [&'static str] {
         "GET /v1/rooms/persistent/{key}/artifacts/{artifact_id}",
         "POST /v1/rooms/persistent/{key}/artifacts/{artifact_id}/amend",
         "GET /v1/rooms/persistent/{key}/snapshot",
+        "GET /v1/rooms/persistent/{key}/runs",
+        "POST /v1/rooms/persistent/{key}/runs/{run_id}/permission",
+        "GET /v1/rooms/persistent/{key}/agents/{agent_id}/settings",
+        "PUT /v1/rooms/persistent/{key}/agents/{agent_id}/settings",
+        "GET /v1/rooms/persistent/{key}/search",
+        "GET /v1/rooms/inbox",
+        "GET /v1/rooms/persistent/{key}/prefs",
+        "PUT /v1/rooms/persistent/{key}/prefs",
         "GET /v1/rooms/persistent/{key}/events",
         "GET /v1/rooms/persistent/{key}/read-cursor",
         "PATCH /v1/rooms/persistent/{key}/read-cursor",
@@ -2270,7 +2300,25 @@ async fn permission_decision(
             }),
         );
     }
+    let (status, body) = resolve_permission_waiter(
+        &state,
+        permission_id,
+        decision.decision,
+        decision.decision_token.as_deref(),
+    )
+    .await;
+    (status, Json(body))
+}
 
+/// Verify `decision_token` against the pending waiter, release it with
+/// `decision`, and record the result. Shared by the generic decision route and
+/// the room run route (team-platform P4), so both keep one authority.
+pub(crate) async fn resolve_permission_waiter(
+    state: &AppState,
+    permission_id: PermissionId,
+    decision: PermissionDecisionBody,
+    decision_token: Option<&str>,
+) -> (StatusCode, PermissionControlResponse) {
     // OCEAN-185 (P0): verify the per-turn secret BEFORE consuming the waiter, so
     // an attacker who sniffed the broadcast `permission_id` off /v1/events but
     // doesn't hold the token can neither approve the tool nor burn the pending
@@ -2286,19 +2334,16 @@ async fn permission_decision(
                 drop(permissions);
                 return (
                     StatusCode::NOT_FOUND,
-                    Json(PermissionControlResponse {
+                    PermissionControlResponse {
                         ok: false,
                         permission_id,
                         message: "permission request not found or already handled".into(),
-                    }),
+                    },
                 );
             }
             Some(waiter) => {
                 if let Some(expected) = waiter.decision_token.as_deref() {
-                    if !ocean_core::decision_token_matches(
-                        Some(expected),
-                        decision.decision_token.as_deref(),
-                    ) {
+                    if !ocean_core::decision_token_matches(Some(expected), decision_token) {
                         drop(permissions);
                         tracing::warn!(
                             %permission_id,
@@ -2306,13 +2351,13 @@ async fn permission_decision(
                         );
                         return (
                             StatusCode::FORBIDDEN,
-                            Json(PermissionControlResponse {
+                            PermissionControlResponse {
                                 ok: false,
                                 permission_id,
                                 message: "forbidden: missing or invalid decision token; this \
                                     decision was not authorized by the turn's submitter"
                                     .into(),
-                            }),
+                            },
                         );
                     }
                 }
@@ -2330,15 +2375,15 @@ async fn permission_decision(
         // our remove. Treat as already-handled.
         return (
             StatusCode::NOT_FOUND,
-            Json(PermissionControlResponse {
+            PermissionControlResponse {
                 ok: false,
                 permission_id,
                 message: "permission request not found or already handled".into(),
-            }),
+            },
         );
     };
 
-    let agent_decision = match decision.decision {
+    let agent_decision = match decision {
         PermissionDecisionBody::Allow => AgentPermissionDecision::Allow,
         // "Allow for this session": the runtime records the tool in the agent
         // loop's per-run `session_allowed` set, so identical follow-up calls of
@@ -2386,11 +2431,11 @@ async fn permission_decision(
 
     (
         StatusCode::OK,
-        Json(PermissionControlResponse {
+        PermissionControlResponse {
             ok: true,
             permission_id,
             message: "permission decision recorded and waiter released".into(),
-        }),
+        },
     )
 }
 
@@ -2423,6 +2468,52 @@ fn build_prompt_control_with_lifecycle(
     decision_token: Option<String>,
     lifecycle: Option<LifecyclePermissionContext>,
 ) -> PromptControl {
+    build_prompt_control_inner(
+        state,
+        request_id,
+        session_id,
+        mode,
+        cancel,
+        decision_token,
+        lifecycle,
+        None,
+    )
+}
+
+/// A room turn's control: its waiters are bound to the run's decision token
+/// and every wait is reported to the run's work card.
+fn build_room_prompt_control(
+    state: &AppState,
+    request_id: RequestId,
+    session_id: Option<SessionId>,
+    mode: PermissionMode,
+    cancel: CancellationToken,
+    decision_token: String,
+    wait_hook: PermissionWaitHook,
+) -> PromptControl {
+    build_prompt_control_inner(
+        state,
+        request_id,
+        session_id,
+        mode,
+        cancel,
+        Some(decision_token),
+        None,
+        Some(wait_hook),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_prompt_control_inner(
+    state: &AppState,
+    request_id: RequestId,
+    session_id: Option<SessionId>,
+    mode: PermissionMode,
+    cancel: CancellationToken,
+    decision_token: Option<String>,
+    lifecycle: Option<LifecyclePermissionContext>,
+    wait_hook: Option<PermissionWaitHook>,
+) -> PromptControl {
     let control: Arc<dyn PermissionPolicy> = Arc::new(DaemonPermissionPolicy {
         mode,
         request_id,
@@ -2434,6 +2525,7 @@ fn build_prompt_control_with_lifecycle(
         seen_permissions: Arc::new(Mutex::new(HashMap::new())),
         decision_token,
         lifecycle,
+        wait_hook,
     });
 
     PromptControl::new(control).with_cancel(cancel)
@@ -2544,6 +2636,9 @@ impl PermissionPolicy for DaemonPermissionPolicy {
                 args: status.args.clone(),
             },
         );
+        if let Some(hook) = &self.wait_hook {
+            hook(Some((permission_id, tool_name, args)));
+        }
 
         let cancelled = || {
             (
@@ -2607,6 +2702,9 @@ impl PermissionPolicy for DaemonPermissionPolicy {
         {
             let mut permissions = self.permissions.write().await;
             permissions.remove(&permission_id);
+        }
+        if let Some(hook) = &self.wait_hook {
+            hook(None);
         }
 
         if matches!(decision, AgentPermissionDecision::Deny { .. }) && self.cancel.is_cancelled() {
@@ -2832,6 +2930,8 @@ async fn agent_def(Path(name): Path<String>) -> Json<serde_json::Value> {
 /// projection paths stay unmounted without constructing the entire daemon.
 fn room_routes() -> Router<AppState> {
     Router::new()
+        // Team-platform P2: the daemon owner identity every room author derives from.
+        .route("/v1/me", get(me_get).put(me_put))
         .route(
             "/v1/rooms/persistent",
             get(rooms_list_persistent).post(room_create),
@@ -2921,6 +3021,35 @@ fn room_routes() -> Router<AppState> {
             post(persistent_rooms::room_amend_artifact),
         )
         .route("/v1/rooms/persistent/{key}/snapshot", get(room_snapshot))
+        // Team-platform P3: the room's agent work cards.
+        .route(
+            "/v1/rooms/persistent/{key}/runs",
+            get(persistent_rooms::room_agent_runs_list),
+        )
+        // Team-platform P4: owner approve/deny from the room card, and
+        // per-room agent overrides (local only).
+        .route(
+            "/v1/rooms/persistent/{key}/runs/{run_id}/permission",
+            post(persistent_rooms::room_agent_run_permission),
+        )
+        .route(
+            "/v1/rooms/persistent/{key}/agents/{agent_id}/settings",
+            get(persistent_rooms::room_agent_settings_get)
+                .put(persistent_rooms::room_agent_settings_put),
+        )
+        // Team-platform P6 (owner-local): message search, the cross-room
+        // mentions/replies inbox, and per-room mute prefs. The inbox lives
+        // outside `/v1/rooms/persistent/{key}` so it never shadows a room
+        // keyed `inbox`.
+        .route(
+            "/v1/rooms/persistent/{key}/search",
+            get(persistent_rooms::room_search),
+        )
+        .route("/v1/rooms/inbox", get(persistent_rooms::room_inbox))
+        .route(
+            "/v1/rooms/persistent/{key}/prefs",
+            get(persistent_rooms::room_prefs_get).put(persistent_rooms::room_prefs_put),
+        )
         // Merged SSE: room_message + room_access frames, with durable replay
         // and access-projection tail (S2-P1).
         .route("/v1/rooms/persistent/{key}/events", get(room_events))
@@ -13008,7 +13137,16 @@ mod tests {
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _env = TestEnvRestore::capture(&["OCEAN_CONFIG_DIR", "OCEAN_MODEL", "OCEAN_YOLO"]);
         let tmp = tempfile::tempdir().unwrap();
-        let app = room_routes().with_state(fake_convene_state(&tmp));
+        let state = fake_convene_state(&tmp);
+        // Team-platform P2: the human join/post below is authored as the owner.
+        with_rooms(&state, |store| {
+            store.replace_owner_identity(&ocean_store::OwnerIdentity {
+                participant_id: "alice".into(),
+                display_name: "Alice".into(),
+            })
+        })
+        .unwrap();
+        let app = room_routes().with_state(state);
 
         let (status, content_type, raw) = persistent_room_http_request(
             app.clone(),
@@ -13973,6 +14111,7 @@ mod tests {
             seen_permissions: Arc::new(Mutex::new(HashMap::new())),
             decision_token,
             lifecycle: None,
+            wait_hook: None,
         }
     }
 
@@ -14205,7 +14344,15 @@ mod tests {
         let runtime = Arc::new(
             AgentRuntime::with_config_dir(tmp.path().to_path_buf()).expect("fake runtime"),
         );
-        let store = ocean_store::SqliteRoomStore::open_in_memory().expect("in-mem store");
+        let mut store = ocean_store::SqliteRoomStore::open_in_memory().expect("in-mem store");
+        // Team-platform P2: every local human join/post is authored as the
+        // daemon owner. Fixtures speak as "john" unless a test re-seeds it.
+        store
+            .replace_owner_identity(&ocean_store::OwnerIdentity {
+                participant_id: "john".into(),
+                display_name: "John".into(),
+            })
+            .expect("seed owner");
         let rooms = Arc::new(Mutex::new(store));
         let room_wakes = RoomWakeBus::default();
         let room_access_wakes = RoomAccessWakeBus::default();
@@ -16095,7 +16242,15 @@ mod tests {
         let runtime = Arc::new(
             AgentRuntime::with_config_dir(tmp.path().to_path_buf()).expect("fake runtime"),
         );
-        let store = ocean_store::SqliteRoomStore::open_in_memory().expect("in-mem store");
+        let mut store = ocean_store::SqliteRoomStore::open_in_memory().expect("in-mem store");
+        // Team-platform P2: every local human join/post is authored as the
+        // daemon owner. Fixtures speak as "john" unless a test re-seeds it.
+        store
+            .replace_owner_identity(&ocean_store::OwnerIdentity {
+                participant_id: "john".into(),
+                display_name: "John".into(),
+            })
+            .expect("seed owner");
         let rooms = Arc::new(Mutex::new(store));
         let room_wakes = RoomWakeBus::default();
         let room_access_wakes = RoomAccessWakeBus::default();
@@ -18553,7 +18708,15 @@ mod tests {
     fn escrow_state_with_titles_db(dir: &std::path::Path) -> AppState {
         std::env::set_var("OCEAN_MODEL", "fake-ok");
         let runtime = Arc::new(AgentRuntime::from_env().expect("fake runtime"));
-        let store = ocean_store::SqliteRoomStore::open_in_memory().expect("in-mem store");
+        let mut store = ocean_store::SqliteRoomStore::open_in_memory().expect("in-mem store");
+        // Team-platform P2: every local human join/post is authored as the
+        // daemon owner. Fixtures speak as "john" unless a test re-seeds it.
+        store
+            .replace_owner_identity(&ocean_store::OwnerIdentity {
+                participant_id: "john".into(),
+                display_name: "John".into(),
+            })
+            .expect("seed owner");
         let rooms = Arc::new(Mutex::new(store));
         let room_wakes = RoomWakeBus::default();
         let room_access_wakes = RoomAccessWakeBus::default();
@@ -25565,6 +25728,14 @@ mod tests {
             "GET /v1/rooms/persistent/{key}/artifacts/{artifact_id}",
             "POST /v1/rooms/persistent/{key}/artifacts/{artifact_id}/amend",
             "GET /v1/rooms/persistent/{key}/snapshot",
+            "GET /v1/rooms/persistent/{key}/runs",
+            "POST /v1/rooms/persistent/{key}/runs/{run_id}/permission",
+            "GET /v1/rooms/persistent/{key}/agents/{agent_id}/settings",
+            "PUT /v1/rooms/persistent/{key}/agents/{agent_id}/settings",
+            "GET /v1/rooms/persistent/{key}/search",
+            "GET /v1/rooms/inbox",
+            "GET /v1/rooms/persistent/{key}/prefs",
+            "PUT /v1/rooms/persistent/{key}/prefs",
             "POST /v1/rooms/{room_id}/livekit-token",
         ] {
             assert!(
@@ -25732,7 +25903,8 @@ mod tests {
             .filter(|route| {
                 let (_, path) = route.split_once(' ').unwrap();
                 path == "/v1/rooms/persistent/{key}/close"
-                    || path.starts_with("/v1/rooms/persistent/{key}/agents")
+                    || (path.starts_with("/v1/rooms/persistent/{key}/agents")
+                        && !path.ends_with("/settings"))
             })
             .cloned()
             .collect();
@@ -25755,7 +25927,7 @@ mod tests {
         assert_eq!(admission_routes, expected_admission_routes);
         assert_eq!(
             banner.len(),
-            119,
+            129,
             "route baseline changed; review the manifest"
         );
 
@@ -26127,6 +26299,83 @@ mod tests {
                 .get(header::ALLOW)
                 .and_then(|value| value.to_str().ok()),
             Some("GET,HEAD")
+        );
+
+        // Team-platform P6: the inbox lives at `/v1/rooms/inbox`, outside the
+        // `{key}` namespace, and answers with the inbox envelope.
+        let inbox = app
+            .clone()
+            .oneshot(Request::get("/v1/rooms/inbox").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(inbox.status(), StatusCode::OK, "the inbox route");
+        let inbox_body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(inbox.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(inbox_body, serde_json::json!({ "ok": true, "items": [] }));
+
+        // A room keyed `inbox` is an ordinary room: before it exists its detail
+        // path is an unknown-room 404, and once created it is reachable there.
+        let missing = app
+            .clone()
+            .oneshot(
+                Request::get("/v1/rooms/persistent/inbox")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        let created = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/rooms/persistent")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"key":"inbox","name":"Inbox"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let detail = app
+            .clone()
+            .oneshot(
+                Request::get("/v1/rooms/persistent/inbox")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            detail.status(),
+            StatusCode::OK,
+            "a room keyed `inbox` must reach the room detail route"
+        );
+        let detail_body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(detail.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(detail_body["room"]["id"], serde_json::json!("inbox"));
+        assert_eq!(detail_body["room"]["name"], serde_json::json!("Inbox"));
+        let inbox_livekit = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/rooms/inbox/livekit-token")
+                    .header(header::CONTENT_TYPE, "application/octet-stream")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            inbox_livekit.status(),
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "a call room id `inbox` must still reach the LiveKit JSON extractor"
         );
 
         let livekit_control = app

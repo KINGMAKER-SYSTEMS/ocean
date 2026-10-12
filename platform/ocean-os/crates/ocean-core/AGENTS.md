@@ -39,6 +39,9 @@ This crate owns shared protocol types used across Ocean clients, daemon, runtime
   `PublicAgentDescriptor`, `RoomOutboxItem`, `OutboxItemState`,
   `RoomAccessProjection`, `RoomAccessState`, `CreateInviteRequest` (`Serialize`
   only), `InviteResponse`, `RedeemInviteRequest` are owned here.
+- `RoomAccessProjection.local_member_id` (team-platform P2) is optional and
+  additive: the credential's local human member id, projected by ocean-store
+  from the credential row without ever touching the bearer.
 - Every new struct field is required unless individually `#[serde(default)]` or
   `skip_serializing_if`. Do not remove `Serialize`/`Deserialize` from types
   the daemon routes use. Trigger flags `on_build_failure` and `on_ci_failure`
