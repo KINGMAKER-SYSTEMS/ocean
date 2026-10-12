@@ -161,7 +161,7 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
 - `recall_registry.rs` owns only the private in-memory `title_id -> RecallVote` store, first-cast tally construction, distinct-voter casting, poison recovery, and named-tally removal. Keep UUID/live-title validation, persisted title and daemon-held Revoker authority, carried-outcome execution, HTTP mapping, and successful-only cleanup ordering in composition. Preserve the existing memory-only, unbounded retention of abandoned tallies during behavior-neutral extraction.
 - `persistent_rooms.rs` owns the shared room-store adapters, durable-room lifecycle/paging and Local/federated message, invite/redeem and agent-registration adapters. Keep AppState, startup, route composition, call persistence/retries and LiveKit authorization in composition. Local triggers persist the caller row and publish wakes before generation-bound admission, durable allow audit, convene footprint and spawn; confirmed federated claims revalidate current roster/credential and private binding before at-most-once dispatch. Replies use exact-generation local writes or the outbox, with daemon-minted generation-scoped session attribution. Preserve one concrete store, poison recovery, no store guard across await/event/spawn, ordinary three-state permission authority and closed-room audit replay. Local HTTP authors must be exact Human roster members; non-roster, whitespace variants and client-claimed Agent/System kinds fail closed without write. The message wire rejects caller `session_id`; admitted replies thread under the resolved root, with stale-parent degradation to top-level.
 - Team-platform P2: Local human joins and posts use the persisted daemon owner from GET/PUT /v1/me; client human ids/names are ignored, and the owner must be on the roster. The owner id resolves from the team member id with the same precedence and strict parsing as `GET /v1/identity` (#41): `<runtime config dir>/member.toml` (`member_id`, optional `display_name`), then `OCEAN_MEMBER_ID`; only when neither names anyone does it fall back to `OCEAN_OWNER_NAME`/`USER`. The seeded owner id is that member id exactly as `GET /v1/identity` reports it, except each `@` becomes `-` because `@` starts a room mention (`ec@kingmaker` → `ec-kingmaker`; case and length kept; mapping owned by `ocean_store::owner_participant_id_for_member`). The member id only seeds a fresh install: an owner id already persisted in rooms.db is never re-keyed (a login-derived owner keeps its id and roster rows when `member.toml` appears or changes; moving it would be a separate explicit migration). `member.toml` is read before the store guard is taken. Federated posts retain their credential-owned human member.
-- `room_federation.rs` owns the restart-safe outbound Bedrock room client and AppState-owned `FederationSupervisor`: strict origin-only client construction, header-bearer SSE receive/reconnect, roster/presence projection, durable Pending sender scans, stable producer/control admission, owner bootstrap, idempotent redemption/self-join recovery, safe-agent registration, status/revoke policy, and post-commit wakes/dispatch hints. SQL remains `ocean-store`; HTTP handlers and local agent execution remain `persistent_rooms.rs`. Keep exactly one task tree per room, serialize stop/join before the next epoch, start existing credentials before the bounded-concurrency all-row recovery worker, select sender Notify + bounded periodic durable scan + cancellation, and never hold `RoomStoreHandle` across network I/O or `.await`. POST 201 never mutates transcript/outbox; ordered SSE is the only ingest/removal rail. Presence follows the authenticated SSE lease, not merely the access-state label. Bearers, registration keys, and invite codes (except intentional invite success) never enter logs/errors/debug output or surface projections. Successful local invite redemption additively returns the daemon-authoritative `room_key` beside the existing access projection so clients never trust an editable deep-link path as room authority.
+- `room_federation.rs` owns the restart-safe outbound Bedrock room client and AppState-owned `FederationSupervisor`: strict origin-only client construction, header-bearer SSE receive/reconnect, roster/presence projection, durable Pending sender scans, stable producer/control admission, owner bootstrap, idempotent redemption/self-join recovery, safe-agent registration, status/revoke policy, and post-commit wakes/dispatch hints. SQL remains `ocean-store`; HTTP handlers and local agent execution remain `persistent_rooms.rs`. Keep exactly one task tree per room, serialize stop/join before the next epoch, start existing credentials before the bounded-concurrency all-row recovery worker, select sender Notify + bounded periodic durable scan + cancellation, and never hold `RoomStoreHandle` across network I/O or `.await`. POST 201 never mutates transcript/outbox; ordered SSE is the only ingest/removal rail. Presence follows the authenticated SSE lease, not merely the access-state label. Bearers, registration keys, and invite codes (except intentional invite success) never enter logs/errors/debug output or surface projections. Successful local invite redemption additively returns the daemon-authoritative `room_key` beside the existing access projection so clients never trust an editable deep-link path as room authority. The roster `MembersEnvelope` stays `deny_unknown_fields` but explicitly accepts and ignores Bedrock's `caller_member_ids` (and `WireMember` its `operator_id`); any new Bedrock roster field must be added the same way, or every receiver epoch fails after `hello` and the room never leaves `recovering` (`roster_with_caller_member_ids_reaches_live`).
 - Federated read-cursor GET/PATCH and epoch refreshes take one per-room operation lock before credential/generation/mirror snapshots. Upstream SSE cursor values are only coalesced invalidation hints; authenticated GET supplies the current nullable value. Refresh is an epoch-owned, cancelled/joined worker, including during authenticated snapshot catch-up; denial returns to the room owner rather than calling a self-joining public revoke path. Epoch revocation revalidates generation/credential under the stable gate and store guard before closing or mutating authority. Revalidate credential identity, generation and stable/epoch admission before mirror commit; keep store guards out of network awaits. PATCH accepts explicit higher `changed:false` no-ops and empty-room `clamped:true, changed:false` null responses while rejecting unflagged mismatches.
 - Durable room failure logs carry only a fixed error code and correlation IDs; never copy response/stderr, prompt, tool, body or credential text into that durable stream.
 - Persistent-room artifact HTTP create/amend classify the roster author kind and perform the write under one store guard. Agent/System authors remain daemon-only; unreadable roster/store state fails closed.
@@ -295,6 +295,77 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   scheduling, Unknown build execution and CI orchestration. Keep #22/#48 holds;
   automated CI remains only Build Ocean and Build Surface.
 
+### Reviewed package consent manifest (ocean-private #55)
+
+- Ported from ocean-private #59 onto the public canonical source. Targets are only `src/room_agent_authority.rs`, registered-route fixtures in
+  `src/main.rs`, and this contract. This additive consent boundary follows #33;
+  it does not complete client onboarding or lift #22/#48 deployment holds.
+- Strict authorize/reauthorize bodies accept optional
+  `expected_definition_digest`; omission and JSON null preserve legacy callers.
+  Both routes require a JSON object through a map-only decoder that passes the
+  original map directly to the strict DTO deserializer. Reject positional arrays
+  and all other non-objects without collapsing duplicate keys into a Value.
+  A supplied string must exactly match the single immutable package capture
+  used for decision hashing and binding persistence. Never trim, reopen, or
+  independently recapture to check it. Refuse mismatches with fixed, content-free
+  `409 definition_digest_mismatch` before decision consumption, binding/audit
+  mutation, or request cancellation; retain existing operator and owner policy.
+- Registered production-route fixtures preview then modify disposable package
+  bytes, proving stale authorize/reauthorize leave bindings, generations,
+  decisions, transcript, requests and cancellation unchanged. Fresh preview
+  succeeds; exact replay, conflicting decisions, legacy omission/null and strict
+  malformed bodies retain their existing behavior. Future reviewed-consent
+  clients must send the digest rather than falling back to legacy submission.
+- Object-only repair (the second ocean-private #59 revision): the same three
+  targets remain owned. Shape-correct positional-array fixtures must refuse with fixed
+  `400 invalid_request`, preserving binding/generation/decision/transcript and
+  a live request's cancellation state. Equivalent object controls must succeed;
+  retain duplicate/unknown rejection and all same-capture/replay invariants.
+- Root runs locked focused/full daemon tests, all-target denied-warning Clippy
+  and workspace test compilation with both auth paths and config/XDG pinned to
+  disposable absolute paths, unchanged HOME. Independent exact-head review is
+  required; no store/schema, client, dependency, route or permission expansion.
+
+### Sovereign federated own-agent consent manifest (ocean-private #62)
+
+- Base: the reviewed package-consent section above (ocean-private #59);
+  ported here from ocean-private #66. Exact targets are
+  `src/room_agent_authority.rs`, registered production-route fixtures in
+  `src/main.rs`, test-only federation execution fixtures in
+  `src/persistent_rooms.rs`, and this contract. The accepted Surface
+  [post-G3 program](../../../../apps/ocean-surface/docs/specs/2026-08-13-ocean-rooms-post-g3-product-depth.md)
+  separates R5 sovereign agent custody from R6 Room administration.
+- `room_owner_proof` proves node-local own-agent identity, not shared Room
+  administration: in Live/Recovering federation, the stored credential must
+  name an exact current User roster row with Owner or Member role. Local
+  ownership/bootstrap stays unchanged and Local-only. The exact target must
+  remain an Agent owned by that human with the captured local package binding.
+  Missing/revoked credentials, missing/reclassified rows, Connecting/Revoked
+  access and foreign ownership fail closed. Preserve existing refusal codes.
+- The only three direct calls are Local/federated `target_proof` and binding
+  list identity projection. Preserve its transitive preview/consent/status,
+  admission, request registration/lifetime/cancellation, scoped memory/resources/
+  tool authority and federated reply consumers. No role promotion, Room
+  administration, store/schema, protocol, client, operator, ordinary permission,
+  provider, dependency or deployment change belongs here.
+- Registered route fixtures use two independent disposable node identities:
+  creator Owner and invited Member with distinct owned agents. Prove own
+  preview/digest consent, reauthorization, invocation/admission, status/revoke
+  and generation cancellation; foreign node/agent/key/credential/roster/kind/
+  package/digest/access, replay and cross-Room authority remain refused with
+  appropriate no-mutation assertions. Keep existing Local/operator/permission
+  and digest fixtures. Parameterize the actual fake-provider federation
+  execution proof for both Owner and invited Member; make no external provider
+  calls.
+- Root owns the sole locked remote Cargo lane: relevant complete Room groups,
+  full daemon tests, all-target denied-warning Clippy, locked workspace-test
+  compilation and docs-check. Both auth and config/XDG paths are absolute
+  disposable paths; HOME stays unchanged. Require independent exact-head
+  review and both actual hosted builds. Native broker/served clients, actual
+  two-human/two-machine R1-R7 and ocean-private #22/#48 deployment acceptance
+  remain separate; the ocean-private #58 billing and original-repository
+  migration holds remain intact.
+
 ### Rooms persistence migration boundary
 
 - Preserve the accepted store/core foundation and #14–19 repairs. The scoped
@@ -426,6 +497,9 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
 - `cargo test -p ocean-daemon persistent_room_http_ -- --nocapture`
 - `cargo test -p ocean-daemon room_read_cursor_ --locked -- --nocapture`
 - `cargo test -p ocean-daemon room_ -- --nocapture`
+- `cargo test -p ocean-daemon room_reviewed_digest_ --locked -- --nocapture --test-threads=1`
+- `cargo test -p ocean-daemon room_sovereign_ --locked -- --nocapture --test-threads=1`
+- `cargo test -p ocean-daemon p2c_ --locked -- --nocapture --test-threads=1`
 - `cargo test -p ocean-daemon at_mention_queues_turn_and_posts_reply_back -- --nocapture`
 - `cargo test -p ocean-daemon closed_persistent_room_preserves_audit_http_asymmetry -- --nocapture`
 - `cargo test -p ocean-daemon workspace_policy::tests:: -- --nocapture`
