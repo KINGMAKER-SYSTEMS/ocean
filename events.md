@@ -1395,3 +1395,14 @@ type: [workflow]
 area: [review] [testing]
 
 PR92 reconciled automatically with fresh canonical main e6857f1c after external PR68 merge; no conflicts or manual source integration. The issue91 CSS bytes remain unchanged. Both parent ledgers preserved by the automatic merge. Production-CSS fixture rerun against incoming cascade passed6 narrow and3 desktop checks, with the explicit unfixed e6857f1c baseline reproducing covered dismissal. Initial rerun used already-fixed HEAD as baseline and correctly failed its expected-before assertion; only disposable fixture baseline selection was corrected. No source repair was needed. Served-WASM/native acceptance remains open. This entry precedes fresh final-head review/checks; root retains exclusive custody and standing approval-policy90 hold.
+
+_________________________________________________________________________________
+time: [17:35] [12-10-26]
+agent: [Codex] [factory PR92 review repair]
+worktree: [codex/issue91-workspace-dismissal]
+type: [bug report]
+area: [frontend] [review]
+
+Addressed PR92 inline finding4252488575: replace media-query range syntax with the established max-width899px form so the dismissal repair does not depend on Safari16.4 syntax while Tauri declares macOS10.15. Verified against the WebKit Safari16.4 release notes and existing island.css convention. Single CSS line changed; owning devlog intentionally unchanged because the layout/state contract is unchanged.
+
+Explicit unfixed e6857f1c baseline still reproduces covered dismissal; refreshed Chromium production-CSS fixture passes6 narrow Files/Browser interaction cases and3 desktop geometry comparisons. Diff check passes. This is neither legacy-WebKit runtime verification nor actual served-WASM/native acceptance. Fresh independent final-head review and required hosted verification follow; prior-head ACKs do not clear this correction. Root owns frozen-head custody through release; issue91 actual acceptance and approval-policy90 remain open.
