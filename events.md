@@ -1182,6 +1182,15 @@ Round 5: round-4 review follow-ups on model reroute fidelity. (F2) Selection-tim
 Validation: ocean-agent 280 passed / 0 failed / 2 ignored; ocean-daemon 908 passed / 2 failed (only the two known pre-existing persistent_room envelope-key assertions); clippy -p ocean-agent --all-targets -D warnings clean; fmt --all --check clean; git diff --check clean.
 _________________________________________________________________________________
 
+time: [22:04] [10-09-26]
+agent: [claude] [opus 5.5]
+worktree: [fix/federation-roster-caller-member-ids] [~/dev/oceanwork/wt-fed-roster-envelope]
+type: [bug-report]
+area: [backend] [infra]
+
+Federated rooms on smaths-mini (northstar, ocean-team) sat in `recovering` with Pending outbox rows and no log output. Replaying the receiver's reads against production Bedrock with the room bearer showed a valid `hello` (high-water 0) and a 200 roster, but the roster carries `caller_member_ids` (Bedrock since ocean-bedrock #137, 2026-09-02) and `MembersEnvelope` is `deny_unknown_fields`, so every epoch silently returned Recover after hello. Fix: accept and ignore `caller_member_ids` on the strict envelope, warn with `outcome="roster_rejected"` on non-transport roster parse failures, and regression test `roster_with_caller_member_ids_reaches_live` (red without the field, green with it). The supervised launcher `deploy/ocean-daemon.sh` now sources owner-only `~/.config/ocean-rs/federation.env` and prints `federation=on|off`; previously only a hand-edited installed copy did, which the installer would overwrite. Operator guide documents the env file, contributor-side local redemption, and the receiver replay diagnosis. Independent review round: `WireMember` also accepts Bedrock's `operator_id` (same failure class, operator rooms); roster projection failures warn too; startup warns `federation_unconfigured` when credentialed rooms exist without a URL; the launcher parses federation.env as data (owner-only, not group/other-writable, `OCEAN_FEDERATION_*` keys only, CR/quote tolerant, plist values win) instead of sourcing it, verified under macOS bash 3.2 against command substitution, foreign keys, spaces, CRLF, group-writable and unreadable files. End-to-end: the fixed release binary, run unsupervised on an isolated HOME with a copied rooms.db (outbox cleared), brought northstar and ocean-team to `live` against production Bedrock. Follow-up folded in before merge: warn-only `credential_member_mismatch` when Bedrock's `caller_member_ids` omit the credential's local member (stale-credential diagnostic; never blocks Live). Launcher mode check fails closed on unparseable `stat` output. Validation: room_federation 92/92; ocean-daemon 910 passed / 2 failed at 99be7a9 (the known persistent_room envelope-key assertions, identical on unmodified main); clippy -p ocean-daemon --all-targets -D warnings clean; fmt clean; docs-check PASS; installer fixtures 12/12. Runtime ops the same evening (not code): Jay's laptop federation.env reduced to OCEAN_FEDERATION_URL (the direct-redeem contributor token was removed and its backup deleted) and his daemon restarted; a fresh invite minted by John's daemon was redeemed through Jay's local /v1/rooms/persistent/invites/redeem (credential f9757e6e in his rooms.db); the stale direct-path Bedrock member db0367cd was removed by the room owner (old token now 403 membership_revoked); the empty local test room ns-taskforce was soft-closed on smaths-mini. Both daemons stay `recovering` until this fix is merged and installed.
+_________________________________________________________________________________
+
 _________________________________________________________________________________
 time: [23:54] [09-10-26]
 agent: [codex]
@@ -1192,3 +1201,19 @@ area: [backend] [testing] [review]
 Reconciled onboarding preparation with canonical main and repaired issue #85. The port now prepares actual package commands and strict host identity, removes unsupported federation activation and alternate service promotion, and retains explicit identity/runtime installation prerequisites. Configuration uses no-follow directory descriptors, private atomic writes and successful credential-producer gating. Public documentation excludes organization-specific host/access inventory.
 
 Validation: 13 isolated mocked tests passed, including regressions that fail on the previous candidate for partial-output token failure and parent-directory substitution. Independent root review re-ran all 13 tests and acknowledged source 2da76c2d; shell syntax, diff check and docs-check (30 packages, 154 Markdown files, 174 links) passed. Owning component/docs contracts updated; root ownership/indexes unchanged. Final receipt review and required checks remain release gates. No actual package installation, credential lookup, service operation, federation activation, merge or deployment is claimed.
+time: [14:44] [10-12-26]
+agent: [claude] [opus 5.5]
+worktree: [fix/installer-launchctl-enabled-spelling] [~/dev/oceanwork/wt-installer-spelling]
+type: [bug-report]
+area: [infra]
+
+`ops/install-ocean-daemon.sh` refused to install on macOS 26 with "cannot establish the prior supervision override": `launchctl print-disabled` now prints `"label" => enabled|disabled` instead of `true|false`, and the override parser only accepted the old spelling. It now accepts both, treating `disabled` like `true`, so operator disablement is still honored. Fixtures gained modern-spelling success and disabled-preservation cases (red on the old regex, 14/14 green). Also recorded: at john's direction, the `main` branch protection's required pull-request review (including last-push approval) and admin enforcement were removed; required status checks remain.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [15:34] [10-12-26]
+agent: [Codex]
+worktree: [PR48 port/team-onboarding; factory-pr48-onboarding-reconcile/ocean]
+type: [workflow]
+area: [review]
+Reconciled PR48 97e32472263d16fe1a096caeb99a76bf3ba65005 with canonical main 1dfc6802bb74fecdcf83f6f17732b671c892b632. Only events.md conflicted; both complete parent histories remain verbatim and ordered. All1157 non-ledger modes/blobs match automatic merge and disjoint parent-source expectations. Onboarding repair source and issue85 scope remain unchanged. Shell/Python syntax and diff checks pass; prior13/13 onboarding, docs-check and14/14 installer evidence retained without duplicate execution. Existing contracts remain accurate; no ownership/index changes. Root owns final commit, separate adversarial review and fresh hosted checks. Issue90 approval policy, PR41 installed identity prerequisite and live acceptance remain separate holds. No heavy build, installation, credential lookup or live operation during preparation.
