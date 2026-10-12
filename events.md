@@ -1281,3 +1281,14 @@ worktree: [PR67 codex/pr67-auth-fixture-reconcile]
 type: [workflow]
 area: [review]
 Reconciled PR67 4f2fc5e449fa33a9a4858ce50c9bf24c66ac0471 with canonical main 1dfc6802bb74fecdcf83f6f17732b671c892b632. Only events.md conflicted; both complete74-record public parent histories remain verbatim and ordered. All1153 non-ledger entries match automatic merge. Complete Surface source and its prior32/32 proxy validation receipt are unchanged; Ocean OS matches main. Cached diff and shell syntax checks pass; identical tests were not repeated. Existing contracts remain accurate with no ownership/index changes. Root owns final commit, separate adversarial review, push and fresh hosted builds. Issue90 and live acceptance remain holds; live PWA smoke is separate from transport fixture proof. No live PWA outcome, authentication, installation or deployment claimed.
+
+_________________________________________________________________________________
+time: [17:26] [12-10-26]
+agent: [Codex] [factory issue91 repair]
+worktree: [codex/issue91-workspace-dismissal]
+type: [bug report]
+area: [frontend] [testing]
+
+Issue91: below900px the fixed workspace pane covered its only visibility toggle. Keep that existing toggle above the overlay in a safe-area-aware corner, reserving space outside the scrolling tabs. No new control, Rust/state change or desktop layout change. Nearest Surface devlog updated; parent ownership and child indexes unchanged.
+
+Validation: Chromium fixture uses the production stylesheet cascade with synthetic DOM/state. Baseline390px hit-test reproduced the covered toggle. Patched350/390/899px Files and Browser open/dismiss/reopen plus scrolled-tab hit tests passed6/6;900/1280/1600px desktop geometry matches baseline3/3. git diff --check passes. This is isolated rendered CSS evidence, not served-WASM/native or live acceptance. No heavy build launched on busy Mac mini. Independent final-head review and required Build Surface follow this receipt; root retains exclusive branch custody. Issue91 stays open for actual app acceptance; approval-policy90 and deployment gates remain.
