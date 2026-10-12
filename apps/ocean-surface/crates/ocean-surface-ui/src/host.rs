@@ -4,7 +4,8 @@
 //! unchanged in the browser PWA and the Chrome extension.
 //!
 //! Contract (frozen — see docs/OCEAN_DESKTOP_NORTH_STAR.md "Host bridge"):
-//! signatures do not change. Nothing outside this module may reference
+//! signatures do not change. Nothing outside this module and its private JS
+//! adapter may reference
 //! `__TAURI_INTERNALS__` or `@tauri-apps` APIs.
 //!
 //! ## Interop mechanism
@@ -20,14 +21,17 @@
 //!   Args are a JS object whose keys match the Rust `#[tauri::command]`
 //!   parameter names. The returned promise resolves to the command's `Ok`
 //!   value (already deserialised by Tauri's IPC layer).
-//! * `__TAURI_INTERNALS__.event.listen(event, handler)` — subscribes to
-//!   shell-emitted events. Each call creates an independent listener
-//!   (multiple subscribers are supported natively).
+//! * `__TAURI_INTERNALS__.transformCallback(handler)` plus
+//!   `plugin:event|listen` — subscribes to shell-emitted events by IPC callback
+//!   id. Scoped listeners unregister the callback and invoke plugin unlisten;
+//!   existing app-lifetime subscribers retain their subscription.
 //!
 //! Serialisation between the JS values Tauri hands us and the Rust structs
 //! (`PathEvent`, `RepoState`, `CommitInfo`) uses a `JSON.stringify` →
 //! `serde_json::from_str` round-trip. That is slightly wasteful but
 //! self-contained — no extra crate dependency like `serde-wasm-bindgen`.
+
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use js_sys::{Array, Function, Object, Promise, Reflect};
 use serde::Deserialize;
@@ -44,6 +48,8 @@ use web_sys::{Notification, NotificationOptions, NotificationPermission};
 pub struct PathEvent {
     pub path: String,
     pub kind: String,
+    #[serde(default)]
+    pub owner: Option<String>,
 }
 
 /// A recent commit in the session repo, read natively by the shell.
@@ -206,15 +212,167 @@ pub fn open_external_link_click(event: web_sys::MouseEvent) {
     }
 }
 
-/// Open the native folder picker. `None` on non-Tauri hosts or user cancel.
+/// Native folder picker; cancellation and unavailable capability return None.
 pub async fn pick_folder() -> Option<String> {
     if !running_in_tauri() {
         return None;
     }
-    match tauri_invoke("pick_folder", &JsValue::NULL).await {
-        Ok(val) if val.is_null() || val.is_undefined() => None,
-        Ok(val) => val.as_string(),
-        Err(_) => None,
+    tauri_invoke("pick_folder", &JsValue::NULL)
+        .await
+        .ok()?
+        .as_string()
+}
+
+/// A Files watch owns a distinct native lease, scoped there by window identity.
+/// Dropping a late admission only releases that lease, never a newer root's
+/// lease, a canonical alias in another window, or the legacy Repo watcher.
+pub struct PathWatch {
+    owner: String,
+    paths: Vec<String>,
+    root: String,
+}
+
+impl PathWatch {
+    /// Translate canonical native events back to the pane's requested alias.
+    pub fn event_path(&self, event: &PathEvent) -> Option<String> {
+        translate_watch_event(&self.root, self.paths.first()?, &self.owner, event)
+    }
+}
+
+fn translate_watch_event(
+    root: &str,
+    canonical: &str,
+    owner: &str,
+    event: &PathEvent,
+) -> Option<String> {
+    if event.owner.as_deref() != Some(owner) {
+        return None;
+    }
+    let relative = event.path.strip_prefix(canonical.trim_end_matches('/'))?;
+    if !relative.is_empty() && !relative.starts_with('/') {
+        return None;
+    }
+    Some(format!("{}{relative}", root.trim_end_matches('/')))
+}
+
+#[cfg(test)]
+mod workspace_watch_tests {
+    use super::*;
+    #[test]
+    fn workspace_watch_event_requires_owner_and_maps_canonical_alias() {
+        let mut event = PathEvent {
+            path: "/canonical/root/file".into(),
+            kind: "modified".into(),
+            owner: Some("new-a".into()),
+        };
+        assert_eq!(
+            translate_watch_event("/alias/", "/canonical/root", "new-a", &event).as_deref(),
+            Some("/alias/file")
+        );
+        assert_eq!(
+            translate_watch_event("/alias", "/canonical/root", "old-a", &event),
+            None
+        );
+        event.path = "/canonical/root-other/file".into();
+        assert_eq!(
+            translate_watch_event("/alias", "/canonical/root", "new-a", &event),
+            None
+        );
+        event.owner = None; // legacy Repo notifications never impersonate Files
+        assert_eq!(
+            translate_watch_event("/alias", "/canonical/root", "new-a", &event),
+            None
+        );
+    }
+}
+
+impl Drop for PathWatch {
+    fn drop(&mut self) {
+        let args = watch_args(&self.paths, Some(&self.owner));
+        wasm_bindgen_futures::spawn_local(async move {
+            if tauri_invoke("unwatch_paths", &args).await.is_err() {
+                log::warn!("native watcher: lease release rejected");
+            }
+        });
+    }
+}
+
+fn watch_args(paths: &[String], owner: Option<&str>) -> Object {
+    let args = Object::new();
+    let arr = Array::new();
+    for path in paths {
+        arr.push(&JsValue::from_str(path));
+    }
+    let _ = Reflect::set(&args, &JsValue::from_str("paths"), &arr);
+    if let Some(owner) = owner {
+        let _ = Reflect::set(
+            &args,
+            &JsValue::from_str("owner"),
+            &JsValue::from_str(owner),
+        );
+    }
+    args
+}
+
+pub async fn watch_workspace_root(path: &str) -> Option<PathWatch> {
+    if !running_in_tauri() {
+        return None;
+    }
+    static NEXT_WATCH: AtomicU64 = AtomicU64::new(0);
+    // Random prefix survives a webview reload, whose monotonic counter restarts.
+    let owner = format!(
+        "files-{}-{}",
+        js_sys::Math::random(),
+        NEXT_WATCH.fetch_add(1, Ordering::Relaxed)
+    );
+    // Capture the native page epoch before admission. A queued old-page call
+    // cannot re-create its watcher after native reload cleanup.
+    let generation = tauri_invoke("workspace_watch_generation", &JsValue::NULL)
+        .await
+        .ok()?;
+    let args = watch_args(&[path.to_owned()], Some(&owner));
+    let _ = Reflect::set(&args, &JsValue::from_str("generation"), &generation);
+    let report = jsval_to::<WatchReport>(&tauri_invoke("watch_paths", &args).await.ok()?);
+    if report.watched.is_empty() {
+        return None;
+    }
+    Some(PathWatch {
+        owner,
+        paths: report.watched,
+        root: path.to_owned(),
+    })
+}
+
+/// Component-owned path listener. Late registration after cleanup immediately
+/// unregisters itself; its callback cannot reach disposed reactive signals.
+pub fn subscribe_path_changed(cb: impl Fn(PathEvent) + 'static) -> impl FnOnce() + Send + Sync {
+    use std::{
+        cell::RefCell,
+        rc::Rc,
+        sync::{atomic::AtomicBool, Arc},
+    };
+    let alive = Arc::new(AtomicBool::new(true));
+    let listener = Rc::new(RefCell::new(None));
+    if running_in_tauri() {
+        let alive = alive.clone();
+        let listener = listener.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let callback_alive = alive.clone();
+            let registered = tauri_listen_scoped("path-changed", move |payload| {
+                if callback_alive.load(Ordering::Relaxed) {
+                    cb(jsval_to::<PathEvent>(&payload));
+                }
+            })
+            .await;
+            if alive.load(Ordering::Relaxed) {
+                *listener.borrow_mut() = registered;
+            }
+        });
+    }
+    let listener = send_wrapper::SendWrapper::new(listener);
+    move || {
+        alive.store(false, Ordering::Relaxed);
+        listener.borrow_mut().take();
     }
 }
 
@@ -305,20 +463,6 @@ pub async fn watch_paths(paths: &[String]) -> WatchAdmission {
         );
     }
     admission
-}
-
-/// Stop watching `paths`. Returns false on non-Tauri hosts.
-pub async fn unwatch_paths(paths: &[String]) -> bool {
-    if !running_in_tauri() {
-        return false;
-    }
-    let args = Object::new();
-    let arr = Array::new();
-    for p in paths {
-        arr.push(&JsValue::from_str(p));
-    }
-    let _ = Reflect::set(&args, &JsValue::from_str("paths"), &arr);
-    tauri_invoke("unwatch_paths", &args).await.is_ok()
 }
 
 /// Subscribe to shell `path-changed` events. No-op on non-Tauri hosts.
@@ -570,51 +714,46 @@ async fn tauri_invoke(cmd: &str, args: &JsValue) -> Result<JsValue, JsValue> {
     JsFuture::from(Promise::from(result)).await
 }
 
-/// Low-level: subscribe to a Tauri shell event via
-/// `__TAURI_INTERNALS__.event.listen(event_name, handler)`.  `handler`
-/// receives the **payload** field of the Tauri event object (the
-/// `{ event, id, payload }` wrapper is stripped).  The returned `UnlistenFn`
-/// is leaked so the subscription lives for the lifetime of the app.
+/// Preserve the existing app-lifetime subscription contract on the same Tauri
+/// event plugin primitive used by component-owned subscriptions.
 async fn tauri_listen<F>(event_name: &str, handler: F)
 where
     F: Fn(JsValue) + 'static,
 {
-    let window = match web_sys::window() {
-        Some(w) => w,
-        None => return,
-    };
-    let internals = match Reflect::get(&window, &JsValue::from_str("__TAURI_INTERNALS__")) {
-        Ok(i) => i,
-        Err(_) => return,
-    };
-    let event_obj = match Reflect::get(&internals, &JsValue::from_str("event")) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    let listen: Function = match Reflect::get(&event_obj, &JsValue::from_str("listen")) {
-        Ok(f) => match f.dyn_into() {
-            Ok(f) => f,
-            Err(_) => return,
-        },
-        Err(_) => return,
-    };
-
-    let closure = Closure::wrap(Box::new(move |raw: JsValue| {
-        // Tauri's event object: { event, id, payload }.  Unwrap payload.
-        if let Ok(payload) = Reflect::get(&raw, &JsValue::from_str("payload")) {
-            handler(payload);
-        }
-    }) as Box<dyn Fn(JsValue)>);
-
-    let call_args = Array::new();
-    call_args.push(&JsValue::from_str(event_name));
-    call_args.push(closure.as_ref().unchecked_ref());
-
-    if let Ok(promise) = Reflect::apply(&listen, &event_obj, &call_args) {
-        if JsFuture::from(Promise::from(promise)).await.is_ok() {
-            closure.forget(); // subscription lives forever
-        }
+    if let Some(listener) = tauri_listen_scoped(event_name, handler).await {
+        std::mem::forget(listener); // preserve existing app-lifetime subscribers
     }
+}
+
+#[wasm_bindgen::prelude::wasm_bindgen(module = "/src/host/native_events.mjs")]
+extern "C" {
+    #[wasm_bindgen::prelude::wasm_bindgen(catch, js_name = listenNativeEvent)]
+    fn listen_native_event(event: &str, handler: &Function) -> Result<Function, JsValue>;
+}
+
+struct NativeSubscription {
+    dispose: Function,
+    _callback: Closure<dyn Fn(JsValue)>,
+}
+
+impl Drop for NativeSubscription {
+    fn drop(&mut self) {
+        // Cancel synchronously before dropping the Rust callback. The bridge
+        // also retires a native listener whose admission resolves after this.
+        let _ = self.dispose.call0(&JsValue::NULL);
+    }
+}
+
+async fn tauri_listen_scoped<F>(event_name: &str, handler: F) -> Option<NativeSubscription>
+where
+    F: Fn(JsValue) + 'static,
+{
+    let callback = Closure::wrap(Box::new(handler) as Box<dyn Fn(JsValue)>);
+    let dispose = listen_native_event(event_name, callback.as_ref().unchecked_ref()).ok()?;
+    Some(NativeSubscription {
+        dispose,
+        _callback: callback,
+    })
 }
 
 /// Round-trip a JsValue through JSON to a Rust `Deserialize` type.
