@@ -331,6 +331,9 @@ pub struct Room {
     /// Optional auto-convene trigger policy. `None` = no automatic triggers.
     #[serde(default)]
     pub trigger_policy: Option<RoomTriggerPolicy>,
+    /// This Ocean's per-room mute pref (team-platform P6; owner-local).
+    #[serde(default)]
+    pub muted: bool,
 }
 
 // ---- Response envelopes (the daemon's `json!({ "ok": .., .. })` shapes) ------
@@ -610,6 +613,9 @@ pub struct Rooms {
     pub invite_error: RwSignal<Option<String>>,
     /// Native invite awaiting explicit operator confirmation.
     pub pending_invite: RwSignal<Option<PendingRoomInvite>>,
+    /// Thread root to open once the target room's transcript has loaded
+    /// (team-platform P6: picking an inbox item).
+    pub focus_thread: RwSignal<Option<(String, String, u64)>>,
     pending_invite_revision: RwSignal<u64>,
     pending_invite_redemption: RwSignal<Option<PendingInviteRedemption>>,
 }
@@ -632,6 +638,11 @@ impl Rooms {
     /// daemon-native text; LiveKit state is intentionally outside this type.
     pub fn new(daemon: &crate::daemon::Daemon) -> Self {
         Self::with_url(daemon.url)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(url: &str) -> Self {
+        Self::with_url(RwSignal::new(url.into()))
     }
 
     fn with_url(url: RwSignal<String>) -> Self {
@@ -667,6 +678,7 @@ impl Rooms {
             invite_loading: RwSignal::new(false),
             invite_error: RwSignal::new(None),
             pending_invite: RwSignal::new(None),
+            focus_thread: RwSignal::new(None),
             pending_invite_revision: RwSignal::new(0),
             pending_invite_redemption: RwSignal::new(None),
         }
@@ -685,7 +697,7 @@ impl Rooms {
     /// signals. Async tail work checks it before any non-frame state write;
     /// decoded frames pass through `accept_room_tail_frame` below.
     ///
-    /// `pub(crate)` so sibling modules (`rooms_workspace.rs`) holding a
+    /// `pub(crate)` so sibling modules (`rooms_workspace/`) holding a
     /// previously-captured `(generation, key)` pair — e.g. a pending
     /// read-advance request built while a room was open — can re-validate it
     /// before dispatching a mutating request. A same-key close/reopen bumps
@@ -709,10 +721,29 @@ impl Rooms {
         self.generation.get_untracked()
     }
 
+    pub(crate) fn take_pending_thread_focus(&self) -> Option<u64> {
+        let (origin, key, root) = self.focus_thread.get()?;
+        if self.url.get() != origin {
+            self.focus_thread.set(None);
+            return None;
+        }
+        if self.open_key.get().as_deref() != Some(key.as_str())
+            || self.open_room.get().as_ref().map(|room| room.id.as_str()) != Some(key.as_str())
+            || !self
+                .transcript
+                .with(|rows| rows.iter().any(|row| row.seq == root))
+        {
+            return None;
+        }
+        self.focus_thread.set(None);
+        Some(root)
+    }
+
     /// Synchronously clear the open-room signals and pin `tail_state` to
     /// `Replaying` so no prior room state leaks into the next open. Shared
     /// by `open_room` (pre-hydrate) and `close_room`.
     fn reset_room_state(&self) {
+        self.focus_thread.set(None);
         self.open_room.set(None);
         self.transcript.set(Vec::new());
         self.runs.set(Vec::new());
@@ -901,7 +932,7 @@ impl Rooms {
     /// the room list so a server-created room is discoverable.
     ///
     /// Callers should gate dispatch on `pending_create` to prevent concurrent
-    /// attempts — the closure in `rooms_workspace.rs` does this.
+    /// attempts — the closure in `rooms_workspace/` does this.
     pub fn create_room(&self, name: String, policy: Option<RoomTriggerPolicy>) -> u64 {
         let name = name.trim().to_string();
         if name.is_empty() {
@@ -2812,7 +2843,7 @@ fn show_no_agents(agents_loaded: bool, agent_count: usize) -> bool {
 }
 
 /// Pure predicate: is `expected_generation`/`expected_key` still the current
-/// room admission? `pub(crate)` so sibling modules (`rooms_workspace.rs`) can
+/// room admission? `pub(crate)` so sibling modules (`rooms_workspace/`) can
 /// unit-test the exact rejection logic behind [`Rooms::room_is_current`]
 /// without needing a live `Rooms` handle (which requires a browser runtime).
 pub(crate) fn room_request_is_current(
@@ -2917,7 +2948,7 @@ fn slugify(name: &str) -> String {
 /// Percent-encode a path segment (room keys can contain `-`/`_`/alnum already,
 /// but a defensive encode keeps an unexpected char from breaking the URL).
 /// Pure Rust so tests run on native targets.
-fn encode(s: &str) -> String {
+pub(crate) fn encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {
@@ -3150,6 +3181,7 @@ mod tests {
             created_at: String::new(),
             updated_at: String::new(),
             trigger_policy: None,
+            muted: false,
         }
     }
 
@@ -3518,7 +3550,7 @@ mod tests {
     /// which bumps the generation to N+1 without changing `open_key`. Key
     /// equality alone (the pre-fix guard) would wrongly admit this stale
     /// request; `room_request_is_current` — the exact predicate backing the
-    /// pub(crate) `Rooms::room_is_current` exposed for `rooms_workspace.rs` —
+    /// pub(crate) `Rooms::room_is_current` exposed for `rooms_workspace/` —
     /// must reject it.
     #[test]
     fn room_request_is_current_rejects_stale_generation_across_same_key_close_reopen() {
@@ -4309,6 +4341,7 @@ mod tests {
             created_at: String::new(),
             updated_at: String::new(),
             trigger_policy: None,
+            muted: false,
         }];
 
         let merged = merge_room_read_summaries(&current, &rooms, &incoming);
@@ -4382,6 +4415,105 @@ mod tests {
         let (_, return_ticket) = rooms.begin_owner_request();
         assert!(!rooms.apply_owner_response(&old_base, old_ticket, owner("old", "Late")));
         assert!(rooms.apply_owner_response(&old_base, return_ticket, owner("old", "Current")));
+    }
+
+    #[test]
+    fn attention_reads_retire_after_origin_room_query_or_ticket_changes() {
+        use crate::room_attention::AttentionResponseFence;
+        let owner = Owner::new();
+        owner.set();
+        let url = RwSignal::new("https://first.example".to_string());
+        let rooms = Rooms::with_url(url);
+        let ticket = RwSignal::new(1_u64);
+        let slot = RwSignal::new(None::<String>);
+        rooms.open_key.set(Some("room-a".into()));
+        let fence = AttentionResponseFence {
+            origin: url.get_untracked(),
+            room: Some(("room-a".into(), rooms.generation_snapshot())),
+            query: Some("needle".into()),
+            ticket: 1,
+        };
+        assert!(fence.publish(rooms, ticket, Some("needle".into()), slot, "current".into()));
+        url.set("https://second.example".into());
+        assert!(!fence.publish(
+            rooms,
+            ticket,
+            Some("needle".into()),
+            slot,
+            "wrong daemon".into()
+        ));
+        url.set(fence.origin.clone());
+        rooms.generation.update(|g| *g += 1);
+        assert!(!fence.publish(
+            rooms,
+            ticket,
+            Some("needle".into()),
+            slot,
+            "old admission".into()
+        ));
+        let current = AttentionResponseFence {
+            room: Some(("room-a".into(), rooms.generation_snapshot())),
+            ..fence
+        };
+        assert!(!current.publish(rooms, ticket, Some("n".into()), slot, "old query".into()));
+        ticket.set(2);
+        assert!(!current.publish(
+            rooms,
+            ticket,
+            Some("needle".into()),
+            slot,
+            "older search".into()
+        ));
+        let inbox = AttentionResponseFence {
+            origin: url.get_untracked(),
+            room: None,
+            query: None,
+            ticket: 2,
+        };
+        assert!(inbox.publish(rooms, ticket, None, slot, "current inbox".into()));
+        ticket.set(3); // closing/reopening the panel retires its former read
+        assert!(!inbox.publish(rooms, ticket, None, slot, "closed inbox".into()));
+        assert_eq!(slot.get_untracked(), Some("current inbox".into()));
+    }
+
+    #[test]
+    fn inbox_thread_pick_waits_for_its_room_and_retires_on_origin_switch() {
+        let owner = Owner::new();
+        owner.set();
+        let url = RwSignal::new("https://first.example".to_string());
+        let rooms = Rooms::with_url(url);
+        let message: RoomMessage = serde_json::from_str(r#"{"seq":7,"author_id":"ada","author_kind":"human","kind":"message","body":"root","created_at":"2026-10-04T05:33:00Z"}"#).unwrap();
+        rooms.transcript.set(vec![message]);
+        rooms.open_key.set(Some("previous".into()));
+        rooms.open_room.set(Some(
+            serde_json::from_str(r#"{"id":"previous","name":"Previous","participants":[]}"#)
+                .unwrap(),
+        ));
+        rooms
+            .focus_thread
+            .set(Some((url.get_untracked(), "target".into(), 7)));
+        assert_eq!(
+            rooms.take_pending_thread_focus(),
+            None,
+            "same seq in another room cannot consume the pick"
+        );
+        rooms.open_key.set(Some("target".into()));
+        assert_eq!(
+            rooms.take_pending_thread_focus(),
+            None,
+            "the previous room record is still visible"
+        );
+        rooms.open_room.set(Some(
+            serde_json::from_str(r#"{"id":"target","name":"Target","participants":[]}"#).unwrap(),
+        ));
+        assert_eq!(rooms.take_pending_thread_focus(), Some(7));
+        assert_eq!(rooms.focus_thread.get_untracked(), None);
+        rooms
+            .focus_thread
+            .set(Some((url.get_untracked(), "target".into(), 7)));
+        url.set("https://second.example".into());
+        assert_eq!(rooms.take_pending_thread_focus(), None);
+        assert_eq!(rooms.focus_thread.get_untracked(), None);
     }
 
     #[test]

@@ -55,6 +55,14 @@ participant retirement. One database file (`rooms.db`), one owning crate.
   room). Not a transcript: `put_room_agent_run` upserts (seeding/recovery); the running turn writes through `put_room_agent_run_from_turn`, which in one immediate transaction never rewrites a stored terminal run and keeps the stored `answer_seq`, so turn writes never regress claim state; `room_agent_runs`
   returns the newest N oldest-first, `interrupt_open_room_agent_runs` fails
   every non-terminal run at startup.
+- `room_prefs` (team-platform P6) keys owner-local `RoomPrefs` JSON by
+  `room_id` (cascade with the room); open rooms only, default prefs delete the
+  row. Read-side P6 APIs: `search_room_messages` (bounded `LIKE ? ESCAPE '\'`
+  over `kind = 'message'` with `%`/`_`/`\` escaped, newest first),
+  `open_room_names(limit)` (SQL-bounded row materialization, not a bounded-scan
+  guarantee), `room_participants` (open-room roster without transcript hydration),
+  and `recent_room_messages_with_parent_author` (newest N
+  rows paired with the thread parent's author for inbox classification).
 - `daemon_owner` — singleton team-platform P2 owner identity
   `{participant_id, display_name}`. `owner_identity_as(member_id, default)`
   mints it once. The configured team member id only seeds a fresh install:
