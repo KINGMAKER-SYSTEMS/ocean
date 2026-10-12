@@ -1162,6 +1162,12 @@ pub struct RoomAgentRun {
     /// the claim is released (run still parked) when admission fails.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer_seq: Option<u64>,
+    /// The daemon request that executes this run's turn: the same id the
+    /// invoke response returns and `POST /v1/requests/{id}/cancel` accepts.
+    /// An identifier only, never a decision token or other credential.
+    /// Legacy-default absent: runs stored before the field load as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
 }
 
 /// A pending tool approval projected onto a run card (team-platform P4).
@@ -2943,16 +2949,51 @@ mod tests {
             reply_seq: None,
             pending_permission: None,
             answer_seq: None,
+            request_id: None,
         };
         let wire = serde_json::to_value(&run).unwrap();
         assert_eq!(wire["state"], "running_tool");
         assert_eq!(wire["label"], "edit");
         assert!(wire.get("summary").is_none());
+        assert!(wire.get("request_id").is_none());
         let back: RoomAgentRun = serde_json::from_value(wire).unwrap();
         assert_eq!(back, run);
         assert!(!run.state.is_terminal());
         assert!(RoomAgentRunState::Done.is_terminal());
         assert!(RoomAgentRunState::Failed { reason: "x".into() }.is_terminal());
+    }
+
+    /// `request_id` is additive: a run body stored before the field existed
+    /// still decodes (as `None`), and a present id round-trips under its own
+    /// key. Mutation: drop `#[serde(default)]` on the field -> RED.
+    #[test]
+    fn room_agent_run_request_id_is_legacy_default_absent() {
+        let legacy = serde_json::json!({
+            "run_id": "r1",
+            "room_id": "room",
+            "agent_id": "helper",
+            "session_id": "s1",
+            "trigger_seq": 4,
+            "thread_root_seq": 4,
+            "state": "queued",
+            "started_at": "2026-10-01T12:00:00Z",
+            "updated_at": "2026-10-01T12:00:00Z"
+        });
+        let run: RoomAgentRun = serde_json::from_value(legacy).unwrap();
+        assert_eq!(run.request_id, None);
+        assert!(serde_json::to_value(&run)
+            .unwrap()
+            .get("request_id")
+            .is_none());
+
+        let run = RoomAgentRun {
+            request_id: Some("6f1c2a52-6a8e-4f7e-9d43-3d6f0a9b2c11".into()),
+            ..run
+        };
+        let wire = serde_json::to_value(&run).unwrap();
+        assert_eq!(wire["request_id"], "6f1c2a52-6a8e-4f7e-9d43-3d6f0a9b2c11");
+        let back: RoomAgentRun = serde_json::from_value(wire).unwrap();
+        assert_eq!(back, run);
     }
 
     /// The anti-drift pin, and the reason this pair moved into `ocean-core`

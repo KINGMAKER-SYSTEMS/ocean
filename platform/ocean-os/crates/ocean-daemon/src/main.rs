@@ -28437,6 +28437,130 @@ prunable gitdir file points to non-existent location
         assert!(!serde_json::to_string(&outbox).unwrap().contains(&token));
     }
 
+    /// PR D: the work card a room invoke starts names the exact daemon
+    /// request the invoke response returned, so a client can cancel that run
+    /// through `POST /v1/requests/{id}/cancel`. Both projections — `GET
+    /// .../runs` and the room tail's `room_agent_run` frame — carry the id,
+    /// and neither carries the invoker's decision token.
+    /// Mutation: start the run with any id but the registered request's -> RED.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn room_invoke_run_carries_the_invoke_request_id() {
+        use http_body_util::BodyExt;
+        use tower::ServiceExt as _;
+
+        let _yolo = yolo_env_guard_async().await;
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _env = TestEnvRestore::capture(&[
+            "OCEAN_AUTH_FILE",
+            "OCEAN_CODEX_AUTH_FILE",
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+            "OCEAN_AGENTS_DIR",
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, app, room) = sovereign_room_fixture(&tmp, SOVEREIGN_MEMBER, "member-key");
+        sovereign_authorize_member(app.clone()).await;
+        let authored = with_rooms(&state, |s| {
+            s.append_message(
+                &room,
+                SOVEREIGN_MEMBER,
+                RoomParticipantKind::Human,
+                RoomMessageKind::Message,
+                "invoke my agent",
+                Utc::now(),
+            )
+        })
+        .unwrap();
+        let token = ocean_core::mint_decision_token();
+        let (status, queued) = operator_room_http_request(
+            app.clone(),
+            axum::http::Method::POST,
+            &format!(
+                "/v1/rooms/persistent/sovereign-consent/agents/{SOVEREIGN_MEMBER_AGENT}/invoke"
+            ),
+            Some(json!({
+                "invoked_by": SOVEREIGN_MEMBER,
+                "message_seq": authored.seq,
+                "decision_token": token,
+            })),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let request_id: RequestId = queued["request_id"].as_str().unwrap().parse().unwrap();
+
+        // The card is durable before invoke returns, so it is readable now,
+        // before the turn settles.
+        let runs = with_rooms(&state, |s| s.room_agent_runs(&room, 10)).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].trigger_seq, authored.seq);
+        assert_eq!(runs[0].session_id, queued["session_id"].as_str().unwrap());
+        assert_eq!(
+            runs[0].request_id.as_deref(),
+            Some(request_id.to_string().as_str())
+        );
+        assert!(state.requests.read().await.contains_key(&request_id));
+
+        for _ in 0..200 {
+            if state.requests.read().await[&request_id].status.state == RequestState::Completed {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            state.requests.read().await[&request_id].status.state,
+            RequestState::Completed
+        );
+
+        let (status, listed) = operator_room_http_request(
+            app.clone(),
+            axum::http::Method::GET,
+            "/v1/rooms/persistent/sovereign-consent/runs",
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let listed_runs = listed["runs"].as_array().unwrap();
+        assert_eq!(listed_runs.len(), 1);
+        assert_eq!(listed_runs[0]["request_id"], queued["request_id"]);
+        assert!(!listed.to_string().contains(&token));
+
+        let response = app
+            .oneshot(
+                axum::http::Request::get("/v1/rooms/persistent/sovereign-consent/events")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body();
+        let mut run_frame = None;
+        for _ in 0..16 {
+            let frame = tokio::time::timeout(std::time::Duration::from_secs(2), body.frame())
+                .await
+                .expect("frame timeout")
+                .expect("SSE body ended")
+                .expect("SSE body error");
+            let text = String::from_utf8_lossy(&frame.into_data().unwrap_or_default()).to_string();
+            if text.contains("event: room_agent_run\n") {
+                run_frame = Some(text);
+                break;
+            }
+        }
+        let run_frame = run_frame.expect("room_agent_run frame");
+        assert!(!run_frame.contains(&token));
+        let data = run_frame
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .expect("room_agent_run data line");
+        let frame_run: serde_json::Value = serde_json::from_str(data).unwrap();
+        assert_eq!(frame_run["request_id"], queued["request_id"]);
+    }
+
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn room_sovereign_member_tool_approval_requires_its_turn_token_and_current_custody() {

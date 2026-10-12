@@ -15286,6 +15286,60 @@ mod tests {
         assert_eq!(mode, 0o600, "reopen must repair a loosened mode");
     }
 
+    /// A run row written before `request_id` existed has no such key in its
+    /// JSON body. It must still load through every read path, and a turn's
+    /// later write adds the id without disturbing the row.
+    /// Mutation: drop `#[serde(default)]` on `RoomAgentRun::request_id` -> RED.
+    #[test]
+    fn legacy_agent_run_rows_without_request_id_still_load() {
+        let mut s = store();
+        let key = RoomKey::new("legacy-runs");
+        s.create(key.clone(), "legacy-runs", None, now()).unwrap();
+        let started = now();
+        let legacy_body = serde_json::json!({
+            "run_id": "old",
+            "room_id": key.as_str(),
+            "agent_id": "helper",
+            "session_id": "s-old",
+            "trigger_seq": 1,
+            "thread_root_seq": 1,
+            "state": "awaiting_reply",
+            "started_at": started,
+            "updated_at": started,
+            "summary": "which branch?"
+        })
+        .to_string();
+        assert!(!legacy_body.contains("request_id"));
+        s.conn
+            .execute(
+                "INSERT INTO room_agent_runs (run_id, room_id, started_at, body)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params!["old", key.as_str(), started.to_rfc3339(), legacy_body],
+            )
+            .unwrap();
+
+        let loaded = s.room_agent_run("old").unwrap().unwrap();
+        assert_eq!(loaded.request_id, None);
+        assert_eq!(loaded.state, RoomAgentRunState::AwaitingReply);
+        assert_eq!(loaded.summary.as_deref(), Some("which branch?"));
+        assert_eq!(s.room_agent_runs(&key, 10).unwrap(), vec![loaded.clone()]);
+        assert_eq!(s.parked_room_agent_runs(&key, 1).unwrap().len(), 1);
+
+        let mut turn = loaded;
+        turn.request_id = Some("req-1".into());
+        let (stored, landed) = s.put_room_agent_run_from_turn(&turn).unwrap();
+        assert!(landed);
+        assert_eq!(stored.request_id.as_deref(), Some("req-1"));
+        assert_eq!(
+            s.room_agent_run("old")
+                .unwrap()
+                .unwrap()
+                .request_id
+                .as_deref(),
+            Some("req-1")
+        );
+    }
+
     fn agent_run(room: &RoomKey, id: &str, started: DateTime<Utc>) -> RoomAgentRun {
         RoomAgentRun {
             run_id: id.into(),
@@ -15303,6 +15357,7 @@ mod tests {
             reply_seq: None,
             pending_permission: None,
             answer_seq: None,
+            request_id: None,
         }
     }
 
