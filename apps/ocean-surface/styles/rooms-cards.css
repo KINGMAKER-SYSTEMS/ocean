@@ -1,0 +1,488 @@
+/* Room agent surfaces (team-platform P3/P4): work cards, in-room approvals,
+   the room header overflow, and per-room agent settings.
+   One card per room-convened agent turn (`room_work_card.rs`). Colors come
+   ONLY from tokens.css. Material rule: border recipe OR elevation recipe,
+   never both. State drives the dot via `data-state`; the only card icons are
+   the disclosure chevron and the approve/deny controls. */
+
+.room-card {
+  margin-top: 8px;
+  max-width: 640px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  background: var(--bg-well);
+  overflow: hidden;
+}
+
+.room-card__head {
+  appearance: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: var(--ctl-h);
+  padding: 6px 10px;
+  border: none;
+  background: transparent;
+  color: var(--fg-2);
+  font: 500 12px/1.3 var(--font);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease);
+}
+
+.room-card__head:hover {
+  background: var(--bg-hover);
+}
+
+.room-card__head:focus-visible {
+  outline: none;
+  box-shadow: inset var(--focus-ring);
+}
+
+.room-card__avatar {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  color: var(--accent-bright);
+  font: 700 9px/1 var(--font);
+  letter-spacing: 0.02em;
+}
+
+.room-card__agent {
+  flex: 0 0 auto;
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.room-card__state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.room-card__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-3);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.room-card__dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--fg-4);
+}
+
+.room-card[data-state="thinking"] .room-card__dot,
+.room-card[data-state="tool"] .room-card__dot {
+  background: var(--running);
+}
+
+.room-card[data-state="queued"] .room-card__dot {
+  background: var(--fg-3);
+}
+
+.room-card[data-state="approval"] .room-card__dot,
+.room-card[data-state="reply"] .room-card__dot {
+  background: var(--warn);
+}
+
+.room-card[data-state="done"] .room-card__dot {
+  background: var(--ok);
+}
+
+.room-card[data-state="failed"] .room-card__dot {
+  background: var(--err);
+}
+
+.room-card[data-state="approval"],
+.room-card[data-state="reply"] {
+  border-color: var(--warn);
+}
+
+.room-card[data-state="failed"] .room-card__label {
+  color: var(--err);
+}
+
+.room-card__meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  color: var(--fg-4);
+  font: 500 11px/1 var(--mono);
+}
+
+.room-card__stat {
+  color: var(--fg-3);
+}
+
+.room-card__chevron {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  color: var(--fg-4);
+  transform: rotate(-90deg);
+  transition: transform var(--dur-fast) var(--ease);
+}
+
+.room-card__chevron.is-open {
+  transform: rotate(0deg);
+}
+
+.room-card__summary {
+  padding: 0 10px 8px 38px;
+  color: var(--fg-2);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.room-card__summary > :first-child {
+  margin-top: 0;
+}
+
+.room-card__summary > :last-child {
+  margin-bottom: 0;
+}
+
+.room-card__body {
+  border-top: 1px solid var(--border-subtle);
+  padding: 8px 10px 10px;
+}
+
+.room-card__files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 0 0 8px;
+  padding: 0;
+  list-style: none;
+}
+
+.room-card__file {
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--fg-2);
+  font: 500 11px/1.4 var(--mono);
+}
+
+.room-card__error {
+  color: var(--err);
+  font-size: 12px;
+}
+
+.room-card__steps .turn--assistant {
+  padding: 0;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .room-card__dot.is-live {
+    animation: room-card-pulse 1.4s var(--ease-tide) infinite;
+  }
+  @keyframes room-card-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.35; }
+  }
+}
+
+@media (max-width: 650px) {
+  .room-card {
+    max-width: none;
+  }
+  .room-card__summary {
+    padding-left: 10px;
+  }
+  .room-card__stat--files {
+    display: none;
+  }
+}
+
+/* ── P4: in-room approval on the card ─────────────────────────────────── */
+
+.room-card__approval {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 10px 8px 38px;
+  padding: 4px 4px 4px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--warn-soft);
+}
+
+.room-card__approval-tool {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+  font: 500 11px/1.4 var(--mono);
+}
+
+.room-card__decide {
+  appearance: none;
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: var(--ctl-h-sm);
+  height: var(--ctl-h-sm);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--fg-2);
+  font-size: 14px;
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
+}
+
+.room-card__decide--allow:hover:not(:disabled) {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+
+.room-card__decide--deny:hover:not(:disabled) {
+  border-color: var(--err);
+  color: var(--err);
+}
+
+.room-card__decide:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.room-card__decide:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+.room-card__error--decide {
+  margin: 0 10px 8px 38px;
+}
+
+/* ── P4: the room header's one overflow menu ──────────────────────────── */
+
+.room-overflow {
+  position: relative;
+}
+
+.room-overflow__trigger {
+  appearance: none;
+  display: inline-grid;
+  place-items: center;
+  width: var(--ctl-h-sm);
+  height: var(--ctl-h-sm);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-3);
+  font-size: 16px;
+  cursor: pointer;
+}
+
+.room-overflow__trigger:hover,
+.room-overflow__trigger[aria-expanded="true"] {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.room-overflow__trigger:focus-visible,
+.room-overflow__item:focus-visible,
+.room-agent-settings__agent:focus-visible,
+.room-agent-settings__close:focus-visible,
+.room-agent-settings__save:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.room-overflow__scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+}
+
+.room-overflow__menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 41;
+  display: flex;
+  flex-direction: column;
+  min-width: 160px;
+  padding: 4px;
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-popover);
+}
+
+.room-overflow__item {
+  appearance: none;
+  min-height: var(--ctl-h-sm);
+  padding: 0 10px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-2);
+  font: 500 13px/1 var(--font);
+  text-align: left;
+  cursor: pointer;
+}
+
+.room-overflow__item:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.room-overflow__item--danger:hover:not(:disabled) {
+  color: var(--err);
+}
+
+.room-overflow__item:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+/* ── P4: per-room agent settings ──────────────────────────────────────── */
+
+.room-agent-settings {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 41;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(420px, calc(100vw - 32px));
+  padding: 10px;
+  border-radius: var(--radius-lg);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-popover);
+}
+
+.room-agent-settings__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.room-agent-settings__agents {
+  display: flex;
+  flex: 1 1 auto;
+  gap: 4px;
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.room-agent-settings__agent {
+  appearance: none;
+  flex: 0 0 auto;
+  min-height: var(--ctl-h-sm);
+  padding: 0 10px;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--fg-3);
+  font: 600 12px/1 var(--font);
+  cursor: pointer;
+}
+
+.room-agent-settings__agent[aria-pressed="true"] {
+  background: var(--accent-soft);
+  color: var(--accent-bright);
+}
+
+.room-agent-settings__close {
+  appearance: none;
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: var(--ctl-h-sm);
+  height: var(--ctl-h-sm);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-4);
+  cursor: pointer;
+}
+
+.room-agent-settings__close:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.room-agent-settings__instructions,
+.room-agent-settings__model {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-well);
+  color: var(--fg);
+  font: 400 13px/1.5 var(--font);
+}
+
+.room-agent-settings__instructions {
+  resize: vertical;
+  min-height: 96px;
+}
+
+.room-agent-settings__model {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.room-agent-settings__instructions:focus,
+.room-agent-settings__model:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.room-agent-settings__foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.room-agent-settings__error {
+  flex: 1 1 auto;
+  color: var(--err);
+  font-size: 12px;
+}
+
+.room-agent-settings__save {
+  appearance: none;
+  min-height: var(--ctl-h-sm);
+  padding: 0 14px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: var(--fg-on-accent);
+  font: 600 12px/1 var(--font);
+  cursor: pointer;
+}
+
+.room-agent-settings__save:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+@media (max-width: 650px) {
+  .room-card__approval,
+  .room-card__error--decide {
+    margin-left: 10px;
+  }
+}
