@@ -1,0 +1,496 @@
+//! Room agent work cards (team-platform P3).
+//!
+//! Every room-convened agent turn gets one [`RoomAgentRun`]: a mutable
+//! projection over that turn's own agent-session events, stored by
+//! ocean-store and pushed to room SSE tails as `room_agent_run` frames. It is
+//! never a second transcript — transcript rows stay append-only, and tool
+//! steps/diffs stay in the agent session, which only the owner's surfaces read.
+//!
+//! Runs are local to the owning daemon and never cross federation.
+//!
+//! P4 adds the agent's voice inside the run: `room_post_update` progress posts,
+//! `room_ask` parking (`AwaitingReply`, resumed by a human thread reply), and
+//! in-room approvals (`AwaitingPermission` + a per-run decision token that only
+//! the owning daemon's `POST .../runs/{run_id}/permission` route presents).
+
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
+
+use chrono::Utc;
+use ocean_agent_sdk::AgentSessionId;
+use ocean_core::{RoomAgentRun, RoomAgentRunState, RoomKey, RoomRunPermission};
+use ocean_runtime::AgentEvent;
+use serde_json::Value;
+use tokio::sync::mpsc;
+use uuid::Uuid;
+
+use crate::persistent_rooms::{publish_room_access_wake, with_rooms};
+use crate::AppState;
+
+/// Most recent runs a room tail or `GET .../runs` projects.
+pub(crate) const ROOM_RUNS_LIMIT: usize = 50;
+/// Longest summary kept on a run (characters).
+const SUMMARY_CHARS: usize = 280;
+/// Longest tool label kept on a run (characters).
+const LABEL_CHARS: usize = 60;
+
+/// Per-run permission decision tokens, held only in daemon memory for the
+/// life of the turn. A room turn's permission waiters are bound to its token,
+/// so the generic `/v1/permissions/{id}/decision` route cannot resolve them
+/// without it; the room run route looks it up here.
+static RUN_DECISION_TOKENS: LazyLock<Mutex<HashMap<String, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn tokens() -> std::sync::MutexGuard<'static, HashMap<String, String>> {
+    RUN_DECISION_TOKENS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// The live decision token for `run_id`, if its turn is still running.
+pub(crate) fn run_decision_token(run_id: &str) -> Option<String> {
+    tokens().get(run_id).cloned()
+}
+
+/// One thread answer's durable claim on a parked `room_ask` run.
+///
+/// The claim is taken before the successor is admitted and must always be
+/// settled, even when the posting request's future is dropped mid-way (a
+/// client disconnect cancels the handler at its next await). Settling
+/// explicitly with [`AnswerClaim::settle`] reports the admission outcome; a
+/// claim dropped unsettled settles from durable evidence instead, exactly as
+/// restart recovery does: a successor run triggered by this answer closes the
+/// run `Done`, otherwise the claim is released and the run stays parked, so
+/// the next reply can claim it.
+pub(crate) struct AnswerClaim {
+    state: AppState,
+    run: RoomAgentRun,
+    answer_seq: u64,
+    settled: bool,
+}
+
+impl AnswerClaim {
+    /// Atomically claim `run` for the thread answer at `answer_seq`. `None`
+    /// when the run is no longer parked or another answer already holds it,
+    /// so of concurrent replies exactly one resumes the run.
+    pub(crate) fn take(state: &AppState, run: &RoomAgentRun, answer_seq: u64) -> Option<Self> {
+        match with_rooms(state, |store| {
+            store.claim_parked_room_agent_run(&run.run_id, answer_seq, Utc::now())
+        }) {
+            Ok(Some(_)) => Some(Self {
+                state: state.clone(),
+                run: run.clone(),
+                answer_seq,
+                settled: false,
+            }),
+            Ok(None) => None,
+            Err(e) => {
+                tracing::warn!(room = %run.room_id, %e, "room agent run claim failed");
+                None
+            }
+        }
+    }
+
+    /// Settle the claim. `resumed` (the successor turn was admitted) closes
+    /// the run `Done`; otherwise the claim is released and the run stays
+    /// parked with the answer still in its thread.
+    pub(crate) fn settle(mut self, resumed: bool) {
+        self.settled = true;
+        let (run_id, answer_seq) = (self.run.run_id.clone(), self.answer_seq);
+        self.finish(|store| {
+            store.settle_room_agent_run_answer(&run_id, answer_seq, resumed, Utc::now())
+        });
+    }
+
+    fn finish(
+        &self,
+        settle: impl FnOnce(
+            &mut ocean_store::SqliteRoomStore,
+        ) -> Result<Option<RoomAgentRun>, ocean_store::RoomStoreError>,
+    ) {
+        match with_rooms(&self.state, settle) {
+            Ok(Some(_)) => publish_room_access_wake(&self.state, &self.run.room_id),
+            Ok(None) => {}
+            Err(e) => tracing::warn!(room = %self.run.room_id, %e, "room agent run settle failed"),
+        }
+    }
+}
+
+impl Drop for AnswerClaim {
+    fn drop(&mut self) {
+        if self.settled {
+            return;
+        }
+        let (run_id, answer_seq) = (self.run.run_id.clone(), self.answer_seq);
+        self.finish(|store| {
+            store.settle_room_agent_run_answer_from_evidence(&run_id, answer_seq, Utc::now())
+        });
+    }
+}
+
+/// Owns one run's projection and persists every change.
+pub(crate) struct RunTracker {
+    state: AppState,
+    run: RoomAgentRun,
+    cwd: String,
+}
+
+impl RunTracker {
+    /// Create the run in `Queued` and publish it.
+    pub(crate) fn start(
+        state: AppState,
+        room: RoomKey,
+        agent_id: &str,
+        session_id: AgentSessionId,
+        trigger_seq: u64,
+        thread_root_seq: u64,
+        cwd: String,
+    ) -> Result<Self, ocean_store::RoomStoreError> {
+        let now = Utc::now();
+        let mut tracker = Self {
+            state,
+            run: RoomAgentRun {
+                run_id: Uuid::new_v4().to_string(),
+                room_id: room,
+                agent_id: agent_id.to_string(),
+                session_id: session_id.to_string(),
+                trigger_seq,
+                thread_root_seq,
+                state: RoomAgentRunState::Queued,
+                started_at: now,
+                updated_at: now,
+                summary: None,
+                files_changed: Vec::new(),
+                tool_count: 0,
+                reply_seq: None,
+                pending_permission: None,
+                answer_seq: None,
+            },
+            cwd,
+        };
+        tracker.try_save()?;
+        Ok(tracker)
+    }
+
+    pub(crate) fn is_parked(&self) -> bool {
+        self.run.state.is_parked()
+    }
+
+    /// Mint and register this run's permission decision token.
+    pub(crate) fn mint_decision_token(&self) -> String {
+        let token = Uuid::new_v4().simple().to_string();
+        tokens().insert(self.run.run_id.clone(), token.clone());
+        token
+    }
+
+    /// The turn is blocked on `permission_id` for `tool`.
+    pub(crate) fn awaiting_permission(&mut self, permission_id: String, tool: &str, args: &Value) {
+        if self.run.state.is_terminal() {
+            return;
+        }
+        self.run.pending_permission = Some(RoomRunPermission {
+            permission_id,
+            tool: tool.to_string(),
+            tool_label: tool_label(tool, args, &self.cwd),
+        });
+        self.run.state = RoomAgentRunState::AwaitingPermission;
+        self.save();
+    }
+
+    /// The pending permission was decided (or cancelled).
+    pub(crate) fn permission_resolved(&mut self) {
+        if self.run.pending_permission.take().is_none() {
+            return;
+        }
+        if !self.run.state.is_terminal() {
+            self.run.state = RoomAgentRunState::Thinking;
+        }
+        self.save();
+    }
+
+    /// `room_post_update`: the agent's latest progress line becomes the
+    /// card summary.
+    pub(crate) fn posted_update(&mut self, text: &str) {
+        if self.run.state.is_terminal() {
+            return;
+        }
+        self.run.summary = summarize(text);
+        self.save();
+    }
+
+    /// `room_ask`: park the run until a human answers in its thread.
+    pub(crate) fn awaiting_reply(
+        &mut self,
+        question: &str,
+        ask_seq: Option<u64>,
+    ) -> Result<(), ocean_store::RoomStoreError> {
+        if self.run.state.is_terminal() {
+            return Err(ocean_store::RoomStoreError::Encode(
+                "room_agent_run_closed".into(),
+            ));
+        }
+        let previous = self.run.clone();
+        self.run.summary = summarize(question);
+        self.run.reply_seq = ask_seq;
+        self.run.state = RoomAgentRunState::AwaitingReply;
+        if let Err(error) = self.try_save() {
+            // The turn must not treat a failed write as a parked run, nor may
+            // a later progress save silently retry this unacknowledged park.
+            self.run = previous;
+            return Err(error);
+        }
+        if !self.is_parked() {
+            return Err(ocean_store::RoomStoreError::Encode(
+                "room_agent_run_closed".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Best-effort progress projection. Admission and parking must instead
+    /// propagate `try_save` errors because their success promises durability.
+    fn save(&mut self) {
+        if let Err(e) = self.try_save() {
+            tracing::warn!(room = %self.run.room_id, %e, "room agent run write failed");
+        }
+    }
+
+    /// Persist this turn's projection without regressing another writer's
+    /// terminal state or answer claim. Publish only a committed write.
+    fn try_save(&mut self) -> Result<(), ocean_store::RoomStoreError> {
+        let mut run = self.run.clone();
+        run.updated_at = Utc::now();
+        let (stored, landed) = with_rooms(&self.state, |store| {
+            store.put_room_agent_run_from_turn(&run)
+        })?;
+        self.run = stored;
+        if landed {
+            publish_room_access_wake(&self.state, &run.room_id);
+        }
+        Ok(())
+    }
+
+    /// Move to `next` unless the run is already terminal or unchanged.
+    ///
+    /// A pending permission keeps the card `AwaitingPermission`: the wait hook
+    /// runs synchronously, but runtime events reach the watcher through two
+    /// channels, so a delta queued before the wait can land after it and must
+    /// not hide the approval the turn is blocked on.
+    pub(crate) fn set_state(&mut self, next: RoomAgentRunState) {
+        if self.run.state.is_terminal()
+            || self.run.state.is_parked()
+            || self.run.pending_permission.is_some()
+            || self.run.state == next
+        {
+            return;
+        }
+        self.run.state = next;
+        self.save();
+    }
+
+    /// Record a tool call: bump the count, label the running step, and note a
+    /// written path.
+    pub(crate) fn tool_started(&mut self, name: &str, args: &Value) {
+        if self.run.state.is_terminal() || self.run.state.is_parked() {
+            return;
+        }
+        self.run.tool_count = self.run.tool_count.saturating_add(1);
+        if let Some(path) = written_path(name, args, &self.cwd) {
+            if !self.run.files_changed.contains(&path) {
+                self.run.files_changed.push(path);
+            }
+        }
+        // A lagging start never replaces a pending approval (see `set_state`).
+        if self.run.pending_permission.is_none() {
+            self.run.state = RoomAgentRunState::RunningTool {
+                label: tool_label(name, args, &self.cwd),
+            };
+        }
+        self.save();
+    }
+
+    pub(crate) fn finish_done(&mut self, reply: &str, reply_seq: Option<u64>) {
+        tokens().remove(&self.run.run_id);
+        if self.run.state.is_terminal() || self.run.state.is_parked() {
+            return;
+        }
+        self.run.pending_permission = None;
+        self.run.summary = summarize(reply);
+        self.run.reply_seq = reply_seq;
+        self.run.state = RoomAgentRunState::Done;
+        self.save();
+    }
+
+    /// The turn's request settled `Cancelled` (an owner cancel, including a
+    /// late success the cancel won): the card ends `Cancelled`, not `Failed`.
+    pub(crate) fn finish_cancelled(&mut self) {
+        tokens().remove(&self.run.run_id);
+        if self.run.state.is_terminal() {
+            return;
+        }
+        self.run.pending_permission = None;
+        self.run.state = RoomAgentRunState::Cancelled;
+        self.save();
+    }
+
+    pub(crate) fn finish_failed(&mut self, reason: &str) {
+        tokens().remove(&self.run.run_id);
+        if self.run.state.is_terminal() {
+            return;
+        }
+        self.run.pending_permission = None;
+        self.run.state = RoomAgentRunState::Failed {
+            reason: truncate(
+                reason.lines().next().unwrap_or("turn failed"),
+                SUMMARY_CHARS,
+            ),
+        };
+        self.save();
+    }
+}
+
+/// Fold this turn's own runtime events (its `PromptControl` event sink) into
+/// the tracker. Room turns have no product SSE bridge, so the sink is the only
+/// live source for the card. Ends when the turn drops its sender.
+pub(crate) async fn watch_runtime_events(
+    tracker: Arc<Mutex<RunTracker>>,
+    mut events: mpsc::UnboundedReceiver<AgentEvent>,
+) {
+    while let Some(event) = events.recv().await {
+        let mut tracker = match tracker.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        apply_runtime_event(&mut tracker, &event);
+    }
+}
+
+fn apply_runtime_event(tracker: &mut RunTracker, event: &AgentEvent) {
+    match event {
+        AgentEvent::ToolExecutionStart {
+            tool_name, args, ..
+        } => tracker.tool_started(tool_name, args),
+        AgentEvent::TurnStart { .. }
+        | AgentEvent::TextDelta { .. }
+        | AgentEvent::ThinkingDelta { .. }
+        | AgentEvent::ToolExecutionEnd { .. } => {
+            tracker.set_state(RoomAgentRunState::Thinking);
+        }
+        _ => {}
+    }
+}
+
+/// A short, human label for a running tool step.
+pub(crate) fn tool_label(name: &str, args: &Value, cwd: &str) -> String {
+    let detail = if let Some(path) = arg_path(args) {
+        Some(relative(path, cwd))
+    } else {
+        ["command", "cmd", "pattern", "query", "url"]
+            .iter()
+            .find_map(|key| args.get(*key).and_then(Value::as_str))
+            .map(|s| s.lines().next().unwrap_or("").trim().to_string())
+    };
+    let label = match detail.filter(|d| !d.is_empty()) {
+        Some(d) => format!("{name} {d}"),
+        None => name.to_string(),
+    };
+    truncate(&label, LABEL_CHARS)
+}
+
+/// The workspace-relative path a writing tool touches, if any.
+pub(crate) fn written_path(name: &str, args: &Value, cwd: &str) -> Option<String> {
+    let lower = name.to_ascii_lowercase();
+    let writes = ["edit", "write", "patch", "create", "apply"]
+        .iter()
+        .any(|verb| lower.contains(verb));
+    if !writes {
+        return None;
+    }
+    arg_path(args).map(|p| relative(p, cwd))
+}
+
+fn arg_path(args: &Value) -> Option<&str> {
+    ["path", "file_path", "filePath", "file"]
+        .iter()
+        .find_map(|key| args.get(*key).and_then(Value::as_str))
+        .filter(|p| !p.trim().is_empty())
+}
+
+fn relative(path: &str, cwd: &str) -> String {
+    let cwd = cwd.trim_end_matches('/');
+    match path.strip_prefix(cwd) {
+        Some(rest) if !cwd.is_empty() && rest.starts_with('/') => rest[1..].to_string(),
+        _ => path.to_string(),
+    }
+}
+
+/// First paragraph of a reply, bounded.
+pub(crate) fn summarize(reply: &str) -> Option<String> {
+    let first = reply.split("\n\n").map(str::trim).find(|p| !p.is_empty())?;
+    Some(truncate(first, SUMMARY_CHARS))
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn tool_label_prefers_relative_path_then_command() {
+        assert_eq!(
+            tool_label("edit", &json!({"path": "/repo/src/lib.rs"}), "/repo"),
+            "edit src/lib.rs"
+        );
+        assert_eq!(
+            tool_label("bash", &json!({"command": "cargo test\n--x"}), "/repo"),
+            "bash cargo test"
+        );
+        assert_eq!(tool_label("todo", &json!({}), "/repo"), "todo");
+        assert!(
+            tool_label("bash", &json!({"command": "x".repeat(200)}), "/")
+                .chars()
+                .count()
+                <= 60
+        );
+    }
+
+    #[test]
+    fn written_path_only_for_writing_tools() {
+        assert_eq!(
+            written_path(
+                "hashline_edit",
+                &json!({"file_path": "/repo/a.rs"}),
+                "/repo"
+            ),
+            Some("a.rs".into())
+        );
+        assert_eq!(
+            written_path("read", &json!({"path": "/repo/a.rs"}), "/repo"),
+            None
+        );
+        assert_eq!(
+            written_path("write", &json!({"path": "/elsewhere/b.rs"}), "/repo"),
+            Some("/elsewhere/b.rs".into())
+        );
+        assert_eq!(written_path("write", &json!({}), "/repo"), None);
+    }
+
+    #[test]
+    fn summarize_takes_first_paragraph() {
+        assert_eq!(
+            summarize("\n\nFixed the bug.\nDetails.\n\nMore."),
+            Some("Fixed the bug.\nDetails.".into())
+        );
+        assert_eq!(summarize("   "), None);
+        assert!(summarize(&"y".repeat(400)).unwrap().chars().count() <= 280);
+    }
+}

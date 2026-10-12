@@ -36,6 +36,16 @@ Capability Matrix). The load-bearing rules:
 - The web core is the bones of the mobile app (Tauri 2 iOS/Android; PWA is
   mobile v0; `compact.css` is the mobile stylesheet; no hover-only
   affordances).
+- One shell on every host (team-platform amendment P1,
+  `docs/specs/2026-10-02-ocean-rooms-team-platform-amendment.md`): full-bleed
+  frame, header spanning it, reading surfaces on the `--content-rail` token;
+  the Dynamic Island is the Sessions entry everywhere; `WorkspacePane` is
+  the only Files/Repo/Browser surface, docked at ≥900px and overlaying below
+  (width-driven, never host-driven). `in_tauri` may gate native titlebar chrome
+  (`is-titlebar` inset, drag region) and keyboard bindings that conflict with
+  browser commands (Cmd/Ctrl+P and Cmd/Ctrl+Shift+F remain native-only; their hints are absent on web/PWA) — never
+  layout, panels, or navigation. Do not reintroduce a web-only deck or per-host
+  panel markup.
 - Shared-file discipline (`app.rs`): smallest hunks, committed promptly;
   NEVER reference an uncommitted module from a shared file — `mod x;` +
   usage lands only when `x` compiles with passing tests.
@@ -308,10 +318,10 @@ Web surface session UI:
   new-project name), not container elements.
 - Reveal lifecycle is deterministic: opening Council closes every competing
   reveal; opening the Island closes every non-Island reveal; every peer reveal
-  open (Council, Rooms, Sessions, Floor, deck, phone dialer, LiveKit controls)
+  open (Council, Rooms, Sessions, Floor, phone dialer, LiveKit controls)
   closes the Island. Window Escape closes exactly one topmost surface in visual
-  z-order: Council → Island → Rooms → Sessions → Floor → deck → phone dialer →
-  LiveKit.
+  z-order: Council → Island → Rooms → Sessions → Floor → phone dialer →
+  LiveKit. The workspace pane is permanent furniture, not a reveal.
 
 ## Rooms Contract
 - The operator-authorized post-G3 product-depth program is governed by
@@ -349,6 +359,99 @@ Web surface session UI:
 - One-level thread replies are writable only in Local rooms. Live federated
   rooms may render threads, but keep the reply composer disabled until the
   Bedrock message contract preserves `thread_parent_seq` end-to-end.
+- Identity is daemon-owned (team-platform P2). The surface never mints or
+  stores a room identity: it reads the owner from `GET /v1/me` (proxied),
+  human joins send only `{kind: human}`, and human posts send no `author_id` —
+  the daemon authors both as its owner. "Me" is the owner `participant_id` in
+  Local rooms and the daemon-projected `access.local_member_id` in federated
+  rooms (`rooms::local_speaker_id`). Names render through
+  `rooms::author_display_name` (roster, then federated member projection,
+  then raw id) and initials through `rooms::name_initials`, with the
+  deterministic `avatar_identity_class` hue on every avatar.
+- Agent work cards (team-platform P3) are daemon projections, not
+  transcript rows. The room SSE also carries `room_agent_run` frames (projection
+  replace by `run_id`, no sequence, same generation+room admission as
+  `room_access`); the daemon replays recent runs on connect, so the surface
+  never polls `/runs`. `room_work_card.rs` renders one card per run under the
+  message whose thread root convened it. Steps load only when opened, from the
+  owner's agent session (`daemon::fetch_session_turns`, sliced by the
+  `[#seq] ... «— mention` prompt marker) and render through the
+  own `AssistantTurn` (`detached`). Card colors come only from
+  tokens (`styles/rooms-cards.css`). Live projections retain the daemon's 50 most
+  recent runs, ordered by start time and run id. Card-step fetches publish
+  success or error only for the latest request while open, with matching
+  daemon origin and unchanged run projection (including session and trigger);
+  closing or disposal invalidates pending work.
+- In-room approvals (P4): a card in `awaiting_permission` with a
+  `pending_permission` shows the tool label plus Approve/Deny icon buttons,
+  which call `POST /v1/rooms/persistent/{key}/runs/{run_id}/permission` with
+  the rendered request's `permission_id` and `tool` (`run_permission_body`), so
+  a stale click is a daemon 409 ("Already decided."), never a decision on a
+  later request. Never apply a decision optimistically; the next
+  `room_agent_run` frame clears it.
+  Permission/settings mutations and the owner rename keep daemon header-only
+  Room operator authority. Operator decision (2026-10-08): any first-party
+  Ocean surface the operator is signed into may act as the Room operator for
+  exactly `PUT /v1/me`, `POST .../runs/{run_id}/permission` and
+  `PUT .../agents/{agent_id}/settings`; every other operator-gated route is
+  unchanged, and a client-supplied operator header is never forwarded.
+  - Web: the proxy attaches the daemon's mode-0600 `operator.key`
+    (`OCEAN_OPERATOR_KEY_FILE` overrides the path), read just before
+    forwarding, to exactly those routes, and only when its operator login is
+    on and the session gate has admitted the request; an unreadable key is a
+    503 before forwarding, and with `OCEAN_SURFACE_AUTH=off` it attaches
+    nothing, so the daemon keeps refusing.
+  - Tauri desktop: the page calls the `room_owner_mutation` command with a
+    fixed `kind` (`rename_owner`, `run_permission`, `agent_settings`) and the
+    ids (`rooms.rs` `OwnerRoute` → `host::room_owner_mutation`). The shell
+    (`crates/ocean-tauri/src/owner_mutation.rs`) builds the fixed method and
+    path itself, reads the same key file just before each request (regular,
+    non-symlink, mode 0600), sends it only to a loopback daemon with no
+    `Origin`/`Cookie`, never caches, logs or returns it, and relays only the
+    daemon's status and body.
+  - Chrome extension: not covered. The side panel talks to the daemon
+    directly from `chrome-extension://`, cannot read the key file, has no
+    proxy session, and its origin is refused by the daemon's operator origin
+    check by design; doing this safely needs a native-messaging host or an
+    extension proxy login, so these actions keep the daemon's authority error
+    there.
+- The room header has exactly one primary action (Join when not joined) and
+  one overflow (`room_overflow.rs`): Share, Agents, Mute/Unmute, Leave. Agents opens the
+  per-room agent settings panel (instructions overlay + model) over
+  `GET/PUT .../agents/{agent_id}/settings`; these settings are local to this
+  Ocean. New secondary room actions go into this overflow, not the header.
+- Rooms UI lives in `src/rooms_workspace/` (team-platform P5): `mod.rs`
+  owns `RoomsWorkspace`, its shared signals, and the transcript; child
+  components are `RoomListRail` (`room_list.rs`), `ChannelComposer`
+  (`composer.rs`), `ThreadPanel` (`threads.rs`), `MembersPanel`
+  (`members.rs`), and the notice banners (`banners.rs`); pure helpers live
+  in `read_cursor.rs`, `mentions.rs` (one `MentionState` drives both
+  composers), `format.rs`, and `access.rs`, each with its own tests. Drafts,
+  send latches, and mention state stay owned by `RoomsWorkspace` because the
+  center and right rails re-render on room state.
+- The timeline hides the daemon's `auto-convene: …` audit rows
+  (`room_messages::is_convene_audit`) because the work card shows the
+  convene; `auto-convene failed …` rows stay. System rows render as one quiet
+  line; grouped rows keep the avatar gutter with the time revealed on intent.
+- Attention (P6, `room_attention.rs`, `styles/rooms-attention.css`): the
+  left-rail @ icon swaps the room list for the mentions inbox
+  (`GET /v1/rooms/inbox`, also forwarded by the proxy; render the daemon's
+  `author_name`); room search input is capped at the daemon's 200 characters;
+  inbox picks dismiss the compact room drawer; both inbox and search picks queue
+  their thread via an origin- and room-key-scoped `Rooms.focus_thread`, consumed
+  only after that room record and root load. Action rows retain native button
+  semantics inside list-item wrappers. Inbox/search responses retire on newer reads, changed daemon origins, room admissions, query edits, and panel cleanup. Mute errors only publish into their originating room. The
+  header search icon opens room search in the right rail (thread > search >
+  members). Muted rooms (`GET/PUT .../prefs`) dim and drop the unread dot.
+  The line above the composer shows agents with a live run. Coworker typing
+  presence is not built: it would cross Bedrock and needs an operator
+  trust-boundary decision. Empty states carry no copy.
+- In `styles/rooms-workspace.css` the "Layout & depth (canonical)" section is
+  the final say on geometry, density, and depth; change values there rather
+  than adding another override layer. Colors only from `tokens.css`.
+- Owner responses publish only for the latest owner request at the current
+  daemon origin. Origin changes clear the old owner and refresh `/v1/me`;
+  an older response cannot overwrite a later owner read.
 - Agent participants are selected from daemon-owned `/v1/agents` identities
   and remain subject to daemon join validation. Free-text agent creation does
   not belong in the surface. Picker keys, values, and labels use the canonical
@@ -379,6 +482,14 @@ Web surface session UI:
 - The rooms browser is a flex column; `.rooms-panel__list` keeps
   `min-height: 0` with vertical overflow so long room lists scroll instead of
   pushing status/actions outside the viewport.
+
+## Workspace Files lifecycle
+
+- Native empty Files exposes the host folder picker as pane-local browsing; picking never rewrites daemon session cwd. Session/cwd intent changes retire picked roots, previews, tree caches and asynchronous results synchronously, including A-B-A; disposal rejects late picker/watch/read completions.
+- Files acquires one native root lease per generation and drops only that lease on change or cleanup. `watch_paths`/`unwatch_paths` accept an optional owner token scoped by the injected native window label; scoped canonical maps are independent of legacy Repo watchers and other consumers/windows. Page-load Started and window destruction retire only that window’s scoped leases; a native page generation rejects pending old-page admissions, while Finished leaves new watches intact. Events carry the lease owner and canonical paths map back to the requested alias. Never clear the legacy canonical map for Files cleanup.
+- The private `host/native_events.mjs` adapter belongs to the `host.rs` seam and uses Tauri 2 IPC callback registration and `plugin:event|listen/unlisten`; legacy subscribers retain their app lifetime. Workspace path listeners belong to the component; cleanup unregisters even late native registration. Ignore events outside the root by path-component boundary. All transcript tool argument previews, including browser tools, are capped at 60 Unicode characters; no remaining consumer parses whole preview JSON.
+- Verify the production event adapter with `node --test scripts/native-events.test.mjs`; its mocked pinned Tauri API exercises delivery, cancellation, late admission and failure cleanup.
+- Pinned cards use the vertical gutter only with the workspace closed; open-workspace layouts retain the horizontal strip.
 
 ## Workspace Map
 
@@ -417,6 +528,20 @@ commit an organization-owned browser key or restore a compiled-in default.
   unauthenticated refusal before forwarding. Root owns locked full proxy tests,
   check, Clippy and independent exact-head review; no live service or owner auth
   is a fixture input.
+
+### Browser pane forwarding (ocean-private #100)
+
+- Expose only the exact daemon `GET /v1/browser/screencast` SSE and
+  `POST /v1/browser/input` JSON endpoints through the session-authenticated
+  PWA proxy. Tauri continues to use its direct daemon URL.
+- Stream screencast bytes through the existing untimed SSE client and
+  `sse_stream_response`; use the bounded JSON client for input and preserve
+  only the upstream status and JSON response bytes. Do not add wildcard
+  forwarding, client credential/header forwarding, CORS, or daemon authority.
+- Drive the production router in fixtures: prove the screencast response
+  arrives before the upstream stream closes, input method/body/status
+  passthrough, and refusal of both routes before upstream access without a
+  valid existing proxy session. Do not use live daemon/browser state.
 
 ## Build / Check
 
@@ -517,12 +642,10 @@ The daemon must be running from `../ocean-os` for live agent behavior.
 **Contract:** FileTreeView captures `daemon.cwd` at mount, creates an
 `on_file_click` callback that calls `resolve_file_tree_path` (unified resolver
 with explicit-vs-absent provenance branch), and sets `preview_file_intent`. The
-app producer Effect reads the intent and dispatches `WorkspaceFocus::Preview`:
-on Tauri it clears the intent after dispatch (FilesPanel never mounts); on web
-it leaves the intent set for the FilesPanel consumer. The consumer (web-only)
-re-reads intent, resolves the path, fetches on cache miss, and clears. On Tauri
-the workspace receives `WorkspaceFocus::Preview` and routes through `open_file`
-→ `open_or_focus` → Preview tab + fetch-on-cache-miss.
+app producer Effect reads the intent on every host, opens the workspace,
+dispatches `WorkspaceFocus::Preview`, and clears the intent. The workspace
+routes it through `open_file` → `open_or_focus` → Preview tab +
+fetch-on-cache-miss.
 
 **Resolver:** `resolve_file_tree_path(entry_path, ancestor_prefix, name,
 workspace_root, cwd)` — explicit absolute/home-relative passthrough; explicit
@@ -531,8 +654,8 @@ resolved-root + ancestor + name where relative roots resolve against cwd.
 `resolve_file_path` exists for non-file_tree callers and follows the same
 cwd-authoritative rule.
 
-**Files:** daemon.rs, app.rs, workspace.rs, components.rs, deck/files.rs,
-styles/deck.css.
+**Files:** daemon.rs, app.rs, workspace.rs, components.rs, deck/files.rs
+(shared tree helpers), styles/workspace.css.
 
 **Frozen gates:** `cargo fmt --check`, `cargo clippy -p ocean-surface-ui
 --target wasm32-unknown-unknown -- -D warnings`, `cargo check -p

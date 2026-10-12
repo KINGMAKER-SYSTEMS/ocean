@@ -1179,6 +1179,238 @@ Validation: cargo xtask docs-check PASS (30 packages, 155 active Markdown files,
 _________________________________________________________________________________
 
 _________________________________________________________________________________
+time: [22:24] [08-10-26]
+agent: [claude] [claude code]
+worktree: [port/rooms-shell] [/Users/risingtidesdev/dev/port-rooms]
+type: [feature-request]
+area: [frontend] [backend] [testing]
+
+Ported the Rooms team-platform P0/P1 shell onto public main: the spec amendment (each coworker owns their daemon, shared Rooms federate), one full-bleed shell on every host with the Dynamic Island as the Sessions entry and WorkspacePane as the only Files/Repo/Browser surface, and the retired web-only deck and Sessions button. Native Tauri keeps Cmd/Ctrl+P for Sessions while web/PWA leaves it to browser Print. Reconciled against public main's newer token-footprint import, compact model-control selectors, the sessions_chrome.rs test rename, and its earlier removal of the unused Rooms search helpers (so the helper-removal port is an empty commit). The P1 host-gating test now skips the documented shortcut seam, which the original Print fix tripped.
+
+Validation: in apps/ocean-surface, `cargo fmt --all -- --check`, `cargo test -p ocean-surface-ui` (847 unit plus integration suites), WASM clippy with warnings denied, WASM check, WASM test compilation, `cargo check -p ocean-surface-proxy`, and `git diff --check` pass. No live browser or desktop run.
+_________________________________________________________________________________
+time: [22:43] [08-10-26]
+agent: [claude] [claude code]
+worktree: [port/rooms-identity-cards-agents] [/Users/risingtidesdev/dev/port-rooms]
+type: [feature-request]
+area: [frontend] [backend] [testing]
+
+Ported Rooms P2 through P4 on top of the shell port. P2 gives each daemon one persisted owner identity (GET/PUT /v1/me, proxied for the PWA); local human joins and posts are authored as that owner whatever id the client claims, and Surface renders real names and initials from the roster or federated member projection instead of minting a browser identity. P3 adds live agent work cards (GET /v1/rooms/persistent/{key}/runs plus room_agent_run SSE frames, interrupted on restart). P4 lets room agents post progress and ask questions through two reserved room tools, with operator-gated run permission and per-room agent settings routes. Reconciled against public main's participant retirement and room inspect routes (import lists, operator guide, route baseline now 125), the endpoint_ready gate on the Rooms workspace, and one retirement test that claimed a retired human id: it now seeds the daemon owner as the retired placeholder, which still gets 409 on join and 403 on post.
+
+Validation: in platform/ocean-os, `cargo fmt --all -- --check`, `cargo test` for ocean-core (63), ocean-store (282), ocean-agent (269) and ocean-daemon (918 passed, 2 failed: the alias-envelope fixtures that already fail on main and are fixed by open #58), `cargo check --workspace --tests`, and docs-check pass. In apps/ocean-surface, all six Surface gates plus proxy tests pass (857 unit tests). No live daemon, browser or desktop run.
+_________________________________________________________________________________
+time: [23:24] [08-10-26]
+agent: [claude] [claude code]
+worktree: [port/rooms-identity-cards-agents] [/Users/risingtidesdev/dev/fix-pr68]
+type: [bug report]
+area: [backend] [frontend] [testing]
+
+Fixed the review defects in the Rooms P2-P4 port (#68), inherited from private issues #91 and #92. The in-room permission route now needs the pending permission_id (and the card's tool name when the client has it) and returns 409 for anything but the request pending now, so a retried Allow or AllowSession can never approve a later request; Surface sends both. A thread answer claims a parked room_ask run with a store compare-and-swap before admission, only an admitted successor closes it Done, a refused admission leaves it parked, a losing concurrent reply starts nothing, and startup settles an outstanding claim from durable evidence without replaying. An owner-cancelled room turn now ends Cancelled instead of Failed "turn_failed". The daemon owner id now comes from member.toml, then OCEAN_MEMBER_ID, with the same precedence and strict parsing as the #41 identity route, re-keying a login-derived owner once; USER is only the fallback. PUT /v1/me requires the room operator. The logged-in Surface web proxy now attaches the daemon's mode-0600 operator key to exactly PUT /v1/me, run permission and agent settings, so in-room approval works from the browser; with login off it attaches nothing, and the daemon gate is unchanged for every other caller.
+
+Validation: in platform/ocean-os, `cargo fmt --all -- --check`, `cargo test -p ocean-daemon --locked room` (269 passed, 2 failed: the alias-envelope fixtures that already fail on main, issue #42), `cargo test -p ocean-store --locked` (285), `cargo check --workspace --tests`, and docs-check pass. In apps/ocean-surface, `cargo test -p ocean-surface-ui` (858 unit), WASM clippy with warnings denied, and proxy tests (31) plus proxy clippy pass. New tests: bound permission decisions, single-claim and refused-admission resume, restart claim settlement, owner cancel ends Cancelled (fails without the fix), member-id owner, operator-gated rename, proxy operator key. No live daemon, browser or desktop run.
+_________________________________________________________________________________
+time: [11:51] [09-10-26]
+agent: [claude] [claude code]
+worktree: [port/rooms-identity-cards-agents] [/Users/risingtidesdev/dev/fix-pr68b]
+type: [bug report]
+area: [backend] [testing]
+
+Fixed the second-round review findings on the Rooms P2-P4 port (#68) and recorded the operator's decision on owner mutations. A thread answer's claim on a parked room_ask run is now a guard that settles from durable evidence if the posting request is dropped mid-admission, so a client disconnect no longer leaves the run claimed until restart. The running turn writes its work card through a store call that never rewrites a closed run and keeps the stored answer claim, so a late progress line or finish from the asking turn cannot reopen an answer. The successor's work card is written before the turn start returns, so settling an answer Done always has a durable successor. The member id now only seeds a fresh owner: an owner already in rooms.db is never re-keyed, and the seeded id is the identity member id as is, with each @ mapped to - because @ starts a mention. The operator decided on 2026-10-08 that any first-party surface he is signed into may make exactly PUT /v1/me, run permission decisions and room agent settings as the Room operator; the contracts say so, and the Tauri shell now does it natively (reads operator.key on the Rust side, fixed routes only, loopback only, key never reaches the page). The Chrome extension is not covered (no key access, no proxy session, origin refused by design) and the TUI makes none of these calls.
+
+Validation: in platform/ocean-os, `cargo fmt --all -- --check`, `cargo test -p ocean-daemon --locked room` (274 passed, 2 failed: the alias-envelope fixtures that fail on main, #42), `cargo test -p ocean-store --locked` (287), `cargo check --workspace --tests` and docs-check pass. In apps/ocean-surface, fmt, `cargo test -p ocean-surface-ui` (859 unit plus integration suites), `cargo test -p ocean-surface-proxy` (31) and WASM clippy with warnings denied pass; in crates/ocean-tauri, `cargo test` (34) and clippy with warnings denied pass against a placeholder dist. No live daemon, browser or desktop run.
+_________________________________________________________________________________
+time: [22:50] [08-10-26]
+agent: [claude] [claude code]
+worktree: [port/rooms-visual-attention] [/Users/risingtidesdev/dev/port-rooms]
+type: [feature-request]
+area: [frontend] [backend] [testing]
+
+Ported Rooms P5 and P6 on top of the P2-P4 port. P5 splits the Rooms workspace into a rooms_workspace module tree (access, banners, composer, format, members, mentions, read cursor, room list, threads) with the visual pass owned by the shared tokens, and hides the daemon's auto-convene audit rows behind the work card. P6 adds an owner-local mentions and replies inbox, bounded room search, per-room mute preferences and a compact working line, with inbox and search responses retired when origin, room admission, query or request ticket changes. Public main's copy of the old rooms_workspace.rs carried one extra caller-alias test, so the file was deleted by hand and that test moved into rooms_workspace/access.rs; the daemon route baseline is now 129.
+
+Validation: in apps/ocean-surface, fmt, `cargo test -p ocean-surface-ui` (865 unit tests plus integration suites), WASM clippy with warnings denied, WASM check, WASM test compilation, proxy check and proxy tests pass. In platform/ocean-os, fmt, ocean-core (63) and ocean-store (286) tests, `cargo check --workspace --tests` and docs-check pass; ocean-daemon is 920 passed, 3 failed, all three the persistent-room lifecycle fixtures that fail on main and are fixed by open #58. No live daemon, browser or desktop run.
+_________________________________________________________________________________
+time: [23:09] [08-10-26]
+agent: [claude] [claude code]
+worktree: [port/rooms-visual-attention] [/Users/risingtidesdev/dev/fix-pr69]
+type: [bug report]
+area: [backend] [frontend] [testing]
+
+Fixed three review findings on the Rooms P5-P6 port (PR #69). The mentions inbox moved from GET /v1/rooms/persistent/inbox, where its static segment made a room keyed inbox unreachable through its own detail route, to GET /v1/rooms/inbox; the daemon banner and operator guide, the Surface inbox client and a new proxy route follow, and a call room id inbox still reaches its LiveKit token route. The inbox now scans only the 50 most recently active open rooms (updated_at order) instead of every open room under the store lock, and room search refuses queries over 200 characters with 400 query_too_long (the Surface search input carries the same maxlength).
+
+Validation: in platform/ocean-os, `cargo fmt --all -- --check`, `cargo check --workspace --tests` and docs-check pass; `cargo test -p ocean-daemon --locked room` is 268 passed, 2 failed, both the alias-envelope fixtures that fail on main. The new route-precedence, inbox-cap and search-cap tests were each confirmed to fail with their fix reverted. In apps/ocean-surface, fmt, `cargo test -p ocean-surface-ui` (866 unit tests plus integration suites), WASM clippy with warnings denied, `cargo check -p ocean-surface-proxy` and the new proxy inbox routing test (fails without the route) pass. No live daemon, browser or desktop run.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [21:51] [10-09-26]
+agent: [Codex] [PR68 persistence repair]
+worktree: [codex/pr68-durable-run-transitions]
+type: [bug report] PR68 / issue71
+area: [backend] [testing]
+
+Run admission propagates initial work-card store failures before spawning execution.
+room_ask returns a failed-park error without terminating or retaining an uncommitted
+parked state; its already-posted question remains in the append-only transcript.
+Added real SQLite abort-trigger regressions for both failure points and retained
+success, claim and authority coverage. Owning daemon AGENTS now states the durable
+transition contract; parent ownership/index contracts remain unchanged.
+Validation on isolated Mac mini: ten p4_ tests and locked daemon check passed.
+Both new regressions fail with swallowed-error behavior restored; fixed sources
+restored byte-identically and all ten passed again. Formatting and diff checks pass.
+No live daemon changes. Other PR68 review findings remain outside this repair.
+
+_________________________________________________________________________________
+time: [22:09] [2026-10-09] America/New_York
+agent: [Codex] [factory release owner]
+worktree: [codex/pr68-reviewed-repairs]
+type: [bug report]
+area: [backend] [frontend] [review]
+
+Resolved the five remaining PR68 review findings through issues73/74. Invalid
+room-model overrides retain the immutable admitted package fallback using the
+actual runtime resolver; valid overrides and explicit turn selection keep their
+priority. Fresh-owner identity documentation now matches member-id seeding and
+preserved persisted ids. Surface uses ordinary accessible agent-selection buttons,
+retains the newest50 work cards, and fences both transcript and error completions
+by request ticket, open lifecycle, daemon origin and the complete captured run.
+Independent review found an Effect-scheduling gap; full-run equality and a
+same-ticket Thinking-to-Done regression close it. Prior durable start/park repairs
+remain intact. Owning devlogs updated; parent ownership and child indexes unchanged.
+
+Validation: daemon P4 tests11/11, locked daemon check, format/diff checks pass;
+new model regression fails with its resolver filter removed. Cached P4 rerun also
+passes with disposable auth/config/XDG paths and unchanged HOME. Surface initial
+snapshot passed861 unit and28 integration tests; final work-card tests4/4, live-cap regression1/1 and
+WASM check pass. Independent exact integration review follows this
+ledger update. No merge, install, live provider call or two-machine outcome.
+time: [10:40pm] [09-10-26]
+agent: [claude] [claude-opus-5-5]
+worktree: [port/rooms-visual-attention] [/Users/risingtidesdev/dev/oceanwork/wt-pr69]
+type: [bug report]
+area: [backend] [review] [testing]
+
+Review fix on the Rooms P5-P6 port (PR #69). Room search and the mentions inbox returned stored message rows raw, skipping the human-read projection every transcript response applies, so a row whose author id fails the member-id bound (a pre-guard row or a federated row carrying brackets, control characters or an oversize id) came back verbatim. Search results now go through projected_transcript, inbox messages through projected_room_message, and the inbox author_name fallback uses rendered_author_id; mention and reply matching still runs on the raw row. New test p6_search_and_inbox_project_unbounded_author_ids fails with the fix reverted.
+
+Validation: in platform/ocean-os, `cargo fmt --all -- --check`, `cargo test -p ocean-store --locked` (291), and `cargo test -p ocean-daemon --locked` filtered to p6_, inbox, search, prefs, mute and router_contract pass. In apps/ocean-surface, `cargo test -p ocean-surface-ui -p ocean-surface-proxy` pass. No live daemon, browser or desktop run.
+_________________________________________________________________________________
+time: [22:10] [10-09-26]
+agent: [claude] [claude-opus-5-5] [PR68 reviewer]
+worktree: [port/rooms-identity-cards-agents]
+type: [bug report] PR68
+area: [backend] [testing]
+
+Fixed a work-card race: the permission wait hook marks a run AwaitingPermission synchronously, but runtime events reach the card watcher through two channels, so a TextDelta or ToolExecutionStart still queued at that moment flipped the card back to Thinking/RunningTool. The Surface shows Approve/Deny only for AwaitingPermission and room-turn waiters only accept the run token, so the turn could block with no way to approve it. set_state and tool_started now keep AwaitingPermission while a permission is pending; tool counts still advance. Added a daemon regression test. Daemon AGENTS unchanged: the durable-transition contract is the same.
+
+Validation on Mac mini (private target dir): `cargo test -p ocean-daemon --locked` 933 passed, 2 failed (the alias-envelope fixtures that also fail on main, #42); ocean-store 287, ocean-agent/ocean-core pass.
+_________________________________________________________________________________
+time: [11:40] [09-10-26]
+agent: [claude] [claude-opus-5-5]
+worktree: [port/rooms-shell] [~/dev/oceanwork/wt-pr66]
+type: [bug report]
+area: [frontend] [review]
+
+PR #66 review fix: the palette's "Switch Session…" command still advertised the ⌘P hint on web/PWA, where Cmd/Ctrl+P is left to browser Print and does not open Sessions. The hint now renders only in native Tauri, matching the amendment's "native-only shortcut hint is hidden on web" rule (the Island hint already did). Validation: `cargo fmt --all -- --check`, `cargo test -p ocean-surface-ui`, WASM clippy with warnings denied pass.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [22:28] [09-10-26]
+agent: [codex] [factory release]
+worktree: [codex/pr66-reviewed-repairs] [factory-pr66-reviewed-repairs/ocean]
+type: [bug report]
+area: [frontend] [testing] [review]
+
+PR #66 / issue #75: restored native-only Sessions and Recall shortcut hints and interception, bounded Unicode tool previews, horizontal pinned cards while Workspace is open, and pane-local Files picker/watch refresh. Files uses generation and disposal fencing, canonical owner leases isolated by native window, and page-Started retirement preserving Repo and other windows. Shared Tauri 2 event adapter now uses the pinned IPC API with synchronous cancellation and late-admission cleanup. Preserved concurrent palette repair 51cd328c and reconciled canonical main f1b22bd8; source matches builder 698431ad except its explanatory shortcut comment.
+
+Validation: native watcher tests 11/11 (real notify aliases, peer and legacy survival), locked native lib check; workspace tests 146/146, sessions chrome 5/5, shortcuts 2/2, previews 3/3, final host tests 14/14, WASM check, executable production event-adapter Node tests 4/4. Native compilation used an ignored disposable frontendDist fixture, not a served bundle. No installation, native UI smoke, deployment or live verification. Final integration review and hosted builds remain required; release owner is this factory chat.
+
+_________________________________________________________________________________
+time: [22:31] [09-10-26]
+agent: [codex] [factory release]
+worktree: [codex/pr68-reviewed-repairs]
+type: [workflow]
+area: [backend] [frontend] [review]
+
+PR #68 stack reconciliation: preserved concurrent pending-permission repair 41e41b08 and merged the reviewed PR #66 shell head 729cb2fb, including canonical main f1b22bd8. The additive PromptControl conflict retains both Room extra_tools and requested model/provider/reroute metadata in its struct, destructure and defaults. Both public ledger histories retained. Existing owning contracts already describe both behaviors; no new ownership or index changes.
+
+Independent review acknowledged the pending-permission delta; its new regression passed as part of the dependent integrated P4 suite (12/12), with P6 7/7 and locked daemon check on that prior integration. Shell focused evidence is recorded in its preceding receipt. This new combined main/shell/Room head requires fresh review and required builds; combined targeted verification is in progress on the dependent #69 integration. No deployment or live behavior claim.
+
+_________________________________________________________________________________
+time: [22:34] [09-10-26]
+agent: [codex] [factory release]
+worktree: [codex/pr69-reviewed-repairs]
+type: [bug report]
+area: [frontend] [backend] [review] [testing]
+
+PR #69 / issue #76: preserved button semantics for inbox/search, closed compact navigation after inbox selection, and queued search thread focus until root hydration under matching room/origin admission. Inbox roster lookup avoids transcript hydration; SQL LIMIT bounds materialized open-room rows (not a claim of bounded SQLite scan cost). Corrected day-key documentation. Preserved concurrent author projection 42d700ac, pending-permission repair and reviewed shell/main reconciliation through #68 de09e349. A test-only Rooms constructor avoids browser initialization in native regression tests. Source review passed 76dfd1db; final integration receipt precedes exact-head review and hosted checks.
+
+Validation: store 3/3 on unchanged store source, with both new regressions failing without fixes; final daemon P4 12/12, P6 7/7, locked daemon check; Surface Rooms 91/91, attention 6/6, host 14/14, workspace filter 131/131 (includes the same 91 Rooms tests, not additional), sessions chrome 5/5, production event adapter Node 4/4, locked WASM check; component formatting and diff checks pass. Remote Surface validation source matched all 376 tracked file hashes. No install, deployment or live acceptance claim. Final release ownership is this factory chat; required approval/build gates and parent-first release order remain.
+time: [22:20] [08-10-26]
+agent: [claude] [claude code]
+worktree: [port/room-agent-consent] [/Users/risingtidesdev/dev/port-misc]
+type: [refactor]
+area: [backend] [testing]
+
+Ported the daemon half of ocean-private #59 so Room-agent consent can no longer bind a package that changed after it was previewed. The authorize and reauthorize routes accept an optional expected_definition_digest, compared against the same immutable package capture used for decision hashing and the binding; a mismatch returns a fixed 409 definition_digest_mismatch before any decision is consumed, binding or audit row written, or live request cancelled. Omitting it or sending null keeps today's callers working. Both routes now take only JSON objects through a map-only decoder that still hands every original key to the strict body type, so positional arrays are refused with 400 invalid_request while duplicate and unknown fields stay rejected. The source diff applied three-way without conflict; the only adaptation is the ocean-daemon contract text, which names ocean-private #55/#59 instead of private-repo-relative numbers and drops the private frozen-base hash.
+
+Validation: `cargo test -p ocean-daemon room_reviewed_digest_ --locked -- --test-threads=1` (3 passed) on this commit; full gates are recorded with the follow-up #66 port entry.
+_________________________________________________________________________________
+time: [22:41] [08-10-26]
+agent: [claude] [claude code]
+worktree: [port/room-agent-consent] [/Users/risingtidesdev/dev/port-misc]
+type: [refactor]
+area: [backend] [testing]
+
+Ported the daemon half of ocean-private #66 so an invited Room Member can review and authorize its own locally bound agents. The proof behind consent now accepts the credential-owning human as Owner or Member, but only while federated access is Live or Recovering, and the exact target must still be an Agent owned by that human with the captured local package binding. Room administration, Local bootstrap, the digest precondition from the previous commit, generation and lifetime checks and per-turn tool permissions keep their existing boundaries. The source diff applied three-way without conflict on top of the #59 port, including the registered-route fixtures for two disposable node identities and the fake-provider federation dispatch proof parameterized for Owner and invited Member. The only adaptation is the ocean-daemon contract text, which names ocean-private issue numbers and drops the private base hash.
+
+Validation: `cargo fmt --all -- --check`, `cargo check --workspace --tests --locked`, `cargo run -q -p xtask -- docs-check` (PASS; 30 packages, 153 Markdown files, 170 local links) and `git diff --check` pass. `cargo test -p ocean-daemon --locked`: 918 passed, 2 failed; the two failures are the alias-envelope fixtures already failing on main (issue #42, fixed by open PR #58). Focused `room_reviewed_digest_` 3, `room_sovereign_` 6 and `p2c_` 40 passed. No external provider was called.
+_________________________________________________________________________________
+
+time: [22:26] [08-10-26]
+agent: [claude] [claude code]
+worktree: [port/rooms-pwa-browser] [/Users/risingtidesdev/dev/port-rooms]
+type: [feature-request]
+area: [frontend] [backend] [testing]
+
+Ported the PWA browser-pane forwarding onto public main. The Surface proxy now relays exactly the daemon's GET /v1/browser/screencast SSE stream and POST /v1/browser/input JSON route behind the existing session cookie, so the WorkspacePane browser works on the PWA origin the way Tauri already reaches the daemon directly. Screencast bytes use the untimed SSE client and the shared no-buffer response; input uses the bounded JSON client. No client cookies, authorization, origin or operator headers are forwarded, and there is no wildcard forwarder. Clean three-way apply; only the contract heading was renamed to cite the private issue.
+
+Validation: in apps/ocean-surface, `cargo fmt --all -- --check`, `cargo test -p ocean-surface-proxy` (32 passed, including loopback fixtures for refusal without a session, input passthrough without credential headers, and a screencast frame received before upstream EOF), proxy clippy with warnings denied, `cargo test -p ocean-surface-ui`, WASM clippy with warnings denied, WASM check, WASM test compilation, and `cargo check -p ocean-surface-proxy` pass. No live PWA run.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [21:49] [10-09-26]
+agent: [Codex] [PR67 review repair]
+worktree: [codex/pr67-auth-fixture-reconcile]
+type: [refactor]
+area: [testing] [review]
+
+Reconciled PR67 with public main f1b22bd8, preserving both appended event histories.
+The browser-input fixture sends a synthetic Authorization header before asserting
+that no client authorization reaches the daemon. Production behavior is unchanged.
+Surface devlog contracts remain accurate and intentionally unchanged. This supplies
+proxy transport; PWA workspace exposure still depends on the separate shell work.
+Validation: Mac mini isolated cargo test --locked -p ocean-surface-proxy passed
+32/32; changed-file rustfmt and diff checks passed. No live PWA outcome claimed.
+Separate review, hosted checks, approval, merge and deployment remain pending.
+_________________________________________________________________________________
+
+time: [22:04] [10-09-26]
+agent: [claude] [opus 5.5]
+worktree: [fix/federation-roster-caller-member-ids] [~/dev/oceanwork/wt-fed-roster-envelope]
+type: [bug-report]
+area: [backend] [infra]
+
+Federated rooms on smaths-mini (northstar, ocean-team) sat in `recovering` with Pending outbox rows and no log output. Replaying the receiver's reads against production Bedrock with the room bearer showed a valid `hello` (high-water 0) and a 200 roster, but the roster carries `caller_member_ids` (Bedrock since ocean-bedrock #137, 2026-09-02) and `MembersEnvelope` is `deny_unknown_fields`, so every epoch silently returned Recover after hello. Fix: accept and ignore `caller_member_ids` on the strict envelope, warn with `outcome="roster_rejected"` on non-transport roster parse failures, and regression test `roster_with_caller_member_ids_reaches_live` (red without the field, green with it). The supervised launcher `deploy/ocean-daemon.sh` now sources owner-only `~/.config/ocean-rs/federation.env` and prints `federation=on|off`; previously only a hand-edited installed copy did, which the installer would overwrite. Operator guide documents the env file, contributor-side local redemption, and the receiver replay diagnosis. Independent review round: `WireMember` also accepts Bedrock's `operator_id` (same failure class, operator rooms); roster projection failures warn too; startup warns `federation_unconfigured` when credentialed rooms exist without a URL; the launcher parses federation.env as data (owner-only, not group/other-writable, `OCEAN_FEDERATION_*` keys only, CR/quote tolerant, plist values win) instead of sourcing it, verified under macOS bash 3.2 against command substitution, foreign keys, spaces, CRLF, group-writable and unreadable files. End-to-end: the fixed release binary, run unsupervised on an isolated HOME with a copied rooms.db (outbox cleared), brought northstar and ocean-team to `live` against production Bedrock. Follow-up folded in before merge: warn-only `credential_member_mismatch` when Bedrock's `caller_member_ids` omit the credential's local member (stale-credential diagnostic; never blocks Live). Launcher mode check fails closed on unparseable `stat` output. Validation: room_federation 92/92; ocean-daemon 910 passed / 2 failed at 99be7a9 (the known persistent_room envelope-key assertions, identical on unmodified main); clippy -p ocean-daemon --all-targets -D warnings clean; fmt clean; docs-check PASS; installer fixtures 12/12. Runtime ops the same evening (not code): Jay's laptop federation.env reduced to OCEAN_FEDERATION_URL (the direct-redeem contributor token was removed and its backup deleted) and his daemon restarted; a fresh invite minted by John's daemon was redeemed through Jay's local /v1/rooms/persistent/invites/redeem (credential f9757e6e in his rooms.db); the stale direct-path Bedrock member db0367cd was removed by the room owner (old token now 403 membership_revoked); the empty local test room ns-taskforce was soft-closed on smaths-mini. Both daemons stay `recovering` until this fix is merged and installed.
+_________________________________________________________________________________
+
+time: [23:30] [09-10-26]
+agent: [codex] [factory release]
+worktree: [codex/pr65-consent-reconcile]
+type: [workflow]
+area: [backend] [testing] [review]
+
+PR #65 reconciled own-agent consent with canonical main f1b22bd8 and preserved both public ledger histories. Original consent and federation source remains unchanged; main's request fixture additions merged cleanly. Resolved the outstanding review finding by removing the private frozen-base identifier from the public consent manifest. Optional reviewed-digest consent remains exact and object-only; invited federated Members may consent only to their own locally bound agents while access is Live/Recovering. Existing Connecting/Revoked refusal, operator authority and Local bootstrap semantics remain unchanged.
+
+Validation: focused reviewed-digest, sovereign-consent and federation p2c groups passed (3, 6 and 40 tests), plus locked daemon check, formatting, diff and docs checks (30 packages, 153 docs, 170 links). Synthetic absolute auth/config/XDG fixtures only; HOME unchanged. Independent source review ACKed 307a316f. This receipt precedes final exact-head review and required hosted checks. Nearest owning contract corrected; parent ownership/indexes unchanged. Maintainer approval, client adoption of the optional digest and actual two-human/live-migration acceptance remain separate. No installation, deployment or live provider calls.
+_________________________________________________________________________________
 time: [23:50] [09-10-26]
 agent: [codex]
 worktree: [codex/pr59-public-proposals-reconcile]
@@ -1188,3 +1420,43 @@ area: [docs] [review]
 Reconciled the two existing extension/lifecycle proposals with canonical main and made their public authority self-contained. Active proposals and owning indexes now describe technical requirements and public source anchors directly, require explicit canonical public operator rulings, and remove private tracker/SHA dependencies and stale tracker-number/billing claims. Both proposals remain PROPOSED; implementation, lifecycle-state adoption, installation and acceptance stay gated. Existing ledger histories were preserved.
 
 Validation: docs-check passed (30 packages, 155 active Markdown files, 175 local links), git diff --check passed, public source anchors were checked, and the accepted Stage A manifest remains byte-identical to canonical main. Independent review acknowledged source e291fa0b; final receipt head and required checks remain release gates. Owning component/docs contracts and proposal indexes updated; root ownership/index unchanged. No runtime change, merge or deployment is claimed.
+
+_________________________________________________________________________________
+
+time: [14:44] [10-12-26]
+agent: [claude] [opus 5.5]
+worktree: [fix/installer-launchctl-enabled-spelling] [~/dev/oceanwork/wt-installer-spelling]
+type: [bug-report]
+area: [infra]
+
+`ops/install-ocean-daemon.sh` refused to install on macOS 26 with "cannot establish the prior supervision override": `launchctl print-disabled` now prints `"label" => enabled|disabled` instead of `true|false`, and the override parser only accepted the old spelling. It now accepts both, treating `disabled` like `true`, so operator disablement is still honored. Fixtures gained modern-spelling success and disabled-preservation cases (red on the old regex, 14/14 green). Also recorded: at john's direction, the `main` branch protection's required pull-request review (including last-push approval) and admin enforcement were removed; required status checks remain.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [14:58] [10-12-26]
+agent: [Codex]
+worktree: [PR66 port/rooms-shell; factory-pr66-reviewed-repairs/ocean]
+type: [workflow]
+area: [review]
+Reconciled reviewed PR66 729cb2fb7a1ac84a4282501053d9b1d7e37e70e7 with canonical main1dfc6802bb74fecdcf83f6f17732b671c892b632 after external79/89 release. Only events.md conflicted; both ordered parent histories preserved. All1155 non-ledger index entries match automatic merge and Surface subtree is unchanged from reviewed PR66. Installer14/14, native-events4/4, bash syntax and diff-check pass; no heavy build/live action. Root takes exclusive release custody for this candidate; fresh independent final-head review and required hosted builds follow this entry. Approval-policy issue90, stack rollout and client acceptance remain separate gates. Applicable AGENTS contracts intentionally unchanged: source behavior and ownership contracts unchanged.
+time: [15:08] [10-12-26]
+agent: [Codex]
+worktree: [PR65 port/room-agent-consent; factory-pr65-consent-reconcile/ocean]
+type: [workflow]
+area: [review]
+Reconciled reviewed PR65 73e8fe170a6788a2033174cb4ef9123eb14e4f7e with canonical main1dfc6802bb74fecdcf83f6f17732b671c892b632. Only events.md conflicted; five original chunks preserved verbatim with both parent orders. All1153 non-ledger entries match automatic merge; three consent source files unchanged, incoming release source retained. Diff-check and source-tree comparisons pass. Installer bytes match previously verified14/14; no duplicate test or heavybuild. Root retains exclusive finalhead custody; fresh independent adversarial review and hosted builds follow. Child88 owner/draft/findings unchanged. Issue90 approvalpolicy and native/served consent acceptance remain separate gates. AGENTS contracts unchanged or automatically combined; no new behavior/ownership. No live action or mainmerge.
+time: [15:34] [10-12-26]
+agent: [Codex]
+worktree: [PR67 codex/pr67-auth-fixture-reconcile]
+type: [workflow]
+area: [review]
+Reconciled PR67 4f2fc5e449fa33a9a4858ce50c9bf24c66ac0471 with canonical main 1dfc6802bb74fecdcf83f6f17732b671c892b632. Only events.md conflicted; both complete74-record public parent histories remain verbatim and ordered. All1153 non-ledger entries match automatic merge. Complete Surface source and its prior32/32 proxy validation receipt are unchanged; Ocean OS matches main. Cached diff and shell syntax checks pass; identical tests were not repeated. Existing contracts remain accurate with no ownership/index changes. Root owns final commit, separate adversarial review, push and fresh hosted builds. Issue90 and live acceptance remain holds; live PWA smoke is separate from transport fixture proof. No live PWA outcome, authentication, installation or deployment claimed.
+
+_________________________________________________________________________________
+time: [17:47] [12-10-26]
+agent: [Codex] [factory release owner]
+worktree: [port/private-proposals; PR59]
+type: [refactor]
+area: [writing] [review]
+
+Reconciled PR59 with canonical main34751752. Only additive events.md history conflicted; both complete parent histories are preserved verbatim and ordered. Original five proposal/index documents remain byte-identical; both proposals stay PROPOSED and require public operator decisions before implementation. Accepted Stage A manifest equals canonical main; all other non-ledger content equals main. Direct-rustc canonical docs-check passed 30 packages, 155 active documents and 175 links. Diff check passed. Owning contracts and indexes intentionally unchanged because this integration changes no proposal or runtime contract. Final exact-head independent review and required hosted checks follow. Standing independent maintainer approval and policy90 holds remain; no operator ratification, slice acceptance, merge, deployment or live outcome claimed.
