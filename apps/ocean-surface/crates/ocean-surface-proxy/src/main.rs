@@ -458,6 +458,12 @@ fn build_app(state: Arc<AppState>, dist: &std::path::Path) -> Router {
         )
         .route("/v1/requests", get(proxy_requests))
         .route("/v1/requests/{id}/cancel", post(proxy_cancel))
+        // The browser pane is same-origin on the PWA: relay its long-lived
+        // daemon screencast and bounded input through the existing session
+        // auth boundary. Keep these as exact routes; this is not a wildcard
+        // daemon forwarder.
+        .route("/v1/browser/screencast", get(proxy_browser_screencast))
+        .route("/v1/browser/input", post(proxy_browser_input))
         // Component interaction events (kanban click / form submit) flow from a
         // remote surface back to the daemon through this origin too, so a phone
         // via the tunnel can drive interactive components (OCEAN-62c).
@@ -1272,6 +1278,23 @@ async fn proxy_requests(State(state): State<Arc<AppState>>, req: Request) -> imp
     proxy_get_json(&state, &path).await
 }
 
+/// Stream the daemon browser screencast through the authenticated PWA origin.
+async fn proxy_browser_screencast(State(state): State<Arc<AppState>>, _req: Request) -> Response {
+    let url = format!(
+        "{}/v1/browser/screencast",
+        state.daemon_url.trim_end_matches('/')
+    );
+    match state.http.get(&url).send().await {
+        Ok(resp) => sse_stream_response(resp),
+        Err(err) => (StatusCode::BAD_GATEWAY, daemon_unreachable_body(&err)).into_response(),
+    }
+}
+
+/// Forward one browser input event through the authenticated PWA origin.
+async fn proxy_browser_input(State(state): State<Arc<AppState>>, body: Bytes) -> Response {
+    proxy_post_json(&state, "/v1/browser/input", body).await
+}
+
 /// Reverse-proxy POST /v1/requests/{id}/cancel (halt a running turn).
 async fn proxy_cancel(
     State(state): State<Arc<AppState>>,
@@ -1941,6 +1964,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use axum::{
         body::{to_bytes, Body, Bytes},
@@ -2187,16 +2211,23 @@ mod tests {
         for (method, uri) in [
             (Method::GET, "/v1/requests"),
             (Method::POST, "/v1/requests/fixture-request/cancel"),
+            (Method::GET, "/v1/browser/screencast"),
+            (Method::POST, "/v1/browser/input"),
         ] {
             for cookie in [None, Some("ocean_session=wrong-session")] {
                 let mut request = Request::builder().method(method.clone()).uri(uri);
                 if let Some(cookie) = cookie {
                     request = request.header(header::COOKIE, cookie);
                 }
+                let body = if uri == "/v1/browser/input" {
+                    Body::from(r#"{"kind":"click","x":10,"y":20}"#)
+                } else {
+                    Body::empty()
+                };
                 let response = fixture
                     .app
                     .clone()
-                    .oneshot(request.body(Body::empty()).unwrap())
+                    .oneshot(request.body(body).unwrap())
                     .await
                     .unwrap();
                 assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -2223,6 +2254,176 @@ mod tests {
         assert_eq!(response.headers()[header::LOCATION], "/login");
         assert!(!super::is_public_boot_asset("/v1/requests"));
         assert!(fixture.received.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn browser_input_is_forwarded_through_the_authenticated_production_route() {
+        let body = r#"{"kind":"click","x":10,"y":20}"#;
+        let upstream_body = "{\"ok\":true}\n";
+        let fixture = request_status_fixture(StatusCode::ACCEPTED, upstream_body).await;
+        let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_address = proxy_listener.local_addr().unwrap();
+        let app = fixture.app.clone();
+        let proxy_server = tokio::spawn(async move {
+            axum::serve(proxy_listener, app).await.unwrap();
+        });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let response = client
+            .post(format!("http://{proxy_address}/v1/browser/input"))
+            .header(reqwest::header::COOKIE, "ocean_session=test-session")
+            .header(
+                reqwest::header::AUTHORIZATION,
+                "Bearer synthetic-client-token",
+            )
+            .header(reqwest::header::ORIGIN, "https://surface.example")
+            .header("x-ocean-operator-key", "synthetic-unused-key")
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert_eq!(
+            response.bytes().await.unwrap().as_ref(),
+            upstream_body.as_bytes()
+        );
+        proxy_server.abort();
+        let _ = proxy_server.await;
+
+        let received = fixture.received.lock().unwrap();
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].method, Method::POST);
+        assert_eq!(received[0].uri.to_string(), "/v1/browser/input");
+        assert_eq!(received[0].body.as_ref(), body.as_bytes());
+        assert_eq!(
+            received[0].headers[header::CONTENT_TYPE],
+            "application/json"
+        );
+        for name in ["cookie", "authorization", "origin", "x-ocean-operator-key"] {
+            assert!(
+                !received[0].headers.contains_key(name),
+                "{name} must not be forwarded"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn browser_screencast_returns_before_the_upstream_stream_finishes() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let upstream = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0u8; 1];
+            while !request.ends_with(b"\r\n\r\n") {
+                let n = socket.read(&mut byte).await.unwrap();
+                assert_ne!(n, 0, "upstream request ended before headers completed");
+                request.push(byte[0]);
+            }
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            let frame = b"event: status\ndata: {\"state\":\"no-browser\"}\n\n";
+            socket
+                .write_all(format!("{:x}\r\n", frame.len()).as_bytes())
+                .await
+                .unwrap();
+            socket.write_all(frame).await.unwrap();
+            socket.write_all(b"\r\n").await.unwrap();
+            socket.flush().await.unwrap();
+            let _ = started_tx.send(request);
+            let _ = release_rx.await;
+            socket.write_all(b"0\r\n\r\n").await.unwrap();
+            socket.shutdown().await.unwrap();
+        });
+
+        let dist = tempfile::tempdir().unwrap();
+        let mut state = auth_test_state();
+        let state_mut = Arc::get_mut(&mut state).unwrap();
+        state_mut.daemon_url = format!("http://{address}");
+        state_mut.http = reqwest::Client::builder().no_proxy().build().unwrap();
+        state_mut.observer_token_path = dist.path().join("absent-fixture-observer-token");
+        let app = build_app(state, dist.path());
+        let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_address = proxy_listener.local_addr().unwrap();
+        let proxy_server = tokio::spawn(async move {
+            axum::serve(proxy_listener, app).await.unwrap();
+        });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let mut response_task = tokio::spawn(async move {
+            client
+                .get(format!("http://{proxy_address}/v1/browser/screencast"))
+                .header(reqwest::header::COOKIE, "ocean_session=test-session")
+                .header(
+                    reqwest::header::AUTHORIZATION,
+                    "Bearer synthetic-client-token",
+                )
+                .send()
+                .await
+                .unwrap()
+        });
+
+        let upstream_request = tokio::time::timeout(std::time::Duration::from_secs(2), started_rx)
+            .await
+            .expect("daemon receives the request")
+            .expect("upstream request capture remains available");
+        let upstream_request = String::from_utf8_lossy(&upstream_request).to_ascii_lowercase();
+        assert!(upstream_request.starts_with("get /v1/browser/screencast http/1.1"));
+        assert!(!upstream_request.contains("cookie:"));
+        assert!(!upstream_request.contains("authorization:"));
+
+        let early_response =
+            tokio::time::timeout(std::time::Duration::from_secs(2), &mut response_task).await;
+        if early_response.is_err() {
+            let _ = release_tx.send(());
+            let _ = response_task.await;
+            proxy_server.abort();
+            let _ = proxy_server.await;
+            let _ = upstream.await;
+            panic!("the screencast proxy buffered until the daemon stream ended");
+        }
+        let mut response = early_response
+            .unwrap()
+            .expect("proxy request task succeeds");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "text/event-stream"
+        );
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            "no-cache, no-transform"
+        );
+        assert_eq!(response.headers()["x-accel-buffering"], "no");
+
+        let first_frame =
+            tokio::time::timeout(std::time::Duration::from_secs(2), response.chunk()).await;
+        if first_frame.is_err() {
+            let _ = release_tx.send(());
+            proxy_server.abort();
+            let _ = proxy_server.await;
+            let _ = upstream.await;
+            panic!("the screencast proxy did not stream a frame before upstream EOF");
+        }
+        let first_frame = first_frame
+            .unwrap()
+            .expect("proxy response body remains readable")
+            .expect("upstream frame arrives before EOF");
+        assert_eq!(
+            first_frame.as_ref(),
+            b"event: status\ndata: {\"state\":\"no-browser\"}\n\n"
+        );
+
+        release_tx.send(()).unwrap();
+        assert_eq!(response.bytes().await.unwrap().as_ref(), b"");
+        proxy_server.abort();
+        let _ = proxy_server.await;
+        upstream.await.unwrap();
     }
 
     #[test]
@@ -2730,6 +2931,7 @@ mod tests {
         let untimed = format!("state.{}{}", "http", ".");
         let streaming_handlers = [
             "async fn proxy_rooms_persistent",
+            "async fn proxy_browser_screencast",
             "async fn proxy_control_events",
             "async fn proxy_events",
             "async fn proxy_observatory",
