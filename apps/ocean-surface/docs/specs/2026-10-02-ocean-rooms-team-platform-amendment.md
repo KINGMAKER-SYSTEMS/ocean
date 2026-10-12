@@ -20,7 +20,7 @@ Topology is fixed and not reopened by this amendment:
 The federated-rooms design lists "a person/account entity in Bedrock" and "new identity/profile machinery inside ocean-os or ocean-surface" as non-goals. This amendment relaxes them only as follows:
 
 1. **Daemon owner profile (ocean-os).** Each daemon holds one local owner profile: `{ display_name }`, operator-set. It is display data, not an authentication principal, and authorizes nothing.
-2. **Bedrock member display name.** `longhouse.room_members.display_name` (already present) is the authoritative cross-machine name. Joining registers it from the owner profile. No new Bedrock table, column, or account entity.
+2. **Bedrock member display name.** `longhouse.room_members.display_name` (already present) is the authoritative cross-machine name. It stays derived from the authenticated principal's token name, which the inviter sets through the invite's `recipient_name` (the owner's comes from their Bedrock admin token). Members cannot choose their own federated name: Bedrock's self-join deliberately accepts no caller identity fields, and letting a member pick a name would reopen impersonation. No new Bedrock table, column, API field, or account entity.
 3. **Avatars are derived, not stored.** Avatar = initials of the display name + a stable color index derived from the opaque member/participant id. No upload, no blob, no Bedrock schema migration.
 
 Everything else in those non-goal lists stands.
@@ -57,7 +57,8 @@ Gate P1: web (`run-surface.sh`) and Tauri (`run-tauri.sh`) screenshots at the sa
 
 Interfaces:
 
-- **ocean-os** `GET /v1/me` → `{ participant_id, display_name, avatar_seed }`. `participant_id` is a stable daemon-minted owner id persisted with the daemon state; `display_name` comes from the owner profile (`PUT /v1/me { display_name }`, loopback/proxy-authenticated surfaces only).
+- **ocean-os** `GET /v1/me` → `{ participant_id, display_name }` (ocean-store `daemon_owner`). `participant_id` is seeded only on a fresh install from `member.toml`, then `OCEAN_MEMBER_ID`, preserving case and length while mapping `@` to `-`; when neither supplies a member id, it is derived from the first display name (`OCEAN_OWNER_NAME`, else `USER`, else `Operator`). A persisted owner is never re-keyed when member configuration appears or changes; `PUT /v1/me { display_name }` renames the owner and its Local roster rows. The avatar seed is the participant/member id itself.
+- **ocean-core** `RoomAccessProjection.local_member_id` (additive, optional): the credential's local human member id, so a surface knows "me" in a federated room without minting identity.
 - **ocean-os** room writes derive authorship server-side:
   - Local rooms: human posts are authored by the daemon owner participant. `RoomMessageRequest.author_id/author_kind` become ignored-for-humans (accepted for wire compatibility, never trusted). Agent and system authorship remain daemon-internal only.
   - Federated rooms: human posts are authored by the daemon's `local_human_member_id`; display name comes from the Bedrock member row registered from the owner profile.
@@ -82,6 +83,13 @@ Interfaces:
 
 Gate P3: `@agent fix X` in a room shows live state progression and a changed-files/diff card to the owner, a truthful state-only card to a remote member, and the final reply threaded under the request.
 
+P3 as landed (narrowing, owner-local):
+
+- Linkage runs from the run to the reply (`RoomAgentRun.reply_seq`), and cards attach by `thread_root_seq`; `RoomMessage` gains no `run_id`.
+- The `room.agent_run` ledger publication is deferred, so remote members do not yet see cards. It ships with P4 under the payload limits above.
+- The card shows changed files plus the edit/write tool steps through the transcript's tool groups; a dedicated diff renderer is P5 work.
+- Runs open at daemon restart close as `Failed { reason: "interrupted by daemon restart" }`.
+
 ## P4 — Agents act inside the conversation
 
 Interfaces:
@@ -93,6 +101,13 @@ Interfaces:
 - **Per-room agent settings** (instructions overlay, model, trigger policy) behind the room header's single overflow menu: `GET/PUT /v1/rooms/persistent/{key}/agents/{agent_id}/settings`. Local-only; never federated.
 
 Gate P4: an agent asks a clarifying question, the operator answers in the thread, the agent continues and finishes; a permission request is approved from the room card.
+
+P4 as landed (narrowing):
+
+- `room_post_update` and `room_ask` are offered only in Local rooms; federated threads stay unwritable until the Bedrock message contract carries `thread_parent_seq`.
+- Thread-reply resume is driven by parked runs, not the `on_thread_reply` policy (whose target is the thread root's author, a human here).
+- Settings are an instructions overlay and a model alias; trigger policy stays room-level and unexposed.
+- The `room.agent_run` ledger publication (deferred from P3) is still deferred; remote members see the agent's posted replies and questions as ordinary messages.
 
 ## P5 — Visual revamp
 

@@ -835,6 +835,31 @@ pub fn Refresh() -> impl IntoView {
     }
 }
 
+/// Check mark — approve affordance.
+#[component]
+pub fn Check() -> impl IntoView {
+    view! {
+        <svg class="icon icon--stroke" viewBox="0 0 24 24" width="1em" height="1em"
+             fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polyline points="5 12.5 10 17.5 19 7" />
+        </svg>
+    }
+}
+
+/// Three horizontal dots — the one overflow menu trigger.
+#[component]
+pub fn More() -> impl IntoView {
+    view! {
+        <svg class="icon icon--stroke" viewBox="0 0 24 24" width="1em" height="1em"
+             fill="currentColor" aria-hidden="true">
+            <circle cx="6" cy="12" r="1.6" />
+            <circle cx="12" cy="12" r="1.6" />
+            <circle cx="18" cy="12" r="1.6" />
+        </svg>
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

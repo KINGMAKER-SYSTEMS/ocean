@@ -1059,6 +1059,11 @@ pub struct RoomAccessProjection {
     /// `None` = no confirmed events yet. Distinguishable from `Some(0)`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_confirmed_global_sequence: Option<u64>,
+    /// The Bedrock member id this daemon's owner speaks as (the credential's
+    /// local human member). `None` for Local rooms and before a credential
+    /// exists. Lets a surface render "me" without minting identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_member_id: Option<String>,
     /// Federated members (daemon-projected, including remote peers).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub members: Vec<FederatedRoomMemberProjection>,
@@ -1080,6 +1085,110 @@ pub enum RoomAccessState {
     Recovering,
     /// Membership revoked or token invalidated.
     Revoked,
+}
+
+/// Live lifecycle of one room-convened agent turn (team-platform P3). A
+/// projection over the agent session's own events — never a second transcript.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum RoomAgentRunState {
+    /// Convened; waiting for the session lane.
+    Queued,
+    /// The model is reasoning or writing.
+    Thinking,
+    /// A tool is executing. `label` is a short, path-free description.
+    RunningTool { label: String },
+    /// Blocked on a permission decision by the agent's owner.
+    AwaitingPermission,
+    /// The agent asked the room a question and is waiting for a thread reply.
+    AwaitingReply,
+    /// Finished and replied.
+    Done,
+    /// Ended without a reply. `reason` is sanitized, never raw provider output.
+    Failed { reason: String },
+    /// Cancelled before completion.
+    Cancelled,
+}
+
+impl RoomAgentRunState {
+    /// Terminal states never change again.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Done | Self::Failed { .. } | Self::Cancelled)
+    }
+
+    /// Parked: the turn ended on `room_ask` and the run resumes from a thread
+    /// reply. Survives a daemon restart (no in-memory wait is held).
+    pub fn is_parked(&self) -> bool {
+        matches!(self, Self::AwaitingReply)
+    }
+}
+
+/// One agent turn in a room, rendered as a single live work card.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomAgentRun {
+    pub run_id: String,
+    pub room_id: RoomKey,
+    pub agent_id: String,
+    /// The agent session that executes the turn. Owner surfaces read tool
+    /// steps and diffs from it; it never crosses federation.
+    pub session_id: String,
+    /// Transcript row that convened the agent.
+    pub trigger_seq: u64,
+    /// Thread root the card and reply attach to.
+    pub thread_root_seq: u64,
+    #[serde(flatten)]
+    pub state: RoomAgentRunState,
+    pub started_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    /// Short summary of the outcome (first part of the reply).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    /// Workspace-relative paths the turn wrote or edited.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files_changed: Vec<String>,
+    /// Number of tool calls so far.
+    #[serde(default)]
+    pub tool_count: u32,
+    /// Transcript row of the agent's reply, once posted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_seq: Option<u64>,
+    /// The permission request this run is blocked on (`AwaitingPermission`).
+    /// Owner-local: a short tool label only, never raw tool arguments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_permission: Option<RoomRunPermission>,
+    /// The thread answer that has claimed this parked (`AwaitingReply`) run
+    /// (team-platform P4). Set by an atomic claim before the successor turn
+    /// is admitted; the run closes `Done` only once that turn is admitted, and
+    /// the claim is released (run still parked) when admission fails.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer_seq: Option<u64>,
+}
+
+/// A pending tool approval projected onto a run card (team-platform P4).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomRunPermission {
+    pub permission_id: String,
+    /// Tool name of the pending call. A room decision names it back with the
+    /// `permission_id`, so a stale or retried decision cannot approve a later,
+    /// different request.
+    #[serde(default)]
+    pub tool: String,
+    /// Short, path-relative description of the tool call awaiting approval.
+    pub tool_label: String,
+}
+
+/// Per-room overrides for one agent participant (team-platform P4). Local to
+/// the owning daemon; never federated.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoomAgentSettings {
+    /// Extra steering layered under the agent's own instructions for this room.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+    /// Model alias for this agent's turns in this room (fail-soft to the
+    /// agent's own model when unresolvable).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2340,6 +2449,7 @@ mod tests {
     #[test]
     fn room_access_local_projection_skips_empty_vecs() {
         let proj = RoomAccessProjection {
+            local_member_id: None,
             state: RoomAccessState::Local,
             caller_member_id: None,
             last_confirmed_global_sequence: None,
@@ -2366,6 +2476,7 @@ mod tests {
             local_binding_available: None,
         };
         let proj = RoomAccessProjection {
+            local_member_id: None,
             state: RoomAccessState::Live,
             last_confirmed_global_sequence: Some(5),
             caller_member_id: Some("mem-1".into()),
@@ -2407,6 +2518,7 @@ mod tests {
             local_binding_available: Some(true),
         };
         let proj = RoomAccessProjection {
+            local_member_id: None,
             state: RoomAccessState::Live,
             last_confirmed_global_sequence: Some(5),
             caller_member_id: None,
@@ -2808,6 +2920,39 @@ mod tests {
             out["members"][0].get("owner_principal_token_id").is_none(),
             "owner_principal_token_id in nested member MUST NOT survive"
         );
+    }
+
+    #[test]
+    fn room_agent_run_state_is_flattened_and_roundtrips() {
+        let now = chrono::Utc::now();
+        let run = RoomAgentRun {
+            run_id: "r1".into(),
+            room_id: RoomKey::new("room"),
+            agent_id: "helper".into(),
+            session_id: "s1".into(),
+            trigger_seq: 4,
+            thread_root_seq: 4,
+            state: RoomAgentRunState::RunningTool {
+                label: "edit".into(),
+            },
+            started_at: now,
+            updated_at: now,
+            summary: None,
+            files_changed: vec!["src/lib.rs".into()],
+            tool_count: 2,
+            reply_seq: None,
+            pending_permission: None,
+            answer_seq: None,
+        };
+        let wire = serde_json::to_value(&run).unwrap();
+        assert_eq!(wire["state"], "running_tool");
+        assert_eq!(wire["label"], "edit");
+        assert!(wire.get("summary").is_none());
+        let back: RoomAgentRun = serde_json::from_value(wire).unwrap();
+        assert_eq!(back, run);
+        assert!(!run.state.is_terminal());
+        assert!(RoomAgentRunState::Done.is_terminal());
+        assert!(RoomAgentRunState::Failed { reason: "x".into() }.is_terminal());
     }
 
     /// The anti-drift pin, and the reason this pair moved into `ocean-core`

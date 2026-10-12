@@ -569,11 +569,14 @@ fn UserTurn(idx: usize, turns: RwSignal<Vec<crate::model::Turn>>) -> impl IntoVi
     }
 }
 
+/// One assistant turn. `detached` renders a turn outside the live session
+/// transcript (room work cards), so the global streaming flag never applies.
 #[component]
-fn AssistantTurn(
+pub(crate) fn AssistantTurn(
     idx: usize,
     turns: RwSignal<Vec<crate::model::Turn>>,
     daemon: Daemon,
+    #[prop(optional)] detached: bool,
 ) -> impl IntoView {
     // Recompute the render-item list whenever the block set changes. Reading
     // the blocks here also subscribes to tool-status changes (a clone snapshot),
@@ -590,7 +593,7 @@ fn AssistantTurn(
     // deltas grow it in place), so gating on `streaming` AND "this is the last
     // turn" lights up exactly one turn — not every assistant turn.
     let streaming = daemon.streaming;
-    let is_streaming = move || streaming.get() && turns.with(|t| t.len() == idx + 1);
+    let is_streaming = move || !detached && streaming.get() && turns.with(|t| t.len() == idx + 1);
 
     view! {
         <div class="turn--assistant" class:is-streaming=is_streaming>

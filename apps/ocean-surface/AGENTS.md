@@ -359,6 +359,70 @@ Web surface session UI:
 - One-level thread replies are writable only in Local rooms. Live federated
   rooms may render threads, but keep the reply composer disabled until the
   Bedrock message contract preserves `thread_parent_seq` end-to-end.
+- Identity is daemon-owned (team-platform P2). The surface never mints or
+  stores a room identity: it reads the owner from `GET /v1/me` (proxied),
+  human joins send only `{kind: human}`, and human posts send no `author_id` —
+  the daemon authors both as its owner. "Me" is the owner `participant_id` in
+  Local rooms and the daemon-projected `access.local_member_id` in federated
+  rooms (`rooms::local_speaker_id`). Names render through
+  `rooms::author_display_name` (roster, then federated member projection,
+  then raw id) and initials through `rooms::name_initials`, with the
+  deterministic `avatar_identity_class` hue on every avatar.
+- Agent work cards (team-platform P3) are daemon projections, not
+  transcript rows. The room SSE also carries `room_agent_run` frames (projection
+  replace by `run_id`, no sequence, same generation+room admission as
+  `room_access`); the daemon replays recent runs on connect, so the surface
+  never polls `/runs`. `room_work_card.rs` renders one card per run under the
+  message whose thread root convened it. Steps load only when opened, from the
+  owner's agent session (`daemon::fetch_session_turns`, sliced by the
+  `[#seq] ... «— mention` prompt marker) and render through the
+  own `AssistantTurn` (`detached`). Card colors come only from
+  tokens (`styles/rooms-cards.css`). Live projections retain the daemon's 50 most
+  recent runs, ordered by start time and run id. Card-step fetches publish
+  success or error only for the latest request while open, with matching
+  daemon origin and unchanged run projection (including session and trigger);
+  closing or disposal invalidates pending work.
+- In-room approvals (P4): a card in `awaiting_permission` with a
+  `pending_permission` shows the tool label plus Approve/Deny icon buttons,
+  which call `POST /v1/rooms/persistent/{key}/runs/{run_id}/permission` with
+  the rendered request's `permission_id` and `tool` (`run_permission_body`), so
+  a stale click is a daemon 409 ("Already decided."), never a decision on a
+  later request. Never apply a decision optimistically; the next
+  `room_agent_run` frame clears it.
+  Permission/settings mutations and the owner rename keep daemon header-only
+  Room operator authority. Operator decision (2026-10-08): any first-party
+  Ocean surface the operator is signed into may act as the Room operator for
+  exactly `PUT /v1/me`, `POST .../runs/{run_id}/permission` and
+  `PUT .../agents/{agent_id}/settings`; every other operator-gated route is
+  unchanged, and a client-supplied operator header is never forwarded.
+  - Web: the proxy attaches the daemon's mode-0600 `operator.key`
+    (`OCEAN_OPERATOR_KEY_FILE` overrides the path), read just before
+    forwarding, to exactly those routes, and only when its operator login is
+    on and the session gate has admitted the request; an unreadable key is a
+    503 before forwarding, and with `OCEAN_SURFACE_AUTH=off` it attaches
+    nothing, so the daemon keeps refusing.
+  - Tauri desktop: the page calls the `room_owner_mutation` command with a
+    fixed `kind` (`rename_owner`, `run_permission`, `agent_settings`) and the
+    ids (`rooms.rs` `OwnerRoute` → `host::room_owner_mutation`). The shell
+    (`crates/ocean-tauri/src/owner_mutation.rs`) builds the fixed method and
+    path itself, reads the same key file just before each request (regular,
+    non-symlink, mode 0600), sends it only to a loopback daemon with no
+    `Origin`/`Cookie`, never caches, logs or returns it, and relays only the
+    daemon's status and body.
+  - Chrome extension: not covered. The side panel talks to the daemon
+    directly from `chrome-extension://`, cannot read the key file, has no
+    proxy session, and its origin is refused by the daemon's operator origin
+    check by design; doing this safely needs a native-messaging host or an
+    extension proxy login, so these actions keep the daemon's authority error
+    there.
+- The room header has exactly one primary action (Join when not joined) and
+  one overflow (`room_overflow.rs`): Share, Agents, Leave. Agents opens the
+  per-room agent settings panel (instructions overlay + model) over
+  `GET/PUT .../agents/{agent_id}/settings`; these settings are local to this
+  Ocean. New secondary room actions go into this overflow, not the header.
+- Owner responses publish only for the latest owner request at the current
+  daemon origin. Origin changes clear the old owner and refresh `/v1/me`;
+  an older response cannot overwrite a later owner read.
 - Agent participants are selected from daemon-owned `/v1/agents` identities
   and remain subject to daemon join validation. Free-text agent creation does
   not belong in the surface. Picker keys, values, and labels use the canonical
