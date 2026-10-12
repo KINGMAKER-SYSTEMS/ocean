@@ -1213,6 +1213,15 @@ Round 5: round-4 review follow-ups on model reroute fidelity. (F2) Selection-tim
 Validation: ocean-agent 280 passed / 0 failed / 2 ignored; ocean-daemon 908 passed / 2 failed (only the two known pre-existing persistent_room envelope-key assertions); clippy -p ocean-agent --all-targets -D warnings clean; fmt --all --check clean; git diff --check clean.
 _________________________________________________________________________________
 
+time: [22:04] [10-09-26]
+agent: [claude] [opus 5.5]
+worktree: [fix/federation-roster-caller-member-ids] [~/dev/oceanwork/wt-fed-roster-envelope]
+type: [bug-report]
+area: [backend] [infra]
+
+Federated rooms on smaths-mini (northstar, ocean-team) sat in `recovering` with Pending outbox rows and no log output. Replaying the receiver's reads against production Bedrock with the room bearer showed a valid `hello` (high-water 0) and a 200 roster, but the roster carries `caller_member_ids` (Bedrock since ocean-bedrock #137, 2026-09-02) and `MembersEnvelope` is `deny_unknown_fields`, so every epoch silently returned Recover after hello. Fix: accept and ignore `caller_member_ids` on the strict envelope, warn with `outcome="roster_rejected"` on non-transport roster parse failures, and regression test `roster_with_caller_member_ids_reaches_live` (red without the field, green with it). The supervised launcher `deploy/ocean-daemon.sh` now sources owner-only `~/.config/ocean-rs/federation.env` and prints `federation=on|off`; previously only a hand-edited installed copy did, which the installer would overwrite. Operator guide documents the env file, contributor-side local redemption, and the receiver replay diagnosis. Independent review round: `WireMember` also accepts Bedrock's `operator_id` (same failure class, operator rooms); roster projection failures warn too; startup warns `federation_unconfigured` when credentialed rooms exist without a URL; the launcher parses federation.env as data (owner-only, not group/other-writable, `OCEAN_FEDERATION_*` keys only, CR/quote tolerant, plist values win) instead of sourcing it, verified under macOS bash 3.2 against command substitution, foreign keys, spaces, CRLF, group-writable and unreadable files. End-to-end: the fixed release binary, run unsupervised on an isolated HOME with a copied rooms.db (outbox cleared), brought northstar and ocean-team to `live` against production Bedrock. Follow-up folded in before merge: warn-only `credential_member_mismatch` when Bedrock's `caller_member_ids` omit the credential's local member (stale-credential diagnostic; never blocks Live). Launcher mode check fails closed on unparseable `stat` output. Validation: room_federation 92/92; ocean-daemon 910 passed / 2 failed at 99be7a9 (the known persistent_room envelope-key assertions, identical on unmodified main); clippy -p ocean-daemon --all-targets -D warnings clean; fmt clean; docs-check PASS; installer fixtures 12/12. Runtime ops the same evening (not code): Jay's laptop federation.env reduced to OCEAN_FEDERATION_URL (the direct-redeem contributor token was removed and its backup deleted) and his daemon restarted; a fresh invite minted by John's daemon was redeemed through Jay's local /v1/rooms/persistent/invites/redeem (credential f9757e6e in his rooms.db); the stale direct-path Bedrock member db0367cd was removed by the room owner (old token now 403 membership_revoked); the empty local test room ns-taskforce was soft-closed on smaths-mini. Both daemons stay `recovering` until this fix is merged and installed.
+_________________________________________________________________________________
+
 _________________________________________________________________________________
 time: [23:34] [09-10-26]
 agent: [codex] [factory release]
@@ -1245,3 +1254,22 @@ area: [backend] maintenance failure accounting and recovery
 Independent review reproduced the proposed maintenance publisher counting one failed sweep twice and replacing known committed counts with zeros. The bounded repair retains cleanup custody and accumulated progress across worker/join failures, reports fixed stage/classification plus complete/incomplete/unknown accounting and in-progress start, and publishes terminal facts once without calling the failing logger. A later scheduler tick recovers; blocked workers retain custody rather than admitting overlapping cleanup.
 
 Validation at source8171961: maintenance24/24, attachments23/23 and router5/5 fixtures passed; locked daemon compilation, formatting, diff and docs checks passed (30 packages,153 active Markdown files,170 local links). Local and remote changed-source hashes matched; exact-source independent review ACK received. The daemon devlog records the changed reporting contract; parent ownership/index contracts are unchanged. Fixtures cover queued cancellation, exceptional join failure, committed retention before panic, publication panic, next-tick recovery and dropped-waiter custody. No live sweep, incident-cause attribution, installation or deployment occurred. Final-head review/builds, maintainer approval, #46 dependency and live migration/installation acceptance remain separate gates.
+
+_________________________________________________________________________________
+
+time: [14:44] [10-12-26]
+agent: [claude] [opus 5.5]
+worktree: [fix/installer-launchctl-enabled-spelling] [~/dev/oceanwork/wt-installer-spelling]
+type: [bug-report]
+area: [infra]
+
+`ops/install-ocean-daemon.sh` refused to install on macOS 26 with "cannot establish the prior supervision override": `launchctl print-disabled` now prints `"label" => enabled|disabled` instead of `true|false`, and the override parser only accepted the old spelling. It now accepts both, treating `disabled` like `true`, so operator disablement is still honored. Fixtures gained modern-spelling success and disabled-preservation cases (red on the old regex, 14/14 green). Also recorded: at john's direction, the `main` branch protection's required pull-request review (including last-push approval) and admin enforcement were removed; required status checks remain.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [15:49] [10-12-26]
+agent: [Codex]
+worktree: [PR47 port/rooms-maintenance; factory-pr47-maintenance-reporting/ocean]
+type: [workflow]
+area: [review]
+Reconciled PR47 1bff98d41e7084e67bb6c2c1a6fb2a7b5a7d58dd with canonical main 1dfc6802bb74fecdcf83f6f17732b671c892b632. Only events.md conflicted; both complete parent histories remain verbatim and ordered. All non-ledger blobs/modes match automatic merge. Maintenance, attachments, persistent-room routes and store source match validated8171961bf23a6a2d1068ee2bac6c171f6d32aaa1; previous24/24 maintenance,23/23 attachments and5/5 router evidence applies to unchanged bytes. Incoming federation/launcher/installer source equals main. Narrow formatting, shell syntax and staged diff checks pass; no duplicate heavy validation. Automatically merged contracts preserve both scopes with no additional index/ownership change. Root owns final commit, separate exact-head review and fresh hosted builds. Preserve release46 before47 before87; no child87 or new unmerged46 imported, external87 custody untouched. Issue90, live migration and issue30 historical-incident acceptance remain holds. No actual maintenance sweep, provider call, restart or deployment.
