@@ -17,7 +17,8 @@ use ocean_core::{
     evaluate_trigger_policy, PermissionMode, PromptRequest, PublicAgentDescriptor, RequestState,
     RoomAccessProjection, RoomAccessState, RoomAgentRun, RoomAgentSettings, RoomArtifactKind,
     RoomArtifactState, RoomKey, RoomMessage, RoomMessageKind, RoomParticipant, RoomParticipantKind,
-    RoomReadCursorProjection, RoomReadCursorUpdateRequest, RoomTriggerEvent, RoomTriggerPolicy,
+    RoomPrefs, RoomReadCursorProjection, RoomReadCursorUpdateRequest, RoomTriggerEvent,
+    RoomTriggerPolicy,
 };
 #[cfg(test)]
 use ocean_core::{OutboxItemState, RoomOutboxItem};
@@ -1327,18 +1328,256 @@ pub(super) async fn rooms_list_persistent(
                 })
             })
             .collect::<Result<Vec<_>, ocean_store::RoomStoreError>>()?;
-        Ok::<_, ocean_store::RoomStoreError>(PersistentRoomsListResponse {
-            ok: true,
-            rooms: page.rooms,
-            read_states,
-            next_cursor: page.next_cursor,
-            has_more: page.has_more,
-        })
+        let muted = page
+            .rooms
+            .iter()
+            .map(|room| reg.room_prefs(&room.id).map(|prefs| prefs.muted))
+            .collect::<Result<Vec<_>, ocean_store::RoomStoreError>>()?;
+        Ok::<_, ocean_store::RoomStoreError>((
+            PersistentRoomsListResponse {
+                ok: true,
+                rooms: page.rooms,
+                read_states,
+                next_cursor: page.next_cursor,
+                has_more: page.has_more,
+            },
+            muted,
+        ))
     }) {
-        Ok(response) => (
+        Ok((response, muted)) => {
+            let mut body = serde_json::to_value(response).unwrap();
+            // Team-platform P6: additive per-room `muted`, alongside the
+            // unchanged `ocean_core::Room` fields.
+            if let Some(rooms) = body.get_mut("rooms").and_then(|r| r.as_array_mut()) {
+                for (room, muted) in rooms.iter_mut().zip(muted) {
+                    if let Some(obj) = room.as_object_mut() {
+                        obj.insert("muted".into(), json!(muted));
+                    }
+                }
+            }
+            (StatusCode::OK, Json(body))
+        }
+        Err(e) => room_store_error_response(e),
+    }
+}
+
+// ── Team-platform P6: search, mentions inbox, per-room prefs (owner-local) ──
+
+/// Shortest accepted search query (characters, after trimming).
+const ROOM_SEARCH_MIN_CHARS: usize = 2;
+/// Longest accepted search query (characters, after trimming); longer queries
+/// are refused with 400 `query_too_long` before the store is touched.
+const ROOM_SEARCH_MAX_CHARS: usize = 200;
+const ROOM_SEARCH_DEFAULT_LIMIT: usize = 20;
+const ROOM_SEARCH_MAX_LIMIT: usize = 50;
+const ROOM_INBOX_DEFAULT_LIMIT: usize = 30;
+const ROOM_INBOX_MAX_LIMIT: usize = 100;
+/// Newest rows scanned per room when building the inbox.
+const ROOM_INBOX_SCAN_PER_ROOM: usize = 500;
+/// Open rooms scanned per inbox read, most recently active (`updated_at`)
+/// first. Bounds the work done under the store lock to
+/// `ROOM_INBOX_MAX_ROOMS * ROOM_INBOX_SCAN_PER_ROOM` rows; mentions in quieter
+/// rooms beyond the cap are not listed.
+const ROOM_INBOX_MAX_ROOMS: usize = 50;
+
+#[derive(Debug, Deserialize, Default)]
+pub(super) struct RoomSearchQuery {
+    #[serde(default)]
+    pub(super) q: Option<String>,
+    #[serde(default)]
+    pub(super) limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub(super) struct RoomInboxQuery {
+    #[serde(default)]
+    pub(super) limit: Option<usize>,
+}
+
+/// `GET /v1/rooms/persistent/{key}/search?q=&limit=` — chat messages whose
+/// body contains `q` (case-insensitive), newest first.
+pub(super) async fn room_search(
+    State(state): State<AppState>,
+    Path(key): Path<String>,
+    Query(q): Query<RoomSearchQuery>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let query = q.q.as_deref().unwrap_or("").trim().to_string();
+    if query.chars().count() < ROOM_SEARCH_MIN_CHARS {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": "query_too_short" })),
+        );
+    }
+    if query.chars().count() > ROOM_SEARCH_MAX_CHARS {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": "query_too_long" })),
+        );
+    }
+    let limit = q
+        .limit
+        .unwrap_or(ROOM_SEARCH_DEFAULT_LIMIT)
+        .clamp(1, ROOM_SEARCH_MAX_LIMIT);
+    let key = RoomKey::new(key.trim());
+    match with_rooms(&state, |store| {
+        store.search_room_messages(&key, &query, limit)
+    }) {
+        Ok(results) => (
             StatusCode::OK,
-            Json(serde_json::to_value(response).unwrap()),
+            // Same human-read projection as every transcript response, so a
+            // row whose author id fails the bound reads `[filtered]` here too.
+            Json(json!({ "ok": true, "results": projected_transcript(results) })),
         ),
+        Err(e) => room_store_error_response(e),
+    }
+}
+
+/// Why a message is in the owner's inbox.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum InboxReason {
+    Mention,
+    Reply,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct InboxItem {
+    room_id: String,
+    room_name: String,
+    reason: InboxReason,
+    /// The author's display name from this room's roster (or federated member
+    /// projection); the raw author id when neither knows it. Lets a surface
+    /// render the inbox without loading every room.
+    author_name: String,
+    message: RoomMessage,
+}
+
+/// Classify one row for `me`: a chat message by someone else that @-mentions
+/// `me`, or a thread reply by someone else under a root `me` wrote. Mention
+/// wins when both hold.
+fn inbox_reason(
+    message: &RoomMessage,
+    parent_author: Option<&str>,
+    me: &str,
+) -> Option<InboxReason> {
+    if message.kind != RoomMessageKind::Message || message.author_id == me {
+        return None;
+    }
+    if parse_mentions(&message.body).iter().any(|id| id == me) {
+        return Some(InboxReason::Mention);
+    }
+    if message.thread_parent_seq.is_some() && parent_author == Some(me) {
+        return Some(InboxReason::Reply);
+    }
+    None
+}
+
+/// `GET /v1/rooms/inbox?limit=` — mentions of, and thread replies to, the
+/// local owner across open rooms, newest first. "Me" is the daemon owner in
+/// Local rooms and the credential's local member in federated rooms. Only the
+/// [`ROOM_INBOX_MAX_ROOMS`] most recently active open rooms are scanned, and
+/// each contributes from its newest [`ROOM_INBOX_SCAN_PER_ROOM`] rows only.
+/// The route sits outside `/v1/rooms/persistent/{key}` so a room keyed
+/// `inbox` stays reachable.
+pub(super) async fn room_inbox(
+    State(state): State<AppState>,
+    Query(q): Query<RoomInboxQuery>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let limit = q
+        .limit
+        .unwrap_or(ROOM_INBOX_DEFAULT_LIMIT)
+        .clamp(1, ROOM_INBOX_MAX_LIMIT);
+    let owner = match daemon_owner(&state) {
+        Ok(owner) => owner.participant_id,
+        Err(e) => return room_store_error_response(e),
+    };
+    let result = with_rooms(&state, |store| {
+        let mut items: Vec<InboxItem> = Vec::new();
+        // `open_room_names` is ordered `updated_at DESC`.
+        for (key, name) in store.open_room_names(ROOM_INBOX_MAX_ROOMS)? {
+            let access = store.room_access(&key)?;
+            let me = match access.state {
+                RoomAccessState::Local => owner.clone(),
+                _ => match access.local_member_id {
+                    Some(id) => id,
+                    None => continue,
+                },
+            };
+            let roster = store.room_participants(&key)?;
+            let display = |id: &str| -> String {
+                roster
+                    .iter()
+                    .find(|p| p.id == id)
+                    .map(|p| p.display_name.clone())
+                    .or_else(|| {
+                        access
+                            .members
+                            .iter()
+                            .find(|m| m.member_id == id)
+                            .map(|m| m.display_name.clone())
+                    })
+                    .filter(|n| !n.trim().is_empty())
+                    .unwrap_or_else(|| rendered_author_id(id.to_string()))
+            };
+            for (message, parent_author) in
+                store.recent_room_messages_with_parent_author(&key, ROOM_INBOX_SCAN_PER_ROOM)?
+            {
+                if let Some(reason) = inbox_reason(&message, parent_author.as_deref(), &me) {
+                    items.push(InboxItem {
+                        room_id: key.to_string(),
+                        room_name: name.clone(),
+                        reason,
+                        author_name: display(&message.author_id),
+                        message: projected_room_message(message),
+                    });
+                }
+            }
+        }
+        Ok::<_, ocean_store::RoomStoreError>(items)
+    });
+    match result {
+        Ok(mut items) => {
+            items.sort_by(|a, b| {
+                b.message
+                    .created_at
+                    .cmp(&a.message.created_at)
+                    .then_with(|| a.room_id.cmp(&b.room_id))
+                    .then_with(|| b.message.seq.cmp(&a.message.seq))
+            });
+            items.truncate(limit);
+            (StatusCode::OK, Json(json!({ "ok": true, "items": items })))
+        }
+        Err(e) => room_store_error_response(e),
+    }
+}
+
+/// `GET /v1/rooms/persistent/{key}/prefs` — the owner's per-room prefs.
+pub(super) async fn room_prefs_get(
+    State(state): State<AppState>,
+    Path(key): Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let key = RoomKey::new(key.trim());
+    match with_rooms(&state, |store| store.room_prefs(&key)) {
+        Ok(prefs) => (StatusCode::OK, Json(json!({ "ok": true, "prefs": prefs }))),
+        Err(e) => room_store_error_response(e),
+    }
+}
+
+/// `PUT /v1/rooms/persistent/{key}/prefs` — replace the owner's per-room prefs.
+pub(super) async fn room_prefs_put(
+    State(state): State<AppState>,
+    Path(key): Path<String>,
+    body: Result<Json<RoomPrefs>, JsonRejection>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let Ok(Json(prefs)) = body else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": "invalid_request" })),
+        );
+    };
+    let key = RoomKey::new(key.trim());
+    match with_rooms(&state, |store| store.put_room_prefs(&key, &prefs)) {
+        Ok(()) => (StatusCode::OK, Json(json!({ "ok": true, "prefs": prefs }))),
         Err(e) => room_store_error_response(e),
     }
 }
@@ -5438,6 +5677,451 @@ mod tests {
         assert!(encoded.contains("\"read_seq\":\"9007199254740999\""));
         assert!(!encoded.contains("bearer-secret"));
         assert!(!encoded.contains("live-principal"));
+    }
+
+    fn p6_post(
+        state: &AppState,
+        key: &RoomKey,
+        author: &str,
+        body: &str,
+        parent: Option<u64>,
+    ) -> u64 {
+        with_rooms(state, |store| {
+            store.append_message_threaded(
+                key,
+                author,
+                RoomParticipantKind::Human,
+                RoomMessageKind::Message,
+                body,
+                Utc::now(),
+                parent,
+                None,
+            )
+        })
+        .unwrap()
+        .seq
+    }
+
+    fn p6_search(q: Option<&str>, limit: Option<usize>) -> Query<RoomSearchQuery> {
+        Query(RoomSearchQuery {
+            q: q.map(str::to_string),
+            limit,
+        })
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn p6_room_search_validates_query_and_returns_newest_chat_first() {
+        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _env = TestEnvRestore::capture(&[
+            "OCEAN_AUTH_FILE",
+            "OCEAN_CODEX_AUTH_FILE",
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let state = crate::tests::isolated_room_fixture_state(&tmp);
+        let key = RoomKey::new("p6-search");
+        create_plain_room(&state, &key);
+        join_human(&state, &key);
+        let first = p6_post(&state, &key, "human", "Ship the Release", None);
+        p6_post(&state, &key, "bob", "lunch?", None);
+        let second = p6_post(&state, &key, "bob", "release notes are up", None);
+        let path = || Path(key.as_str().to_string());
+
+        let (status, Json(body)) =
+            room_search(State(state.clone()), path(), p6_search(Some("  r  "), None)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body, json!({ "ok": false, "error": "query_too_short" }));
+        let (status, _) = room_search(State(state.clone()), path(), p6_search(None, None)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let (status, _) = room_search(
+            State(state.clone()),
+            Path("p6-missing".into()),
+            p6_search(Some("release"), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let (status, Json(body)) = room_search(
+            State(state.clone()),
+            path(),
+            p6_search(Some(" RELEASE "), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["ok"], json!(true));
+        let results = body["results"].as_array().unwrap();
+        let seqs: Vec<u64> = results.iter().map(|m| m["seq"].as_u64().unwrap()).collect();
+        assert_eq!(seqs, vec![second, first]);
+        // Same RoomMessage wire shape as the transcript endpoint.
+        let transcript = with_rooms(&state, |store| store.transcript(&key, None)).unwrap();
+        let expected = transcript.iter().find(|m| m.seq == second).unwrap();
+        assert_eq!(results[0], serde_json::to_value(expected).unwrap());
+
+        let (_, Json(body)) = room_search(
+            State(state.clone()),
+            path(),
+            p6_search(Some("release"), Some(0)),
+        )
+        .await;
+        assert_eq!(
+            body["results"].as_array().unwrap().len(),
+            1,
+            "limit clamps to 1"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn p6_room_search_refuses_queries_over_the_length_cap() {
+        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _env = TestEnvRestore::capture(&[
+            "OCEAN_AUTH_FILE",
+            "OCEAN_CODEX_AUTH_FILE",
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let state = crate::tests::isolated_room_fixture_state(&tmp);
+        let key = RoomKey::new("p6-search-cap");
+        create_plain_room(&state, &key);
+        join_human(&state, &key);
+        let at_cap = "é".repeat(ROOM_SEARCH_MAX_CHARS);
+        let seq = p6_post(&state, &key, "human", &at_cap, None);
+        let path = || Path(key.as_str().to_string());
+
+        // Exactly the cap (counted in characters, after trimming) is accepted.
+        let padded = format!("  {at_cap}  ");
+        let (status, Json(body)) =
+            room_search(State(state.clone()), path(), p6_search(Some(&padded), None)).await;
+        assert_eq!(status, StatusCode::OK);
+        let seqs: Vec<u64> = body["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["seq"].as_u64().unwrap())
+            .collect();
+        assert_eq!(seqs, vec![seq]);
+
+        // One character over is refused before any lookup, even for an
+        // unknown room.
+        let over = "é".repeat(ROOM_SEARCH_MAX_CHARS + 1);
+        let (status, Json(body)) =
+            room_search(State(state.clone()), path(), p6_search(Some(&over), None)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body, json!({ "ok": false, "error": "query_too_long" }));
+        let (status, Json(body)) = room_search(
+            State(state.clone()),
+            Path("p6-missing".into()),
+            p6_search(Some(&over), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body, json!({ "ok": false, "error": "query_too_long" }));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn p6_inbox_scans_only_the_most_recently_active_rooms() {
+        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _env = TestEnvRestore::capture(&[
+            "OCEAN_AUTH_FILE",
+            "OCEAN_CODEX_AUTH_FILE",
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let state = crate::tests::isolated_room_fixture_state(&tmp);
+        seed_owner(&state, "ada", "Ada");
+        // One more open room than the cap, each holding one mention of the
+        // owner; rooms are touched in creation order, so `p6-cap-00` is the
+        // least recently active.
+        let rooms: Vec<RoomKey> = (0..=ROOM_INBOX_MAX_ROOMS)
+            .map(|i| RoomKey::new(format!("p6-cap-{i:02}")))
+            .collect();
+        for room in &rooms {
+            create_plain_room(&state, room);
+            p6_post(&state, room, "bob", "@ada ping", None);
+        }
+        let inbox_rooms = |body: &serde_json::Value| -> Vec<String> {
+            let mut ids: Vec<String> = body["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|i| i["room_id"].as_str().unwrap().to_string())
+                .collect();
+            ids.sort();
+            ids.dedup();
+            ids
+        };
+        let max = Query(RoomInboxQuery {
+            limit: Some(ROOM_INBOX_MAX_LIMIT),
+        });
+
+        let (status, Json(body)) = room_inbox(State(state.clone()), max).await;
+        assert_eq!(status, StatusCode::OK);
+        let expected: Vec<String> = rooms[1..].iter().map(|k| k.to_string()).collect();
+        assert_eq!(
+            inbox_rooms(&body),
+            expected,
+            "only the {ROOM_INBOX_MAX_ROOMS} most recently active rooms are scanned"
+        );
+
+        // New activity in the oldest room brings it back into the window and
+        // pushes the next-oldest out.
+        p6_post(&state, &rooms[0], "bob", "@ada again", None);
+        let (_, Json(body)) = room_inbox(
+            State(state.clone()),
+            Query(RoomInboxQuery {
+                limit: Some(ROOM_INBOX_MAX_LIMIT),
+            }),
+        )
+        .await;
+        let ids = inbox_rooms(&body);
+        assert_eq!(ids.len(), ROOM_INBOX_MAX_ROOMS);
+        assert!(ids.contains(&rooms[0].to_string()));
+        assert!(!ids.contains(&rooms[1].to_string()));
+        let from_oldest = body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|i| i["room_id"] == json!(rooms[0].as_str()))
+            .count();
+        assert_eq!(
+            from_oldest, 2,
+            "the re-admitted room contributes every mention"
+        );
+    }
+
+    #[tokio::test]
+    async fn p6_inbox_roster_lookup_does_not_hydrate_old_transcript() {
+        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _env = TestEnvRestore::capture(&[
+            "OCEAN_AUTH_FILE",
+            "OCEAN_CODEX_AUTH_FILE",
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let state = crate::tests::isolated_room_fixture_state(&tmp);
+        let path = tmp.path().join("inbox-roster.db");
+        *state.rooms.lock().unwrap() = ocean_store::SqliteRoomStore::open(&path).unwrap();
+        let room = RoomKey::new("p6-roster-only");
+        create_plain_room(&state, &room);
+        seed_owner(&state, "ada", "Ada");
+        join_participant(&state, &room, "bob", RoomParticipantKind::Human, "Robert");
+        let old = p6_post(&state, &room, "bob", "old unrelated history", None);
+        for _ in 0..ROOM_INBOX_SCAN_PER_ROOM {
+            p6_post(&state, &room, "bob", "filler", None);
+        }
+        p6_post(&state, &room, "bob", "@ada new mention", None);
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute(
+            "UPDATE messages SET author_kind = 'invalid-fixture-kind' WHERE room_id = ?1 AND seq = ?2",
+            rusqlite::params![room.as_str(), old as i64],
+        ).unwrap();
+        assert!(with_rooms(&state, |store| store.get(&room)).is_err());
+        let (status, Json(body)) =
+            room_inbox(State(state), Query(RoomInboxQuery { limit: None })).await;
+        assert_eq!(status, StatusCode::OK);
+        let items = body["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["author_name"], json!("Robert"));
+        assert_eq!(items[0]["message"]["body"], json!("@ada new mention"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn p6_inbox_lists_mentions_and_replies_to_the_owner_newest_first() {
+        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _env = TestEnvRestore::capture(&[
+            "OCEAN_AUTH_FILE",
+            "OCEAN_CODEX_AUTH_FILE",
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let state = crate::tests::isolated_room_fixture_state(&tmp);
+        let room = RoomKey::new("p6-inbox");
+        let other = RoomKey::new("p6-inbox-other");
+        create_plain_room(&state, &room);
+        create_plain_room(&state, &other);
+        join_human(&state, &room);
+        seed_owner(&state, "ada", "Ada");
+
+        let root = p6_post(&state, &room, "ada", "my root", None);
+        let reply = p6_post(&state, &room, "bob", "replying to you", Some(root));
+        let both = p6_post(&state, &room, "bob", "@ada also a reply", Some(root));
+        p6_post(&state, &room, "ada", "@ada own message", None);
+        let bob_root = p6_post(&state, &room, "bob", "bob root", None);
+        p6_post(&state, &room, "cy", "reply to bob", Some(bob_root));
+        p6_post(&state, &room, "cy", "@adam is someone else", None);
+        let elsewhere = p6_post(&state, &other, "cy", "hey @ada, look", None);
+        with_rooms(&state, |store| {
+            store.append_message(
+                &other,
+                "system",
+                RoomParticipantKind::System,
+                RoomMessageKind::System,
+                "@ada system notice",
+                Utc::now(),
+            )
+        })
+        .unwrap();
+
+        let (status, Json(body)) =
+            room_inbox(State(state.clone()), Query(RoomInboxQuery { limit: None })).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["ok"], json!(true));
+        let items = body["items"].as_array().unwrap();
+        let got: Vec<(String, String, u64)> = items
+            .iter()
+            .map(|i| {
+                (
+                    i["room_id"].as_str().unwrap().to_string(),
+                    i["reason"].as_str().unwrap().to_string(),
+                    i["message"]["seq"].as_u64().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (other.to_string(), "mention".into(), elsewhere),
+                (room.to_string(), "mention".into(), both),
+                (room.to_string(), "reply".into(), reply),
+            ]
+        );
+        assert_eq!(items[0]["room_name"], json!(other.as_str()));
+        // Not on the roster: the author name falls back to the raw id.
+        assert_eq!(items[0]["author_name"], json!("cy"));
+
+        let (_, Json(body)) = room_inbox(
+            State(state.clone()),
+            Query(RoomInboxQuery { limit: Some(1) }),
+        )
+        .await;
+        assert_eq!(body["items"].as_array().unwrap().len(), 1);
+
+        with_rooms(&state, |store| store.close(&other)).unwrap();
+        let (_, Json(body)) =
+            room_inbox(State(state.clone()), Query(RoomInboxQuery { limit: None })).await;
+        assert!(body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|i| i["room_id"] == json!(room.as_str())));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn p6_search_and_inbox_project_unbounded_author_ids() {
+        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _env = TestEnvRestore::capture(&[
+            "OCEAN_AUTH_FILE",
+            "OCEAN_CODEX_AUTH_FILE",
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let state = crate::tests::isolated_room_fixture_state(&tmp);
+        seed_owner(&state, "ada", "Ada");
+        let key = RoomKey::new("p6-projection");
+        create_plain_room(&state, &key);
+        // A row the store accepted from an in-process or federated writer
+        // whose author id fails the bound every human read applies.
+        let raw = "[click](https://evil.example)";
+        p6_post(&state, &key, raw, "@ada needle", None);
+
+        let (status, Json(body)) = room_search(
+            State(state.clone()),
+            Path(key.as_str().to_string()),
+            p6_search(Some("needle"), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["results"][0]["author_id"], json!("[filtered]"));
+
+        let (status, Json(body)) =
+            room_inbox(State(state.clone()), Query(RoomInboxQuery { limit: None })).await;
+        assert_eq!(status, StatusCode::OK);
+        let item = &body["items"][0];
+        assert_eq!(item["reason"], json!("mention"));
+        assert_eq!(item["message"]["author_id"], json!("[filtered]"));
+        assert_eq!(item["author_name"], json!("[filtered]"));
+        assert!(!body.to_string().contains("evil.example"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn p6_room_prefs_get_put_and_list_carries_muted() {
+        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _env = TestEnvRestore::capture(&[
+            "OCEAN_AUTH_FILE",
+            "OCEAN_CODEX_AUTH_FILE",
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let state = crate::tests::isolated_room_fixture_state(&tmp);
+        let key = RoomKey::new("p6-prefs");
+        create_plain_room(&state, &key);
+        let path = || Path(key.as_str().to_string());
+
+        let (status, Json(body)) = room_prefs_get(State(state.clone()), path()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, json!({ "ok": true, "prefs": { "muted": false } }));
+
+        let (status, Json(body)) = room_prefs_put(
+            State(state.clone()),
+            path(),
+            Ok(Json(RoomPrefs { muted: true })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, json!({ "ok": true, "prefs": { "muted": true } }));
+        let (_, Json(body)) = room_prefs_get(State(state.clone()), path()).await;
+        assert_eq!(body["prefs"]["muted"], json!(true));
+
+        assert!(serde_json::from_value::<RoomPrefs>(json!({ "muted": true, "x": 1 })).is_err());
+        let (status, _) = room_prefs_get(State(state.clone()), Path("p6-none".into())).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = room_prefs_put(
+            State(state.clone()),
+            Path("p6-none".into()),
+            Ok(Json(RoomPrefs { muted: true })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let quiet = RoomKey::new("p6-prefs-quiet");
+        create_plain_room(&state, &quiet);
+        let (status, Json(body)) = rooms_list_persistent(
+            State(state.clone()),
+            Query(RoomsListQuery {
+                limit: Some(10),
+                cursor: None,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let rooms = body["rooms"].as_array().unwrap();
+        assert_eq!(rooms.len(), 2);
+        for room in rooms {
+            let expect = room["id"] == json!(key.as_str());
+            assert_eq!(room["muted"], json!(expect), "room {room}");
+        }
+        assert!(body.get("read_states").is_some() && body.get("has_more").is_some());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
