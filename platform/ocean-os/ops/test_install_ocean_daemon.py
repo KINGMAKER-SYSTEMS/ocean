@@ -72,7 +72,10 @@ elif name == "launchctl":
             end(17)
         if scenario == "malformed_disabled":
             end(value='disabled services = {\n "dev.risingtides.ocean-daemon" => trueXYZ\n}')
-        disabled = "true" if state.get("disabled", False) else "false"
+        if state.get("modern_spelling", False):
+            disabled = "disabled" if state.get("disabled", False) else "enabled"
+        else:
+            disabled = "true" if state.get("disabled", False) else "false"
         end(value='disabled services = {\n "dev.risingtides.ocean-daemon" => ' + disabled + '\n}')
     if action == "print":
         end(0 if state["loaded"] else 113)
@@ -311,6 +314,21 @@ class InstallerFixture(unittest.TestCase):
         self.state = {"loaded": False, "disabled": True, "running_rev": None, "calls": []}
         self.baseline = self.snapshot()
         self.assert_restored(self.run_install("not_ready"), 75, recovered=False)
+        self.assertTrue(self.state["disabled"])
+        self.assertFalse(any(call[0] == "launchctl" and call[1] != "print-disabled"
+                             for call in self.state["calls"]))
+
+    def test_modern_enabled_spelling_installs(self):
+        # macOS 26 launchctl prints overrides as enabled/disabled, not true/false.
+        self.state["modern_spelling"] = True
+        result = self.run_install()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.state["running_rev"], NEW_REV)
+
+    def test_modern_disabled_spelling_preserves_override(self):
+        self.state["modern_spelling"] = True
+        self.state["disabled"] = True
+        self.assert_restored(self.run_install("not_ready"), 75)
         self.assertTrue(self.state["disabled"])
         self.assertFalse(any(call[0] == "launchctl" and call[1] != "print-disabled"
                              for call in self.state["calls"]))
