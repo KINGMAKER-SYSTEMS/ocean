@@ -1185,6 +1185,32 @@ area: [frontend] [testing] [review]
 PR #66 / issue #75: restored native-only Sessions and Recall shortcut hints and interception, bounded Unicode tool previews, horizontal pinned cards while Workspace is open, and pane-local Files picker/watch refresh. Files uses generation and disposal fencing, canonical owner leases isolated by native window, and page-Started retirement preserving Repo and other windows. Shared Tauri 2 event adapter now uses the pinned IPC API with synchronous cancellation and late-admission cleanup. Preserved concurrent palette repair 51cd328c and reconciled canonical main f1b22bd8; source matches builder 698431ad except its explanatory shortcut comment.
 
 Validation: native watcher tests 11/11 (real notify aliases, peer and legacy survival), locked native lib check; workspace tests 146/146, sessions chrome 5/5, shortcuts 2/2, previews 3/3, final host tests 14/14, WASM check, executable production event-adapter Node tests 4/4. Native compilation used an ignored disposable frontendDist fixture, not a served bundle. No installation, native UI smoke, deployment or live verification. Final integration review and hosted builds remain required; release owner is this factory chat.
+time: [22:26] [08-10-26]
+agent: [claude] [claude code]
+worktree: [port/rooms-pwa-browser] [/Users/risingtidesdev/dev/port-rooms]
+type: [feature-request]
+area: [frontend] [backend] [testing]
+
+Ported the PWA browser-pane forwarding onto public main. The Surface proxy now relays exactly the daemon's GET /v1/browser/screencast SSE stream and POST /v1/browser/input JSON route behind the existing session cookie, so the WorkspacePane browser works on the PWA origin the way Tauri already reaches the daemon directly. Screencast bytes use the untimed SSE client and the shared no-buffer response; input uses the bounded JSON client. No client cookies, authorization, origin or operator headers are forwarded, and there is no wildcard forwarder. Clean three-way apply; only the contract heading was renamed to cite the private issue.
+
+Validation: in apps/ocean-surface, `cargo fmt --all -- --check`, `cargo test -p ocean-surface-proxy` (32 passed, including loopback fixtures for refusal without a session, input passthrough without credential headers, and a screencast frame received before upstream EOF), proxy clippy with warnings denied, `cargo test -p ocean-surface-ui`, WASM clippy with warnings denied, WASM check, WASM test compilation, and `cargo check -p ocean-surface-proxy` pass. No live PWA run.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [21:49] [10-09-26]
+agent: [Codex] [PR67 review repair]
+worktree: [codex/pr67-auth-fixture-reconcile]
+type: [refactor]
+area: [testing] [review]
+
+Reconciled PR67 with public main f1b22bd8, preserving both appended event histories.
+The browser-input fixture sends a synthetic Authorization header before asserting
+that no client authorization reaches the daemon. Production behavior is unchanged.
+Surface devlog contracts remain accurate and intentionally unchanged. This supplies
+proxy transport; PWA workspace exposure still depends on the separate shell work.
+Validation: Mac mini isolated cargo test --locked -p ocean-surface-proxy passed
+32/32; changed-file rustfmt and diff checks passed. No live PWA outcome claimed.
+Separate review, hosted checks, approval, merge and deployment remain pending.
 _________________________________________________________________________________
 
 time: [22:04] [10-09-26]
@@ -1212,3 +1238,9 @@ worktree: [PR66 port/rooms-shell; factory-pr66-reviewed-repairs/ocean]
 type: [workflow]
 area: [review]
 Reconciled reviewed PR66 729cb2fb7a1ac84a4282501053d9b1d7e37e70e7 with canonical main1dfc6802bb74fecdcf83f6f17732b671c892b632 after external79/89 release. Only events.md conflicted; both ordered parent histories preserved. All1155 non-ledger index entries match automatic merge and Surface subtree is unchanged from reviewed PR66. Installer14/14, native-events4/4, bash syntax and diff-check pass; no heavy build/live action. Root takes exclusive release custody for this candidate; fresh independent final-head review and required hosted builds follow this entry. Approval-policy issue90, stack rollout and client acceptance remain separate gates. Applicable AGENTS contracts intentionally unchanged: source behavior and ownership contracts unchanged.
+time: [15:34] [10-12-26]
+agent: [Codex]
+worktree: [PR67 codex/pr67-auth-fixture-reconcile]
+type: [workflow]
+area: [review]
+Reconciled PR67 4f2fc5e449fa33a9a4858ce50c9bf24c66ac0471 with canonical main 1dfc6802bb74fecdcf83f6f17732b671c892b632. Only events.md conflicted; both complete74-record public parent histories remain verbatim and ordered. All1153 non-ledger entries match automatic merge. Complete Surface source and its prior32/32 proxy validation receipt are unchanged; Ocean OS matches main. Cached diff and shell syntax checks pass; identical tests were not repeated. Existing contracts remain accurate with no ownership/index changes. Root owns final commit, separate adversarial review, push and fresh hosted builds. Issue90 and live acceptance remain holds; live PWA smoke is separate from transport fixture proof. No live PWA outcome, authentication, installation or deployment claimed.
