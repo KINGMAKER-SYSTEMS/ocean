@@ -49,6 +49,26 @@ participant retirement. One database file (`rooms.db`), one owning crate.
   upstream-mirrored read positions as canonical decimal u64 TEXT. Mirror writes
   use `RoomReadCursorMirrorCas`: callers supply the previously observed mirror;
   mismatches return `Stale` without writing, including stale clears.
+- `room_agent_runs` — team-platform P3 mutable work-card projections
+- `room_agent_settings` (team-platform P4) keys per-room agent overrides by `(room_id, agent_id)` with a JSON `RoomAgentSettings` body that cascades with the room; writing empty settings deletes the row. `AwaitingReply` runs are parked, not open: `interrupt_open_room_agent_runs` leaves them parked, and `parked_room_agent_runs(key, thread_root_seq)` finds them for resume. Resumption is a two-step compare-and-swap under immediate transactions: `claim_parked_room_agent_run(run, answer_seq)` succeeds for exactly one answer while the run is parked and unclaimed; `settle_room_agent_run_answer(run, answer_seq, resumed)` then closes it `Done` (successor admitted) or releases the claim (still parked), and touches nothing claimed by another answer. `settle_room_agent_run_answer_from_evidence(run, answer_seq)` settles a claim whose holder can no longer report (a dropped request, and every outstanding claim at startup): `Done` only when a run triggered by that answer exists for the same room and agent; otherwise it is released.
+  `{run_id, room_id, started_at, body JSON RoomAgentRun}` (cascade with the
+  room). Not a transcript: `put_room_agent_run` upserts (seeding/recovery); the running turn writes through `put_room_agent_run_from_turn`, which in one immediate transaction never rewrites a stored terminal run and keeps the stored `answer_seq`, so turn writes never regress claim state; `room_agent_runs`
+  returns the newest N oldest-first, `interrupt_open_room_agent_runs` fails
+  every non-terminal run at startup.
+- `daemon_owner` — singleton team-platform P2 owner identity
+  `{participant_id, display_name}`. `owner_identity_as(member_id, default)`
+  mints it once. The configured team member id only seeds a fresh install:
+  with no owner row yet, the participant id is
+  `owner_participant_id_for_member(member_id)`: exactly the member id
+  `GET /v1/identity` (#41) reports, trimmed, case kept, no length cap, except
+  that each `@` (legal in a member id, but a mention boundary) becomes `-`
+  (`ec@kingmaker` → `ec-kingmaker`, `Jay.V` → `Jay.V`); never the login name. An owner already persisted in `rooms.db` is never re-keyed, whatever
+  `member.toml` says now or later, so its roster rows and authored rows stay
+  valid; moving it would be a separate explicit migration (not built).
+  Without a member id the id is derived from the first display name
+  (`owner_participant_id`) and never changes. `set_owner_display_name_as`
+  renames the owner row and the owner's Human roster rows in one transaction.
+  Display data only — never an authentication principal.
 - P2-A federation tables: `federation_instance` (singleton instance id),
   `room_federation` (bearer credential — PRIVATE), `room_member_bindings`
   (member→agent binding, `registration_key` PRIVATE, agent name unique per
@@ -120,9 +140,10 @@ participant retirement. One database file (`rooms.db`), one owning crate.
   the outbox and its cursor only advances. `replace_room_access` is
   destructive test seeding only.
 - **Caller projection follows credential custody.** Non-Local `room_access`
-  reads `caller_member_id` solely from `room_federation.local_human_member_id`
-  alongside access state; no credential means absent, and Local always means
-  absent. Projection replacement never installs caller identity or credentials.
+  reads `caller_member_id` and P2 speaker field `local_member_id` from one
+  `room_federation.local_human_member_id` snapshot alongside access state; no
+  credential means both are absent, and Local always means absent. Projection
+  replacement never installs caller identity or credentials.
 - **Mirrored cursor writes are compare-and-swap.** `set_room_read_cursor_mirror`
   evaluates the expected prior mirror and write under one IMMEDIATE transaction.
   `Applied` returns the durable projection; `Stale` never mutates the row. Callers

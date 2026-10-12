@@ -2756,7 +2756,11 @@ pub fn App() -> impl IntoView {
             // explicitly from the app menu; selecting a room never swaps in a
             // separate stage or overlay.
             <Show when=move || show_rooms.get() && endpoint_ready.get()>
-                <RoomsWorkspace rooms=rooms on_close=Callback::new(move |()| show_rooms.set(false)) />
+                <RoomsWorkspace
+                    rooms=rooms
+                    daemon=daemon_for_island.get_value()
+                    on_close=Callback::new(move |()| show_rooms.set(false))
+                />
             </Show>
 
             <Show when=move || !show_rooms.get()>

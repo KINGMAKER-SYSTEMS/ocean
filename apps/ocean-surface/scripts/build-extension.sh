@@ -20,7 +20,7 @@ cp dist/ocean-surface-ui.js     "$DIST/ocean-surface-ui.js"
 cp dist/ocean-surface-ui_bg.wasm "$DIST/ocean-surface-ui_bg.wasm"
 
 # Stylesheets: every dist/*.css (tokens/base/chrome/island/transcript/components/
-# composer/panels/deck/workspace/rooms-workspace/rooms-interaction/council/call/
+# composer/panels/deck/workspace/rooms-workspace/rooms-interaction/rooms-markdown/rooms-cards/council/call/
 # canvas/observatory/compact/float — sidepanel.html links relatively.
 cp dist/*.css "$DIST/"
 if [ -d dist/fonts ]; then

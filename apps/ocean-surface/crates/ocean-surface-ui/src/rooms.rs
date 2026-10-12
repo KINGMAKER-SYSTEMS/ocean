@@ -44,11 +44,6 @@ enum TailState {
     Reconnecting,
 }
 
-/// localStorage key for this surface's stable room participant id, so a given
-/// browser keeps the same identity across reloads (join/leave/author are keyed
-/// on it).
-const ROOM_IDENTITY_KEY: &str = "ocean.room_identity";
-
 // ---- Wire types (mirror ocean-core Room / RoomMessage / RoomParticipant) ----
 
 /// What kind of actor a participant / message author is. Mirrors
@@ -250,6 +245,10 @@ pub struct RoomAccessProjection {
     pub caller_member_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_confirmed_global_sequence: Option<u64>,
+    /// The Bedrock member id this daemon's owner speaks as in a federated
+    /// room. `None` for Local rooms and before a credential exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_member_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub members: Vec<FederatedRoomMemberProjection>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -437,16 +436,23 @@ struct CreateRoomBody<'a> {
     trigger_policy: Option<RoomTriggerPolicy>,
 }
 
+/// A human join carries no identity: the daemon joins its owner.
 #[derive(Debug, Clone, Serialize)]
-struct JoinBody<'a> {
+struct JoinBody {
+    kind: RoomParticipantKind,
+}
+
+/// An agent join names the daemon-owned folder agent to add.
+#[derive(Debug, Clone, Serialize)]
+struct AgentJoinBody<'a> {
     id: &'a str,
     display_name: &'a str,
     kind: RoomParticipantKind,
 }
 
+/// A human post carries no author id: the daemon authors it as its owner.
 #[derive(Debug, Clone, Serialize)]
 struct PostMessageBody<'a> {
-    author_id: &'a str,
     author_kind: RoomParticipantKind,
     body: &'a str,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -475,32 +481,13 @@ struct RetryOutboxErrorResponse {
     error: Option<String>,
 }
 
-/// Identity of this surface as a room participant. Stable per browser via
-/// localStorage so join/leave/author all key on the same id.
-#[derive(Debug, Clone)]
-pub struct RoomIdentity {
-    pub id: String,
+/// The daemon owner this surface speaks for (`GET /v1/me`). Every surface
+/// talking to one daemon is the same person, so identity is daemon-owned and
+/// never minted in the browser (team-platform P2).
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct OwnerIdentity {
+    pub participant_id: String,
     pub display_name: String,
-}
-
-impl RoomIdentity {
-    fn current() -> Self {
-        // Reuse a persisted id if present; otherwise mint one and store it.
-        let id = local_storage()
-            .and_then(|s| s.get_item(ROOM_IDENTITY_KEY).ok().flatten())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| {
-                let minted = format!("web-{}", mint_suffix());
-                if let Some(s) = local_storage() {
-                    let _ = s.set_item(ROOM_IDENTITY_KEY, &minted);
-                }
-                minted
-            });
-        Self {
-            display_name: id.clone(),
-            id,
-        }
-    }
 }
 
 /// Outcome of a typed create-room operation. Each outcome carries the
@@ -569,15 +556,22 @@ pub struct Rooms {
     pub open_room: RwSignal<Option<Room>>,
     /// The open room's transcript, ascending by `seq`.
     pub transcript: RwSignal<Vec<RoomMessage>>,
+    /// The open room's agent work cards (team-platform P3), start-ordered.
+    pub runs: RwSignal<Vec<RoomAgentRun>>,
     /// Free-form status line (errors, in-flight notices).
     pub status: RwSignal<String>,
     /// Monotonic generation: bumped when the open room changes so a stale
     /// poll/SSE loop retires instead of writing into the wrong room.
     generation: RwSignal<u64>,
-    /// This browser's stable participant id, used for join/leave/post.
+    /// The daemon owner's participant id (`GET /v1/me`); empty until loaded.
+    /// Local rooms render "me" by it; joins and posts never send it as
+    /// authority — the daemon derives authorship itself.
     pub identity_id: RwSignal<&'static str>,
-    /// This browser's display name.
+    /// The daemon owner's display name; empty until loaded.
     pub identity_name: RwSignal<&'static str>,
+    /// Latest owner read owns publication; a daemon-origin change retires it.
+    owner_request_ticket: RwSignal<u64>,
+    owner_origin: RwSignal<Option<String>>,
     /// Tail state for the live connection indicator. Starts as Replaying during
     /// initial catch-up, switches to Live once connected, and to Reconnecting on
     /// drop/retry. The view reads this to render the status bar indicator.
@@ -637,14 +631,12 @@ impl Rooms {
     /// always targets the origin resolved by bootstrap. Room collaboration is
     /// daemon-native text; LiveKit state is intentionally outside this type.
     pub fn new(daemon: &crate::daemon::Daemon) -> Self {
-        let identity = RoomIdentity::current();
-        // Leak the small, app-lifetime identity strings to obtain `&'static str`
-        // signals, so the panel can pass them into request closures without a
-        // per-call clone.
-        let id_static: &'static str = Box::leak(identity.id.into_boxed_str());
-        let name_static: &'static str = Box::leak(identity.display_name.into_boxed_str());
+        Self::with_url(daemon.url)
+    }
+
+    fn with_url(url: RwSignal<String>) -> Self {
         Self {
-            url: daemon.url,
+            url,
             list: RwSignal::new(Vec::new()),
             rooms_loaded: RwSignal::new(false),
             rooms_loading: RwSignal::new(false),
@@ -653,10 +645,13 @@ impl Rooms {
             open_key: RwSignal::new(None),
             open_room: RwSignal::new(None),
             transcript: RwSignal::new(Vec::new()),
+            runs: RwSignal::new(Vec::new()),
             status: RwSignal::new(String::new()),
             generation: RwSignal::new(0),
-            identity_id: RwSignal::new(id_static),
-            identity_name: RwSignal::new(name_static),
+            identity_id: RwSignal::new(""),
+            identity_name: RwSignal::new(""),
+            owner_request_ticket: RwSignal::new(0),
+            owner_origin: RwSignal::new(None),
             tail_state: RwSignal::new(TailState::Replaying),
             available_agents: RwSignal::new(Vec::new()),
             agents_root: RwSignal::new(None),
@@ -720,6 +715,7 @@ impl Rooms {
     fn reset_room_state(&self) {
         self.open_room.set(None);
         self.transcript.set(Vec::new());
+        self.runs.set(Vec::new());
         self.access.set(None);
         self.open_read_cursor.set(None);
         self.read_cursor_in_flight.set(None);
@@ -791,6 +787,11 @@ impl Rooms {
             }
             match result {
                 Ok(success) => {
+                    // The daemon is reachable at this origin; load the owner
+                    // identity if the mount-time fetch raced URL bootstrap.
+                    if me.identity_id.get_untracked().is_empty() {
+                        me.fetch_me();
+                    }
                     me.list.set(success.rooms.clone());
                     me.read_summaries.update(|current| {
                         *current = merge_room_read_summaries(
@@ -811,12 +812,53 @@ impl Rooms {
         });
     }
 
+    fn begin_owner_request(&self) -> (String, u64) {
+        let base = self.base();
+        if self.owner_origin.get_untracked().as_deref() != Some(base.as_str()) {
+            self.identity_id.set("");
+            self.identity_name.set("");
+            self.owner_origin.set(Some(base.clone()));
+        }
+        let ticket = self.owner_request_ticket.get_untracked().wrapping_add(1);
+        self.owner_request_ticket.set(ticket);
+        (base, ticket)
+    }
+
+    fn apply_owner_response(&self, base: &str, ticket: u64, owner: OwnerIdentity) -> bool {
+        if self.base() != base || self.owner_request_ticket.get_untracked() != ticket {
+            return false;
+        }
+        if self.identity_id.get_untracked() != owner.participant_id {
+            self.identity_id
+                .set(Box::leak(owner.participant_id.into_boxed_str()));
+        }
+        if self.identity_name.get_untracked() != owner.display_name {
+            self.identity_name
+                .set(Box::leak(owner.display_name.into_boxed_str()));
+        }
+        true
+    }
+
+    /// Load the daemon owner identity (`GET /v1/me`). The strings are leaked
+    /// once per distinct identity so request closures keep `&'static str`
+    /// signals; an unchanged identity is not re-leaked.
+    pub fn fetch_me(&self) {
+        let (base, ticket) = self.begin_owner_request();
+        let me = *self;
+        spawn_local(async move {
+            let url = format!("{base}/v1/me");
+            let Ok(resp) = Request::get(&url).send().await else {
+                return;
+            };
+            let Ok(owner) = resp.json::<OwnerIdentity>().await else {
+                return;
+            };
+            me.apply_owner_response(&base, ticket, owner);
+        });
+    }
+
     /// Fetch available agents from GET /v1/agents (TASK-9/TASK-11).
-    /// The daemon returns `{ "ok": true, "root": "...", "agents": [{"name":"flux",
-    /// "description":..., "model":..., "skills":n, "subagents":[..]}, ...] }`.
-    /// A folder that failed to resolve arrives as `{"name", "error"}` and is
-    /// kept (flagged) so the operator sees the broken one instead of it
-    /// silently vanishing from the picker.
+    /// Unresolved catalog entries stay visible with their resolution error.
     pub fn fetch_agents(&self) {
         let base = self.base();
         let agents_sig = self.available_agents;
@@ -1208,12 +1250,8 @@ impl Rooms {
         let base = self.base();
         let me = *self;
         let generation_id = self.generation.get_untracked();
-        let id = self.identity_id.get_untracked();
-        let name = self.identity_name.get_untracked();
         spawn_local(async move {
             let body = JoinBody {
-                id,
-                display_name: name,
                 kind: RoomParticipantKind::Human,
             };
             let post_url = format!("{base}/v1/rooms/persistent/{}/participants", encode(&key));
@@ -1287,7 +1325,7 @@ impl Rooms {
         let generation_id = self.generation.get_untracked();
         self.add_agent_in_flight.set(Some(agent_id.clone()));
         spawn_local(async move {
-            let body = JoinBody {
+            let body = AgentJoinBody {
                 id: &agent_id,
                 display_name: &agent_id,
                 kind: RoomParticipantKind::Agent,
@@ -1440,10 +1478,8 @@ impl Rooms {
         let base = self.base();
         let me = *self;
         let generation_id = self.generation.get_untracked();
-        let id = self.identity_id.get_untracked();
         spawn_local(async move {
             let payload = PostMessageBody {
-                author_id: id,
                 author_kind: RoomParticipantKind::Human,
                 body: &body,
                 thread_parent_seq,
@@ -1633,9 +1669,18 @@ impl Rooms {
                         gloo_net::eventsource::State::Closed => TailState::Reconnecting,
                     });
                 }
+                let run_sub = match es.subscribe("room_agent_run") {
+                    Ok(s) => s
+                        .map(|event| event.map(|msg| ("room_agent_run", msg)))
+                        .boxed_local(),
+                    Err(_) => {
+                        gloo_timers::future::TimeoutFuture::new(2_000).await;
+                        continue;
+                    }
+                };
                 let mut stream = futures_util::stream::select(
                     futures_util::stream::select(message_sub, access_sub),
-                    read_cursor_sub,
+                    futures_util::stream::select(read_cursor_sub, run_sub),
                 );
                 // Race stream.next() against a 2 s timeout so room close/switch
                 // can cancel a stalled connection (blame: gloo EventSource errors
@@ -1695,6 +1740,9 @@ impl Rooms {
                     };
                     tail_state.set(TailState::Live);
                     match frame {
+                        RoomTailFrame::Run(run) => {
+                            me.runs.update(|runs| upsert_run(runs, run));
+                        }
                         RoomTailFrame::Access(access) => {
                             apply_access_projection(&me.access, access.clone());
                             update_open_summary_from_open_room(
@@ -1950,6 +1998,296 @@ enum RoomTailFrame {
     Message(RoomMessage),
     Access(RoomAccessProjection),
     ReadCursor(RoomReadCursorProjection),
+    Run(RoomAgentRun),
+}
+
+/// Live lifecycle of one room-convened agent turn (team-platform P3), mirror
+/// of `ocean_core::RoomAgentRunState`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum RoomAgentRunState {
+    Queued,
+    Thinking,
+    RunningTool {
+        label: String,
+    },
+    AwaitingPermission,
+    AwaitingReply,
+    Done,
+    Failed {
+        reason: String,
+    },
+    Cancelled,
+    /// A state this build does not know yet renders as idle work.
+    #[serde(other)]
+    Unknown,
+}
+
+impl RoomAgentRunState {
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Done | Self::Failed { .. } | Self::Cancelled)
+    }
+}
+
+/// One agent turn in a room: the work card's daemon-owned projection.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct RoomAgentRun {
+    pub run_id: String,
+    pub room_id: String,
+    pub agent_id: String,
+    pub session_id: String,
+    pub trigger_seq: u64,
+    pub thread_root_seq: u64,
+    #[serde(flatten)]
+    pub state: RoomAgentRunState,
+    pub started_at: String,
+    pub updated_at: String,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub files_changed: Vec<String>,
+    #[serde(default)]
+    pub tool_count: u32,
+    #[serde(default)]
+    pub reply_seq: Option<u64>,
+    /// The tool approval this run is blocked on (owner-local).
+    #[serde(default)]
+    pub pending_permission: Option<RoomRunPermission>,
+}
+
+/// A pending tool approval on a run. Mirrors `ocean_core::RoomRunPermission`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct RoomRunPermission {
+    pub permission_id: String,
+    /// Tool name of the pending call; the decision names it back.
+    #[serde(default)]
+    pub tool: String,
+    pub tool_label: String,
+}
+
+/// Per-room agent overrides. Mirrors `ocean_core::RoomAgentSettings`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomAgentSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RoomAgentSettingsEnvelope {
+    settings: RoomAgentSettings,
+}
+
+#[derive(Deserialize)]
+struct RoomErrorEnvelope {
+    #[serde(default)]
+    error: String,
+}
+
+const UNREACHABLE: &str = "Ocean could not reach the room service.";
+
+/// The decision body for one pending permission. It names the exact request
+/// the owner saw (`permission_id` + `tool`), so the daemon refuses it with 409
+/// once that request is stale instead of applying it to a later one.
+pub fn run_permission_body(permission: &RoomRunPermission, allow: bool) -> String {
+    let mut body = serde_json::json!({
+        "permission_id": permission.permission_id,
+        "decision": if allow { "allow" } else { "deny" },
+    });
+    if !permission.tool.is_empty() {
+        body["tool"] = serde_json::Value::String(permission.tool.clone());
+    }
+    body.to_string()
+}
+
+/// A Room owner mutation that needs daemon Room operator authority. Exactly
+/// the routes a first-party surface may make as the operator (decision
+/// 2026-10-08): the web proxy attaches the key for its logged-in session, the
+/// Tauri shell attaches it natively (`host::room_owner_mutation`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OwnerRoute<'a> {
+    RunPermission { key: &'a str, run_id: &'a str },
+    AgentSettings { key: &'a str, agent_id: &'a str },
+}
+
+impl OwnerRoute<'_> {
+    fn method(self) -> &'static str {
+        match self {
+            Self::RunPermission { .. } => "POST",
+            Self::AgentSettings { .. } => "PUT",
+        }
+    }
+
+    fn url(self, base: &str) -> String {
+        match self {
+            Self::RunPermission { key, run_id } => format!(
+                "{base}/v1/rooms/persistent/{}/runs/{}/permission",
+                encode(key),
+                encode(run_id)
+            ),
+            Self::AgentSettings { key, agent_id } => agent_settings_url(base, key, agent_id),
+        }
+    }
+
+    /// The native shell's invoke arguments: one of its fixed kinds plus the
+    /// raw ids (the shell encodes them into its own fixed path).
+    fn ids(self) -> (&'static str, String, String) {
+        match self {
+            Self::RunPermission { key, run_id } => {
+                ("run_permission", key.to_string(), run_id.to_string())
+            }
+            Self::AgentSettings { key, agent_id } => {
+                ("agent_settings", key.to_string(), agent_id.to_string())
+            }
+        }
+    }
+}
+
+/// Status and body of an owner mutation, from either transport.
+struct OwnerReply {
+    status: u16,
+    body: String,
+}
+
+/// Send an owner mutation: through the native shell on Tauri (it attaches the
+/// operator key), else as an ordinary request to `base` (the web proxy
+/// attaches the key for its logged-in session; a direct daemon refuses).
+async fn send_owner_mutation(
+    base: &str,
+    route: OwnerRoute<'_>,
+    body: String,
+) -> Result<OwnerReply, ()> {
+    let (kind, room, target) = route.ids();
+    if let Some(reply) =
+        crate::host::room_owner_mutation(kind, Some(&room), Some(&target), &body).await
+    {
+        return reply
+            .map(|r| OwnerReply {
+                status: r.status,
+                body: r.body,
+            })
+            .map_err(|_| ());
+    }
+    let url = route.url(base);
+    let builder = match route.method() {
+        "POST" => Request::post(&url),
+        _ => Request::put(&url),
+    };
+    let request = builder
+        .header("content-type", "application/json")
+        .body(body)
+        .map_err(|_| ())?;
+    let response = request.send().await.map_err(|_| ())?;
+    Ok(OwnerReply {
+        status: response.status(),
+        body: response.text().await.unwrap_or_default(),
+    })
+}
+
+/// Owner approve/deny for a run's pending tool permission. The card updates
+/// from the next `room_agent_run` frame; nothing is applied optimistically.
+pub async fn decide_run_permission(
+    base: &str,
+    key: &str,
+    run_id: &str,
+    permission: &RoomRunPermission,
+    allow: bool,
+) -> Result<(), String> {
+    let route = OwnerRoute::RunPermission { key, run_id };
+    match send_owner_mutation(base, route, run_permission_body(permission, allow)).await {
+        Ok(r) if (200..300).contains(&r.status) => Ok(()),
+        Ok(r) if r.status == 409 || r.status == 404 => Err("Already decided.".into()),
+        Ok(_) => Err("Ocean could not record the decision.".into()),
+        Err(()) => Err(UNREACHABLE.into()),
+    }
+}
+
+fn agent_settings_url(base: &str, key: &str, agent_id: &str) -> String {
+    format!(
+        "{base}/v1/rooms/persistent/{}/agents/{}/settings",
+        encode(key),
+        encode(agent_id)
+    )
+}
+
+pub async fn fetch_agent_settings(
+    base: &str,
+    key: &str,
+    agent_id: &str,
+) -> Result<RoomAgentSettings, String> {
+    match Request::get(&agent_settings_url(base, key, agent_id))
+        .send()
+        .await
+    {
+        Ok(r) if r.ok() => r
+            .json::<RoomAgentSettingsEnvelope>()
+            .await
+            .map(|e| e.settings)
+            .map_err(|_| "Ocean returned invalid agent settings.".into()),
+        Ok(_) => Err("Ocean could not load agent settings.".into()),
+        Err(_) => Err(UNREACHABLE.into()),
+    }
+}
+
+pub async fn save_agent_settings(
+    base: &str,
+    key: &str,
+    agent_id: &str,
+    settings: &RoomAgentSettings,
+) -> Result<RoomAgentSettings, String> {
+    let body = serde_json::to_string(settings).map_err(|_| UNREACHABLE.to_string())?;
+    let route = OwnerRoute::AgentSettings { key, agent_id };
+    match send_owner_mutation(base, route, body).await {
+        Ok(r) if (200..300).contains(&r.status) => {
+            serde_json::from_str::<RoomAgentSettingsEnvelope>(&r.body)
+                .map(|e| e.settings)
+                .map_err(|_| "Ocean returned invalid agent settings.".into())
+        }
+        Ok(r) if r.status == 400 => {
+            let code = serde_json::from_str::<RoomErrorEnvelope>(&r.body)
+                .map(|e| e.error)
+                .unwrap_or_default();
+            Err(settings_error_message(&code).into())
+        }
+        Ok(_) => Err("Ocean could not save agent settings.".into()),
+        Err(()) => Err(UNREACHABLE.into()),
+    }
+}
+
+/// Human text for a settings validation code.
+pub(crate) fn settings_error_message(code: &str) -> &'static str {
+    match code {
+        "instructions_too_long" => "Instructions are too long.",
+        "invalid_model" => "That model name is not valid.",
+        _ => "Ocean rejected these settings.",
+    }
+}
+
+/// Ids of the runs whose card attaches under thread root `root_seq`.
+pub(crate) fn run_ids_for_root(runs: &[RoomAgentRun], root_seq: u64) -> Vec<String> {
+    runs.iter()
+        .filter(|r| r.thread_root_seq == root_seq)
+        .map(|r| r.run_id.clone())
+        .collect()
+}
+
+/// Match the daemon's recent work-card projection on reconnect and live updates.
+pub(crate) const ROOM_RUNS_LIMIT: usize = 50;
+
+/// Insert or replace a run by id, retaining the most recent starts.
+pub(crate) fn upsert_run(runs: &mut Vec<RoomAgentRun>, run: RoomAgentRun) {
+    match runs.iter_mut().find(|r| r.run_id == run.run_id) {
+        Some(existing) => *existing = run,
+        None => runs.push(run),
+    }
+    runs.sort_by(|a, b| {
+        a.started_at
+            .cmp(&b.started_at)
+            .then(a.run_id.cmp(&b.run_id))
+    });
+    let excess = runs.len().saturating_sub(ROOM_RUNS_LIMIT);
+    runs.drain(..excess);
 }
 
 fn decode_room_tail_frame(
@@ -1974,6 +2312,11 @@ fn decode_room_tail_frame(
                 .ok()
             })
             .map(RoomTailFrame::ReadCursor),
+        // Run frames carry their room identity; drop any that name another.
+        "room_agent_run" => serde_json::from_str::<RoomAgentRun>(data)
+            .ok()
+            .filter(|run| run.room_id == expected_room_key)
+            .map(RoomTailFrame::Run),
         _ => None,
     }
 }
@@ -2266,9 +2609,68 @@ fn joined_open_for(
                 .any(|participant| participant.id == identity_id)
         });
     }
-    access.members.iter().any(|member| {
-        member.member_id == identity_id || member.owner_member_id.as_deref() == Some(identity_id)
+    // A federated room knows "me" only by the daemon-projected member id.
+    let Some(me) = access.local_member_id.as_deref() else {
+        return false;
+    };
+    access.members.iter().any(|member| member.member_id == me)
+}
+
+/// Human-readable name for a message author or member id: the room roster's
+/// display name first (Local), then the federated member projection, falling
+/// back to the raw id only when neither authority names it.
+pub fn author_display_name(
+    room: Option<&Room>,
+    access: Option<&RoomAccessProjection>,
+    author_id: &str,
+) -> String {
+    room.and_then(|room| {
+        room.participants
+            .iter()
+            .find(|p| p.id == author_id)
+            .map(|p| p.display_name.clone())
     })
+    .or_else(|| {
+        access.and_then(|access| {
+            access
+                .members
+                .iter()
+                .find(|m| m.member_id == author_id)
+                .map(|m| m.display_name.clone())
+        })
+    })
+    .filter(|name| !name.trim().is_empty())
+    .unwrap_or_else(|| author_id.to_string())
+}
+
+/// Up to two uppercase initials from a display name ("Ada King" -> "AK",
+/// "researcher" -> "RE", "" -> "?").
+pub fn name_initials(name: &str) -> String {
+    let words: Vec<&str> = name
+        .split(|c: char| c.is_whitespace() || c == '-' || c == '_' || c == '.')
+        .filter(|w| !w.is_empty())
+        .collect();
+    let initials: String = match words.as_slice() {
+        [] => "?".into(),
+        [one] => one.chars().take(2).collect(),
+        [first, .., last] => first.chars().take(1).chain(last.chars().take(1)).collect(),
+    };
+    initials.to_uppercase()
+}
+
+/// The id this surface's owner speaks as in the open room: the Local roster
+/// id from `/v1/me`, or the daemon-projected Bedrock member id when federated.
+pub fn local_speaker_id(
+    access: Option<&RoomAccessProjection>,
+    owner_participant_id: &str,
+) -> Option<String> {
+    match access {
+        Some(a) if a.state == RoomAccessState::Local => {
+            (!owner_participant_id.is_empty()).then(|| owner_participant_id.to_string())
+        }
+        Some(a) => a.local_member_id.clone(),
+        None => None,
+    }
 }
 
 /// Which placeholder the rooms list should render, given whether the first
@@ -2496,22 +2898,6 @@ fn agent_ids_for(access: Option<&RoomAccessProjection>, room: Option<&Room>) -> 
     .unwrap_or_default()
 }
 
-fn local_storage() -> Option<web_sys::Storage> {
-    web_sys::window().and_then(|w| w.local_storage().ok().flatten())
-}
-
-/// A short, reasonably-unique suffix for a minted identity. We don't have a UUID
-/// crate in this WASM bundle, so derive one from the wall clock (`js_sys::Date`,
-/// no web-sys feature needed) XOR'd with a random.
-fn mint_suffix() -> String {
-    let now = js_sys::Date::now();
-    let rand = js_sys::Math::random();
-    format!(
-        "{:x}",
-        (now as u64).wrapping_mul(1_000_000) ^ (rand * 1e9) as u64
-    )
-}
-
 /// Derive a url/key-safe slug from a room name (lowercase alnum + `-`).
 fn slugify(name: &str) -> String {
     let mut out = String::new();
@@ -2567,6 +2953,74 @@ pub(crate) fn livekit_token_path_for_room(key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owner_routes_map_to_the_shell_kinds_and_the_daemon_paths() {
+        let base = "http://127.0.0.1:4780";
+        let decision = OwnerRoute::RunPermission {
+            key: "team room",
+            run_id: "run-1",
+        };
+        assert_eq!(
+            decision.ids(),
+            (
+                "run_permission",
+                "team room".to_string(),
+                "run-1".to_string()
+            )
+        );
+        assert_eq!(decision.method(), "POST");
+        assert_eq!(
+            decision.url(base),
+            format!(
+                "{base}/v1/rooms/persistent/{}/runs/run-1/permission",
+                encode("team room")
+            )
+        );
+        let settings = OwnerRoute::AgentSettings {
+            key: "k",
+            agent_id: "helper",
+        };
+        assert_eq!(
+            settings.ids(),
+            ("agent_settings", "k".to_string(), "helper".to_string())
+        );
+        assert_eq!(settings.method(), "PUT");
+        assert_eq!(settings.url(base), agent_settings_url(base, "k", "helper"));
+    }
+
+    #[test]
+    fn run_permission_body_names_the_request_the_owner_saw() {
+        let permission = RoomRunPermission {
+            permission_id: "7c1d2f9e-1111-4222-8333-944445555666".into(),
+            tool: "bash".into(),
+            tool_label: "bash cargo test".into(),
+        };
+        let allow: serde_json::Value =
+            serde_json::from_str(&run_permission_body(&permission, true)).unwrap();
+        assert_eq!(
+            allow,
+            serde_json::json!({
+                "permission_id": "7c1d2f9e-1111-4222-8333-944445555666",
+                "tool": "bash",
+                "decision": "allow",
+            })
+        );
+        let deny: serde_json::Value =
+            serde_json::from_str(&run_permission_body(&permission, false)).unwrap();
+        assert_eq!(deny["decision"], "deny");
+        assert_eq!(deny["permission_id"], permission.permission_id.as_str());
+        // A card from an older daemon carries no tool name; the id still binds.
+        let legacy: RoomRunPermission = serde_json::from_value(serde_json::json!({
+            "permission_id": "p1",
+            "tool_label": "write a.rs",
+        }))
+        .unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(&run_permission_body(&legacy, true)).unwrap();
+        assert_eq!(body["permission_id"], "p1");
+        assert!(body.get("tool").is_none());
+    }
 
     #[test]
     fn redeem_response_uses_daemon_authoritative_room_key() {
@@ -2625,6 +3079,7 @@ mod tests {
             state,
             caller_member_id: None,
             last_confirmed_global_sequence: None,
+            local_member_id: None,
             members: Vec::new(),
             outbox: Vec::new(),
         }
@@ -2645,8 +3100,8 @@ mod tests {
 
     #[test]
     fn post_message_wire_omits_none_thread_parent_and_includes_some() {
+        // P2: the wire carries no author id — the daemon authors as its owner.
         let root = serde_json::to_value(PostMessageBody {
-            author_id: "human-1",
             author_kind: RoomParticipantKind::Human,
             body: "root body",
             thread_parent_seq: None,
@@ -2655,14 +3110,12 @@ mod tests {
         assert_eq!(
             root,
             serde_json::json!({
-                "author_id": "human-1",
                 "author_kind": "human",
                 "body": "root body"
             })
         );
 
         let reply = serde_json::to_value(PostMessageBody {
-            author_id: "human-1",
             author_kind: RoomParticipantKind::Human,
             body: "reply body",
             thread_parent_seq: Some(7),
@@ -2671,7 +3124,6 @@ mod tests {
         assert_eq!(
             reply,
             serde_json::json!({
-                "author_id": "human-1",
                 "author_kind": "human",
                 "body": "reply body",
                 "thread_parent_seq": 7
@@ -2918,10 +3370,99 @@ mod tests {
         .unwrap();
         match frame {
             RoomTailFrame::Message(message) => assert_eq!(message.seq, 8),
-            RoomTailFrame::Access(_) => panic!("message frame decoded as access"),
-            RoomTailFrame::ReadCursor(_) => panic!("message frame decoded as read cursor"),
+            other => panic!("message frame decoded as {other:?}"),
         }
         assert!(decode_room_tail_frame("unknown", "{}", "room-1").is_none());
+    }
+
+    fn run_wire(run_id: &str, room: &str, state: &str, started: &str) -> String {
+        format!(
+            r#"{{"run_id":"{run_id}","room_id":"{room}","agent_id":"helper","session_id":"s","trigger_seq":4,"thread_root_seq":4,"state":"{state}","label":"bash cargo test","started_at":"{started}","updated_at":"{started}","tool_count":2}}"#
+        )
+    }
+
+    #[test]
+    fn run_frames_decode_only_for_the_open_room() {
+        let wire = run_wire("r1", "room-1", "running_tool", "2026-10-03T10:00:00Z");
+        let Some(RoomTailFrame::Run(run)) =
+            decode_room_tail_frame("room_agent_run", &wire, "room-1")
+        else {
+            panic!("run frame must decode");
+        };
+        assert_eq!(
+            run.state,
+            RoomAgentRunState::RunningTool {
+                label: "bash cargo test".into()
+            }
+        );
+        assert_eq!(run.tool_count, 2);
+        assert!(run.files_changed.is_empty());
+        assert!(
+            decode_room_tail_frame("room_agent_run", &wire, "room-2").is_none(),
+            "a run naming another room is dropped"
+        );
+        let future = run_wire("r2", "room-1", "some_future_state", "2026-10-03T10:00:00Z");
+        let Some(RoomTailFrame::Run(run)) =
+            decode_room_tail_frame("room_agent_run", &future, "room-1")
+        else {
+            panic!("unknown states still decode");
+        };
+        assert_eq!(run.state, RoomAgentRunState::Unknown);
+    }
+
+    #[test]
+    fn upsert_run_replaces_by_id_and_keeps_start_order() {
+        let decode = |w: String| serde_json::from_str::<RoomAgentRun>(&w).unwrap();
+        let mut runs = Vec::new();
+        upsert_run(
+            &mut runs,
+            decode(run_wire("b", "r", "queued", "2026-10-03T10:00:05Z")),
+        );
+        upsert_run(
+            &mut runs,
+            decode(run_wire("a", "r", "queued", "2026-10-03T10:00:00Z")),
+        );
+        upsert_run(
+            &mut runs,
+            decode(run_wire("b", "r", "done", "2026-10-03T10:00:05Z")),
+        );
+        assert_eq!(
+            runs.iter().map(|r| r.run_id.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+        assert_eq!(runs[1].state, RoomAgentRunState::Done);
+        assert_eq!(run_ids_for_root(&runs, 4), vec!["a", "b"]);
+        assert!(run_ids_for_root(&runs, 5).is_empty());
+    }
+
+    #[test]
+    fn live_run_projection_keeps_only_latest_fifty_across_replay_and_updates() {
+        let make = |index: usize, state: &str| {
+            serde_json::from_str::<RoomAgentRun>(&run_wire(
+                &format!("run-{index:03}"),
+                "r",
+                state,
+                &format!("2026-10-03T10:{:02}:{:02}Z", index / 60, index % 60),
+            ))
+            .unwrap()
+        };
+        let mut runs = Vec::new();
+        // Replay may arrive in reverse order; retain newest, not last received.
+        for index in (0..75).rev() {
+            upsert_run(&mut runs, make(index, "thinking"));
+            assert!(runs.len() <= ROOM_RUNS_LIMIT);
+        }
+        assert_eq!(runs.first().unwrap().run_id, "run-025");
+        assert_eq!(runs.last().unwrap().run_id, "run-074");
+        upsert_run(&mut runs, make(74, "done"));
+        assert_eq!(runs.len(), ROOM_RUNS_LIMIT);
+        assert_eq!(runs.last().unwrap().state, RoomAgentRunState::Done);
+        // A late update to an evicted run must not displace a recent card.
+        upsert_run(&mut runs, make(2, "done"));
+        assert_eq!(runs.first().unwrap().run_id, "run-025");
+        upsert_run(&mut runs, make(75, "queued"));
+        assert_eq!(runs.first().unwrap().run_id, "run-026");
+        assert_eq!(runs.last().unwrap().run_id, "run-075");
     }
 
     #[test]
@@ -3072,13 +3613,69 @@ mod tests {
             derived_presence: None,
             local_binding_available: Some(true),
         }];
-        assert!(joined_open_for(Some(&federated), None, "federated-user"));
+        // Federated "me" is the daemon-projected member id, never the owner's
+        // Local participant id.
+        assert!(!joined_open_for(Some(&federated), None, "local-human"));
+        federated.local_member_id = Some("federated-user".into());
         assert!(joined_open_for(Some(&federated), None, "local-human"));
+        federated.local_member_id = Some("someone-else".into());
         assert!(!joined_open_for(
             Some(&federated),
             Some(&room),
-            "local-agent"
+            "local-human"
         ));
+    }
+
+    #[test]
+    fn author_display_name_prefers_roster_then_member_projection() {
+        let room = local_room();
+        let local_id = room.participants[0].id.clone();
+        let local_name = room.participants[0].display_name.clone();
+        assert_eq!(
+            author_display_name(Some(&room), None, &local_id),
+            local_name
+        );
+        let mut live = access_projection(RoomAccessState::Live);
+        live.members = vec![FederatedRoomMemberProjection {
+            member_id: "m-7".into(),
+            owner_member_id: None,
+            actor_type: FederatedActorType::User,
+            role_in_room: FederatedRoomRole::Member,
+            display_name: "Grace Hopper".into(),
+            public_agent_descriptor: None,
+            joined_at: String::new(),
+            derived_presence: None,
+            local_binding_available: None,
+        }];
+        assert_eq!(
+            author_display_name(None, Some(&live), "m-7"),
+            "Grace Hopper"
+        );
+        assert_eq!(
+            author_display_name(Some(&room), Some(&live), "ghost"),
+            "ghost"
+        );
+    }
+
+    #[test]
+    fn name_initials_take_first_and_last_words() {
+        assert_eq!(name_initials("Ada King"), "AK");
+        assert_eq!(name_initials("Grace Brewster Hopper"), "GH");
+        assert_eq!(name_initials("researcher"), "RE");
+        assert_eq!(name_initials("john-smathers"), "JS");
+        assert_eq!(name_initials("   "), "?");
+    }
+
+    #[test]
+    fn local_speaker_id_follows_access_authority() {
+        let local = access_projection(RoomAccessState::Local);
+        assert_eq!(local_speaker_id(Some(&local), "ada"), Some("ada".into()));
+        assert_eq!(local_speaker_id(Some(&local), ""), None);
+        let mut live = access_projection(RoomAccessState::Live);
+        assert_eq!(local_speaker_id(Some(&live), "ada"), None);
+        live.local_member_id = Some("m-1".into());
+        assert_eq!(local_speaker_id(Some(&live), "ada"), Some("m-1".into()));
+        assert_eq!(local_speaker_id(None, "ada"), None);
     }
 
     #[test]
@@ -3751,6 +4348,40 @@ mod tests {
         );
         assert!(rooms_loaded.get_untracked());
         assert!(!rooms_loading.get_untracked());
+    }
+
+    #[test]
+    fn owner_responses_retire_on_origin_switch_and_newer_read() {
+        let url = RwSignal::new("https://old.example".into());
+        let rooms = Rooms::with_url(url);
+        let owner = |id: &str, name: &str| OwnerIdentity {
+            participant_id: id.into(),
+            display_name: name.into(),
+        };
+        let (old_base, old_ticket) = rooms.begin_owner_request();
+        assert!(rooms.apply_owner_response(&old_base, old_ticket, owner("old", "Old")));
+
+        url.set("https://new.example".into());
+        // Reject even before the origin effect starts its replacement request.
+        assert!(!rooms.apply_owner_response(&old_base, old_ticket, owner("old", "Late")));
+        let (new_base, first_ticket) = rooms.begin_owner_request();
+        assert_eq!(rooms.identity_id.get_untracked(), "");
+        assert_eq!(rooms.identity_name.get_untracked(), "");
+        let (_, latest_ticket) = rooms.begin_owner_request();
+        assert!(rooms.apply_owner_response(&new_base, latest_ticket, owner("new", "Renamed")));
+        assert!(!rooms.apply_owner_response(
+            &new_base,
+            first_ticket,
+            owner("new", "Before rename")
+        ));
+        assert_eq!(rooms.identity_id.get_untracked(), "new");
+        assert_eq!(rooms.identity_name.get_untracked(), "Renamed");
+
+        // Returning to an origin does not revive its previous request ticket.
+        url.set(old_base.clone());
+        let (_, return_ticket) = rooms.begin_owner_request();
+        assert!(!rooms.apply_owner_response(&old_base, old_ticket, owner("old", "Late")));
+        assert!(rooms.apply_owner_response(&old_base, return_ticket, owner("old", "Current")));
     }
 
     #[test]
