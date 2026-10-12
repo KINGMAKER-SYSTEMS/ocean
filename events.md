@@ -1228,3 +1228,11 @@ worktree: [PR44 port/rooms-summarize; factory-pr44-reviewed-summary/ocean]
 type: [workflow]
 area: [review]
 Reconciled reviewed PR44 c4863019e89977b4b61e50e3055be9649cd4220f with canonical main 1dfc6802bb74fecdcf83f6f17732b671c892b632. Only events.md conflicted; four divergent entries and both complete parent histories remain verbatim and ordered. All non-ledger blobs match automatic merge; three summary source files are unchanged. Diff and source-preservation checks pass. Incoming installer bytes match the already verified 14/14 fixture version; no identical tests were repeated. Root owns the final head through independent review, fresh hosted checks and release. Issue90, standing approvals and live acceptance remain separate gates. Existing contracts combined automatically; no new devlog or index changes. No heavy build, remote job or live action.
+
+_________________________________________________________________________________
+time: [15:28] [10-12-26]
+agent: [Codex]
+worktree: [port/rooms-summarize; factory-pr44-reviewed-summary/ocean]
+type: [bug report]
+area: [backend]
+Repaired issue81 / PR44 requester-kind race found during independent reconciliation review. Summary publication now reclassifies the requester through the shared client-artifact author gate under the same store lock as create, amend and unchanged-result handling, preserving the pre-provider artifact CAS. Agent/System leave-and-rejoin interleavings refuse without artifact or marker publication. The synthetic regression covers both replacement kinds across absent, changed and identical summary output. Targeted regression1/1 and full summary group25/25 passed in disposable auth/config/XDG fixtures with unchanged HOME; formatting and diff checks pass. Independent source reviewer ACKed the frozen three-file patch. Updated nearest daemon contract; parent ownership and indexes remain unchanged. Root owns final committed-head review, push and fresh Build Ocean/Build Surface checks. Standing approval policy issue90 and live acceptance remain separate holds. No merge, deployment or live provider action.

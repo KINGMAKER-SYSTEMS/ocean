@@ -1608,7 +1608,7 @@ pub(super) struct AmendArtifactRequest {
 /// Classify and mutate under the same guard: a leave/rejoin cannot change the
 /// author kind between the HTTP authorization decision and the committed write.
 /// `None` rejects a daemon-owned author; unreadable roster state fails closed.
-fn with_client_artifact_author<T>(
+pub(super) fn with_client_artifact_author<T>(
     rooms: &RoomStoreHandle,
     key: &RoomKey,
     author_id: &str,

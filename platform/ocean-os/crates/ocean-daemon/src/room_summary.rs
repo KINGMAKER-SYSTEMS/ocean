@@ -22,7 +22,8 @@ use ocean_core::{RoomArtifact, RoomArtifactKind, RoomKey, RoomMessage, RoomParti
 use ocean_store::{RoomStore as _, RoomStoreError, SqliteRoomStore};
 
 use crate::persistent_rooms::{
-    read_transcript_page, room_history_text, with_rooms_handle, RoomStoreHandle,
+    read_transcript_page, room_history_text, with_client_artifact_author, with_rooms_handle,
+    RoomStoreHandle,
 };
 
 /// The well-known artifact id every summarize call writes to. It is a constant,
@@ -466,15 +467,19 @@ where
         .as_ref()
         .and_then(|prior| unchanged_summary_body(prior, &model, &text))
         .unwrap_or(&body);
-    let written = with_rooms_handle(rooms, |store| {
+    // The requester may have left and rejoined as an Agent/System during the
+    // provider call. Recheck kind under the same guard as the captured-CAS
+    // write, including an identical-output no-op.
+    let written = with_client_artifact_author(rooms, &key, &requested_by, |store| {
         upsert_summary_artifact(store, &key, &requested_by, artifact.as_ref(), body, now)
     });
     match written {
-        Ok((SummaryWrite::Unchanged(artifact), _)) => {
+        Ok(None) => SummarizeOutcome::ForgedAuthor,
+        Ok(Some((SummaryWrite::Unchanged(artifact), _))) => {
             tracing::info!(room = %key, "room summarize: summary unchanged");
             SummarizeOutcome::Unchanged { artifact }
         }
-        Ok((write, message)) => {
+        Ok(Some((write, message))) => {
             let (artifact, created) = match write {
                 SummaryWrite::Created(a) => (a, true),
                 SummaryWrite::Amended(a) => (a, false),
@@ -1202,6 +1207,83 @@ mod tests {
             SummarizeOutcome::Store(RoomStoreError::ArtifactAuthorNotInRoster { .. })
         ));
         assert!(!invoked.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn requester_reclassified_during_provider_cannot_publish_or_report_unchanged() {
+        for replacement_kind in [RoomParticipantKind::Agent, RoomParticipantKind::System] {
+            for (present, same_output) in [(false, false), (true, false), (true, true)] {
+                let key = RoomKey::new("reclassified-summary-requester");
+                let rooms = room_with_messages(&key, 2);
+                let before = with_rooms_handle(&rooms, |store| {
+                    if present {
+                        let body = summary_body(
+                            "model-x",
+                            if same_output {
+                                "provider result"
+                            } else {
+                                "initial summary"
+                            },
+                            0,
+                            2,
+                            3,
+                            false,
+                            Utc::now(),
+                        );
+                        store.create_artifact(
+                            &key,
+                            ROOM_SUMMARY_ARTIFACT_ID,
+                            RoomArtifactKind::Note,
+                            ROOM_SUMMARY_TITLE,
+                            &body,
+                            "alice",
+                            Utc::now(),
+                        )?;
+                    }
+                    store.artifact(&key, ROOM_SUMMARY_ARTIFACT_ID)
+                })
+                .unwrap();
+                let during = rooms.clone();
+                let provider_key = key.clone();
+                let interleaved_transcript = Arc::new(Mutex::new(None));
+                let captured_transcript = interleaved_transcript.clone();
+                let outcome =
+                    summarize_room(&rooms, input(&key, None), move |_, _, _| async move {
+                        let transcript = with_rooms_handle(&during, |store| {
+                            store.remove_participant(&provider_key, "alice", Utc::now())?;
+                            store.add_participant(
+                                &provider_key,
+                                participant("alice", replacement_kind),
+                                Utc::now(),
+                            )?;
+                            store.transcript(&provider_key, None)
+                        })
+                        .unwrap();
+                        *captured_transcript.lock().unwrap() = Some(transcript);
+                        Ok::<_, &'static str>(("provider result".into(), "model-x".into()))
+                    })
+                    .await;
+                assert!(
+                    matches!(outcome, SummarizeOutcome::ForgedAuthor),
+                    "kind={replacement_kind:?}, present={present}, same_output={same_output}: {outcome:?}"
+                );
+                with_rooms_handle(&rooms, |store| {
+                    assert_eq!(
+                        serde_json::to_value(
+                            store.artifact(&key, ROOM_SUMMARY_ARTIFACT_ID).unwrap()
+                        )
+                        .unwrap(),
+                        serde_json::to_value(&before).unwrap(),
+                        "refusal must preserve the entire artifact or its absence"
+                    );
+                    assert_eq!(
+                        store.transcript(&key, None).unwrap(),
+                        *interleaved_transcript.lock().unwrap().as_ref().unwrap(),
+                        "only the provider interleaving's leave/join markers may be written"
+                    );
+                });
+            }
+        }
     }
 
     #[tokio::test]

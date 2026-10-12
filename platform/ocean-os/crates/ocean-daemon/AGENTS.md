@@ -277,7 +277,12 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   including fake and custom endpoint models. Capture artifact absence/version
   before the provider and preserve that expectation through store CAS,
   including unchanged results.
-  Reject unknown/agent/system requesters before provider work. Identical model
+  Reject unknown/agent/system requesters before provider work. Reclassify the
+  current requester after provider completion under the same store guard as
+  create/amend/no-op handling, using the shared client-artifact author gate;
+  leave/rejoin as Agent or System must refuse without an artifact or marker
+  change. Preserve the artifact expectation captured before the provider.
+  Identical model
   and prose in an exact generated header preserve the stored artifact and its
   original coverage/timestamp; a no-op does not claim newly read coverage.
   `has_more` and the partial-window warning report omitted rows on either side.
