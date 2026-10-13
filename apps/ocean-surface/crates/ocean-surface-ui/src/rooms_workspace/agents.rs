@@ -40,6 +40,15 @@ fn invoke_menu_label(state: &InvocationState, run: Option<&RoomAgentRun>) -> Str
     }
 }
 
+/// Hover text for an invoke-menu status: the readable refusal reason, the
+/// same text the composer status line shows when the refusal arrives.
+fn invoke_menu_title(state: &InvocationState) -> Option<String> {
+    match state {
+        InvocationState::Refused(code) => Some(crate::rooms::invocation_error_text(code)),
+        _ => None,
+    }
+}
+
 /// Binding for a roster member, matched on the daemon agent member id.
 fn binding_for(bindings: &[RoomAgentBinding], member_id: &str) -> Option<RoomAgentBinding> {
     bindings
@@ -265,7 +274,11 @@ pub(super) fn AgentBindingMenu(rooms: Rooms, member_id: String) -> impl IntoView
 pub(super) fn InvokeMenu(rooms: Rooms, message_seq: u64) -> impl IntoView {
     let open = RwSignal::new(false);
     move || {
-        let caller = crate::rooms::invoke_caller(rooms.access.get().as_ref())?;
+        let caller = crate::rooms::invoke_caller(
+            rooms.access.get().as_ref(),
+            rooms.open_room.get().as_ref(),
+            rooms.identity_id.get(),
+        )?;
         let transcript = rooms.transcript.get();
         let message = transcript.iter().find(|m| m.seq == message_seq)?;
         if !crate::rooms::message_invocable(message, &caller) {
@@ -297,7 +310,7 @@ pub(super) fn InvokeMenu(rooms: Rooms, message_seq: u64) -> impl IntoView {
                                     .find(|i| i.agent_member_id == agent.agent_member_id && i.message_seq == message_seq)
                                     .map(|i| {
                                         let run = rooms.invocation_run(&i.agent_member_id, message_seq);
-                                        invoke_menu_label(&i.state, run.as_ref())
+                                        (invoke_menu_label(&i.state, run.as_ref()), invoke_menu_title(&i.state))
                                     });
                                 let invoked = state.is_some();
                                 let agent_id = agent.agent_member_id.clone();
@@ -318,8 +331,8 @@ pub(super) fn InvokeMenu(rooms: Rooms, message_seq: u64) -> impl IntoView {
                                         }
                                     >
                                         {name}
-                                        {state.map(|label| view! {
-                                            <span class="rooms-workspace__member-binding">{label}</span>
+                                        {state.map(|(label, title)| view! {
+                                            <span class="rooms-workspace__member-binding" title=title>{label}</span>
                                         })}
                                     </button>
                                 }
@@ -358,6 +371,11 @@ mod tests {
         assert_eq!(binding_for(&bindings, "agent-x"), Some(binding));
         assert_eq!(binding_for(&bindings, "scout"), None);
         assert_eq!(invocation_label(&InvocationState::Unknown), "unknown");
+        assert_eq!(
+            invoke_menu_title(&InvocationState::Refused("workspace_unavailable".into())).as_deref(),
+            Some("This room has no workspace folder for the agent.")
+        );
+        assert_eq!(invoke_menu_title(&InvocationState::Unknown), None);
     }
 
     #[test]

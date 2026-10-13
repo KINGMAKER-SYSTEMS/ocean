@@ -574,14 +574,23 @@ Web surface session UI:
   client (`GET .../agents`), the consent draft (room generation + ticket
   guarded; committed or unknown outcomes refresh authoritative bindings even
   when navigation raced; post-send command errors `consent_task_failed` and
-  `invalid_reply` are treated as `unknown`) and explicit invocation. Invocation is currently
-  wired only for federated rooms: it needs the daemon-projected
-  `caller_member_id` naming a User in Live/Recovering access, a committed
-  Human message by that caller and an active binding; it runs once per
-  (agent, message) and leaves a lost acknowledgement `unknown`. Local rooms do
-  have an invoker identity (the `/v1/me` owner `participant_id`, since #68),
-  but Local invocation is not wired yet (PR H; Local consent is reachable
-  since PR G's bootstrap).
+  `invalid_reply` are treated as `unknown`) and explicit invocation.
+  `rooms::invoke_caller(access, open_room, identity_id)` names the invoker
+  from daemon projections only: in Local rooms (PR H) the `/v1/me` owner
+  `participant_id` (`Rooms.identity_id`, since #68) when non-empty and a
+  Human participant on the open room's roster; in Live/Recovering rooms the
+  daemon-projected `caller_member_id` naming a User (unchanged); every other
+  state has no invoker. Browser-supplied identity is never authority. The
+  daemon's Local invoke check matches (non-agent roster member who authored
+  the message; not operator-gated). Invocation then needs a committed Human
+  message by that caller and an active binding, runs once per (agent,
+  message) and leaves a lost acknowledgement `unknown`. A refusal shows
+  `rooms::invocation_error_text` in the composer status line (and as the
+  invoke-menu badge's title), e.g. `workspace_unavailable` → "This room has
+  no workspace folder for the agent.", `agent_binding_required` → "This
+  agent is not authorized in this room.", author/membership refusals, and
+  `room_not_found` (a soft-closed room) → "This room is closed."; unknown
+  codes read "Ocean could not invoke the agent."
 - Invocation sends no decision token (removed in PR C, together with
   `RoomInvocation::token_for` and #88's `try_mint_decision_token` split in
   `daemon.rs`): since #68 the daemon binds Room-turn permission waiters to a
@@ -597,9 +606,10 @@ Web surface session UI:
   (#93) matches exactly the invocation acknowledged with that id and session;
   a legacy run without one falls back to session id == `run.session_id`,
   message seq == `run.trigger_seq` and package id == `run.agent_id` (federated
-  runs record the package id; Local runs record the participant id, which
-  matters once Local invocation lands), and any other run sharing that session
-  and seq makes it ambiguous, so neither matches. The card shows a
+  runs record the package id; Local runs record the participant id, so a
+  Local invocation's run matches only by `request_id`, tested with its Cancel
+  control, and a legacy Local run fails closed), and any other run sharing
+  that session and seq makes it ambiguous, so neither matches. The card shows a
   display-only "yours" tag (`Rooms::run_is_own`); approve/deny stays on the
   operator route for every card, and the match never reads or writes
   `Daemon::permission_view`, decision authority or `Daemon::cancel_request`
@@ -637,7 +647,7 @@ Web surface session UI:
   native consent hosts in Live/Recovering access.
 - Verification: `cd crates/ocean-tauri && cargo test room_consent` (disposable
   loopback daemons and key fixtures), `cargo test -p ocean-surface-ui`,
-  WASM check/Clippy. Remaining: Local invocation, served native acceptance.
+  WASM check/Clippy. Remaining: served native acceptance.
 
 ### Shared native daemon transport
 
