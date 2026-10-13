@@ -522,6 +522,7 @@ mod tests {
             tool_count: 0,
             reply_seq: None,
             pending_permission: None,
+            request_id: None,
         }
     }
 

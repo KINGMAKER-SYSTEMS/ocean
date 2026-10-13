@@ -188,6 +188,11 @@ pub fn RoomWorkCard(run_id: String, rooms: Rooms, daemon: StoredValue<Daemon>) -
         });
     });
 
+    // Display-only: this page's acknowledged invocation started the run. It
+    // never changes who may decide below — every card's approval goes through
+    // the operator-gated run permission route.
+    let own = Memo::new(move |_| rooms.run_is_own(&run_id.get_value()));
+
     // Team-platform P4: the owner decides a pending tool permission here.
     // Nothing is applied optimistically; the next run frame clears the row.
     let deciding = RwSignal::new(false);
@@ -245,6 +250,9 @@ pub fn RoomWorkCard(run_id: String, rooms: Rooms, daemon: StoredValue<Daemon>) -
                     >
                         <span class="room-card__avatar" aria-hidden="true">{initials}</span>
                         <span class="room-card__agent">{agent.clone()}</span>
+                        {move || own.get().then(|| view! {
+                            <span class="room-card__own" title="Invoked by you">"yours"</span>
+                        })}
                         <span class="room-card__state">
                             <span class="room-card__dot" class:is-live=active aria-hidden="true"></span>
                             <span class="room-card__label">{label}</span>
