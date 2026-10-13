@@ -521,21 +521,29 @@ Web surface session UI:
   preview itself and freezes room, package, agent, owner, digest, policies
   and a fresh UUIDv4 decision id; the
   page gets a projection and an opaque consent id, never a digest it can
-  supply. At most 4 consents live for 120 s; a newer preview supersedes an
-  idle one for the same agent. The TTL covers the dialog too: idle and
-  confirming consents are pruned past it, and a confirmation settled after it
-  is refused (`consent_expired`) and sends nothing; only an in-flight send
-  keeps its slot.
+  supply. Authorize and revoke share at most 4 pending decisions, with a
+  120 s TTL; a newer preview supersedes an idle decision for the same agent.
+  The TTL covers both the dialog and blocking-worker queue. Dispatch claims
+  a still-owned, unexpired queued decision under the native mutex, then
+  releases that mutex before I/O; only a dispatch-claimed send keeps its slot.
+  Preview/bootstrap capture a native cancellation epoch before entering the
+  blocking queue, and may insert a preview only if that epoch is still current.
 - Authorize/reauthorize require a native dialog (`tauri-plugin-dialog`, Rust
   side; the webview gains no dialog permission) and always send the frozen
   non-null `expected_definition_digest`. The authorize dialog shows only
   frozen preview values: room, package id, agent member id, owner, requested
-  capabilities and digest. Decline, cancel, expiry, navigation
-  invalidation (`room_consent_cancel(None)` from the shared room reset) or an
-  invalidation racing the dialog sends zero privileged requests. A definitive
-  reply consumes the consent; a lost acknowledgement is `unknown`, is never
-  retried automatically, and an explicit re-confirmed retry replays the same
-  decision id. Revoke is natively confirmed with a fresh decision id; its
+  capabilities and digest. Decline, expiry or cancellation received natively
+  before the dispatch claim sends zero authorization/revoke requests.
+  `room_consent_cancel(None)` clears all tracked decisions and advances the
+  epoch, including while a revoke dialog or preview/bootstrap read is pending.
+  This boundary is native receipt, not a page navigation click or IPC enqueue:
+  after the dispatch claim, a request may finish, but cancellation prevents its
+  late completion from restoring retry state. Bootstrap side effects are not
+  rolled back. A definitive reply consumes the decision; a lost acknowledgement
+  is `unknown`, never retried automatically, and an explicit re-confirmed retry
+  replays the same decision id. Revoke registers native custody before its
+  dialog, invalidates older authorization for that target, and uses a fresh
+  decision id unless explicitly retrying a still-live unknown decision; its
   dialog names the exact room and `agent_member_id` being revoked.
 - Native dialog text: member ids and capabilities containing controls,
   line/paragraph separators, bidi or invisible formatting characters are
@@ -545,8 +553,9 @@ Web surface session UI:
 - Consent transport: the shared `daemon_transport.rs` (below) with fixed
   typed intents (`Intent::{Preview, Authorize, Reauthorize, Revoke, Me,
   Bootstrap}`; only the preview and `Me` are unprivileged). A transport bad reply (hostile chunk size,
-  redirect, non-JSON, oversize) on a decision is `unknown` and frees the slot,
-  never a panic; an untrusted `OCEAN_DAEMON_URL` makes every consent command
+  redirect, non-JSON, oversize) on a decision is `unknown` and returns an
+  uncancelled entry to Ready for a manual same-decision retry, never a panic;
+  an untrusted `OCEAN_DAEMON_URL` makes every consent command
   `consent_unavailable`. Consent commands refuse any webview other than
   `main` (`consent_window_refused`).
 - Local bootstrap (PR G): a plain Local `POST .../participants` never
@@ -635,6 +644,24 @@ Web surface session UI:
   "Ocean could not cancel this run." and is never retried automatically (an
   explicit click may try again). It never calls `Daemon::cancel_request`, a
   session-level cancel, or touches focused direct-chat state (tested).
+- Room consent UI retirement: `host::room_consent_cancel` returns an awaited
+  native receipt/error (the native command signature is unchanged). Room/origin
+  changes, workspace unmount and dismissal retire page tickets immediately and
+  cancel all native decisions even without a visible draft. Every outstanding
+  cancellation receipt must succeed before a new preview, bootstrap, authorize
+  or revoke can dispatch; an error keeps this page fail-closed and uses existing
+  status presentation. Nothing retries a mutation automatically. Fresh or
+  superseding revokes cancel older native intents; only a page-owned Unknown
+  revoke for the same origin/admission/ticket/agent can explicitly retry without
+  cancel-all, preserving the native decision id and native reconfirmation.
+  Pending duplicate clicks are latched; retirement and definitive outcomes clear
+  retry ownership. Post-send command errors use the existing Unknown mapping.
+  Callback writes
+  require live signals plus the originating room admission, origin and request
+  ticket; already-sent committed/unknown results reconcile authoritative state
+  only in that admission. Unmount also stops the room tail by advancing its
+  generation. The native epoch/tracked-revoke repair (PR103) is a semantic
+  release prerequisite; this UI gate cannot retract an already-dispatched send.
 - UI (`rooms_workspace/agents.rs`): one consent sheet (name, short digest,
   requested capabilities, one primary action, dismiss) above the right-rail
   list; bound agent rows get a single overflow holding Review/Revoke; the
