@@ -192,6 +192,10 @@ pub fn RoomWorkCard(run_id: String, rooms: Rooms, daemon: StoredValue<Daemon>) -
     // never changes who may decide below — every card's approval goes through
     // the operator-gated run permission route.
     let own = Memo::new(move |_| rooms.run_is_own(&run_id.get_value()));
+    // Exact cancel of this page's own unfinished run by its daemon request
+    // id. Nothing is applied optimistically: the card reads Cancelled only
+    // when the daemon's run frame says so.
+    let own_cancel = Memo::new(move |_| rooms.own_run_cancel(&run_id.get_value()));
 
     // Team-platform P4: the owner decides a pending tool permission here.
     // Nothing is applied optimistically; the next run frame clears the row.
@@ -242,6 +246,7 @@ pub fn RoomWorkCard(run_id: String, rooms: Rooms, daemon: StoredValue<Daemon>) -
                     data-state=token
                     aria-label=format!("{agent} work")
                 >
+                    <div class="room-card__bar">
                     <button
                         class="room-card__head"
                         type="button"
@@ -272,6 +277,19 @@ pub fn RoomWorkCard(run_id: String, rooms: Rooms, daemon: StoredValue<Daemon>) -
                             <crate::icons::ChevronDown />
                         </span>
                     </button>
+                    {move || own_cancel.get().map(|cancel| view! {
+                        <button
+                            class="room-card__cancel"
+                            type="button"
+                            aria-label="Cancel this run"
+                            title="Cancel this run"
+                            disabled=cancel.in_flight
+                            on:click=move |_| rooms.cancel_own_run(&run_id.get_value())
+                        >
+                            <crate::icons::Stop />
+                        </button>
+                    })}
+                    </div>
                     {pending.map(|p| {
                         let allow_p = p.clone();
                         let deny_p = p.clone();
@@ -303,6 +321,9 @@ pub fn RoomWorkCard(run_id: String, rooms: Rooms, daemon: StoredValue<Daemon>) -
                     })}
                     {move || decide_error.get().map(|e| view! {
                         <div class="room-card__error room-card__error--decide" role="alert">{e}</div>
+                    })}
+                    {move || own_cancel.get().and_then(|cancel| cancel.error).map(|e| view! {
+                        <div class="room-card__error room-card__error--cancel" role="alert">{e}</div>
                     })}
                     // Chat-grade markdown; `markdown::render` textifies raw HTML.
                     {summary.map(|s| view! {

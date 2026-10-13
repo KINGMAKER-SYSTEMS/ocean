@@ -340,6 +340,10 @@ pub struct Room {
     /// This Ocean's per-room mute pref (team-platform P6; owner-local).
     #[serde(default)]
     pub muted: bool,
+    /// Canonical workspace directory bound at create. Fixed for the room's
+    /// lifetime; absent for unbound rooms and older daemons.
+    #[serde(default)]
+    pub workspace_root: Option<String>,
 }
 
 // ---- Response envelopes (the daemon's `json!({ "ok": .., .. })` shapes) ------
@@ -443,6 +447,21 @@ struct CreateRoomBody<'a> {
     /// (no triggers) applies; otherwise the daemon stores it verbatim.
     #[serde(skip_serializing_if = "Option::is_none")]
     trigger_policy: Option<RoomTriggerPolicy>,
+    /// Absolute workspace directory chosen explicitly by the creator. Omitted
+    /// when `None`: the room stays unbound, never inheriting a session cwd.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workspace_root: Option<&'a str>,
+}
+
+/// Status line for a failed create. Daemon error codes the creator can fix
+/// map to readable text; anything else passes through verbatim.
+pub(crate) fn create_failure_status(error: &str) -> String {
+    match error {
+        "invalid_workspace_root" => {
+            "create failed: workspace folder not found on this Ocean".to_string()
+        }
+        other => format!("create failed: {other}"),
+    }
 }
 
 /// A human join carries no identity: the daemon joins its owner.
@@ -635,6 +654,9 @@ pub struct Rooms {
     /// made under so a work card can be matched to it
     /// ([`own_invocation_for_run`]).
     pub invocations: RwSignal<Vec<RoomInvocation>>,
+    /// Exact cancellations of this page's own room runs, keyed by daemon
+    /// request id. Memory-only and reset with the room.
+    run_cancels: RwSignal<RunCancels>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -702,6 +724,7 @@ impl Rooms {
             consent: RwSignal::new(None),
             consent_ticket: RwSignal::new(0),
             invocations: RwSignal::new(Vec::new()),
+            run_cancels: RwSignal::new(RunCancels::default()),
         }
     }
 
@@ -761,6 +784,95 @@ impl Rooms {
         })
     }
 
+    /// The single run this page's invocation of `agent_member_id` on
+    /// `message_seq` started (reactive; see [`run_for_invocation`]). `None`
+    /// while unacknowledged, before the run frame arrives, or when ambiguous.
+    pub(crate) fn invocation_run(
+        &self,
+        agent_member_id: &str,
+        message_seq: u64,
+    ) -> Option<RoomAgentRun> {
+        let key = self.open_key.get()?;
+        let generation = self.generation.get();
+        self.invocations.with(|invocations| {
+            let invocation = invocations
+                .iter()
+                .find(|i| i.agent_member_id == agent_member_id && i.message_seq == message_seq)?;
+            self.runs.with(|runs| {
+                run_for_invocation(invocations, runs, invocation, &key, generation).cloned()
+            })
+        })
+    }
+
+    /// Cancel control state for `run_id` (reactive): `Some` only for this
+    /// page's own acknowledged, unfinished run ([`own_run_cancel_target`]).
+    pub(crate) fn own_run_cancel(&self, run_id: &str) -> Option<OwnRunCancel> {
+        let key = self.open_key.get()?;
+        let generation = self.generation.get();
+        let request_id = self.runs.with(|runs| {
+            let run = runs.iter().find(|r| r.run_id == run_id)?;
+            self.invocations
+                .with(|invocations| own_run_cancel_target(invocations, runs, run, &key, generation))
+        })?;
+        self.run_cancels.with(|cancels| {
+            Some(OwnRunCancel {
+                in_flight: cancels.is_in_flight(&request_id),
+                error: cancels.error(&request_id).map(str::to_string),
+                request_id,
+            })
+        })
+    }
+
+    /// Accept one cancel click for `run_id`: resolve its exact request id
+    /// from the current room state and latch it in flight. `None` when the
+    /// run is not this page's own unfinished run or a cancel for that request
+    /// is already in flight. Never touches the run projection.
+    pub(crate) fn begin_own_run_cancel(&self, run_id: &str) -> Option<RunCancelTicket> {
+        let room_key = self.open_key.get_untracked()?;
+        let room_generation = self.generation.get_untracked();
+        let request_id = self.runs.with_untracked(|runs| {
+            let run = runs.iter().find(|r| r.run_id == run_id)?;
+            self.invocations.with_untracked(|invocations| {
+                own_run_cancel_target(invocations, runs, run, &room_key, room_generation)
+            })
+        })?;
+        let mut accepted = false;
+        self.run_cancels
+            .update(|cancels| accepted = cancels.begin(&request_id));
+        accepted.then_some(RunCancelTicket {
+            room_key,
+            room_generation,
+            request_id,
+        })
+    }
+
+    /// Settle one cancel request in the room admission it was made in. A
+    /// failure (transport, non-2xx or `ok: false`) is shown and never
+    /// retried; success changes nothing until the daemon's run frame does.
+    pub(crate) fn finish_run_cancel(&self, ticket: &RunCancelTicket, result: Result<(), String>) {
+        if !self.room_is_current(ticket.room_generation, &ticket.room_key) {
+            return;
+        }
+        self.run_cancels
+            .update(|cancels| cancels.finish(&ticket.request_id, result));
+    }
+
+    /// Cancel this page's own unfinished run by its exact daemon request id
+    /// (`POST /v1/requests/{id}/cancel`). One request per id at a time,
+    /// nothing optimistic, no automatic retry. Never the session-level or
+    /// focused direct-chat cancel (`Daemon::cancel_request`).
+    pub fn cancel_own_run(&self, run_id: &str) {
+        let Some(ticket) = self.begin_own_run_cancel(run_id) else {
+            return;
+        };
+        let base = self.base();
+        let me = *self;
+        spawn_local(async move {
+            let result = cancel_room_request(&base, &ticket.request_id).await;
+            me.finish_run_cancel(&ticket, result);
+        });
+    }
+
     pub(crate) fn take_pending_thread_focus(&self) -> Option<u64> {
         let (origin, key, root) = self.focus_thread.get()?;
         if self.url.get() != origin {
@@ -797,6 +909,7 @@ impl Rooms {
         self.pending_invite_redemption.set(None);
         self.agent_bindings.set(Vec::new());
         self.invocations.set(Vec::new());
+        self.run_cancels.set(RunCancels::default());
         self.consent_ticket.update(|t| *t = t.wrapping_add(1));
         if self.consent.get_untracked().is_some() {
             crate::host::room_consent_cancel(None);
@@ -980,7 +1093,16 @@ impl Rooms {
     ///
     /// Callers should gate dispatch on `pending_create` to prevent concurrent
     /// attempts — the closure in `rooms_workspace/` does this.
-    pub fn create_room(&self, name: String, policy: Option<RoomTriggerPolicy>) -> u64 {
+    ///
+    /// `workspace_root` is only an explicit creator choice; the daemon binds it
+    /// once (absolute existing directory, else 400 `invalid_workspace_root`)
+    /// and offers no route to change it later.
+    pub fn create_room(
+        &self,
+        name: String,
+        policy: Option<RoomTriggerPolicy>,
+        workspace_root: Option<String>,
+    ) -> u64 {
         let name = name.trim().to_string();
         if name.is_empty() {
             return 0;
@@ -1007,6 +1129,7 @@ impl Rooms {
                 key: &key,
                 name: &name,
                 trigger_policy: policy,
+                workspace_root: workspace_root.as_deref(),
             };
             let post_url = format!("{base}/v1/rooms/persistent");
             let res = Request::post(&post_url)
@@ -1064,7 +1187,7 @@ impl Rooms {
                             status.set(format!("room '{name}' already exists"));
                         }
                         CreateOutcome::Failed { error } => {
-                            status.set(format!("create failed: {error}"));
+                            status.set(create_failure_status(error));
                         }
                     }
                 } else if matches!(&outcome, CreateOutcome::Success { .. }) {
@@ -2586,6 +2709,43 @@ pub async fn decide_run_permission(
     }
 }
 
+const CANCEL_REFUSED: &str = "Ocean could not cancel this run.";
+
+/// Exact request cancel route for one room run's daemon request.
+pub(crate) fn cancel_request_url(base: &str, request_id: &str) -> String {
+    format!(
+        "{}/v1/requests/{}/cancel",
+        base.trim_end_matches('/'),
+        encode(request_id)
+    )
+}
+
+/// A cancel succeeded only on a 2xx reply whose body says `ok: true`; a
+/// refusal (`ok: false`, e.g. already terminal) or unreadable reply fails.
+pub(crate) fn cancel_reply_result(http_ok: bool, raw: &str) -> Result<(), String> {
+    match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(body) if http_ok && body.get("ok") == Some(&serde_json::Value::Bool(true)) => Ok(()),
+        _ => Err(CANCEL_REFUSED.into()),
+    }
+}
+
+/// `POST /v1/requests/{request_id}/cancel` for exactly one room run's
+/// request. No operator key (the daemon route takes none, and the web proxy
+/// forwards it as-is); never a session-level cancel.
+pub async fn cancel_room_request(base: &str, request_id: &str) -> Result<(), String> {
+    match Request::post(&cancel_request_url(base, request_id))
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            let http_ok = resp.ok();
+            let raw = resp.text().await.unwrap_or_default();
+            cancel_reply_result(http_ok, &raw)
+        }
+        Err(_) => Err(UNREACHABLE.into()),
+    }
+}
+
 fn agent_settings_url(base: &str, key: &str, agent_id: &str) -> String {
     format!(
         "{base}/v1/rooms/persistent/{}/agents/{}/settings",
@@ -3493,6 +3653,95 @@ pub(crate) fn own_invocation_for_run<'a>(
     }
 }
 
+/// The single run in `runs` that [`own_invocation_for_run`] attributes to
+/// `invocation`. Zero or several matches (e.g. a legacy double run on the
+/// same session and seq) yield `None`, so no run state is shown for it.
+pub(crate) fn run_for_invocation<'a>(
+    invocations: &[RoomInvocation],
+    runs: &'a [RoomAgentRun],
+    invocation: &RoomInvocation,
+    room_key: &str,
+    generation: u64,
+) -> Option<&'a RoomAgentRun> {
+    let mut matched = runs.iter().filter(|run| {
+        own_invocation_for_run(invocations, runs, run, room_key, generation) == Some(invocation)
+    });
+    let first = matched.next()?;
+    matched.next().is_none().then_some(first)
+}
+
+/// The exact daemon request to cancel for `run`: the request id this page's
+/// own acknowledged invocation received (equal to `run.request_id` when the
+/// daemon projects one), and only while the run is not terminal. Foreign,
+/// ambiguous and finished runs have no target.
+pub(crate) fn own_run_cancel_target(
+    invocations: &[RoomInvocation],
+    runs: &[RoomAgentRun],
+    run: &RoomAgentRun,
+    room_key: &str,
+    generation: u64,
+) -> Option<String> {
+    if run.state.is_terminal() {
+        return None;
+    }
+    match &own_invocation_for_run(invocations, runs, run, room_key, generation)?.state {
+        InvocationState::Acknowledged { request_id, .. } => Some(request_id.clone()),
+        _ => None,
+    }
+}
+
+/// Cancel control state shown on an own, unfinished work card.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OwnRunCancel {
+    pub request_id: String,
+    pub in_flight: bool,
+    pub error: Option<String>,
+}
+
+/// One accepted cancel click: the exact request and the room admission it
+/// was made in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RunCancelTicket {
+    pub room_key: String,
+    pub room_generation: u64,
+    pub request_id: String,
+}
+
+/// In-flight cancels and their last failure, keyed by daemon request id.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct RunCancels {
+    in_flight: Vec<String>,
+    errors: HashMap<String, String>,
+}
+
+impl RunCancels {
+    /// Latch `request_id` in flight; `false` if it already is. A new
+    /// explicit attempt clears the previous failure.
+    pub(crate) fn begin(&mut self, request_id: &str) -> bool {
+        if self.is_in_flight(request_id) {
+            return false;
+        }
+        self.errors.remove(request_id);
+        self.in_flight.push(request_id.to_string());
+        true
+    }
+
+    pub(crate) fn finish(&mut self, request_id: &str, result: Result<(), String>) {
+        self.in_flight.retain(|id| id != request_id);
+        if let Err(error) = result {
+            self.errors.insert(request_id.to_string(), error);
+        }
+    }
+
+    pub(crate) fn is_in_flight(&self, request_id: &str) -> bool {
+        self.in_flight.iter().any(|id| id == request_id)
+    }
+
+    pub(crate) fn error(&self, request_id: &str) -> Option<&str> {
+        self.errors.get(request_id).map(String::as_str)
+    }
+}
+
 /// Authoritative invoking Human: only the daemon credential's caller in a
 /// Live/Recovering room, and only when it names a projected User. Browser
 /// identity is never authority, so Local rooms have no invoker until the
@@ -3849,7 +4098,74 @@ mod tests {
             updated_at: String::new(),
             trigger_policy: None,
             muted: false,
+            workspace_root: None,
         }
+    }
+
+    #[test]
+    fn create_body_omits_workspace_root_when_none() {
+        let body = CreateRoomBody {
+            key: "ops",
+            name: "Ops",
+            trigger_policy: None,
+            workspace_root: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&body).unwrap(),
+            serde_json::json!({"key": "ops", "name": "Ops"})
+        );
+    }
+
+    #[test]
+    fn create_body_carries_explicit_workspace_root() {
+        let body = CreateRoomBody {
+            key: "ops",
+            name: "Ops",
+            trigger_policy: None,
+            workspace_root: Some("/Users/me/dev/ocean"),
+        };
+        assert_eq!(
+            serde_json::to_value(&body).unwrap(),
+            serde_json::json!({
+                "key": "ops",
+                "name": "Ops",
+                "workspace_root": "/Users/me/dev/ocean",
+            })
+        );
+    }
+
+    #[test]
+    fn room_decodes_with_and_without_workspace_root() {
+        let bound: Room = serde_json::from_value(serde_json::json!({
+            "id": "ops",
+            "name": "Ops",
+            "workspace_root": "/srv/ocean",
+        }))
+        .unwrap();
+        assert_eq!(bound.workspace_root.as_deref(), Some("/srv/ocean"));
+
+        let older: Room =
+            serde_json::from_value(serde_json::json!({"id": "ops", "name": "Ops"})).unwrap();
+        assert_eq!(older.workspace_root, None);
+
+        let unbound: Room = serde_json::from_value(serde_json::json!({
+            "id": "ops",
+            "name": "Ops",
+            "workspace_root": null,
+        }))
+        .unwrap();
+        assert_eq!(unbound.workspace_root, None);
+    }
+
+    #[test]
+    fn create_failure_maps_invalid_workspace_root() {
+        assert_eq!(
+            create_failure_status("invalid_workspace_root"),
+            "create failed: workspace folder not found on this Ocean"
+        );
+        assert_eq!(create_failure_status("timeout"), "create failed: timeout");
+        // The rail shows only `create `-prefixed status lines.
+        assert!(create_failure_status("invalid_workspace_root").starts_with("create "));
     }
 
     #[test]
@@ -5009,6 +5325,7 @@ mod tests {
             updated_at: String::new(),
             trigger_policy: None,
             muted: false,
+            workspace_root: None,
         }];
 
         let merged = merge_room_read_summaries(&current, &rooms, &incoming);
@@ -5560,6 +5877,293 @@ mod tests {
         assert!(!rooms.run_is_own("r1"));
 
         assert_eq!(snapshot(&daemon), before);
+    }
+
+    /// A Rooms handle with `room-1` open at generation 7, the given
+    /// invocations and runs.
+    fn cancel_rooms(invocations: Vec<RoomInvocation>, runs: Vec<RoomAgentRun>) -> Rooms {
+        let rooms = Rooms::for_test("http://127.0.0.1:4780");
+        rooms.open_key.set(Some("room-1".into()));
+        rooms.generation.set(7);
+        rooms.invocations.set(invocations);
+        rooms.runs.set(runs);
+        rooms
+    }
+
+    #[test]
+    fn cancel_targets_exactly_the_runs_request_id() {
+        let owner = Owner::new();
+        owner.set();
+        assert_eq!(
+            cancel_request_url("http://127.0.0.1:4780/", "req-1"),
+            "http://127.0.0.1:4780/v1/requests/req-1/cancel"
+        );
+        assert_eq!(
+            cancel_request_url("http://h", "a/b c"),
+            "http://h/v1/requests/a%2Fb%20c/cancel"
+        );
+        let invocations = vec![
+            invocation("agent-x", 4, acked("req-1", "sess-1")),
+            invocation("agent-y", 5, acked("req-2", "sess-2")),
+        ];
+        // The run's own request id, never another invocation's or the session.
+        let run = own_run("r1", "sess-1", 4, Some("req-1"));
+        assert_eq!(
+            own_run_cancel_target(&invocations, &[run.clone()], &run, "room-1", 7).as_deref(),
+            Some("req-1")
+        );
+        // A legacy run cancels the exact request its invocation acknowledged.
+        let legacy = own_run("r2", "sess-1", 4, None);
+        assert_eq!(
+            own_run_cancel_target(&invocations, &[legacy.clone()], &legacy, "room-1", 7).as_deref(),
+            Some("req-1")
+        );
+        let rooms = cancel_rooms(invocations, vec![run]);
+        let ticket = rooms.begin_own_run_cancel("r1").unwrap();
+        assert_eq!(
+            ticket,
+            RunCancelTicket {
+                room_key: "room-1".into(),
+                room_generation: 7,
+                request_id: "req-1".into(),
+            }
+        );
+        assert_eq!(
+            cancel_request_url(&rooms.base(), &ticket.request_id),
+            "http://127.0.0.1:4780/v1/requests/req-1/cancel"
+        );
+    }
+
+    #[test]
+    fn cancel_is_hidden_for_foreign_terminal_and_ambiguous_runs() {
+        let owner = Owner::new();
+        owner.set();
+        let invocations = vec![invocation("agent-x", 4, acked("req-1", "sess-1"))];
+        let target = |runs: &[RoomAgentRun], run: &RoomAgentRun| {
+            own_run_cancel_target(&invocations, runs, run, "room-1", 7)
+        };
+        // Foreign: a request id this page never received.
+        let foreign = own_run("f", "sess-1", 4, Some("req-other"));
+        assert_eq!(target(&[foreign.clone()], &foreign), None);
+        // Terminal: done, failed and cancelled runs have nothing to cancel.
+        for state in [
+            RoomAgentRunState::Done,
+            RoomAgentRunState::Failed {
+                reason: "boom".into(),
+            },
+            RoomAgentRunState::Cancelled,
+        ] {
+            let mut finished = own_run("t", "sess-1", 4, Some("req-1"));
+            finished.state = state;
+            assert_eq!(target(&[finished.clone()], &finished), None);
+        }
+        // Ambiguous: two legacy runs share session and trigger seq.
+        let a = own_run("a", "sess-1", 4, None);
+        let b = own_run("b", "sess-1", 4, None);
+        assert_eq!(target(&[a.clone(), b.clone()], &a), None);
+        assert_eq!(target(&[a.clone(), b.clone()], &b), None);
+        // Unacknowledged invocations and another room generation.
+        let run = own_run("r1", "sess-1", 4, Some("req-1"));
+        for state in [
+            InvocationState::Pending,
+            InvocationState::Unknown,
+            InvocationState::Refused("invoke_refused".into()),
+        ] {
+            let pending = vec![invocation("agent-x", 4, state)];
+            assert_eq!(
+                own_run_cancel_target(&pending, &[run.clone()], &run, "room-1", 7),
+                None
+            );
+        }
+        assert_eq!(
+            own_run_cancel_target(&invocations, &[run.clone()], &run, "room-1", 8),
+            None
+        );
+
+        // The reactive control and the click path agree: no button, no send.
+        let mut done = own_run("done", "sess-1", 4, Some("req-1"));
+        done.state = RoomAgentRunState::Done;
+        let rooms = cancel_rooms(invocations.clone(), vec![foreign, done, a, b]);
+        for id in ["f", "done", "a", "b", "missing"] {
+            assert_eq!(rooms.own_run_cancel(id), None, "{id}");
+            assert_eq!(rooms.begin_own_run_cancel(id), None, "{id}");
+        }
+        rooms
+            .run_cancels
+            .with_untracked(|c| assert_eq!(*c, RunCancels::default()));
+    }
+
+    #[test]
+    fn cancel_is_single_flight_per_request_and_never_optimistic() {
+        let owner = Owner::new();
+        owner.set();
+        let run = own_run("r1", "sess-1", 4, Some("req-1"));
+        let rooms = cancel_rooms(
+            vec![invocation("agent-x", 4, acked("req-1", "sess-1"))],
+            vec![run.clone()],
+        );
+        assert_eq!(
+            rooms.own_run_cancel("r1"),
+            Some(OwnRunCancel {
+                request_id: "req-1".into(),
+                in_flight: false,
+                error: None,
+            })
+        );
+        let ticket = rooms.begin_own_run_cancel("r1").unwrap();
+        assert_eq!(
+            rooms.begin_own_run_cancel("r1"),
+            None,
+            "one in flight per id"
+        );
+        assert!(rooms.own_run_cancel("r1").unwrap().in_flight);
+        assert_eq!(rooms.runs.get_untracked(), vec![run.clone()]);
+
+        // An accepted cancel still changes nothing: only the daemon's run
+        // frame moves the card to Cancelled.
+        rooms.finish_run_cancel(&ticket, Ok(()));
+        assert_eq!(rooms.runs.get_untracked(), vec![run.clone()]);
+        assert_eq!(
+            rooms.own_run_cancel("r1"),
+            Some(OwnRunCancel {
+                request_id: "req-1".into(),
+                in_flight: false,
+                error: None,
+            })
+        );
+        let mut cancelled = run;
+        cancelled.state = RoomAgentRunState::Cancelled;
+        cancelled.pending_permission = None;
+        rooms.runs.update(|runs| upsert_run(runs, cancelled));
+        assert_eq!(rooms.own_run_cancel("r1"), None, "terminal hides Cancel");
+    }
+
+    #[test]
+    fn cancel_failure_shows_an_error_and_is_never_retried() {
+        let owner = Owner::new();
+        owner.set();
+        assert_eq!(
+            cancel_reply_result(
+                true,
+                r#"{"ok":true,"request_id":"req-1","state":"cancelling","message":""}"#
+            ),
+            Ok(())
+        );
+        for (http_ok, raw) in [
+            (
+                true,
+                r#"{"ok":false,"request_id":"req-1","state":"done","message":"request is already terminal (Done); cancel ignored"}"#,
+            ),
+            (false, r#"{"ok":true}"#),
+            (false, r#"{"error":"daemon_unreachable"}"#),
+            (true, ""),
+        ] {
+            assert_eq!(
+                cancel_reply_result(http_ok, raw),
+                Err(CANCEL_REFUSED.to_string()),
+                "{raw}"
+            );
+        }
+
+        let run = own_run("r1", "sess-1", 4, Some("req-1"));
+        let rooms = cancel_rooms(
+            vec![invocation("agent-x", 4, acked("req-1", "sess-1"))],
+            vec![run.clone()],
+        );
+        let ticket = rooms.begin_own_run_cancel("r1").unwrap();
+        rooms.finish_run_cancel(&ticket, Err(CANCEL_REFUSED.into()));
+        let shown = rooms.own_run_cancel("r1").unwrap();
+        assert_eq!(shown.error.as_deref(), Some(CANCEL_REFUSED));
+        // Settled, not re-sent: nothing is latched in flight afterwards.
+        assert!(!shown.in_flight);
+        rooms
+            .run_cancels
+            .with_untracked(|c| assert!(!c.is_in_flight("req-1")));
+        assert_eq!(rooms.runs.get_untracked(), vec![run]);
+        // Only an explicit new click sends again, and it clears the error.
+        assert!(rooms.begin_own_run_cancel("r1").is_some());
+        assert_eq!(rooms.own_run_cancel("r1").unwrap().error, None);
+
+        // A reply landing after the room was reopened writes nothing.
+        let stale = rooms.begin_own_run_cancel("r1");
+        assert_eq!(stale, None, "still in flight");
+        rooms.close_room();
+        rooms.open_key.set(Some("room-1".into()));
+        rooms.finish_run_cancel(&ticket, Err(CANCEL_REFUSED.into()));
+        rooms
+            .run_cancels
+            .with_untracked(|c| assert_eq!(*c, RunCancels::default()));
+    }
+
+    #[test]
+    fn room_run_cancel_leaves_focused_direct_chat_state_unchanged() {
+        let owner = Owner::new();
+        owner.set();
+        let daemon = crate::daemon::Daemon::dummy();
+        daemon.session_id.set(Some("sess-1".into()));
+        daemon.streaming.set(true);
+        daemon.status.set("thinking".into());
+        daemon.active_turn_id.set(Some("req-1".into()));
+        daemon
+            .active_decision_token
+            .set(Some("direct-chat-token".into()));
+        let snapshot = |d: &crate::daemon::Daemon| {
+            (
+                d.permission_view.get_untracked(),
+                d.session_id.get_untracked(),
+                d.streaming.get_untracked(),
+                d.status.get_untracked(),
+                d.active_turn_id.get_untracked(),
+                d.active_decision_token.get_untracked(),
+                d.request_cancellations.get_untracked(),
+            )
+        };
+        let before = snapshot(&daemon);
+
+        let rooms = cancel_rooms(
+            vec![invocation("agent-x", 4, acked("req-1", "sess-1"))],
+            vec![own_run("r1", "sess-1", 4, Some("req-1"))],
+        );
+        let ticket = rooms.begin_own_run_cancel("r1").unwrap();
+        rooms.finish_run_cancel(&ticket, Err(CANCEL_REFUSED.into()));
+        let ticket = rooms.begin_own_run_cancel("r1").unwrap();
+        rooms.finish_run_cancel(&ticket, Ok(()));
+
+        assert_eq!(snapshot(&daemon), before);
+    }
+
+    #[test]
+    fn invocation_run_is_the_single_matched_run() {
+        let owner = Owner::new();
+        owner.set();
+        let invocations = vec![invocation("agent-x", 4, acked("req-1", "sess-1"))];
+        let mine = own_run("r1", "sess-1", 4, Some("req-1"));
+        let other = own_run("r2", "sess-1", 4, Some("req-mention"));
+        let runs = vec![other.clone(), mine.clone()];
+        assert_eq!(
+            run_for_invocation(&invocations, &runs, &invocations[0], "room-1", 7),
+            Some(&mine)
+        );
+        assert_eq!(
+            run_for_invocation(&invocations, &runs, &invocations[0], "room-1", 8),
+            None
+        );
+        // Legacy double run on the same session and seq: no status.
+        let a = own_run("a", "sess-1", 4, None);
+        let b = own_run("b", "sess-1", 4, None);
+        assert_eq!(
+            run_for_invocation(&invocations, &[a.clone(), b], &invocations[0], "room-1", 7),
+            None
+        );
+        assert_eq!(
+            run_for_invocation(&invocations, &[a.clone()], &invocations[0], "room-1", 7),
+            Some(&a)
+        );
+
+        let rooms = cancel_rooms(invocations, runs);
+        assert_eq!(rooms.invocation_run("agent-x", 4), Some(mine));
+        assert_eq!(rooms.invocation_run("agent-x", 5), None);
+        assert_eq!(rooms.invocation_run("agent-y", 4), None);
     }
 
     #[test]
