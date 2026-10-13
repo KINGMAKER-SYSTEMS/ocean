@@ -626,6 +626,8 @@ pub struct Rooms {
     pending_invite_redemption: RwSignal<Option<PendingInviteRedemption>>,
     /// Daemon agent bindings for the open room.
     pub agent_bindings: RwSignal<Vec<RoomAgentBinding>>,
+    /// Latest bindings read owns publication, including after a failed refresh.
+    agent_bindings_request_ticket: RwSignal<u64>,
     /// Native-frozen consent awaiting explicit authorization, if any.
     pub consent: RwSignal<Option<RoomConsentDraft>>,
     /// Ticket owning the latest preview/authorize completion.
@@ -697,6 +699,7 @@ impl Rooms {
             pending_invite_revision: RwSignal::new(0),
             pending_invite_redemption: RwSignal::new(None),
             agent_bindings: RwSignal::new(Vec::new()),
+            agent_bindings_request_ticket: RwSignal::new(0),
             consent: RwSignal::new(None),
             consent_ticket: RwSignal::new(0),
             invocations: RwSignal::new(Vec::new()),
@@ -774,6 +777,8 @@ impl Rooms {
         self.invite_loading.set(false);
         self.invite_error.set(None);
         self.pending_invite_redemption.set(None);
+        self.agent_bindings_request_ticket
+            .update(|ticket| *ticket = ticket.wrapping_add(1));
         self.agent_bindings.set(Vec::new());
         self.invocations.set(Vec::new());
         self.consent_ticket.update(|t| *t = t.wrapping_add(1));
@@ -1466,7 +1471,35 @@ impl Rooms {
         });
     }
 
-    /// Refresh the open room's agent bindings from the daemon.
+    fn begin_agent_bindings_request(&self) -> u64 {
+        let ticket = self
+            .agent_bindings_request_ticket
+            .get_untracked()
+            .wrapping_add(1);
+        self.agent_bindings_request_ticket.set(ticket);
+        ticket
+    }
+
+    fn apply_agent_bindings_response(
+        &self,
+        generation_id: u64,
+        key: &str,
+        ticket: u64,
+        bindings: Option<Vec<RoomAgentBinding>>,
+    ) -> bool {
+        if !self.room_is_current(generation_id, key)
+            || self.agent_bindings_request_ticket.get_untracked() != ticket
+        {
+            return false;
+        }
+        let Some(bindings) = bindings else {
+            return false;
+        };
+        self.agent_bindings.set(bindings);
+        true
+    }
+
+    /// Refresh the open room's bindings; only the latest read may publish.
     pub fn fetch_agent_bindings(&self) {
         let Some(key) = self.open_key.get_untracked() else {
             return;
@@ -1474,20 +1507,16 @@ impl Rooms {
         let base = self.base();
         let me = *self;
         let generation_id = self.generation.get_untracked();
+        let ticket = self.begin_agent_bindings_request();
         spawn_local(async move {
             let url = format!("{base}/v1/rooms/persistent/{}/agents", encode(&key));
-            let Ok(resp) = Request::get(&url).send().await else {
-                return;
-            };
-            let Ok(body) = resp.json::<serde_json::Value>().await else {
-                return;
-            };
-            let Some(bindings) = parse_agent_bindings(&body) else {
-                return;
-            };
-            if me.room_is_current(generation_id, &key) {
-                me.agent_bindings.set(bindings);
+            let bindings = async {
+                let resp = Request::get(&url).send().await.ok()?;
+                let body = resp.json::<serde_json::Value>().await.ok()?;
+                parse_agent_bindings(&body)
             }
+            .await;
+            me.apply_agent_bindings_response(generation_id, &key, ticket, bindings);
         });
     }
 
@@ -5072,6 +5101,121 @@ mod tests {
             decision_token: "secret-token-value".into(),
             state,
         }
+    }
+
+    fn binding_projection(status: &str) -> Vec<RoomAgentBinding> {
+        vec![RoomAgentBinding {
+            agent_member_id: "agent-x".into(),
+            agent_package_id: "scout".into(),
+            agent_definition_digest: String::new(),
+            display_name: "Scout".into(),
+            owner_member_id: "human-a".into(),
+            status: status.into(),
+            generation: "1".into(),
+            owner_eligible: true,
+        }]
+    }
+
+    #[test]
+    fn agent_binding_responses_reversed_success_and_error_keep_latest_request() {
+        let owner = Owner::new();
+        owner.with(|| {
+            for old_succeeds in [false, true] {
+                for latest_succeeds in [false, true] {
+                    let rooms = Rooms::for_test("https://unused.example");
+                    rooms.open_key.set(Some("room-a".into()));
+                    let generation = rooms.generation_snapshot();
+                    let initial = binding_projection("pending");
+                    rooms.agent_bindings.set(initial.clone());
+                    let old = rooms.begin_agent_bindings_request();
+                    let latest = rooms.begin_agent_bindings_request();
+
+                    // A mutation refresh settles before the older room-load GET.
+                    let refreshed = binding_projection("revoked");
+                    assert_eq!(
+                        rooms.apply_agent_bindings_response(
+                            generation,
+                            "room-a",
+                            latest,
+                            latest_succeeds.then(|| refreshed.clone()),
+                        ),
+                        latest_succeeds
+                    );
+                    assert!(!rooms.apply_agent_bindings_response(
+                        generation,
+                        "room-a",
+                        old,
+                        old_succeeds.then(|| binding_projection("active")),
+                    ));
+                    assert_eq!(
+                        rooms.agent_bindings.get_untracked(),
+                        if latest_succeeds { refreshed } else { initial }
+                    );
+                    assert_eq!(rooms.agent_bindings_request_ticket.get_untracked(), latest);
+
+                    // Neither failure nor stale completion blocks the next refresh.
+                    let next = rooms.begin_agent_bindings_request();
+                    assert!(rooms.apply_agent_bindings_response(
+                        generation,
+                        "room-a",
+                        next,
+                        Some(Vec::new()),
+                    ));
+                    assert!(rooms.agent_bindings.get_untracked().is_empty());
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn agent_binding_responses_reset_retires_pending_reads() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let rooms = Rooms::for_test("https://unused.example");
+            rooms.open_key.set(Some("room-a".into()));
+            let generation = rooms.generation_snapshot();
+            let pending = rooms.begin_agent_bindings_request();
+            rooms.agent_bindings.set(binding_projection("active"));
+
+            // The shared reset itself retires reads, even with the same key/generation.
+            rooms.reset_room_state();
+            assert!(!rooms.apply_agent_bindings_response(
+                generation,
+                "room-a",
+                pending,
+                Some(binding_projection("active")),
+            ));
+            assert!(rooms.agent_bindings.get_untracked().is_empty());
+
+            rooms.close_room();
+            // Re-admit the same key without starting network work in this fixture.
+            rooms.open_key.set(Some("room-a".into()));
+            let reopened = rooms.generation_snapshot();
+            let latest = rooms.begin_agent_bindings_request();
+            // Request ownership never substitutes for the room admission checks.
+            assert!(!rooms.apply_agent_bindings_response(
+                generation,
+                "room-a",
+                latest,
+                Some(binding_projection("active")),
+            ));
+            assert!(!rooms.apply_agent_bindings_response(
+                reopened,
+                "room-b",
+                latest,
+                Some(binding_projection("active")),
+            ));
+            assert!(rooms.apply_agent_bindings_response(
+                reopened,
+                "room-a",
+                latest,
+                Some(binding_projection("revoked")),
+            ));
+            assert_eq!(
+                rooms.agent_bindings.get_untracked(),
+                binding_projection("revoked")
+            );
+        });
     }
 
     #[test]

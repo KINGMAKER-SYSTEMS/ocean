@@ -1455,3 +1455,14 @@ Fixed the independent-review findings on PR #88. room_consent.rs: finish_confirm
 
 Validation: in apps/ocean-surface, cargo fmt --check clean; WASM clippy -D warnings clean; WASM check passes; cargo test -p ocean-surface-ui 913 passed (883 unit + 30 integration). In crates/ocean-tauri (placeholder dist/), cargo fmt --check clean, cargo test room_consent 15 passed (4 new; the TTL and hostile-chunk tests were confirmed RED against the pre-fix logic), cargo test owner_mutation 4 passed, clippy --all-targets -D warnings clean. No native-dialog, served-surface, live daemon or install run claimed.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [20:19] [12-10-26]
+agent: [Codex] [factory coordinator]
+worktree: [codex/issue94-binding-order]
+type: [bug report]
+area: [frontend]
+
+Repair the binding-response ordering defect tracked by issue #94 after PR #88. Only the latest binding GET in the current Room admission may publish; reset retires pending reads, and failed refreshes preserve the last projection without reviving older responses. The nearest Surface contract records that ownership rule; root and child indexes are unchanged because structure is unchanged.
+
+Validation: one isolated Mac mini run of cargo test --locked -p ocean-surface-ui --bin ocean-surface-ui agent_binding -- --nocapture passed 3/3 tests in 95 seconds. Coverage includes reversed success/error completions, reset, same-key readmission, and room mismatch. Formatting and diff checks pass. Native consent lifecycle and compact-layout findings in issue #94 remain open. Independent final-head review, required hosted builds, maintainer approval under issue #90, and actual served acceptance remain separate release gates; no deployment or live outcome is claimed.

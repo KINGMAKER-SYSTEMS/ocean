@@ -531,6 +531,7 @@ Web surface session UI:
   replies use checked framing: a hostile chunk size is a bad reply
   (`unknown`) that frees the slot, never a panic. Consent
   commands also refuse any webview other than `main`.
+- Binding GETs publish only for the newest request in the current Room generation; reset retires pending reads, and failed refreshes keep the last projection without reviving older responses.
 - Surface: `host.rs` wrappers are absent off-Tauri, so browser/extension hosts
   render bindings but never emulate consent. `rooms.rs` owns the bindings
   client (`GET .../agents`), the consent draft (room generation + ticket
