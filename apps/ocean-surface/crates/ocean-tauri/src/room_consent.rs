@@ -14,20 +14,24 @@
 //! * Authorize/reauthorize always carry the frozen non-null
 //!   `expected_definition_digest`; a stale digest is reported as refused with
 //!   no legacy retry.
-//! * Requests go only to a fixed numeric-loopback daemon over a raw HTTP/1.1
-//!   connection: no proxy routing, no redirects, no page-supplied method, path,
-//!   header or body. Replies are size-bounded and must be JSON objects.
-//! * The key is read through a no-follow descriptor immediately before each
-//!   privileged request, must be an owner-only regular file owned by this
-//!   user, and is never cached, returned, logged or embedded in an error.
+//! * Requests are built only from the typed [`Intent`]s below (no page-supplied
+//!   method, path, header or body) and go through the shared
+//!   `daemon_transport.rs`, which owns every transport and custody rule:
+//!   numeric-loopback daemon only, raw HTTP/1.1 with no proxy routing, no
+//!   redirects, replies bounded to 256 KiB JSON objects, and the key read
+//!   through a no-follow descriptor immediately before each privileged
+//!   request (owner-only, effective-uid owned, never cached, returned, logged
+//!   or embedded in an error).
+//! * Local rooms record their owner through the operator-gated bootstrap
+//!   ([`Intent::Bootstrap`]). The owner is the daemon's own `GET /v1/me`
+//!   `participant_id`, read natively; the page names only room and package.
+//!   A bootstrap creates no binding: it lands in the same frozen preview, so
+//!   authorization still needs the native dialog.
 //!
 //! The pure broker below owns every check; the `#[tauri::command]` glue at the
 //! bottom only adds the native dialog and the main-window gate (Tauri plugin
 //! ACLs do not cover application commands).
 
-use std::io::{Read, Write};
-use std::net::{IpAddr, SocketAddr, TcpStream};
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -35,19 +39,19 @@ use parking_lot::Mutex;
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 
-const OPERATOR_HEADER: &str = "X-Ocean-Operator";
+use crate::daemon_transport::{
+    encode_segment, require_main_window, DaemonRequest, DaemonTransport, Method, Reply, SendError,
+};
+
 /// Pending consents held at once; the oldest idle one is evicted past this.
 const MAX_PENDING: usize = 4;
 /// A frozen preview older than this must be fetched again.
 const CONSENT_TTL: Duration = Duration::from_secs(120);
-const MAX_REPLY_BYTES: usize = 256 * 1024;
 const MAX_ID_CHARS: usize = 512;
 /// Longest page- or package-supplied label shown in a native dialog.
 const MAX_DIALOG_LABEL_CHARS: usize = 128;
 /// Longest capability line shown in the authorize dialog.
 const MAX_DIALOG_CAPS_CHARS: usize = 1024;
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
-const IO_TIMEOUT: Duration = Duration::from_secs(15);
 
 const ACTIVATION_DEFAULT: &str = "explicit_only";
 const CONTEXT_DEFAULT: &str = "invocation_only";
@@ -249,18 +253,28 @@ enum Intent {
         agent: String,
         decision_id: String,
     },
+    /// `GET /v1/me`: the daemon owner a Local bootstrap names. Unprivileged.
+    Me,
+    /// Local-room owner/agent bootstrap. `owner` is only ever the
+    /// `participant_id` this module read from [`Intent::Me`]; the page never
+    /// supplies it. Creates no binding.
+    Bootstrap {
+        room: String,
+        package_id: String,
+        owner: String,
+    },
 }
 
 impl Intent {
-    fn method(&self) -> &'static str {
+    /// The fixed request for this intent. Only consent decisions carry the
+    /// operator credential; the preview is unprivileged.
+    fn request(&self) -> DaemonRequest {
         match self {
-            Self::Preview { .. } => "GET",
-            _ => "POST",
+            Self::Preview { .. } | Self::Me => {
+                DaemonRequest::public(Method::Get, self.path(), None)
+            }
+            _ => DaemonRequest::operator(Method::Post, self.path(), self.body()),
         }
-    }
-
-    fn privileged(&self) -> bool {
-        !matches!(self, Self::Preview { .. })
     }
 
     fn path(&self) -> String {
@@ -279,35 +293,26 @@ impl Intent {
             Self::Revoke { room: r, agent, .. } => {
                 format!("{}/agents/{}/revoke", room(r), encode_segment(agent))
             }
+            Self::Me => "/v1/me".to_string(),
+            Self::Bootstrap { room: r, .. } => format!("{}/agents/bootstrap", room(r)),
         }
     }
 
     fn body(&self) -> Option<String> {
         match self {
-            Self::Preview { .. } => None,
+            Self::Preview { .. } | Self::Me => None,
+            // Exactly the daemon's strict `{owner_member_id, agent_package_id}`.
+            Self::Bootstrap {
+                package_id, owner, ..
+            } => Some(
+                json!({ "owner_member_id": owner, "agent_package_id": package_id }).to_string(),
+            ),
             Self::Authorize { body, .. } | Self::Reauthorize { body, .. } => Some(body.to_string()),
             Self::Revoke { decision_id, .. } => {
                 Some(json!({ "decision_id": decision_id }).to_string())
             }
         }
     }
-}
-
-/// Percent-encode one path segment: only RFC 3986 unreserved bytes pass, and
-/// dot segments are fully encoded.
-fn encode_segment(raw: &str) -> String {
-    if raw == "." || raw == ".." {
-        return raw.replace('.', "%2E");
-    }
-    let mut out = String::with_capacity(raw.len());
-    for byte in raw.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
-            out.push(byte as char);
-        } else {
-            out.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    out
 }
 
 // ── native dialog text ──────────────────────────────────────────────────
@@ -374,245 +379,6 @@ fn revoke_dialog_text(room: &str, agent_member_id: &str, display_name: &str) -> 
         format!("Revoke {label}")
     };
     (title, format!("Room: {room}\nAgent id: {agent_member_id}"))
-}
-
-// ── endpoint and credential custody ─────────────────────────────────────
-
-/// Accept only `http://<numeric loopback>[:port][/]`. Hostnames (including
-/// `localhost`), userinfo, non-loopback addresses and TLS schemes are refused
-/// so the credential cannot be resolved or routed anywhere else.
-pub(crate) fn loopback_endpoint(url: &str) -> Option<SocketAddr> {
-    let rest = url.trim().strip_prefix("http://")?;
-    let authority = rest.strip_suffix('/').unwrap_or(rest);
-    if authority.is_empty() || authority.contains(['/', '?', '#', '@', ' ']) {
-        return None;
-    }
-    let (host, port) = if let Some(v6) = authority.strip_prefix('[') {
-        let (host, tail) = v6.split_once(']')?;
-        let port = match tail {
-            "" => 4780,
-            tail => tail.strip_prefix(':')?.parse().ok()?,
-        };
-        (host, port)
-    } else {
-        match authority.rsplit_once(':') {
-            Some((host, port)) => (host, port.parse().ok()?),
-            None => (authority, 4780),
-        }
-    };
-    let ip: IpAddr = host.parse().ok()?;
-    (ip.is_loopback() && port != 0).then_some(SocketAddr::new(ip, port))
-}
-
-fn ocean_config_dir() -> PathBuf {
-    if let Some(path) = std::env::var_os("OCEAN_CONFIG_DIR") {
-        return PathBuf::from(path);
-    }
-    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
-        return PathBuf::from(xdg).join("ocean-rs");
-    }
-    if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home).join(".config").join("ocean-rs");
-    }
-    PathBuf::from(".ocean-rs")
-}
-
-/// `OCEAN_OPERATOR_KEY_FILE`, else `<config dir>/operator.key` — the path the
-/// daemon writes.
-pub(crate) fn operator_key_path() -> PathBuf {
-    std::env::var_os("OCEAN_OPERATOR_KEY_FILE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| ocean_config_dir().join("operator.key"))
-}
-
-const CREDENTIAL_UNAVAILABLE: &str = "operator_credential_unavailable";
-
-/// Read the operator key through a no-follow descriptor. The opened file must
-/// be the inspected regular file, owned by this user, with no group/other
-/// permission bits, and hold one header-safe token. Errors carry only a code.
-#[cfg(unix)]
-fn read_operator_key(path: &Path) -> Result<String, &'static str> {
-    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-    let link = std::fs::symlink_metadata(path).map_err(|_| CREDENTIAL_UNAVAILABLE)?;
-    if link.file_type().is_symlink() || !link.is_file() {
-        return Err("operator_credential_not_regular");
-    }
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)
-        .map_err(|_| CREDENTIAL_UNAVAILABLE)?;
-    let opened = file.metadata().map_err(|_| CREDENTIAL_UNAVAILABLE)?;
-    if !opened.is_file() || opened.dev() != link.dev() || opened.ino() != link.ino() {
-        return Err("operator_credential_changed");
-    }
-    // SAFETY: geteuid has no preconditions and cannot fail.
-    if opened.uid() != unsafe { libc::geteuid() } {
-        return Err("operator_credential_foreign_owner");
-    }
-    if opened.mode() & 0o077 != 0 {
-        return Err("operator_credential_not_private");
-    }
-    if opened.len() > 4096 {
-        return Err(CREDENTIAL_UNAVAILABLE);
-    }
-    let mut raw = String::new();
-    (&mut file)
-        .take(4097)
-        .read_to_string(&mut raw)
-        .map_err(|_| CREDENTIAL_UNAVAILABLE)?;
-    let key = raw.trim();
-    let header_safe = (16..=512).contains(&key.len())
-        && key
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'=' | b'+' | b'/'));
-    if !header_safe {
-        return Err(CREDENTIAL_UNAVAILABLE);
-    }
-    Ok(key.to_string())
-}
-
-#[cfg(not(unix))]
-fn read_operator_key(_path: &Path) -> Result<String, &'static str> {
-    Err(CREDENTIAL_UNAVAILABLE)
-}
-
-// ── transport ───────────────────────────────────────────────────────────
-
-#[derive(Debug, PartialEq)]
-enum SendError {
-    /// Nothing reached the daemon (validation, credential, connect).
-    NotSent(&'static str),
-    /// The request may have reached the daemon; the reply was lost.
-    Unknown,
-    /// A reply arrived but is not acceptable (redirect, oversize, non-JSON).
-    BadReply(&'static str),
-}
-
-struct Reply {
-    status: u16,
-    body: Map<String, Value>,
-}
-
-fn send(endpoint: SocketAddr, key_path: &Path, intent: &Intent) -> Result<Reply, SendError> {
-    let key = if intent.privileged() {
-        Some(read_operator_key(key_path).map_err(SendError::NotSent)?)
-    } else {
-        None
-    };
-    let body = intent.body().unwrap_or_default();
-    let mut stream = TcpStream::connect_timeout(&endpoint, CONNECT_TIMEOUT)
-        .map_err(|_| SendError::NotSent("daemon_unreachable"))?;
-    let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
-    let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
-    let mut head = format!(
-        "{} {} HTTP/1.1\r\nHost: {}\r\nAccept: application/json\r\nConnection: close\r\n",
-        intent.method(),
-        intent.path(),
-        endpoint
-    );
-    if intent.body().is_some() {
-        head.push_str(&format!(
-            "Content-Type: application/json\r\nContent-Length: {}\r\n",
-            body.len()
-        ));
-    }
-    if let Some(key) = key.as_deref() {
-        head.push_str(&format!("{OPERATOR_HEADER}: {key}\r\n"));
-    }
-    head.push_str("\r\n");
-    stream
-        .write_all(head.as_bytes())
-        .and_then(|()| stream.write_all(body.as_bytes()))
-        .map_err(|_| SendError::Unknown)?;
-    drop(head);
-    let mut raw = Vec::new();
-    stream
-        .take((MAX_REPLY_BYTES + 16 * 1024 + 1) as u64)
-        .read_to_end(&mut raw)
-        .map_err(|_| SendError::Unknown)?;
-    if raw.is_empty() {
-        return Err(SendError::Unknown);
-    }
-    parse_reply(&raw)
-}
-
-fn parse_reply(raw: &[u8]) -> Result<Reply, SendError> {
-    const BAD: SendError = SendError::BadReply("invalid_reply");
-    if raw.len() > MAX_REPLY_BYTES + 16 * 1024 {
-        return Err(SendError::BadReply("reply_too_large"));
-    }
-    let split = raw.windows(4).position(|w| w == b"\r\n\r\n").ok_or(BAD)?;
-    let head = std::str::from_utf8(&raw[..split]).map_err(|_| BAD)?;
-    let mut payload = &raw[split + 4..];
-    let mut lines = head.split("\r\n");
-    let status: u16 = lines
-        .next()
-        .filter(|line| line.starts_with("HTTP/1."))
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|code| code.parse().ok())
-        .ok_or(BAD)?;
-    if (300..400).contains(&status) {
-        return Err(SendError::BadReply("redirect_refused"));
-    }
-    let mut length = None;
-    let mut chunked = false;
-    for line in lines {
-        let Some((name, value)) = line.split_once(':') else {
-            return Err(BAD);
-        };
-        let value = value.trim();
-        if name.eq_ignore_ascii_case("content-length") {
-            if length.is_some() {
-                return Err(BAD);
-            }
-            length = Some(value.parse::<usize>().map_err(|_| BAD)?);
-        } else if name.eq_ignore_ascii_case("transfer-encoding") {
-            chunked = value.eq_ignore_ascii_case("chunked");
-            if !chunked {
-                return Err(BAD);
-            }
-        }
-    }
-    let body = if chunked {
-        let mut out = Vec::new();
-        loop {
-            let end = payload.windows(2).position(|w| w == b"\r\n").ok_or(BAD)?;
-            let size_text = std::str::from_utf8(&payload[..end]).map_err(|_| BAD)?;
-            let size = usize::from_str_radix(size_text.split(';').next().unwrap_or("").trim(), 16)
-                .map_err(|_| BAD)?;
-            payload = &payload[end + 2..];
-            if size == 0 {
-                break;
-            }
-            // A hostile size must not overflow or slice out of bounds.
-            if size > MAX_REPLY_BYTES.saturating_sub(out.len()) {
-                return Err(BAD);
-            }
-            let framed = size.checked_add(2).ok_or(BAD)?;
-            let (chunk, rest) = payload.split_at_checked(framed).ok_or(BAD)?;
-            if &chunk[size..] != b"\r\n" {
-                return Err(BAD);
-            }
-            out.extend_from_slice(&chunk[..size]);
-            payload = rest;
-        }
-        out
-    } else if let Some(length) = length {
-        if length > MAX_REPLY_BYTES || payload.len() < length {
-            return Err(BAD);
-        }
-        payload[..length].to_vec()
-    } else {
-        if payload.len() > MAX_REPLY_BYTES {
-            return Err(SendError::BadReply("reply_too_large"));
-        }
-        payload.to_vec()
-    };
-    match serde_json::from_slice::<Value>(&body) {
-        Ok(Value::Object(body)) => Ok(Reply { status, body }),
-        _ => Err(BAD),
-    }
 }
 
 // ── preview validation ──────────────────────────────────────────────────
@@ -774,6 +540,28 @@ fn refused(code: &'static str) -> ConsentOutcome {
     }
 }
 
+/// A bootstrap whose existing Room owner is not this daemon's owner.
+const BOOTSTRAP_OWNER_CONFLICT: &str = "room_owner_conflict";
+
+/// Map a definitive bootstrap reply. `Ok` proceeds to the preview: created
+/// (201), already bootstrapped (200), or an owner conflict the preview then
+/// settles against `/v1/me`. Every refusal is one fixed code.
+fn bootstrap_step(reply: &Reply) -> Result<(), &'static str> {
+    let code = reply.body.get("error").and_then(Value::as_str);
+    match (reply.status, code) {
+        (200 | 201, _) if reply.body.get("ok") == Some(&Value::Bool(true)) => Ok(()),
+        (409, Some("room_owner_conflict")) => Ok(()),
+        (403, Some("room_owner_required")) => Err("room_owner_required"),
+        (409, Some("local_room_required")) => Err("local_room_required"),
+        (409, Some("bootstrap_target_conflict")) => Err("bootstrap_target_conflict"),
+        (404, Some("room_not_found")) => Err("room_not_found"),
+        (404, Some("agent_package_not_found")) | (400, Some("invalid_agent_package_id")) => {
+            Err("agent_package_not_found")
+        }
+        _ => Err("bootstrap_refused"),
+    }
+}
+
 fn fresh_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
@@ -781,24 +569,27 @@ fn fresh_id() -> String {
 // ── broker ──────────────────────────────────────────────────────────────
 
 pub(crate) struct ConsentBroker {
-    endpoint: Option<SocketAddr>,
-    key_path: PathBuf,
+    transport: DaemonTransport,
     ttl: Duration,
     pending: Mutex<Vec<Entry>>,
 }
 
 impl ConsentBroker {
-    pub(crate) fn new(daemon_url: &str, key_path: PathBuf) -> Self {
+    pub(crate) fn new(transport: DaemonTransport) -> Self {
         Self {
-            endpoint: loopback_endpoint(daemon_url),
-            key_path,
+            transport,
             ttl: CONSENT_TTL,
             pending: Mutex::new(Vec::new()),
         }
     }
 
-    fn endpoint(&self) -> Result<SocketAddr, &'static str> {
-        self.endpoint.ok_or("consent_unavailable")
+    /// Refuse every consent command when `OCEAN_DAEMON_URL` is not a numeric
+    /// loopback daemon.
+    fn endpoint(&self) -> Result<(), &'static str> {
+        self.transport
+            .endpoint()
+            .map(|_| ())
+            .ok_or("consent_unavailable")
     }
 
     /// Expire idle and still-confirming consents past the TTL. A consent
@@ -810,15 +601,26 @@ impl ConsentBroker {
 
     /// Fetch and freeze the authoritative preview for `package_id` in `room`.
     pub(crate) fn preview(&self, room: &str, package_id: &str) -> Result<ConsentPreview, String> {
-        let endpoint = self.endpoint()?;
+        self.endpoint()?;
         if !valid_key(room) || !valid_key(package_id) {
             return Err("invalid_request".into());
         }
+        self.freeze(room, package_id, None)
+    }
+
+    /// Fetch and freeze one preview. With `expected_owner`, a preview naming
+    /// any other owner is refused and nothing is frozen.
+    fn freeze(
+        &self,
+        room: &str,
+        package_id: &str,
+        expected_owner: Option<&str>,
+    ) -> Result<ConsentPreview, String> {
         let intent = Intent::Preview {
             room: room.to_string(),
             package_id: package_id.to_string(),
         };
-        let reply = match send(endpoint, &self.key_path, &intent) {
+        let reply = match self.transport.send(&intent.request()) {
             Ok(reply) => reply,
             Err(SendError::NotSent(code) | SendError::BadReply(code)) => return Err(code.into()),
             Err(SendError::Unknown) => return Err("daemon_unreachable".into()),
@@ -833,6 +635,9 @@ impl ConsentBroker {
                 .to_string());
         }
         let frozen = freeze_preview(room, package_id, &reply.body, fresh_id())?;
+        if expected_owner.is_some_and(|owner| owner != frozen.owner_member_id) {
+            return Err(BOOTSTRAP_OWNER_CONFLICT.into());
+        }
         let id = fresh_id();
         let mut entries = self.pending.lock();
         self.prune(&mut entries);
@@ -907,14 +712,11 @@ impl ConsentBroker {
     /// lost acknowledgement returns it to `Ready` with the same decision id so
     /// only an explicit, re-confirmed retry can replay it.
     pub(crate) fn send_decision(&self, consent_id: &str, frozen: &Frozen) -> ConsentOutcome {
-        let endpoint = match self.endpoint() {
-            Ok(endpoint) => endpoint,
-            Err(code) => {
-                self.release(consent_id, true);
-                return refused(code);
-            }
-        };
-        match send(endpoint, &self.key_path, &frozen.intent()) {
+        if let Err(code) = self.endpoint() {
+            self.release(consent_id, true);
+            return refused(code);
+        }
+        match self.transport.send(&frozen.intent().request()) {
             Ok(reply) => {
                 self.release(consent_id, false);
                 outcome_from_reply(reply)
@@ -955,6 +757,51 @@ impl ConsentBroker {
         }
     }
 
+    /// The daemon owner's `participant_id` from `GET /v1/me`, read natively.
+    fn daemon_owner(&self) -> Result<String, String> {
+        let reply = match self.transport.send(&Intent::Me.request()) {
+            Ok(reply) => reply,
+            Err(SendError::NotSent(code) | SendError::BadReply(code)) => return Err(code.into()),
+            // A lost reply to a read changed nothing.
+            Err(SendError::Unknown) => return Err("daemon_unreachable".into()),
+        };
+        if reply.status != 200 {
+            return Err("owner_unavailable".into());
+        }
+        bounded_id(reply.body.get("participant_id")).ok_or_else(|| "owner_unavailable".into())
+    }
+
+    /// Bootstrap `package_id` into the Local `room` as the daemon owner's
+    /// agent, then fetch and freeze its consent preview so the page lands in
+    /// the consent sheet. The owner comes only from `GET /v1/me`.
+    ///
+    /// The daemon records the owner role once and refuses a different owner
+    /// (`room_owner_conflict`); that refusal still proceeds to the preview,
+    /// which is frozen only when it names this daemon's owner. Nothing is
+    /// retried automatically: a lost bootstrap acknowledgement is
+    /// `outcome_unknown` and fetches no preview.
+    pub(crate) fn bootstrap(&self, room: &str, package_id: &str) -> Result<ConsentPreview, String> {
+        self.endpoint()?;
+        if !valid_key(room) || !valid_key(package_id) {
+            return Err("invalid_request".into());
+        }
+        let owner = self.daemon_owner()?;
+        let intent = Intent::Bootstrap {
+            room: room.to_string(),
+            package_id: package_id.to_string(),
+            owner: owner.clone(),
+        };
+        let reply = match self.transport.send(&intent.request()) {
+            Ok(reply) => reply,
+            Err(SendError::NotSent(code)) => return Err(code.into()),
+            Err(SendError::Unknown | SendError::BadReply(_)) => {
+                return Err("outcome_unknown".into())
+            }
+        };
+        bootstrap_step(&reply)?;
+        self.freeze(room, package_id, Some(&owner))
+    }
+
     /// Drop one consent, or every consent when `consent_id` is `None`
     /// (navigation, room change). A request already sending keeps its late
     /// outcome but is not returned to `Ready`.
@@ -969,10 +816,9 @@ impl ConsentBroker {
     /// Revoke an own agent's binding with a fresh decision id. Call only after
     /// native confirmation.
     pub(crate) fn revoke(&self, room: &str, agent_member_id: &str) -> ConsentOutcome {
-        let endpoint = match self.endpoint() {
-            Ok(endpoint) => endpoint,
-            Err(code) => return refused(code),
-        };
+        if let Err(code) = self.endpoint() {
+            return refused(code);
+        }
         if !valid_key(room)
             || bounded_id(Some(&Value::String(agent_member_id.to_string()))).is_none()
         {
@@ -988,7 +834,7 @@ impl ConsentBroker {
         self.pending
             .lock()
             .retain(|e| !(e.frozen.room == room && e.frozen.agent_member_id == agent_member_id));
-        match send(endpoint, &self.key_path, &intent) {
+        match self.transport.send(&intent.request()) {
             Ok(reply) => outcome_from_reply(reply),
             Err(SendError::NotSent(code)) => refused(code),
             Err(SendError::BadReply(code)) => ConsentOutcome {
@@ -1012,9 +858,7 @@ impl ConsentBroker {
 pub(crate) struct ConsentState(pub(crate) Arc<ConsentBroker>);
 
 fn main_window(window: &tauri::WebviewWindow) -> Result<(), String> {
-    (window.label() == "main")
-        .then_some(())
-        .ok_or_else(|| "consent_window_refused".to_string())
+    require_main_window(window.label(), "consent_window_refused")
 }
 
 async fn native_confirm(
@@ -1080,6 +924,32 @@ pub(crate) async fn room_consent_authorize(
     blocking(move || broker.send_decision(&consent_id, &frozen)).await
 }
 
+/// Window-gated bootstrap (pure, so the gate is testable without a webview).
+fn bootstrap_from(
+    label: &str,
+    broker: &ConsentBroker,
+    room: &str,
+    package_id: &str,
+) -> Result<ConsentPreview, String> {
+    require_main_window(label, "consent_window_refused")?;
+    broker.bootstrap(room.trim(), package_id.trim())
+}
+
+/// Local-room agent bootstrap, then the same frozen preview
+/// `room_consent_preview` returns. Main window only; the owner is read
+/// natively from `GET /v1/me`.
+#[tauri::command]
+pub(crate) async fn room_agent_bootstrap(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, ConsentState>,
+    room: String,
+    package_id: String,
+) -> Result<ConsentPreview, String> {
+    let label = window.label().to_string();
+    let broker = state.0.clone();
+    blocking(move || bootstrap_from(&label, &broker, &room, &package_id)).await?
+}
+
 #[tauri::command]
 pub(crate) fn room_consent_cancel(
     window: tauri::WebviewWindow,
@@ -1119,25 +989,14 @@ pub(crate) async fn room_agent_revoke(
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use std::net::TcpListener;
+    use crate::daemon_transport::test_support::*;
+    use crate::daemon_transport::{
+        loopback_endpoint, parse_reply, read_operator_key, CREDENTIAL_UNAVAILABLE, MAX_REPLY_BYTES,
+    };
     use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
 
-    const KEY: &str = "fixtureOperatorKey_0123456789abcdefABCDEF-xyz";
     const DIGEST: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-
-    fn key_file(dir: &Path, mode: u32) -> PathBuf {
-        let path = dir.join("operator.key");
-        std::fs::write(&path, format!("{KEY}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
-        path
-    }
-
-    fn http(status: &str, body: &str) -> String {
-        format!(
-            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
-            body.len()
-        )
-    }
 
     fn preview_body(eligible: bool, binding: Option<Value>) -> String {
         json!({
@@ -1156,68 +1015,11 @@ mod tests {
         .to_string()
     }
 
-    /// Loopback "daemon" answering each accepted connection with the next
-    /// canned reply (`None` closes without replying). Returns raw requests.
-    fn fake_daemon(replies: Vec<Option<String>>) -> (u16, std::thread::JoinHandle<Vec<String>>) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let handle = std::thread::spawn(move || {
-            let mut seen = Vec::new();
-            for reply in replies {
-                let (mut socket, _) = listener.accept().unwrap();
-                socket
-                    .set_read_timeout(Some(Duration::from_secs(5)))
-                    .unwrap();
-                let mut raw = Vec::new();
-                let mut buf = [0u8; 4096];
-                loop {
-                    let n = socket.read(&mut buf).unwrap_or(0);
-                    raw.extend_from_slice(&buf[..n]);
-                    let text = String::from_utf8_lossy(&raw).to_string();
-                    if let Some(end) = text.find("\r\n\r\n") {
-                        let len = text[..end]
-                            .lines()
-                            .find_map(|l| l.strip_prefix("Content-Length: "))
-                            .map(|v| v.trim().parse::<usize>().unwrap())
-                            .unwrap_or(0);
-                        if raw.len() >= end + 4 + len {
-                            break;
-                        }
-                    }
-                    if n == 0 {
-                        break;
-                    }
-                }
-                if let Some(reply) = reply {
-                    socket.write_all(reply.as_bytes()).unwrap();
-                }
-                seen.push(String::from_utf8(raw).unwrap());
-            }
-            seen
-        });
-        (port, handle)
-    }
-
-    /// A bound port that records whether anything ever connected.
-    fn silent_daemon() -> (u16, TcpListener) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
-        (listener.local_addr().unwrap().port(), listener)
-    }
-
-    fn assert_never_contacted(listener: &TcpListener) {
-        match listener.accept() {
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
-            other => panic!("daemon was contacted: {other:?}"),
-        }
-    }
-
     fn broker(port: u16, key: &Path) -> ConsentBroker {
-        ConsentBroker::new(&format!("http://127.0.0.1:{port}"), key.to_path_buf())
-    }
-
-    fn json_body(request: &str) -> Value {
-        serde_json::from_str(&request[request.find("\r\n\r\n").unwrap() + 4..]).unwrap()
+        ConsentBroker::new(DaemonTransport::new(
+            &format!("http://127.0.0.1:{port}"),
+            key.to_path_buf(),
+        ))
     }
 
     #[test]
@@ -1246,7 +1048,22 @@ mod tests {
         ] {
             assert_eq!(loopback_endpoint(url), None, "{url}");
         }
-        let broker = ConsentBroker::new("http://192.0.2.1:4780", PathBuf::from("/nonexistent"));
+        for url in ["http://192.0.2.1:4780", "http://localhost:4780"] {
+            let broker =
+                ConsentBroker::new(DaemonTransport::new(url, PathBuf::from("/nonexistent")));
+            assert_eq!(
+                broker.preview("room", "scout").unwrap_err(),
+                "consent_unavailable"
+            );
+            assert_eq!(
+                broker.revoke("room", "agent").code.as_deref(),
+                Some("consent_unavailable")
+            );
+        }
+        let broker = ConsentBroker::new(DaemonTransport::new(
+            "http://192.0.2.1:4780",
+            PathBuf::from("/nonexistent"),
+        ));
         assert_eq!(
             broker.preview("room", "scout").unwrap_err(),
             "consent_unavailable"
@@ -1738,5 +1555,307 @@ mod tests {
         // the same decision.
         let retry = broker.begin_confirm(&preview.consent_id).unwrap();
         assert_eq!(retry.decision_id, frozen.decision_id);
+    }
+
+    // ── Local bootstrap (PR G) ──────────────────────────────────────────
+
+    fn me_body(participant: &str) -> String {
+        json!({ "participant_id": participant, "display_name": "Owner" }).to_string()
+    }
+
+    fn bootstrapped(created: bool) -> String {
+        json!({
+            "ok": true,
+            "created": created,
+            "room_id": "team.room",
+            "owner_member_id": "member-owner",
+            "agent_member_id": "scout",
+            "agent_package_id": "scout",
+            "owner_eligible": true,
+        })
+        .to_string()
+    }
+
+    fn refusal(status: &str, code: &str) -> String {
+        http(status, &json!({ "ok": false, "error": code }).to_string())
+    }
+
+    #[test]
+    fn bootstrap_intent_is_a_fixed_operator_post_with_the_strict_body() {
+        let intent = Intent::Bootstrap {
+            room: "team room".into(),
+            package_id: "scout".into(),
+            owner: "member-owner".into(),
+        };
+        let request = intent.request();
+        assert!(request.is_operator());
+        assert_eq!(
+            request,
+            DaemonRequest::operator(
+                Method::Post,
+                "/v1/rooms/persistent/team%20room/agents/bootstrap".into(),
+                Some(
+                    json!({ "owner_member_id": "member-owner", "agent_package_id": "scout" })
+                        .to_string()
+                ),
+            )
+        );
+        let me = Intent::Me.request();
+        assert!(!me.is_operator(), "the owner read is unprivileged");
+        assert_eq!(
+            me,
+            DaemonRequest::public(Method::Get, "/v1/me".into(), None)
+        );
+    }
+
+    #[test]
+    fn bootstrap_takes_the_owner_from_v1_me_and_lands_in_the_frozen_preview() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_file(dir.path(), 0o600);
+        let (port, daemon) = fake_daemon(vec![
+            Some(http("200 OK", &me_body("member-owner"))),
+            Some(http("201 Created", &bootstrapped(true))),
+            Some(http("200 OK", &preview_body(true, None))),
+        ]);
+        let broker = broker(port, &key);
+        let preview = broker.bootstrap("team.room", "scout").unwrap();
+        let seen = daemon.join().unwrap();
+        assert_eq!(seen.len(), 3);
+        assert!(seen[0].starts_with("GET /v1/me HTTP/1.1\r\n"));
+        assert!(!seen[0].contains(KEY), "the owner read is unprivileged");
+        assert!(seen[1]
+            .starts_with("POST /v1/rooms/persistent/team.room/agents/bootstrap HTTP/1.1\r\n"));
+        assert!(seen[1].contains(&format!("\r\nX-Ocean-Operator: {KEY}\r\n")));
+        let lower = seen[1].to_ascii_lowercase();
+        assert!(!lower.contains("\r\norigin:") && !lower.contains("\r\ncookie:"));
+        assert_eq!(
+            json_body(&seen[1]),
+            json!({ "owner_member_id": "member-owner", "agent_package_id": "scout" })
+        );
+        assert!(seen[2]
+            .starts_with("GET /v1/rooms/persistent/team.room/agents/preview/scout HTTP/1.1\r\n"));
+        assert!(!seen[2].contains(KEY));
+        // The same projection the preview command returns, now authorizable.
+        assert_eq!(preview.owner_member_id, "member-owner");
+        assert_eq!(preview.mode, ConsentMode::Authorize);
+        assert_eq!(preview.definition_digest, DIGEST);
+        assert!(!serde_json::to_string(&preview).unwrap().contains(KEY));
+        assert!(broker.begin_confirm(&preview.consent_id).is_ok());
+    }
+
+    #[test]
+    fn bootstrap_owner_is_only_ever_the_v1_me_participant() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_file(dir.path(), 0o600);
+        // Whatever /v1/me names is the owner sent; the page has no owner input.
+        let (port, daemon) = fake_daemon(vec![
+            Some(http("200 OK", &me_body("member-me"))),
+            Some(refusal("403 Forbidden", "room_owner_required")),
+        ]);
+        assert_eq!(
+            broker(port, &key).bootstrap("room", "scout").unwrap_err(),
+            "room_owner_required"
+        );
+        let seen = daemon.join().unwrap();
+        assert_eq!(json_body(&seen[1])["owner_member_id"], "member-me");
+
+        // An unusable /v1/me never reaches the privileged bootstrap.
+        for reply in [
+            http("200 OK", &me_body("member\nOwner: x")),
+            http("200 OK", &me_body("")),
+            http("200 OK", &me_body(" padded")),
+            http("200 OK", r#"{"display_name":"Owner"}"#),
+            http("200 OK", r#"{"participant_id":7}"#),
+            refusal("500 Internal Server Error", "room_store_error"),
+        ] {
+            let (port, daemon) = fake_daemon(vec![Some(reply)]);
+            let broker = broker(port, &key);
+            assert_eq!(
+                broker.bootstrap("room", "scout").unwrap_err(),
+                "owner_unavailable"
+            );
+            assert_eq!(daemon.join().unwrap().len(), 1, "no bootstrap sent");
+            assert!(broker.pending.lock().is_empty());
+        }
+    }
+
+    #[test]
+    fn bootstrap_refusals_map_to_fixed_codes_and_fetch_no_preview() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_file(dir.path(), 0o600);
+        let cases = [
+            (
+                refusal("403 Forbidden", "room_owner_required"),
+                "room_owner_required",
+            ),
+            (
+                refusal("409 Conflict", "local_room_required"),
+                "local_room_required",
+            ),
+            (
+                refusal("409 Conflict", "bootstrap_target_conflict"),
+                "bootstrap_target_conflict",
+            ),
+            (refusal("404 Not Found", "room_not_found"), "room_not_found"),
+            (
+                refusal("404 Not Found", "agent_package_not_found"),
+                "agent_package_not_found",
+            ),
+            (
+                refusal("400 Bad Request", "invalid_agent_package_id"),
+                "agent_package_not_found",
+            ),
+            (
+                refusal("403 Forbidden", "operator_required"),
+                "bootstrap_refused",
+            ),
+            (
+                refusal("409 Conflict", "Arbitrary\ntext"),
+                "bootstrap_refused",
+            ),
+            (http("200 OK", r#"{"ok":false}"#), "bootstrap_refused"),
+        ];
+        for (reply, code) in cases {
+            let (port, daemon) = fake_daemon(vec![
+                Some(http("200 OK", &me_body("member-owner"))),
+                Some(reply),
+            ]);
+            let broker = broker(port, &key);
+            assert_eq!(broker.bootstrap("room", "scout").unwrap_err(), code);
+            assert_eq!(daemon.join().unwrap().len(), 2, "{code}: no preview");
+            assert!(broker.pending.lock().is_empty(), "{code}");
+        }
+    }
+
+    #[test]
+    fn an_existing_bootstrap_proceeds_only_when_the_preview_names_this_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_file(dir.path(), 0o600);
+        // Already bootstrapped (200) and an owner conflict whose preview names
+        // the /v1/me owner both land in the consent sheet.
+        for reply in [
+            http("200 OK", &bootstrapped(false)),
+            refusal("409 Conflict", "room_owner_conflict"),
+        ] {
+            let (port, daemon) = fake_daemon(vec![
+                Some(http("200 OK", &me_body("member-owner"))),
+                Some(reply),
+                Some(http("200 OK", &preview_body(true, None))),
+            ]);
+            let broker = broker(port, &key);
+            let preview = broker.bootstrap("room", "scout").unwrap();
+            assert_eq!(preview.owner_member_id, "member-owner");
+            assert_eq!(daemon.join().unwrap().len(), 3);
+            assert_eq!(broker.pending.lock().len(), 1);
+        }
+        // A preview naming another owner is refused and freezes nothing.
+        for reply in [
+            refusal("409 Conflict", "room_owner_conflict"),
+            http("201 Created", &bootstrapped(true)),
+        ] {
+            let (port, daemon) = fake_daemon(vec![
+                Some(http("200 OK", &me_body("member-me"))),
+                Some(reply),
+                Some(http("200 OK", &preview_body(true, None))),
+            ]);
+            let broker = broker(port, &key);
+            assert_eq!(
+                broker.bootstrap("room", "scout").unwrap_err(),
+                "room_owner_conflict"
+            );
+            assert_eq!(daemon.join().unwrap().len(), 3);
+            assert!(broker.pending.lock().is_empty());
+        }
+    }
+
+    #[test]
+    fn bootstrap_not_sent_and_unknown_outcomes_are_never_retried() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_file(dir.path(), 0o600);
+        // Lost acknowledgement: unknown, no retry, no preview.
+        let (port, daemon) =
+            fake_daemon(vec![Some(http("200 OK", &me_body("member-owner"))), None]);
+        let broker_a = broker(port, &key);
+        assert_eq!(
+            broker_a.bootstrap("room", "scout").unwrap_err(),
+            "outcome_unknown"
+        );
+        let seen = daemon.join().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert!(seen[1].contains(KEY), "the bootstrap did reach the daemon");
+        assert!(broker_a.pending.lock().is_empty());
+
+        // A bad reply after sending is unknown too.
+        let (port, daemon) = fake_daemon(vec![
+            Some(http("200 OK", &me_body("member-owner"))),
+            Some(http("200 OK", "not json")),
+        ]);
+        assert_eq!(
+            broker(port, &key).bootstrap("room", "scout").unwrap_err(),
+            "outcome_unknown"
+        );
+        assert_eq!(daemon.join().unwrap().len(), 2);
+
+        // A refused credential: only the unprivileged owner read went out.
+        let loose = key_file(dir.path(), 0o644);
+        let (port, daemon) = fake_daemon(vec![Some(http("200 OK", &me_body("member-owner")))]);
+        assert_eq!(
+            broker(port, &loose).bootstrap("room", "scout").unwrap_err(),
+            "operator_credential_not_private"
+        );
+        let seen = daemon.join().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert!(seen[0].starts_with("GET /v1/me ") && !seen[0].contains(KEY));
+
+        // An unreachable daemon, an untrusted URL or invalid ids send nothing.
+        let unreachable = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap().port()
+        };
+        assert_eq!(
+            broker(unreachable, &key)
+                .bootstrap("room", "scout")
+                .unwrap_err(),
+            "daemon_unreachable"
+        );
+        let untrusted =
+            ConsentBroker::new(DaemonTransport::new("http://localhost:4780", key.clone()));
+        assert_eq!(
+            untrusted.bootstrap("room", "scout").unwrap_err(),
+            "consent_unavailable"
+        );
+        let (port, listener) = silent_daemon();
+        for (room, package) in [("a/b", "scout"), ("room", ".."), ("", "scout")] {
+            assert_eq!(
+                broker(port, &key).bootstrap(room, package).unwrap_err(),
+                "invalid_request"
+            );
+        }
+        assert_never_contacted(&listener);
+    }
+
+    #[test]
+    fn bootstrap_answers_only_the_main_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_file(dir.path(), 0o600);
+        let (port, listener) = silent_daemon();
+        let broker_b = broker(port, &key);
+        for label in ["floating", "Main", "", "main-2"] {
+            assert_eq!(
+                bootstrap_from(label, &broker_b, "room", "scout").unwrap_err(),
+                "consent_window_refused",
+                "{label:?}"
+            );
+        }
+        assert_never_contacted(&listener);
+
+        let (port, daemon) = fake_daemon(vec![
+            Some(http("200 OK", &me_body("member-owner"))),
+            Some(http("201 Created", &bootstrapped(true))),
+            Some(http("200 OK", &preview_body(true, None))),
+        ]);
+        let preview = bootstrap_from("main", &broker(port, &key), " room ", " scout ").unwrap();
+        assert_eq!(preview.room, "room");
+        assert_eq!(daemon.join().unwrap().len(), 3);
     }
 }

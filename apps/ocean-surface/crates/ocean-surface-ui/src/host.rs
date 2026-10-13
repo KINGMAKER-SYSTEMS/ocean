@@ -848,6 +848,25 @@ pub fn room_consent_cancel(consent_id: Option<&str>) {
     });
 }
 
+/// Bootstrap `package_id` into the Local `room` as this daemon's owner's
+/// agent and return the frozen consent preview (same projection as
+/// [`room_consent_preview`]). The shell reads the owner from `GET /v1/me`
+/// itself; the page never names it. Creates no binding. `None` off-Tauri,
+/// where the page keeps the plain participant add.
+pub async fn room_agent_bootstrap(
+    room: &str,
+    package_id: &str,
+) -> Option<Result<RoomConsentPreview, String>> {
+    if !room_consent_supported() {
+        return None;
+    }
+    let args = consent_args(&[("room", room), ("packageId", package_id)]);
+    Some(match tauri_invoke("room_agent_bootstrap", &args).await {
+        Ok(val) => consent_decode(&val),
+        Err(err) => Err(consent_error(err)),
+    })
+}
+
 /// Natively confirm, then revoke an own agent's Room binding. `None`
 /// off-Tauri.
 pub async fn room_agent_revoke(

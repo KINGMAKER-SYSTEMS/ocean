@@ -401,14 +401,17 @@ Web surface session UI:
     on and the session gate has admitted the request; an unreadable key is a
     503 before forwarding, and with `OCEAN_SURFACE_AUTH=off` it attaches
     nothing, so the daemon keeps refusing.
-  - Tauri desktop: the page calls the `room_owner_mutation` command with a
-    fixed `kind` (`rename_owner`, `run_permission`, `agent_settings`) and the
-    ids (`rooms.rs` `OwnerRoute` → `host::room_owner_mutation`). The shell
+  - Tauri desktop: the page calls the `room_owner_mutation` command (main
+    window only) with a fixed `kind` (`rename_owner`, `run_permission`,
+    `agent_settings`) and the ids (`rooms.rs` `OwnerRoute` →
+    `host::room_owner_mutation`). The shell
     (`crates/ocean-tauri/src/owner_mutation.rs`) builds the fixed method and
-    path itself, reads the same key file just before each request (regular,
-    non-symlink, mode 0600), sends it only to a loopback daemon with no
-    `Origin`/`Cookie`, never caches, logs or returns it, and relays only the
-    daemon's status and body.
+    path itself and sends it through the shared native transport
+    (`daemon_transport.rs`, see "Shared native daemon transport" below): the
+    key file is read just before each request and goes only to a
+    numeric-loopback daemon with no `Origin`/`Cookie`, is never cached,
+    logged or returned, and only the daemon's status and JSON object body are
+    relayed.
   - Chrome extension: not covered. The side panel talks to the daemon
     directly from `chrome-extension://`, cannot read the key file, has no
     proxy session, and its origin is refused by the daemon's operator origin
@@ -420,6 +423,21 @@ Web surface session UI:
   per-room agent settings panel (instructions overlay + model) over
   `GET/PUT .../agents/{agent_id}/settings`; these settings are local to this
   Ocean. New secondary room actions go into this overflow, not the header.
+- Room create (`RoomListRail`) carries an optional workspace (PR F): a
+  native `<select>` under the name input defaults to "No workspace" and lists
+  the daemon project catalogue's absolute `ProjectInfo.workspace_root`s
+  (passed down from `RoomsWorkspace` as a signal, deduped, first wins), plus
+  "Choose folder…" via `host::pick_folder` on Tauri only. The choice is
+  explicit and resets after a successful create; it is never seeded from a
+  session cwd, the focused chat's project, or `/tmp`, and a root no longer
+  offered is not sent. `CreateRoomBody.workspace_root` is omitted when unset.
+  The daemon binds it once (absolute existing directory, canonicalized;
+  otherwise 400 `invalid_workspace_root`, shown as "create failed: workspace
+  folder not found on this Ocean" with the draft kept) and has no route to
+  change it. `Room.workspace_root` decodes as absent for unbound rooms and
+  older daemons; when set, the header shows its folder name read-only
+  (`title` = full root). A room turn's folder is agent folder, then room
+  folder, then `workspace_root`, else `workspace_unavailable`.
 - Rooms UI lives in `src/rooms_workspace/` (team-platform P5): `mod.rs`
   owns `RoomsWorkspace`, its shared signals, and the transcript; child
   components are `RoomListRail` (`room_list.rs`), `ChannelComposer`
@@ -489,7 +507,8 @@ Web surface session UI:
 - Builds on the daemon digest guard and invited-Member own-agent consent
   (#65, on main). Owned targets: `crates/ocean-tauri/src/room_consent.rs`, its
   `lib.rs` registration (`ConsentState` managed after the plugins; the four
-  consent commands follow `room_owner_mutation` in `generate_handler!`), its
+  consent commands and `room_agent_bootstrap` follow
+  `owner_mutation::room_owner_mutation` in `generate_handler!`), its
   `Cargo.toml`/`Cargo.lock` (`libc`, `uuid` v4 only),
   `crates/ocean-surface-ui/src/{host.rs,rooms.rs,daemon.rs}`,
   `src/rooms_workspace/agents.rs` (mounted from `mod.rs` and `members.rs`),
@@ -497,9 +516,10 @@ Web surface session UI:
   store, policy or provider change.
 - Native operator custody lives in two shell modules: `owner_mutation.rs`
   (rename owner, run permission, agent settings; see above) and
-  `room_consent.rs` (Room-agent consent and revoke). Their transports are not
-  yet unified. `room_consent.rs` fetches the preview itself and freezes room,
-  package, agent, owner, digest, policies and a fresh UUIDv4 decision id; the
+  `room_consent.rs` (Room-agent consent and revoke). Both send through the
+  one shared `daemon_transport.rs` (below). `room_consent.rs` fetches the
+  preview itself and freezes room, package, agent, owner, digest, policies
+  and a fresh UUIDv4 decision id; the
   page gets a projection and an opaque consent id, never a digest it can
   supply. At most 4 consents live for 120 s; a newer preview supersedes an
   idle one for the same agent. The TTL covers the dialog too: idle and
@@ -522,33 +542,100 @@ Web surface session UI:
   refused (preview `owner_not_eligible`/`invalid_preview`, revoke
   `invalid_request`) so they are shown verbatim; display names are labels
   only, stripped of those characters and capped at 128 characters.
-- Consent transport: raw HTTP/1.1 to a numeric-loopback `OCEAN_DAEMON_URL`
-  only (hostnames, `localhost`, userinfo, TLS, paths refused); fixed typed
-  intents; no Origin/Cookie, redirects refused, replies bounded to 256 KiB
-  JSON objects. The key is read per request through `O_NOFOLLOW`, must be the
-  inspected regular file owned by the effective uid with no group/other bits
-  and a header-safe token, and never reaches JS, errors or logs. Chunked
-  replies use checked framing: a hostile chunk size is a bad reply
-  (`unknown`) that frees the slot, never a panic. Consent
-  commands also refuse any webview other than `main`.
+- Consent transport: the shared `daemon_transport.rs` (below) with fixed
+  typed intents (`Intent::{Preview, Authorize, Reauthorize, Revoke, Me,
+  Bootstrap}`; only the preview and `Me` are unprivileged). A transport bad reply (hostile chunk size,
+  redirect, non-JSON, oversize) on a decision is `unknown` and frees the slot,
+  never a panic; an untrusted `OCEAN_DAEMON_URL` makes every consent command
+  `consent_unavailable`. Consent commands refuse any webview other than
+  `main` (`consent_window_refused`).
+- Local bootstrap (PR G): a plain Local `POST .../participants` never
+  records a Room owner, so its preview is `owner_not_eligible`. On native
+  consent hosts a Local add (`rooms::agent_add_route` → `Bootstrap`) calls
+  `room_agent_bootstrap` (main window only, `consent_window_refused`). Rust
+  reads the owner from `GET /v1/me` `participant_id` (unprivileged; the page
+  never supplies an owner), then sends the operator-gated
+  `POST .../agents/bootstrap` with exactly `{owner_member_id,
+  agent_package_id}`. 200/201, or a `room_owner_conflict` 409, proceed to
+  the normal preview freeze, which is kept only when its owner equals the
+  `/v1/me` participant (else `room_owner_conflict`); the page gets the same
+  projection as `room_consent_preview` and lands in the consent sheet.
+  Bootstrap creates no binding: authorize still needs the native dialog.
+  Fixed codes: `room_owner_required` ("Join the room before adding an
+  agent."), `local_room_required`, `room_owner_conflict`,
+  `bootstrap_target_conflict`, `room_not_found`, `agent_package_not_found`,
+  `owner_unavailable`, else `bootstrap_refused`; a lost or unparseable
+  bootstrap reply is `outcome_unknown`, fetches no preview and is never
+  retried (the page re-reads the roster). Text lives in
+  `rooms::bootstrap_error_text`. Web/extension hosts keep the plain
+  participant add and get no bootstrap control.
 - Binding GETs publish only for the newest request in the current Room generation; reset retires pending reads, and failed refreshes keep the last projection without reviving older responses.
 - Surface: `host.rs` wrappers are absent off-Tauri, so browser/extension hosts
   render bindings but never emulate consent. `rooms.rs` owns the bindings
   client (`GET .../agents`), the consent draft (room generation + ticket
   guarded; committed or unknown outcomes refresh authoritative bindings even
   when navigation raced; post-send command errors `consent_task_failed` and
-  `invalid_reply` are treated as `unknown`) and explicit invocation. Invocation is currently
-  wired only for federated rooms: it needs the daemon-projected
-  `caller_member_id` naming a User in Live/Recovering access, a committed
-  Human message by that caller and an active binding; it runs once per
-  (agent, message) and leaves a lost acknowledgement `unknown`. Local rooms do
-  have an invoker identity (the `/v1/me` owner `participant_id`, since #68),
-  but Local invocation is not wired yet.
-- The per-invocation token (`RoomInvocation::token_for`) grants no permission
-  decision: since #68 the daemon binds Room-turn permission waiters to a
+  `invalid_reply` are treated as `unknown`) and explicit invocation.
+  `rooms::invoke_caller(access, open_room, identity_id)` names the invoker
+  from daemon projections only: in Local rooms (PR H) the `/v1/me` owner
+  `participant_id` (`Rooms.identity_id`, since #68) when non-empty and a
+  Human participant on the open room's roster; in Live/Recovering rooms the
+  daemon-projected `caller_member_id` naming a User (unchanged); every other
+  state has no invoker. Browser-supplied identity is never authority. The
+  daemon's Local invoke check matches (non-agent roster member who authored
+  the message; not operator-gated). Invocation then needs a committed Human
+  message by that caller and an active binding, runs once per (agent,
+  message) and leaves a lost acknowledgement `unknown`. A refusal shows
+  `rooms::invocation_error_text` in the composer status line (and as the
+  invoke-menu badge's title), e.g. `workspace_unavailable` → "This room has
+  no workspace folder for the agent.", `agent_binding_required` → "This
+  agent is not authorized in this room.", author/membership refusals, and
+  `room_not_found` (a soft-closed room) → "This room is closed."; unknown
+  codes read "Ocean could not invoke the agent."
+- Invocation sends no decision token (removed in PR C, together with
+  `RoomInvocation::token_for` and #88's `try_mint_decision_token` split in
+  `daemon.rs`): since #68 the daemon binds Room-turn permission waiters to a
   daemon-minted per-run token, and Room approvals go only through the
-  operator-gated `POST .../runs/{run_id}/permission` route above. Do not build
-  a token-gated Room permission path on it.
+  operator-gated `POST .../runs/{run_id}/permission` route above. The daemon's
+  invoke body keeps `decision_token` optional, so omitting it is accepted. Do
+  not reintroduce a token-gated Room permission path.
+- Own-run matching (`rooms::own_invocation_for_run`, pure): each
+  `RoomInvocation` records its room key, page room generation and the bound
+  `agent_package_id`. A work card is "yours" only for an `Acknowledged`
+  invocation in the open room at the current generation; pending, unknown and
+  refused invocations never match. A run carrying the daemon `request_id`
+  (#93) matches exactly the invocation acknowledged with that id and session;
+  a legacy run without one falls back to session id == `run.session_id`,
+  message seq == `run.trigger_seq` and package id == `run.agent_id` (federated
+  runs record the package id; Local runs record the participant id, so a
+  Local invocation's run matches only by `request_id`, tested with its Cancel
+  control, and a legacy Local run fails closed), and any other run sharing
+  that session and seq makes it ambiguous, so neither matches. The card shows a
+  display-only "yours" tag (`Rooms::run_is_own`); approve/deny stays on the
+  operator route for every card, and the match never reads or writes
+  `Daemon::permission_view`, decision authority or `Daemon::cancel_request`
+  (focused direct-chat state is covered by a test).
+- Own-run status and exact cancel (PR E): the invoke menu shows, for an
+  `Acknowledged` invocation, the live state label of the single run
+  `rooms::run_for_invocation` attributes to it (via `own_invocation_for_run`);
+  no run yet, or several (a legacy double run on one session+seq), keeps the
+  acknowledged label ("queued"). The work card shows one Cancel icon
+  (`.room-card__cancel`, `aria-label` "Cancel this run", tokens only in
+  `styles/rooms-cards.css`) as a sibling of the disclosure head (never nested
+  in it), only while `rooms::own_run_cancel_target` holds: the page's own
+  acknowledged invocation in the current room generation, not ambiguous, and
+  the run not terminal. A click re-derives the target and calls
+  `rooms::cancel_room_request(base, request_id)` →
+  `POST /v1/requests/{request_id}/cancel` with the invocation's exact
+  acknowledged request id (equal to the run's `request_id` when projected),
+  no body and no operator key (the daemon route takes none; the web proxy
+  already forwards it, see #49). `RunCancels` latches one request in flight
+  per id; the reply settles only in its own room admission; success changes
+  nothing (the card ends Cancelled only when the daemon's `room_agent_run`
+  frame says so); transport failure, non-2xx or `ok: false` shows one inline
+  "Ocean could not cancel this run." and is never retried automatically (an
+  explicit click may try again). It never calls `Daemon::cancel_request`, a
+  session-level cancel, or touches focused direct-chat state (tested).
 - UI (`rooms_workspace/agents.rs`): one consent sheet (name, short digest,
   requested capabilities, one primary action, dismiss) above the right-rail
   list; bound agent rows get a single overflow holding Review/Revoke; the
@@ -561,10 +648,52 @@ Web surface session UI:
   native consent hosts in Live/Recovering access.
 - Verification: `cd crates/ocean-tauri && cargo test room_consent` (disposable
   loopback daemons and key fixtures), `cargo test -p ocean-surface-ui`,
-  WASM check/Clippy. Remaining: own-run status matching and exact
-  cancellation, one shared native transport with `owner_mutation.rs`, Local
-  bootstrap intent and Local invocation, workspace selection on create,
-  served native acceptance.
+  WASM check/Clippy. Remaining: served native acceptance.
+
+### Shared native daemon transport
+
+- Owned targets: `crates/ocean-tauri/src/daemon_transport.rs` (the only
+  place the shell attaches `X-Ocean-Operator`), its callers
+  `owner_mutation.rs` (`OwnerMutation` routes + the `room_owner_mutation`
+  command and its `OwnerMutationState`) and `room_consent.rs` (`Intent`s),
+  and their `lib.rs` wiring (one `DaemonTransport` built from
+  `daemon_url_from_env()` + `operator_key_path()`, cloned into
+  `OwnerMutationState` and `ConsentBroker`). Callers keep typed intent enums
+  on top; JS never supplies a method, path or header.
+- Rules (strictest of the two former transports): daemon address from
+  `OCEAN_DAEMON_URL` restricted to `http://<numeric loopback>[:port][/]`
+  (hostnames incl. `localhost`, userinfo, TLS, paths/queries refused);
+  request paths must be `/v1/…` visible ASCII; request bodies ≤64 KiB; the
+  operator key is read per privileged request via `O_NOFOLLOW` (symlink
+  refused, opened dev/ino must equal the inspected file, owned by the
+  effective uid, no group/other bits, one 16–512 byte base64/base64url
+  token) and never reaches JS, errors or logs; headers are exactly `Host`,
+  `Accept`, `Connection: close`, `Content-Type`/`Content-Length` with a body
+  and the operator header; 3xx replies are refused; replies must be JSON
+  objects ≤256 KiB with checked chunked framing.
+- Outcomes: `NotSent(code)` (`daemon_not_loopback`, `invalid_request`,
+  `request_too_large`, `operator_credential_*`, `daemon_unreachable`),
+  `Unknown` (request written, acknowledgement lost; code `outcome_unknown`),
+  `BadReply(code)` (`redirect_refused`, `invalid_reply`, `reply_too_large`).
+  Nothing retries automatically. `room_owner_mutation` returns these codes
+  as its error string; the page already maps every error to its
+  unreachable text.
+- Intentional behavior changes for owner mutations (consent is unchanged):
+  `OCEAN_DAEMON_URL=http://localhost:…` (or any hostname, `https://`, or a
+  URL with a path) now disables owner mutations instead of sending to
+  `localhost`; any numeric loopback address (`127.0.0.0/8`, `[::1]`) is
+  accepted. An owner-only `0400` key is now accepted (formerly exactly
+  `0600`), while a key owned by another user, a key opened through a
+  swapped-in symlink, or a key that is not a header-safe token is refused.
+  Redirects, non-JSON or non-object replies and replies over 256 KiB
+  (formerly 1 MiB of any text) are errors instead of being relayed; the
+  daemon's owner routes always answer JSON objects. Error strings are now
+  fixed codes. The command refuses any webview other than `main`
+  (`owner_mutation_window_refused`).
+- Verification: `cd crates/ocean-tauri && cargo test daemon_transport`
+  (loopback refusal, key-file refusal incl. foreign owner, redirect,
+  oversize/invalid reply, lost-ack → unknown), `cargo test owner_mutation`,
+  `cargo test room_consent`, `cargo clippy --all-targets -- -D warnings`.
 
 ## Workspace Files lifecycle
 

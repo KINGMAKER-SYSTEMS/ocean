@@ -9,7 +9,7 @@
 use leptos::prelude::*;
 
 use super::format::avatar_identity_class;
-use crate::rooms::{AgentSummary, InvocationState, RoomAgentBinding, Rooms};
+use crate::rooms::{AgentSummary, InvocationState, RoomAgentBinding, RoomAgentRun, Rooms};
 
 /// `sha256:` plus the first 12 hex digits; the full digest stays in the title.
 fn short_digest(digest: &str) -> String {
@@ -25,6 +25,27 @@ fn invocation_label(state: &InvocationState) -> &'static str {
         InvocationState::Acknowledged { .. } => "queued",
         InvocationState::Refused(_) => "refused",
         InvocationState::Unknown => "unknown",
+    }
+}
+
+/// Invoke-menu status: an acknowledged invocation shows its matched run's
+/// live state; without exactly one matched run it keeps the acknowledged
+/// label.
+fn invoke_menu_label(state: &InvocationState, run: Option<&RoomAgentRun>) -> String {
+    match (state, run) {
+        (InvocationState::Acknowledged { .. }, Some(run)) => {
+            crate::room_work_card::state_label(&run.state)
+        }
+        _ => invocation_label(state).to_string(),
+    }
+}
+
+/// Hover text for an invoke-menu status: the readable refusal reason, the
+/// same text the composer status line shows when the refusal arrives.
+fn invoke_menu_title(state: &InvocationState) -> Option<String> {
+    match state {
+        InvocationState::Refused(code) => Some(crate::rooms::invocation_error_text(code)),
+        _ => None,
     }
 }
 
@@ -253,7 +274,11 @@ pub(super) fn AgentBindingMenu(rooms: Rooms, member_id: String) -> impl IntoView
 pub(super) fn InvokeMenu(rooms: Rooms, message_seq: u64) -> impl IntoView {
     let open = RwSignal::new(false);
     move || {
-        let caller = crate::rooms::invoke_caller(rooms.access.get().as_ref())?;
+        let caller = crate::rooms::invoke_caller(
+            rooms.access.get().as_ref(),
+            rooms.open_room.get().as_ref(),
+            rooms.identity_id.get(),
+        )?;
         let transcript = rooms.transcript.get();
         let message = transcript.iter().find(|m| m.seq == message_seq)?;
         if !crate::rooms::message_invocable(message, &caller) {
@@ -283,7 +308,11 @@ pub(super) fn InvokeMenu(rooms: Rooms, message_seq: u64) -> impl IntoView {
                                 let state = invocations
                                     .iter()
                                     .find(|i| i.agent_member_id == agent.agent_member_id && i.message_seq == message_seq)
-                                    .map(|i| invocation_label(&i.state));
+                                    .map(|i| {
+                                        let run = rooms.invocation_run(&i.agent_member_id, message_seq);
+                                        (invoke_menu_label(&i.state, run.as_ref()), invoke_menu_title(&i.state))
+                                    });
+                                let invoked = state.is_some();
                                 let agent_id = agent.agent_member_id.clone();
                                 let name = if agent.display_name.is_empty() {
                                     agent.agent_member_id.clone()
@@ -295,15 +324,15 @@ pub(super) fn InvokeMenu(rooms: Rooms, message_seq: u64) -> impl IntoView {
                                         class="room-overflow__item"
                                         type="button"
                                         role="menuitem"
-                                        disabled=state.is_some()
+                                        disabled=invoked
                                         on:click=move |_| {
                                             open.set(false);
                                             rooms.invoke_agent(agent_id.clone(), message_seq);
                                         }
                                     >
                                         {name}
-                                        {state.map(|label| view! {
-                                            <span class="rooms-workspace__member-binding">{label}</span>
+                                        {state.map(|(label, title)| view! {
+                                            <span class="rooms-workspace__member-binding" title=title>{label}</span>
                                         })}
                                     </button>
                                 }
@@ -342,6 +371,50 @@ mod tests {
         assert_eq!(binding_for(&bindings, "agent-x"), Some(binding));
         assert_eq!(binding_for(&bindings, "scout"), None);
         assert_eq!(invocation_label(&InvocationState::Unknown), "unknown");
+        assert_eq!(
+            invoke_menu_title(&InvocationState::Refused("workspace_unavailable".into())).as_deref(),
+            Some("This room has no workspace folder for the agent.")
+        );
+        assert_eq!(invoke_menu_title(&InvocationState::Unknown), None);
+    }
+
+    #[test]
+    fn invoke_menu_shows_the_matched_run_state_or_the_acknowledged_label() {
+        let acked = InvocationState::Acknowledged {
+            request_id: "req-1".into(),
+            session_id: "sess-1".into(),
+            generation: "3".into(),
+        };
+        let run = |state: &str| -> RoomAgentRun {
+            serde_json::from_value(serde_json::json!({
+                "run_id": "r1", "room_id": "room-1", "agent_id": "scout",
+                "session_id": "sess-1", "trigger_seq": 4, "thread_root_seq": 4,
+                "state": state, "request_id": "req-1",
+                "started_at": "2026-10-12T10:00:00Z", "updated_at": "2026-10-12T10:00:01Z"
+            }))
+            .unwrap()
+        };
+        assert_eq!(
+            invoke_menu_label(&acked, Some(&run("thinking"))),
+            "thinking"
+        );
+        assert_eq!(
+            invoke_menu_label(&acked, Some(&run("cancelled"))),
+            "cancelled"
+        );
+        // No (or no unambiguous) matched run keeps the acknowledged label.
+        assert_eq!(invoke_menu_label(&acked, None), "queued");
+        // Only acknowledged invocations ever show a run state.
+        for state in [
+            InvocationState::Pending,
+            InvocationState::Unknown,
+            InvocationState::Refused("invoke_refused".into()),
+        ] {
+            assert_eq!(
+                invoke_menu_label(&state, Some(&run("thinking"))),
+                invocation_label(&state)
+            );
+        }
     }
 
     #[test]
