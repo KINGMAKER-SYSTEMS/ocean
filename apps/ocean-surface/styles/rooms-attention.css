@@ -1,0 +1,267 @@
+/* Room attention (team-platform P6): mentions inbox, room search, muted
+   rooms, and the "agent is working" line (`room_attention.rs`). Colors come
+   ONLY from tokens.css. Icon buttons carry aria-labels; no instructional
+   copy — empty states are empty. */
+
+/* ── Header icon buttons (inbox, search) ──────────────────────────────── */
+
+.rooms-workspace__left-inbox,
+.rooms-workspace__center-search {
+  appearance: none;
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: var(--ctl-h-sm);
+  height: var(--ctl-h-sm);
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-3);
+  font-size: 15px;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__left-inbox {
+  margin-left: auto;
+}
+
+.rooms-workspace__left-inbox:hover,
+.rooms-workspace__center-search:hover,
+.rooms-workspace__left-inbox.is-on,
+.rooms-workspace__center-search.is-on {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__left-inbox.is-on,
+.rooms-workspace__center-search.is-on {
+  color: var(--accent);
+}
+
+.rooms-workspace__left-inbox:focus-visible,
+.rooms-workspace__center-search:focus-visible,
+.room-inbox__item:focus-visible,
+.room-search__hit:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* ── Muted rooms ──────────────────────────────────────────────────────── */
+
+.rooms-workspace__room.is-muted .rooms-workspace__room-name,
+.rooms-workspace__room.is-muted .rooms-workspace__room-hash {
+  color: var(--fg-4);
+}
+
+/* ── Mentions inbox (left rail) ───────────────────────────────────────── */
+
+.room-inbox {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.room-inbox__item {
+  appearance: none;
+  display: flex;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 8px;
+  border: none;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--fg-2);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease);
+}
+
+.room-inbox__item:hover {
+  background: var(--bg-hover);
+}
+
+.room-inbox__avatar {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  color: var(--accent-bright);
+  font: 700 9px/1 var(--font);
+  text-transform: uppercase;
+}
+
+.room-inbox__item[data-reason="reply"] .room-inbox__avatar {
+  background: var(--info-soft);
+  color: var(--info);
+}
+
+.room-inbox__main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.room-inbox__meta {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12px;
+}
+
+.room-inbox__author {
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.room-inbox__room {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg-4);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.room-inbox__time,
+.room-search__time {
+  margin-left: auto;
+  color: var(--fg-4);
+  font: 500 10px/1 var(--mono);
+}
+
+.room-inbox__body,
+.room-search__body {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--fg-3);
+  font-size: 12px;
+  line-height: 1.45;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+/* ── Room search (right rail) ─────────────────────────────────────────── */
+
+.room-search {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.room-search__input {
+  width: 100%;
+  box-sizing: border-box;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--fg);
+  font: 400 13px/32px var(--font);
+  outline: none;
+}
+
+.room-search__input:focus {
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+
+.room-search__results {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.room-search__hit {
+  appearance: none;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 100%;
+  padding: 7px 8px;
+  border: none;
+  border-radius: var(--radius);
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease);
+}
+
+.room-search__hit:hover {
+  background: var(--bg-hover);
+}
+
+.room-search__meta {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.room-search__author {
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.room-search__error {
+  color: var(--err);
+  font-size: 12px;
+}
+
+/* ── Agent working line (above the composer) ──────────────────────────── */
+
+.room-working {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 18px;
+  padding: 0 clamp(18px, 3vw, 42px);
+  color: var(--fg-3);
+  font-size: 12px;
+}
+
+.room-working:empty {
+  min-height: 0;
+}
+
+.room-working__dots {
+  display: inline-flex;
+  gap: 3px;
+}
+
+.room-working__dots span {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--running);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .room-working__dots span {
+    animation: room-working-bounce 1.2s var(--ease) infinite;
+  }
+  .room-working__dots span:nth-child(2) {
+    animation-delay: 0.15s;
+  }
+  .room-working__dots span:nth-child(3) {
+    animation-delay: 0.3s;
+  }
+  @keyframes room-working-bounce {
+    0%, 60%, 100% { opacity: 0.35; transform: translateY(0); }
+    30% { opacity: 1; transform: translateY(-2px); }
+  }
+}
+
+@media (max-width: 650px) {
+  .room-working {
+    padding: 0 12px;
+  }
+}
