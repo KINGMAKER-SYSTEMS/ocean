@@ -45,7 +45,12 @@ pub(crate) fn settings_from_fields(instructions: &str, model: &str) -> RoomAgent
 }
 
 #[component]
-pub fn RoomOverflow(rooms: Rooms, joined: bool) -> impl IntoView {
+pub fn RoomOverflow(
+    rooms: Rooms,
+    joined: bool,
+    on_members: Callback<()>,
+    trigger_ref: NodeRef<leptos::html::Button>,
+) -> impl IntoView {
     let open = RwSignal::new(false);
     let settings_open = RwSignal::new(false);
     let can_share =
@@ -56,6 +61,7 @@ pub fn RoomOverflow(rooms: Rooms, joined: bool) -> impl IntoView {
         <div class="room-overflow">
             <button
                 class="room-overflow__trigger"
+                node_ref=trigger_ref
                 type="button"
                 aria-label="Room options"
                 aria-haspopup="menu"
@@ -71,10 +77,25 @@ pub fn RoomOverflow(rooms: Rooms, joined: bool) -> impl IntoView {
                     role="menu"
                     on:keydown=move |ev| {
                         if ev.key() == "Escape" {
+                            ev.prevent_default();
                             open.set(false);
+                            if let Some(trigger) = trigger_ref.get() {
+                                let _ = trigger.focus();
+                            }
                         }
                     }
                 >
+                    <button
+                        class="room-overflow__item"
+                        role="menuitem"
+                        type="button"
+                        on:click=move |_| {
+                            open.set(false);
+                            on_members.run(());
+                        }
+                    >
+                        "Members"
+                    </button>
                     {move || can_share().then(|| view! {
                         <button
                             class="room-overflow__item"

@@ -1508,3 +1508,15 @@ PR H of the room-consent follow-ups (item 5: Local-room invocation). `rooms::inv
 
 Validation: in apps/ocean-surface, cargo fmt --check clean; WASM clippy -D warnings clean; WASM check passes; proxy check passes; WASM test build passes (7 executables); cargo test -p ocean-surface-ui 944 passed (914 unit + 30 integration), including 4 new tests (Local invoker matrix: valid / empty / non-roster / agent / non-Human kinds / no roster, federated caller ignored in Local; Local invoke body uses the identity as invoked_by; refusal text mapping; Local invocation run recognized as own via request_id with run_is_own, Cancel control and menu run, legacy Local run not own) and the federated/other-state matrix extended (page identity ignored for Live/Recovering, valid Local identity never rescues Connecting/Revoked/no access). No served-surface, native or live daemon run claimed.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [22:25] [12-10-26] America/New_York
+agent: [Codex] [root release coordinator]
+worktree: codex/issue94-compact-members
+type: [bug report]
+area: [frontend] [review]
+
+Restored compact Rooms Members reachability through the existing Room options overflow and shared Members/Search/Thread rail. The overlay spans widths through 1080px and becomes full width through 650px; desktop docking and existing consent authority remain intact. Close/Escape restores trigger focus, and room admission changes retire open rail modes. Refs issue #94; remaining native cancellation acknowledgement and unmount work is separate.
+
+Validation: 12/12 targeted native unit tests and 24/24 production-CSS synthetic geometry cases passed at 390, 650, 900, 901, 1080, and 1081px. Rustfmt and diff checks passed. Independent source review found no actionable findings. Synthetic geometry does not execute Leptos interaction handlers or establish served/native acceptance. Final committed-head review and hosted builds follow; maintainer approval under issue #90 and live acceptance remain held. Nearest Surface AGENTS.md updated; root and child indexes unchanged because ownership and hierarchy are unchanged.
+_________________________________________________________________________________

@@ -966,31 +966,10 @@
 
 /* ── Responsive collapse ──────────────────────────────────────────── */
 
-@media (max-width: 900px) {
-  .rooms-workspace {
-    position: relative;
-  }
-
-  .rooms-workspace__right {
-    display: none;
-  }
-
-  .rooms-workspace__right--thread {
-    display: flex;
-    position: absolute;
-    top: 0;
-    right: 0;
-    bottom: 0;
-    width: min(360px, 46vw);
-    z-index: 220;
-    box-shadow: var(--shadow-md);
-  }
-}
-
 /* At 650px and below: shell stacks vertically (top nav + center), left rail
    becomes a fixed drawer with a backdrop. This breakpoint matches the native
    shell's minimum width while preserving the denser desktop layout above it.
-   Thread rail takes full width. */
+   The room list retains its existing compact drawer. */
 @media (max-width: 650px) {
   .rooms-workspace {
     flex-direction: column;
@@ -1006,12 +985,6 @@
     max-width: 280px;
     border-right: 1px solid var(--border-subtle);
     box-shadow: var(--shadow-md);
-  }
-  .rooms-workspace__right--thread {
-    position: fixed;
-    inset: 0;
-    width: 100vw;
-    z-index: 410;
   }
 }
 
@@ -1623,14 +1596,35 @@
   height: 13px;
 }
 
-/* Preserve a useful reading column before the member rail is removed. */
-@media (max-width: 1080px) and (min-width: 901px) {
+/* Reveal the shared Members/Search/Thread rail on explicit intent. */
+@media (max-width: 1080px) {
+  .rooms-workspace {
+    position: relative;
+  }
+
   .rooms-workspace__right {
     display: none;
+  }
+
+  .rooms-workspace__right--open {
+    display: flex;
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(360px, 46vw);
+    z-index: 220;
+    box-shadow: var(--shadow-md);
   }
 }
 
 @media (max-width: 650px) {
+  .rooms-workspace__right--open {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    z-index: 410;
+  }
   .rooms-workspace__left--visible {
     inset: auto;
     top: 0;
