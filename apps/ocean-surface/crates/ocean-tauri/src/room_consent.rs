@@ -9,8 +9,9 @@
 //!   preview itself and freezes the exact room, package, agent, owner, digest,
 //!   policies and a fresh decision id in native memory. The page receives a
 //!   projection plus an opaque consent id; it can never supply the digest.
-//! * Authorization needs an explicit native confirmation dialog. A declined,
-//!   cancelled, expired or invalidated consent sends zero privileged requests.
+//! * Authorization and revoke need native confirmation. Cancellation received
+//!   before native dispatch is claimed sends no decision request; after that
+//!   claim, I/O may finish but cancellation prevents retry-state resurrection.
 //! * Authorize/reauthorize always carry the frozen non-null
 //!   `expected_definition_digest`; a stale digest is reported as refused with
 //!   no legacy retry.
@@ -43,7 +44,7 @@ use crate::daemon_transport::{
     encode_segment, require_main_window, DaemonRequest, DaemonTransport, Method, Reply, SendError,
 };
 
-/// Pending consents held at once; the oldest idle one is evicted past this.
+/// Pending decisions held at once; a preview may evict the oldest idle one.
 const MAX_PENDING: usize = 4;
 /// A frozen preview older than this must be fetched again.
 const CONSENT_TTL: Duration = Duration::from_secs(120);
@@ -220,15 +221,57 @@ impl Frozen {
 enum Phase {
     Ready,
     Confirming,
+    Queued,
     Sending,
 }
 
 #[derive(Debug)]
 struct Entry {
     id: String,
-    frozen: Frozen,
+    decision: Decision,
     created: Instant,
     phase: Phase,
+}
+
+/// One lock owns the cancellation epoch and every pending native decision.
+#[derive(Default)]
+struct Pending {
+    epoch: Arc<()>,
+    entries: Vec<Entry>,
+}
+
+#[derive(Debug)]
+enum Decision {
+    Consent(Frozen),
+    Revoke {
+        room: String,
+        agent: String,
+        decision_id: String,
+    },
+}
+
+impl Decision {
+    fn target(&self) -> (&str, &str) {
+        match self {
+            Self::Consent(frozen) => (&frozen.room, &frozen.agent_member_id),
+            Self::Revoke { room, agent, .. } => (room, agent),
+        }
+    }
+
+    fn intent(&self) -> Intent {
+        match self {
+            Self::Consent(frozen) => frozen.intent(),
+            Self::Revoke {
+                room,
+                agent,
+                decision_id,
+            } => Intent::Revoke {
+                room: room.clone(),
+                agent: agent.clone(),
+                decision_id: decision_id.clone(),
+            },
+        }
+    }
 }
 
 // ── typed intents: the only requests this module can build ──────────────
@@ -531,7 +574,7 @@ fn outcome_from_reply(reply: Reply) -> ConsentOutcome {
     }
 }
 
-fn refused(code: &'static str) -> ConsentOutcome {
+fn refused(code: &str) -> ConsentOutcome {
     ConsentOutcome {
         state: OutcomeState::Refused,
         status: None,
@@ -571,7 +614,7 @@ fn fresh_id() -> String {
 pub(crate) struct ConsentBroker {
     transport: DaemonTransport,
     ttl: Duration,
-    pending: Mutex<Vec<Entry>>,
+    pending: Mutex<Pending>,
 }
 
 impl ConsentBroker {
@@ -579,7 +622,7 @@ impl ConsentBroker {
         Self {
             transport,
             ttl: CONSENT_TTL,
-            pending: Mutex::new(Vec::new()),
+            pending: Mutex::new(Pending::default()),
         }
     }
 
@@ -599,13 +642,27 @@ impl ConsentBroker {
         entries.retain(|e| e.phase == Phase::Sending || e.created.elapsed() < ttl);
     }
 
+    fn epoch(&self) -> Arc<()> {
+        self.pending.lock().epoch.clone()
+    }
+
     /// Fetch and freeze the authoritative preview for `package_id` in `room`.
-    pub(crate) fn preview(&self, room: &str, package_id: &str) -> Result<ConsentPreview, String> {
+    #[cfg(test)]
+    fn preview(&self, room: &str, package_id: &str) -> Result<ConsentPreview, String> {
+        self.preview_at(room, package_id, &self.epoch())
+    }
+
+    fn preview_at(
+        &self,
+        room: &str,
+        package_id: &str,
+        epoch: &Arc<()>,
+    ) -> Result<ConsentPreview, String> {
         self.endpoint()?;
         if !valid_key(room) || !valid_key(package_id) {
             return Err("invalid_request".into());
         }
-        self.freeze(room, package_id, None)
+        self.freeze(room, package_id, None, epoch)
     }
 
     /// Fetch and freeze one preview. With `expected_owner`, a preview naming
@@ -615,6 +672,7 @@ impl ConsentBroker {
         room: &str,
         package_id: &str,
         expected_owner: Option<&str>,
+        epoch: &Arc<()>,
     ) -> Result<ConsentPreview, String> {
         let intent = Intent::Preview {
             room: room.to_string(),
@@ -639,13 +697,16 @@ impl ConsentBroker {
             return Err(BOOTSTRAP_OWNER_CONFLICT.into());
         }
         let id = fresh_id();
-        let mut entries = self.pending.lock();
-        self.prune(&mut entries);
+        let mut pending = self.pending.lock();
+        if !Arc::ptr_eq(epoch, &pending.epoch) {
+            return Err("consent_invalidated".into());
+        }
+        let entries = &mut pending.entries;
+        self.prune(entries);
         // One live consent per room/agent: a fresh preview supersedes an idle one.
         entries.retain(|e| {
             e.phase != Phase::Ready
-                || e.frozen.room != frozen.room
-                || e.frozen.agent_member_id != frozen.agent_member_id
+                || e.decision.target() != (frozen.room.as_str(), frozen.agent_member_id.as_str())
         });
         if entries.len() >= MAX_PENDING {
             match entries.iter().position(|e| e.phase == Phase::Ready) {
@@ -658,7 +719,7 @@ impl ConsentBroker {
         let preview = frozen.projection(&id, self.ttl);
         entries.push(Entry {
             id,
-            frozen,
+            decision: Decision::Consent(frozen),
             created: Instant::now(),
             phase: Phase::Ready,
         });
@@ -667,8 +728,9 @@ impl ConsentBroker {
 
     /// Claim a ready consent for native confirmation.
     pub(crate) fn begin_confirm(&self, consent_id: &str) -> Result<Frozen, String> {
-        let mut entries = self.pending.lock();
-        self.prune(&mut entries);
+        let mut pending = self.pending.lock();
+        let entries = &mut pending.entries;
+        self.prune(entries);
         let entry = entries
             .iter_mut()
             .find(|e| e.id == consent_id)
@@ -676,8 +738,11 @@ impl ConsentBroker {
         if entry.phase != Phase::Ready {
             return Err("consent_in_progress".into());
         }
+        let Decision::Consent(frozen) = &entry.decision else {
+            return Err("consent_invalidated".into());
+        };
         entry.phase = Phase::Confirming;
-        Ok(entry.frozen.clone())
+        Ok(frozen.clone())
     }
 
     /// Settle the native confirmation. Only a still-claimed, confirmed,
@@ -689,10 +754,26 @@ impl ConsentBroker {
         consent_id: &str,
         confirmed: bool,
     ) -> Result<Option<Frozen>, String> {
-        let mut entries = self.pending.lock();
+        let mut pending = self.pending.lock();
+        if !self.settle_confirmation(&mut pending.entries, consent_id, confirmed)? {
+            return Ok(None);
+        }
+        let entry = pending.entries.iter().find(|e| e.id == consent_id).unwrap();
+        let Decision::Consent(frozen) = &entry.decision else {
+            return Err("consent_invalidated".into());
+        };
+        Ok(Some(frozen.clone()))
+    }
+
+    fn settle_confirmation(
+        &self,
+        entries: &mut Vec<Entry>,
+        id: &str,
+        confirmed: bool,
+    ) -> Result<bool, String> {
         let Some(index) = entries
             .iter()
-            .position(|e| e.id == consent_id && e.phase == Phase::Confirming)
+            .position(|e| e.id == id && e.phase == Phase::Confirming)
         else {
             return Err("consent_invalidated".into());
         };
@@ -702,21 +783,45 @@ impl ConsentBroker {
         }
         if !confirmed {
             entries.remove(index);
-            return Ok(None);
+            return Ok(false);
+        }
+        entries[index].phase = Phase::Queued;
+        Ok(true)
+    }
+
+    /// The dispatch boundary: atomically claim a still-live queued decision.
+    /// Cancellation received before this claim wins; after it, I/O may finish.
+    fn claim_dispatch(&self, id: &str) -> Result<Intent, &'static str> {
+        let mut pending = self.pending.lock();
+        let entries = &mut pending.entries;
+        let index = entries
+            .iter()
+            .position(|e| e.id == id)
+            .ok_or("consent_invalidated")?;
+        if entries[index].phase != Phase::Queued {
+            return Err("consent_in_progress");
+        }
+        if entries[index].created.elapsed() >= self.ttl {
+            entries.remove(index);
+            return Err("consent_expired");
         }
         entries[index].phase = Phase::Sending;
-        Ok(Some(entries[index].frozen.clone()))
+        Ok(entries[index].decision.intent())
     }
 
     /// Send the frozen decision. A definitive reply consumes the consent; a
     /// lost acknowledgement returns it to `Ready` with the same decision id so
     /// only an explicit, re-confirmed retry can replay it.
-    pub(crate) fn send_decision(&self, consent_id: &str, frozen: &Frozen) -> ConsentOutcome {
+    pub(crate) fn send_decision(&self, consent_id: &str) -> ConsentOutcome {
+        let intent = match self.claim_dispatch(consent_id) {
+            Ok(intent) => intent,
+            Err(code) => return refused(code),
+        };
         if let Err(code) = self.endpoint() {
             self.release(consent_id, true);
             return refused(code);
         }
-        match self.transport.send(&frozen.intent().request()) {
+        match self.transport.send(&intent.request()) {
             Ok(reply) => {
                 self.release(consent_id, false);
                 outcome_from_reply(reply)
@@ -747,8 +852,12 @@ impl ConsentBroker {
     }
 
     fn release(&self, consent_id: &str, keep: bool) {
-        let mut entries = self.pending.lock();
-        if let Some(index) = entries.iter().position(|e| e.id == consent_id) {
+        let mut pending = self.pending.lock();
+        let entries = &mut pending.entries;
+        if let Some(index) = entries
+            .iter()
+            .position(|e| e.id == consent_id && e.phase == Phase::Sending)
+        {
             if keep {
                 entries[index].phase = Phase::Ready;
             } else {
@@ -780,7 +889,17 @@ impl ConsentBroker {
     /// which is frozen only when it names this daemon's owner. Nothing is
     /// retried automatically: a lost bootstrap acknowledgement is
     /// `outcome_unknown` and fetches no preview.
-    pub(crate) fn bootstrap(&self, room: &str, package_id: &str) -> Result<ConsentPreview, String> {
+    #[cfg(test)]
+    fn bootstrap(&self, room: &str, package_id: &str) -> Result<ConsentPreview, String> {
+        self.bootstrap_at(room, package_id, &self.epoch())
+    }
+
+    fn bootstrap_at(
+        &self,
+        room: &str,
+        package_id: &str,
+        epoch: &Arc<()>,
+    ) -> Result<ConsentPreview, String> {
         self.endpoint()?;
         if !valid_key(room) || !valid_key(package_id) {
             return Err("invalid_request".into());
@@ -799,57 +918,76 @@ impl ConsentBroker {
             }
         };
         bootstrap_step(&reply)?;
-        self.freeze(room, package_id, Some(&owner))
+        self.freeze(room, package_id, Some(&owner), epoch)
     }
 
     /// Drop one consent, or every consent when `consent_id` is `None`
     /// (navigation, room change). A request already sending keeps its late
     /// outcome but is not returned to `Ready`.
     pub(crate) fn cancel(&self, consent_id: Option<&str>) {
-        let mut entries = self.pending.lock();
+        let mut pending = self.pending.lock();
+        let entries = &mut pending.entries;
         match consent_id {
             Some(id) => entries.retain(|e| e.id != id),
-            None => entries.clear(),
+            None => {
+                entries.clear();
+                pending.epoch = Arc::new(());
+            }
         }
     }
 
-    /// Revoke an own agent's binding with a fresh decision id. Call only after
-    /// native confirmation.
-    pub(crate) fn revoke(&self, room: &str, agent_member_id: &str) -> ConsentOutcome {
-        if let Err(code) = self.endpoint() {
-            return refused(code);
+    /// Register revoke before showing its dialog. An explicit retry after an
+    /// unknown outcome reuses the same decision id and requires confirmation.
+    fn begin_revoke(&self, room: &str, agent: &str) -> Result<String, String> {
+        self.endpoint()?;
+        if !valid_key(room) || bounded_id(Some(&Value::String(agent.to_string()))).is_none() {
+            return Err("invalid_request".into());
         }
-        if !valid_key(room)
-            || bounded_id(Some(&Value::String(agent_member_id.to_string()))).is_none()
-        {
-            return refused("invalid_request");
+        let mut pending = self.pending.lock();
+        let entries = &mut pending.entries;
+        self.prune(entries);
+        if let Some(entry) = entries.iter_mut().find(|e| {
+            matches!(&e.decision, Decision::Revoke { .. }) && e.decision.target() == (room, agent)
+        }) {
+            if entry.phase != Phase::Ready {
+                return Err("consent_in_progress".into());
+            }
+            entry.phase = Phase::Confirming;
+            let id = entry.id.clone();
+            entries.retain(|e| e.id == id || e.decision.target() != (room, agent));
+            return Ok(id);
         }
-        let intent = Intent::Revoke {
-            room: room.to_string(),
-            agent: agent_member_id.to_string(),
-            decision_id: fresh_id(),
+        // Invalidate older authorization for this target before the dialog.
+        entries.retain(|e| e.decision.target() != (room, agent));
+        if entries.len() >= MAX_PENDING {
+            return Err("consent_busy".into());
+        }
+        let id = fresh_id();
+        entries.push(Entry {
+            id: id.clone(),
+            decision: Decision::Revoke {
+                room: room.into(),
+                agent: agent.into(),
+                decision_id: fresh_id(),
+            },
+            created: Instant::now(),
+            phase: Phase::Confirming,
+        });
+        Ok(id)
+    }
+
+    fn finish_revoke(&self, id: &str, confirmed: bool) -> Result<bool, String> {
+        self.settle_confirmation(&mut self.pending.lock().entries, id, confirmed)
+    }
+
+    #[cfg(test)]
+    fn revoke(&self, room: &str, agent: &str) -> ConsentOutcome {
+        let id = match self.begin_revoke(room, agent) {
+            Ok(id) => id,
+            Err(code) => return refused(&code),
         };
-        // Revocation is idempotent at the daemon; a dropped consent leaves no
-        // native state, so a pending one for this agent is dropped first.
-        self.pending
-            .lock()
-            .retain(|e| !(e.frozen.room == room && e.frozen.agent_member_id == agent_member_id));
-        match self.transport.send(&intent.request()) {
-            Ok(reply) => outcome_from_reply(reply),
-            Err(SendError::NotSent(code)) => refused(code),
-            Err(SendError::BadReply(code)) => ConsentOutcome {
-                state: OutcomeState::Unknown,
-                status: None,
-                code: Some(code.into()),
-                binding: None,
-            },
-            Err(SendError::Unknown) => ConsentOutcome {
-                state: OutcomeState::Unknown,
-                status: None,
-                code: None,
-                binding: None,
-            },
-        }
+        self.finish_revoke(&id, true).unwrap();
+        self.send_decision(&id)
     }
 }
 
@@ -903,7 +1041,8 @@ pub(crate) async fn room_consent_preview(
 ) -> Result<ConsentPreview, String> {
     main_window(&window)?;
     let broker = state.0.clone();
-    blocking(move || broker.preview(room.trim(), package_id.trim())).await?
+    let epoch = broker.epoch();
+    blocking(move || broker.preview_at(room.trim(), package_id.trim(), &epoch)).await?
 }
 
 #[tauri::command]
@@ -918,13 +1057,14 @@ pub(crate) async fn room_consent_authorize(
     let frozen = broker.begin_confirm(&consent_id)?;
     let (title, message, action) = frozen.dialog_text();
     let confirmed = native_confirm(&app, title, message, action, false).await;
-    let Some(frozen) = broker.finish_confirm(&consent_id, confirmed)? else {
+    let Some(_) = broker.finish_confirm(&consent_id, confirmed)? else {
         return Ok(ConsentOutcome::declined());
     };
-    blocking(move || broker.send_decision(&consent_id, &frozen)).await
+    blocking(move || broker.send_decision(&consent_id)).await
 }
 
 /// Window-gated bootstrap (pure, so the gate is testable without a webview).
+#[cfg(test)]
 fn bootstrap_from(
     label: &str,
     broker: &ConsentBroker,
@@ -945,9 +1085,10 @@ pub(crate) async fn room_agent_bootstrap(
     room: String,
     package_id: String,
 ) -> Result<ConsentPreview, String> {
-    let label = window.label().to_string();
+    main_window(&window)?;
     let broker = state.0.clone();
-    blocking(move || bootstrap_from(&label, &broker, &room, &package_id)).await?
+    let epoch = broker.epoch();
+    blocking(move || broker.bootstrap_at(room.trim(), package_id.trim(), &epoch)).await?
 }
 
 #[tauri::command]
@@ -976,12 +1117,14 @@ pub(crate) async fn room_agent_revoke(
     if !valid_key(&room) || bounded_id(Some(&Value::String(agent.clone()))).is_none() {
         return Err("invalid_request".into());
     }
+    let broker = state.0.clone();
+    let id = broker.begin_revoke(&room, &agent)?;
     let (title, message) = revoke_dialog_text(&room, &agent, &display_name);
-    if !native_confirm(&app, title, message, "Revoke", true).await {
+    let confirmed = native_confirm(&app, title, message, "Revoke", true).await;
+    if !broker.finish_revoke(&id, confirmed)? {
         return Ok(ConsentOutcome::declined());
     }
-    let broker = state.0.clone();
-    blocking(move || broker.revoke(&room, &agent)).await
+    blocking(move || broker.send_decision(&id)).await
 }
 
 // ── tests ───────────────────────────────────────────────────────────────
@@ -1118,7 +1261,7 @@ mod tests {
         assert_eq!(preview.mode, ConsentMode::Authorize);
         assert_eq!(preview.agent_member_id, "agent-scout-1");
         assert!(!serde_json::to_string(&preview).unwrap().contains(KEY));
-        assert_eq!(broker.pending.lock().len(), 1);
+        assert_eq!(broker.pending.lock().entries.len(), 1);
     }
 
     #[test]
@@ -1152,7 +1295,7 @@ mod tests {
             let broker = broker(port, &key);
             assert_eq!(broker.preview("room", "scout").unwrap_err(), code);
             daemon.join().unwrap();
-            assert!(broker.pending.lock().is_empty(), "{code}");
+            assert!(broker.pending.lock().entries.is_empty(), "{code}");
         }
         let broker = broker(9, &key);
         for (room, package) in [
@@ -1189,7 +1332,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(frozen, frozen2);
-        let outcome = broker.send_decision(&preview.consent_id, &frozen2);
+        let outcome = broker.send_decision(&preview.consent_id);
         let seen = daemon.join().unwrap();
         assert_eq!(outcome.state, OutcomeState::Applied);
         assert_eq!(outcome.binding.unwrap()["status"], "active");
@@ -1260,11 +1403,11 @@ mod tests {
         let broker = broker(port, &key);
         let preview = broker.preview("room", "scout").unwrap();
         broker.begin_confirm(&preview.consent_id).unwrap();
-        let frozen = broker
+        let _frozen = broker
             .finish_confirm(&preview.consent_id, true)
             .unwrap()
             .unwrap();
-        let outcome = broker.send_decision(&preview.consent_id, &frozen);
+        let outcome = broker.send_decision(&preview.consent_id);
         assert_eq!(outcome.state, OutcomeState::Refused);
         assert_eq!(outcome.status, Some(409));
         assert_eq!(outcome.code.as_deref(), Some("definition_digest_mismatch"));
@@ -1274,7 +1417,7 @@ mod tests {
             "exactly one decision request"
         );
         assert!(
-            broker.pending.lock().is_empty(),
+            broker.pending.lock().entries.is_empty(),
             "a refused consent is consumed"
         );
     }
@@ -1296,7 +1439,7 @@ mod tests {
             .finish_confirm(&preview.consent_id, true)
             .unwrap()
             .unwrap();
-        let outcome = broker.send_decision(&preview.consent_id, &frozen);
+        let outcome = broker.send_decision(&preview.consent_id);
         let seen = daemon.join().unwrap();
         assert_eq!(outcome.state, OutcomeState::Unknown);
         assert_eq!(seen.len(), 2, "no automatic retry");
@@ -1330,15 +1473,19 @@ mod tests {
             .map(|_| broker.preview("room", "scout").unwrap().consent_id)
             .collect();
         daemon.join().unwrap();
-        let entries = broker.pending.lock();
+        let pending = broker.pending.lock();
+        let entries = &pending.entries;
         assert_eq!(entries.len(), MAX_PENDING);
         assert!(entries.iter().all(|e| e.id != ids[0]), "oldest evicted");
         let decisions: std::collections::HashSet<_> = entries
             .iter()
-            .map(|e| e.frozen.decision_id.clone())
+            .map(|e| match &e.decision {
+                Decision::Consent(frozen) => frozen.decision_id.clone(),
+                _ => panic!("not consent"),
+            })
             .collect();
         assert_eq!(decisions.len(), MAX_PENDING);
-        drop(entries);
+        drop(pending);
         broker.ttl = Duration::ZERO;
         assert_eq!(
             broker.begin_confirm(&ids[1]).unwrap_err(),
@@ -1410,16 +1557,19 @@ mod tests {
             broker.finish_confirm(&a.consent_id, true).unwrap_err(),
             "consent_expired"
         );
-        assert!(broker.pending.lock().is_empty(), "expired consent removed");
+        assert!(
+            broker.pending.lock().entries.is_empty(),
+            "expired consent removed"
+        );
 
         // A consent stuck in Confirming past the TTL is pruned too.
         broker.ttl = CONSENT_TTL;
         let b = broker.preview("room", "scout").unwrap();
         broker.begin_confirm(&b.consent_id).unwrap();
         broker.ttl = Duration::ZERO;
-        broker.prune(&mut broker.pending.lock());
+        broker.prune(&mut broker.pending.lock().entries);
         assert!(
-            broker.pending.lock().is_empty(),
+            broker.pending.lock().entries.is_empty(),
             "confirming consent pruned"
         );
         assert_eq!(
@@ -1547,7 +1697,7 @@ mod tests {
             .finish_confirm(&preview.consent_id, true)
             .unwrap()
             .unwrap();
-        let outcome = broker.send_decision(&preview.consent_id, &frozen);
+        let outcome = broker.send_decision(&preview.consent_id);
         assert_eq!(daemon.join().unwrap().len(), 2);
         assert_eq!(outcome.state, OutcomeState::Unknown);
         assert_eq!(outcome.code.as_deref(), Some("invalid_reply"));
@@ -1555,6 +1705,287 @@ mod tests {
         // the same decision.
         let retry = broker.begin_confirm(&preview.consent_id).unwrap();
         assert_eq!(retry.decision_id, frozen.decision_id);
+    }
+
+    // Deterministic custody interleavings: channels stop real loopback I/O at
+    // a known request, without sleeping to guess which side won the race.
+    fn paused_daemon(
+        replies: Vec<Option<String>>,
+        pause_at: usize,
+    ) -> (
+        u16,
+        std::sync::mpsc::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+        std::thread::JoinHandle<Vec<String>>,
+    ) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (arrived_tx, arrived) = std::sync::mpsc::channel();
+        let (resume, resume_rx) = std::sync::mpsc::channel();
+        let daemon = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            for (i, reply) in replies.into_iter().enumerate() {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut raw = Vec::new();
+                loop {
+                    let mut byte = [0];
+                    socket.read_exact(&mut byte).unwrap();
+                    raw.push(byte[0]);
+                    if let Some(end) = raw.windows(4).position(|s| s == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&raw[..end]);
+                        let len = headers
+                            .lines()
+                            .find_map(|l| l.strip_prefix("Content-Length: "))
+                            .map(|s| s.parse::<usize>().unwrap())
+                            .unwrap_or(0);
+                        if raw.len() >= end + 4 + len {
+                            break;
+                        }
+                    }
+                }
+                seen.push(String::from_utf8(raw).unwrap());
+                if i == pause_at {
+                    arrived_tx.send(()).unwrap();
+                    resume_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                }
+                if let Some(reply) = reply {
+                    socket.write_all(reply.as_bytes()).unwrap();
+                }
+            }
+            seen
+        });
+        (port, arrived, resume, daemon)
+    }
+
+    /// Seed the same parsed frozen decision as a preview; these tests exercise
+    /// the subsequent confirmation/dispatch boundary against a silent socket.
+    fn seed_consent(broker: &ConsentBroker) -> String {
+        let frozen = freeze_preview(
+            "room",
+            "scout",
+            &serde_json::from_str(&preview_body(true, None)).unwrap(),
+            fresh_id(),
+        )
+        .unwrap();
+        let id = fresh_id();
+        broker.pending.lock().entries.push(Entry {
+            id: id.clone(),
+            decision: Decision::Consent(frozen),
+            created: Instant::now(),
+            phase: Phase::Ready,
+        });
+        id
+    }
+
+    fn queue_decision(broker: &ConsentBroker, revoke: bool) -> String {
+        if revoke {
+            let id = broker.begin_revoke("room", "agent-scout-1").unwrap();
+            assert!(broker.finish_revoke(&id, true).unwrap());
+            id
+        } else {
+            let id = seed_consent(broker);
+            broker.begin_confirm(&id).unwrap();
+            broker.finish_confirm(&id, true).unwrap().unwrap();
+            id
+        }
+    }
+
+    #[test]
+    fn queued_decisions_cancel_or_expire_before_dispatch_without_contact() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_file(dir.path(), 0o600);
+        for revoke in [false, true] {
+            for action in ["cancel_one", "cancel_all", "expire"] {
+                let (port, listener) = silent_daemon();
+                let mut broker = broker(port, &key);
+                let id = queue_decision(&broker, revoke);
+                match action {
+                    "cancel_one" => broker.cancel(Some(&id)),
+                    "cancel_all" => broker.cancel(None),
+                    _ => broker.ttl = Duration::ZERO,
+                }
+                let outcome = broker.send_decision(&id);
+                assert_eq!(outcome.state, OutcomeState::Refused);
+                assert_eq!(
+                    outcome.code.as_deref(),
+                    Some(if action == "expire" {
+                        "consent_expired"
+                    } else {
+                        "consent_invalidated"
+                    })
+                );
+                assert!(broker.pending.lock().entries.is_empty());
+                assert_never_contacted(&listener);
+            }
+        }
+    }
+
+    #[test]
+    fn revoke_dialog_is_cancellable_and_invalidates_queued_authorization() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_file(dir.path(), 0o600);
+        let (port, listener) = silent_daemon();
+        let broker = broker(port, &key);
+        let authorization = queue_decision(&broker, false);
+        let revoke = broker.begin_revoke("room", "agent-scout-1").unwrap();
+        assert_eq!(
+            broker.send_decision(&authorization).code.as_deref(),
+            Some("consent_invalidated")
+        );
+        broker.cancel(None);
+        assert_eq!(
+            broker.finish_revoke(&revoke, true).unwrap_err(),
+            "consent_invalidated"
+        );
+        assert_eq!(
+            broker.send_decision(&revoke).code.as_deref(),
+            Some("consent_invalidated")
+        );
+        let declined = broker.begin_revoke("room", "agent-scout-1").unwrap();
+        assert!(!broker.finish_revoke(&declined, false).unwrap());
+        assert!(broker.pending.lock().entries.is_empty());
+        assert_never_contacted(&listener);
+    }
+
+    #[test]
+    fn cancellation_fences_preview_and_bootstrap_insertion_across_network_waits() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_file(dir.path(), 0o600);
+        for bootstrap in [false, true] {
+            let mut replies = Vec::new();
+            if bootstrap {
+                replies.push(Some(http("200 OK", &me_body("member-owner"))));
+                replies.push(Some(http("201 Created", &bootstrapped(true))));
+            }
+            replies.push(Some(http("200 OK", &preview_body(true, None))));
+            // For bootstrap, pause the initial owner read: the epoch must span
+            // the entire operation, not just its final preview fetch.
+            let (port, arrived, resume, daemon) = paused_daemon(replies, 0);
+            let broker = Arc::new(broker(port, &key));
+            let worker_broker = broker.clone();
+            let epoch = broker.epoch();
+            let worker = std::thread::spawn(move || {
+                if bootstrap {
+                    worker_broker.bootstrap_at("room", "scout", &epoch)
+                } else {
+                    worker_broker.preview_at("room", "scout", &epoch)
+                }
+            });
+            arrived.recv_timeout(Duration::from_secs(5)).unwrap();
+            broker.cancel(None);
+            resume.send(()).unwrap();
+            assert_eq!(worker.join().unwrap().unwrap_err(), "consent_invalidated");
+            assert!(broker.pending.lock().entries.is_empty());
+            let seen = daemon.join().unwrap();
+            assert_eq!(seen.len(), if bootstrap { 3 } else { 1 });
+            // Cancellation invalidates consent insertion, not a bootstrap
+            // side effect: bootstrap is not an authorization/binding.
+            assert!(seen.iter().all(|r| !r.contains("/authorize ")));
+        }
+    }
+
+    #[test]
+    fn cancellation_before_a_queued_preview_worker_still_fences_its_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_file(dir.path(), 0o600);
+        let (port, daemon) = fake_daemon(vec![Some(http("200 OK", &preview_body(true, None)))]);
+        let broker = broker(port, &key);
+        let epoch = broker.epoch(); // captured by command before spawn_blocking
+        broker.cancel(None);
+        assert_eq!(
+            broker.preview_at("room", "scout", &epoch).unwrap_err(),
+            "consent_invalidated"
+        );
+        assert!(broker.pending.lock().entries.is_empty());
+        assert_eq!(daemon.join().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn cancelled_inflight_completions_never_restore_retry_state_or_hold_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_file(dir.path(), 0o600);
+        for revoke in [false, true] {
+            let (port, arrived, resume, daemon) = paused_daemon(vec![None], 0);
+            let broker = Arc::new(broker(port, &key));
+            let id = queue_decision(&broker, revoke);
+            let worker_broker = broker.clone();
+            let worker_id = id.clone();
+            let worker = std::thread::spawn(move || worker_broker.send_decision(&worker_id));
+            arrived.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert_eq!(
+                broker.send_decision(&id).code.as_deref(),
+                Some("consent_in_progress")
+            );
+            // This must complete while the socket is still blocked.
+            broker.cancel(None);
+            let fresh = seed_consent(&broker);
+            resume.send(()).unwrap();
+            assert_eq!(worker.join().unwrap().state, OutcomeState::Unknown);
+            assert_eq!(daemon.join().unwrap().len(), 1, "no duplicate dispatch");
+            let pending = broker.pending.lock();
+            assert_eq!(pending.entries.len(), 1);
+            assert_eq!(
+                pending.entries[0].id, fresh,
+                "late completion leaves newer state alone"
+            );
+            assert_eq!(pending.entries[0].phase, Phase::Ready);
+        }
+    }
+
+    #[test]
+    fn revoke_unknown_requires_reconfirmation_and_replays_same_decision() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_file(dir.path(), 0o600);
+        let (port, daemon) = fake_daemon(vec![
+            None,
+            Some(http(
+                "200 OK",
+                r#"{"ok":true,"applied":true,"binding":{"status":"revoked"}}"#,
+            )),
+        ]);
+        let broker = broker(port, &key);
+        let id = broker.begin_revoke("room", "agent-scout-1").unwrap();
+        assert!(broker.finish_revoke(&id, true).unwrap());
+        assert_eq!(broker.send_decision(&id).state, OutcomeState::Unknown);
+        assert_eq!(
+            broker.send_decision(&id).code.as_deref(),
+            Some("consent_in_progress")
+        );
+        let retry = broker.begin_revoke("room", "agent-scout-1").unwrap();
+        assert_eq!(retry, id);
+        assert!(broker.finish_revoke(&retry, true).unwrap());
+        assert_eq!(broker.send_decision(&retry).state, OutcomeState::Applied);
+        let seen = daemon.join().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(json_body(&seen[0]), json_body(&seen[1]));
+        assert!(broker.pending.lock().entries.is_empty());
+    }
+
+    #[test]
+    fn tracked_revokes_share_the_consent_bound_and_expire_in_dialog() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_file(dir.path(), 0o600);
+        let (port, listener) = silent_daemon();
+        let mut broker = broker(port, &key);
+        let id = seed_consent(&broker);
+        broker.begin_confirm(&id).unwrap();
+        let ids: Vec<_> = (1..MAX_PENDING)
+            .map(|i| broker.begin_revoke("room", &format!("agent-{i}")).unwrap())
+            .collect();
+        assert_eq!(
+            broker.begin_revoke("room", "overflow").unwrap_err(),
+            "consent_busy"
+        );
+        broker.ttl = Duration::ZERO;
+        assert_eq!(
+            broker.finish_revoke(&ids[0], true).unwrap_err(),
+            "consent_expired"
+        );
+        assert_never_contacted(&listener);
     }
 
     // ── Local bootstrap (PR G) ──────────────────────────────────────────
@@ -1675,7 +2106,7 @@ mod tests {
                 "owner_unavailable"
             );
             assert_eq!(daemon.join().unwrap().len(), 1, "no bootstrap sent");
-            assert!(broker.pending.lock().is_empty());
+            assert!(broker.pending.lock().entries.is_empty());
         }
     }
 
@@ -1723,7 +2154,7 @@ mod tests {
             let broker = broker(port, &key);
             assert_eq!(broker.bootstrap("room", "scout").unwrap_err(), code);
             assert_eq!(daemon.join().unwrap().len(), 2, "{code}: no preview");
-            assert!(broker.pending.lock().is_empty(), "{code}");
+            assert!(broker.pending.lock().entries.is_empty(), "{code}");
         }
     }
 
@@ -1746,7 +2177,7 @@ mod tests {
             let preview = broker.bootstrap("room", "scout").unwrap();
             assert_eq!(preview.owner_member_id, "member-owner");
             assert_eq!(daemon.join().unwrap().len(), 3);
-            assert_eq!(broker.pending.lock().len(), 1);
+            assert_eq!(broker.pending.lock().entries.len(), 1);
         }
         // A preview naming another owner is refused and freezes nothing.
         for reply in [
@@ -1764,7 +2195,7 @@ mod tests {
                 "room_owner_conflict"
             );
             assert_eq!(daemon.join().unwrap().len(), 3);
-            assert!(broker.pending.lock().is_empty());
+            assert!(broker.pending.lock().entries.is_empty());
         }
     }
 
@@ -1783,7 +2214,7 @@ mod tests {
         let seen = daemon.join().unwrap();
         assert_eq!(seen.len(), 2);
         assert!(seen[1].contains(KEY), "the bootstrap did reach the daemon");
-        assert!(broker_a.pending.lock().is_empty());
+        assert!(broker_a.pending.lock().entries.is_empty());
 
         // A bad reply after sending is unknown too.
         let (port, daemon) = fake_daemon(vec![
