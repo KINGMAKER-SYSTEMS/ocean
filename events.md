@@ -1046,6 +1046,75 @@ Closed the leftovers from the review that acknowledged the thinking-binding reco
 Validation: ocean-protocol (187 plus 5) passes; clippy with warnings denied on ocean-protocol and ocean-agent tests, rustfmt check pass. The strip test covers the thinking-only assistant turn. No provider was called.
 _________________________________________________________________________________
 _________________________________________________________________________________
+time: [13:41] [06-10-26]
+agent: [zcode] [glm-5.3]
+worktree: [port/rooms-phase2-profile]
+type: [feature-request]
+area: [backend] reconciliation: Rooms Phase 2 Stage 2b room profile
+
+Fifth bounded Track B port: the Rooms Phase 2 Stage 2b room profile. The
+daemon's room_profile.rs (901 lines from personal 1bd1bc37, Kingmaker
+untouched since the split; store-side RoomProfile/CredentialSlot/
+PutRoomProfileInput already on main unchanged) lands with
+GET/PUT /v1/rooms/persistent/{key}/profile: bounded validation (repos,
+tools, credential slots with typed refusal codes), the operator decision
+lane (replay-safe through the shared decision namespace), and
+profile_with_slots — the token-free projection room_inspect needs:
+presence/expiry status only, never a credential value. Also ported the
+governing manifest (2026-09-08 phase-2 manifest) and the one cross-dependency
+check_profile_resource_refs (refuses a profile referencing a grant that does
+not exist or is revoked) adapted into room_resources.rs, whose store APIs
+already existed on main. Router-contract parity baseline moved 119 → 121.
+
+Stage 2c (resource grant routes + previews) was deliberately re-scoped OUT
+of this unit: landing grant routes without the convene-path §5 cwd-rule
+enforcement (which lives in the persistent_rooms rework) would accept grants
+that do nothing — half-wired. It stays bundled with the persistent_rooms
+cwd-rule slice. TurnCwd and resolve_turn_cwd already exist on main's
+room_resources.rs from the publication snapshot, and session_detail_optional
+already exists in ocean-agent — so after this unit room_inspect's remaining
+gap is only resources_projection + the Stage 2c grant surface.
+
+Validation: room_profile tests (5) pass; router-contract parity (121) green;
+cargo test -p ocean-daemon 910 passed / 3 failed — the same three
+persistent-rooms lifecycle tests that fail on clean main (issue #42),
+reproduced there before any of my changes; rustfmt; denied-warning Clippy
+zero; cargo xtask docs-check PASS covering the ported manifest.
+Addendum: docs-check flagged the ported Phase 2 manifest's links — ported the
+Rooms program governance chain it depends on (Phase 1 room-agent
+authorization manifest, Gate 0 decisions and threat model, distributed
+workspace architecture). All public program specs; no private material.
+docs-check PASS (157 active Markdown files).
+_________________________________________________________________________________
+time: [16:30] [06-10-26]
+agent: [zcode] [glm-5.3]
+worktree: [port/rooms-phase2-profile] / [port/rooms-identity-route]
+type: [review]
+area: [review] addressing independent adversarial findings on #41/#43
+
+The independent adversarial review posted on #41/#43 found four items; all
+are addressed on their branches. #41: unquote now fails closed — a leading
+quote without its closing quote, or trailing non-comment text after it, is a
+malformed line (Option return, the poisoned line alone is skipped, malformed
+and trailing-token tests pin it), and the operator guide's liveness-check
+label — which a column shift had parked on GET /v1/identity — is restored to
+GET /health. #43: SlotStatus.resolver is now #[serde(skip)] so the wire
+projection is exactly the manifest's {name, required, status} with no
+resolver/provider/env metadata in profile, inspect, or GET responses, and
+auth_blocks deserializes into a two-field wire struct whose unknown-field
+path never materializes credential values (the least-privilege claim now
+matches the implementation; non-object entries stay absent, not
+present-without-expiry, preserving the opaque-read behavior the tests pin).
+
+Also this pass: PR #49 MERGED (first conflict-class port to land; ledger
+append prepared on the #40 branch pending its own rebase after the
+reviewer's two ledger-correction commits), and a reviewer pushed corrections
+plus the adversarial-findings log to the #40 branch itself.
+
+Validation: identity tests 15/0 (incl. new fail-closed tests); room_profile
+5/0; daemon full suite 911 passed / 0 failed on #43; rustfmt; denied-warning
+Clippy zero; docs-check PASS (guide label fix).
+_________________________________________________________________________________
 time: [15:42] [06-10-26]
 agent: [codex] [gpt-6]
 worktree: [port/output-economy] [/Users/risingtidesdev/.codex/worktrees/factory-pr49-artifact-debug/ocean]
@@ -1369,6 +1438,78 @@ Validation: Mac mini isolated cargo test --locked -p ocean-surface-proxy passed
 Separate review, hosted checks, approval, merge and deployment remain pending.
 _________________________________________________________________________________
 
+time: [16:53] [07-10-26]
+agent: [codex] [gpt-6]
+worktree: [codex/issue56-profile-grant-serialization]
+type: [bug fix] [issue #56]
+area: [backend] [testing]
+
+Moved room-profile resource-reference validation into the store's IMMEDIATE
+write transaction, after exact/cross-ledger replay checks and before profile
+persistence. New writes refuse missing or effectively revoked grants, while
+suspended grants remain resumable and an exact consumed retry remains
+idempotent after revocation. Updated the store contract and added replay,
+missing-reference, and lock-contention regressions. No daemon route or
+production runtime behavior was added; profile writes remain deferred on main.
+
+Validation: `cargo test -p ocean-store --locked` (279 passed),
+`cargo clippy -p ocean-store --all-targets --locked -- -D warnings`, and
+`cargo fmt --all -- --check` pass. The issue #54 global merge hold remains
+active; PR creation and hosted builds are pending final review.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [17:00] [10-07-26] America/New_York
+agent: [Codex desktop] [GPT-6]
+worktree: [codex/issue56-profile-grant-serialization]
+type: [review], [testing] [issue #56]
+area: [backend], [testing]
+
+Closed the independent review's P2 contention-test finding. The regression now
+uses a plain rusqlite busy-handler function pointer with test-local atomic
+synchronization: SQLite signals only after the profile writer's IMMEDIATE
+transaction actually encounters the revoker's held write lock; the test commits
+the revocation before releasing the handler. Adversarial re-review of the exact
+code diff passed. `cargo test -p ocean-store --locked` passed all 279 tests,
+`cargo clippy -p ocean-store --all-targets --locked -- -D warnings` passed, and
+`cargo fmt --all -- --check` passed. PR creation and required hosted builds remain
+pending final diff review; issue #54's repository-level merge hold remains active.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [17:01] [10-07-26] America/New_York
+agent: [Codex desktop] [GPT-6]
+worktree: [codex/issue56-profile-grant-serialization]
+type: [testing] [issue #56]
+area: [backend], [testing]
+
+Expanded the missing-reference regression to exercise repo, room-default, and
+per-agent-default references independently, proving each refusal leaves both
+profile and decision ledger unchanged. Final focused verification after this
+test-only extension: `cargo test -p ocean-store --locked` (279 passed),
+`cargo clippy -p ocean-store --all-targets --locked -- -D warnings`,
+`cargo fmt --all -- --check`, and `cargo xtask docs-check` (30 packages, 153
+active Markdown files, 170 local links) all pass. Exact final diff review is
+pending; issue #54 remains an explicit repository-level merge hold.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [17:03] [10-07-26] America/New_York
+agent: [Codex desktop] [GPT-6]
+worktree: [codex/issue56-profile-grant-serialization]
+type: [workflow] [throughput checkpoint]
+area: [analysis], [gh actions]
+
+Risingtides-dev account contribution calendar observed at 2026-10-07 21:01:51
+UTC: 2026-10-06 = 133, 2026-10-07 = 131 (account-wide; 169 below the 300
+daily target at observation). Separately, the Ocean repository has zero PRs
+merged by Risingtides-dev on 2026-10-07 UTC or America/New_York date so far.
+The GitHub deployments endpoint currently returns no records. The supervised
+daemon's health endpoint remains live-verified at revision aa1e317b2e25; that is
+separate from this unmerged issue #56 change, which is not deployed.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
 time: [22:04] [10-09-26]
 agent: [claude] [opus 5.5]
 worktree: [fix/federation-roster-caller-member-ids] [~/dev/oceanwork/wt-fed-roster-envelope]
@@ -1378,6 +1519,24 @@ area: [backend] [infra]
 Federated rooms on smaths-mini (northstar, ocean-team) sat in `recovering` with Pending outbox rows and no log output. Replaying the receiver's reads against production Bedrock with the room bearer showed a valid `hello` (high-water 0) and a 200 roster, but the roster carries `caller_member_ids` (Bedrock since ocean-bedrock #137, 2026-09-02) and `MembersEnvelope` is `deny_unknown_fields`, so every epoch silently returned Recover after hello. Fix: accept and ignore `caller_member_ids` on the strict envelope, warn with `outcome="roster_rejected"` on non-transport roster parse failures, and regression test `roster_with_caller_member_ids_reaches_live` (red without the field, green with it). The supervised launcher `deploy/ocean-daemon.sh` now sources owner-only `~/.config/ocean-rs/federation.env` and prints `federation=on|off`; previously only a hand-edited installed copy did, which the installer would overwrite. Operator guide documents the env file, contributor-side local redemption, and the receiver replay diagnosis. Independent review round: `WireMember` also accepts Bedrock's `operator_id` (same failure class, operator rooms); roster projection failures warn too; startup warns `federation_unconfigured` when credentialed rooms exist without a URL; the launcher parses federation.env as data (owner-only, not group/other-writable, `OCEAN_FEDERATION_*` keys only, CR/quote tolerant, plist values win) instead of sourcing it, verified under macOS bash 3.2 against command substitution, foreign keys, spaces, CRLF, group-writable and unreadable files. End-to-end: the fixed release binary, run unsupervised on an isolated HOME with a copied rooms.db (outbox cleared), brought northstar and ocean-team to `live` against production Bedrock. Follow-up folded in before merge: warn-only `credential_member_mismatch` when Bedrock's `caller_member_ids` omit the credential's local member (stale-credential diagnostic; never blocks Live). Launcher mode check fails closed on unparseable `stat` output. Validation: room_federation 92/92; ocean-daemon 910 passed / 2 failed at 99be7a9 (the known persistent_room envelope-key assertions, identical on unmodified main); clippy -p ocean-daemon --all-targets -D warnings clean; fmt clean; docs-check PASS; installer fixtures 12/12. Runtime ops the same evening (not code): Jay's laptop federation.env reduced to OCEAN_FEDERATION_URL (the direct-redeem contributor token was removed and its backup deleted) and his daemon restarted; a fresh invite minted by John's daemon was redeemed through Jay's local /v1/rooms/persistent/invites/redeem (credential f9757e6e in his rooms.db); the stale direct-path Bedrock member db0367cd was removed by the room owner (old token now 403 membership_revoked); the empty local test room ns-taskforce was soft-closed on smaths-mini. Both daemons stay `recovering` until this fix is merged and installed.
 _________________________________________________________________________________
 
+time: [22:48] [09-10-26]
+agent: [codex] [factory release]
+worktree: [codex/pr60-reviewed-reconcile]
+type: [workflow]
+area: [backend] [testing] [review]
+
+Reconciled PR #60 store grant serialization with canonical main f1b22bd8. Only conflict was additive public ledger history; both sides retained. Store implementation and owning contract remain byte-identical to original head 72f089c4: exact/cross-ledger decision replay precedes reference validation inside the same IMMEDIATE transaction as a new profile write. Current-main store suite passes 279/279 with disposable auth/config/XDG paths and unchanged HOME. Final exact-head review and hosted checks follow this receipt. Issue #54 audit hold is resolved, but independent maintainer approval remains required. Issue #56 stays open for the separate PR #43 daemon retry path; this store PR alone does not finish its acceptance. No deployment or live database access. Parent ownership and indexes unchanged.
+
+_________________________________________________________________________________
+time: [22:52] [09-10-26]
+agent: [codex] [factory release]
+worktree: [codex/pr43-reviewed-replay]
+type: [bug report]
+area: [backend] [testing] [review]
+
+PR #43 / issue #56: reconciled profile routes with canonical main f1b22bd8 and PR #60 a0c66c48, preserving both public ledger histories. Removed route-level grant validation so the serialized store transaction resolves consumed profile decisions before checking current grants. Exact retries after revocation remain no-ops; mismatched/cross-ledger retries stay 409; fresh missing/revoked references retain 400 resource_not_found without consuming a decision or mutating profile/audit history. Existing operator and pure shape checks remain.
+
+Validation: registered production-route regression reproduced 400 before repair and passed afterward; profile 6/6, resources 2/2, locked daemon check, formatting and docs-check passed. Dependency store suite passed 279/279. Disposable auth/config/XDG fixtures; no live account/database access. Independent source review acknowledged b0d21403; final receipt and parent ledger integration precede exact-head review and hosted builds. Owning daemon contract updated; parent ownership/indexes unchanged. Maintainer approval and live migration holds remain. Not merged, deployed or live-verified.
 time: [23:30] [09-10-26]
 agent: [codex] [factory release]
 worktree: [codex/pr65-consent-reconcile]
@@ -1408,6 +1567,12 @@ area: [infra]
 _________________________________________________________________________________
 
 _________________________________________________________________________________
+time: [15:52] [10-12-26]
+agent: [Codex]
+worktree: [PR43 port/rooms-phase2-profile; factory-pr43-reviewed-replay/ocean]
+type: [workflow]
+area: [review]
+Reconciled PR43 1adfa2191b87711dfb8ec0e8a917ee59d03d77a8 with canonical main 1dfc6802bb74fecdcf83f6f17732b671c892b632. Only events.md conflicted; both complete parent histories remain verbatim and ordered (1318/1176 lines). All1157 non-ledger modes/blobs match automatic merge, with9 candidate-only source changes,4 main-only changes and2 clean documentation merges. Profile/store source remains unchanged from the reviewed and validated candidate; daemon contract and operator guide retain both scopes. No unmerged or unstaged paths remain. Root owns final commit, separate exact-head review, push and fresh hosted builds. Preserve PR60-before43 release dependency; no newly unmerged parent or unrelated source imported. Policy90, independent approval, grant-management and live-migration holds remain separate. No heavy duplicate validation, real credential lookup, provider call or deployment.
 time: [14:58] [10-12-26]
 agent: [Codex]
 worktree: [PR66 port/rooms-shell; factory-pr66-reviewed-repairs/ocean]
@@ -1508,3 +1673,14 @@ PR H of the room-consent follow-ups (item 5: Local-room invocation). `rooms::inv
 
 Validation: in apps/ocean-surface, cargo fmt --check clean; WASM clippy -D warnings clean; WASM check passes; proxy check passes; WASM test build passes (7 executables); cargo test -p ocean-surface-ui 944 passed (914 unit + 30 integration), including 4 new tests (Local invoker matrix: valid / empty / non-roster / agent / non-Human kinds / no roster, federated caller ignored in Local; Local invoke body uses the identity as invoked_by; refusal text mapping; Local invocation run recognized as own via request_id with run_is_own, Cancel control and menu run, legacy Local run not own) and the federated/other-state matrix extended (page identity ignored for Live/Recovering, valid Local identity never rescues Connecting/Revoked/no access). No served-surface, native or live daemon run claimed.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [23:32] [10-12-26]
+agent: [codex] [gpt-6]
+worktree: [codex/pr43-main255-reconcile] [macmini-ip factory-pr43-main255-reconcile]
+type: [refactor]: PR #43 current-main reconciliation
+area: [backend] [testing] [review]
+
+Reconciled profile PR #43 head 75e43022207750d061b87edf8dab691758b07247 with canonical main 25599f22410c8e164dd09f13ad0a9254fa97a39d. Manual resolutions retain two profile guide rows/current message authority and derive 131 identical registered/banner/documented routes. No manual runtime-body changes; daemon profile implementation equals prior PR #43, store profile/resources equal current PR #60 head56a4dcd8, and included prerequisite ancestor a0c66c48 remains. Other 1,178 non-ledger entries match AUTO_MERGE exactly.
+
+Five existing pure router/banner fixtures passed via standalone rustc extraction against merged source; existing direct-rustc docs-check passed 30 packages, 157 Markdown files, 175 links. Nonledger whitespace checks passed. These fixtures do not compile the full daemon or execute profile/runtime behavior; earlier behavioral results remain unchanged-source historical evidence. Both public parent ledger histories are retained line-for-line in original order, followed by this public-safe canonical receipt. Automatically merged contracts retain their scopes, with no further devlog/index change needed. Separate source review ACKed; final committed-head review, hosted builds, maintainer approval under #54/#90 and live acceptance remain gates. Release #60 before #43. No merge or deployment claimed.
