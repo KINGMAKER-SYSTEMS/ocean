@@ -295,16 +295,12 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   new synthetic capture-bound and per-call memory-revocation checks. Root runs
   locked focused/full daemon tests, denied-warning Clippy and workspace test
   compilation remotely; independent exact-source review is required.
-<<<<<<< HEAD
-- Deferred: Room metrics/sampler, attachment context/maintenance, profile/resource writes,
-=======
-- Deferred: Room metrics/sampler, attachments/context, resource writes,
->>>>>>> origin/main
+- Deferred: Room metrics/sampler, attachment context/maintenance,
+  profile/resource writes,
   retirement/summary/maintenance/workspace bridge, client onboarding/UI, extension
   scheduling, Unknown build execution and CI orchestration. Keep #22/#48 holds;
   automated CI remains only Build Ocean and Build Surface.
 
-<<<<<<< HEAD
 ### Durable room attachment bytes
 
 - `room_attachments.rs` owns the four durable-room attachment routes: raw upload,
@@ -324,8 +320,6 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
 - Verify `cargo test --locked -p ocean-daemon room_attachments::` and attachment
   store regressions; run a locked daemon/store check for interface changes.
 
-=======
->>>>>>> origin/main
 ### Reviewed package consent manifest (ocean-private #55)
 
 - Ported from ocean-private #59 onto the public canonical source. Targets are only `src/room_agent_authority.rs`, registered-route fixtures in
