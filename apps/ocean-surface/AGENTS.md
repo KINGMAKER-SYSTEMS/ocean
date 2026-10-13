@@ -420,6 +420,21 @@ Web surface session UI:
   per-room agent settings panel (instructions overlay + model) over
   `GET/PUT .../agents/{agent_id}/settings`; these settings are local to this
   Ocean. New secondary room actions go into this overflow, not the header.
+- Room create (`RoomListRail`) carries an optional workspace (PR F): a
+  native `<select>` under the name input defaults to "No workspace" and lists
+  the daemon project catalogue's absolute `ProjectInfo.workspace_root`s
+  (passed down from `RoomsWorkspace` as a signal, deduped, first wins), plus
+  "Choose folder…" via `host::pick_folder` on Tauri only. The choice is
+  explicit and resets after a successful create; it is never seeded from a
+  session cwd, the focused chat's project, or `/tmp`, and a root no longer
+  offered is not sent. `CreateRoomBody.workspace_root` is omitted when unset.
+  The daemon binds it once (absolute existing directory, canonicalized;
+  otherwise 400 `invalid_workspace_root`, shown as "create failed: workspace
+  folder not found on this Ocean" with the draft kept) and has no route to
+  change it. `Room.workspace_root` decodes as absent for unbound rooms and
+  older daemons; when set, the header shows its folder name read-only
+  (`title` = full root). A room turn's folder is agent folder, then room
+  folder, then `workspace_root`, else `workspace_unavailable`.
 - Rooms UI lives in `src/rooms_workspace/` (team-platform P5): `mod.rs`
   owns `RoomsWorkspace`, its shared signals, and the transcript; child
   components are `RoomListRail` (`room_list.rs`), `ChannelComposer`
