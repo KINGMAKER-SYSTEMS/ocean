@@ -401,14 +401,17 @@ Web surface session UI:
     on and the session gate has admitted the request; an unreadable key is a
     503 before forwarding, and with `OCEAN_SURFACE_AUTH=off` it attaches
     nothing, so the daemon keeps refusing.
-  - Tauri desktop: the page calls the `room_owner_mutation` command with a
-    fixed `kind` (`rename_owner`, `run_permission`, `agent_settings`) and the
-    ids (`rooms.rs` `OwnerRoute` → `host::room_owner_mutation`). The shell
+  - Tauri desktop: the page calls the `room_owner_mutation` command (main
+    window only) with a fixed `kind` (`rename_owner`, `run_permission`,
+    `agent_settings`) and the ids (`rooms.rs` `OwnerRoute` →
+    `host::room_owner_mutation`). The shell
     (`crates/ocean-tauri/src/owner_mutation.rs`) builds the fixed method and
-    path itself, reads the same key file just before each request (regular,
-    non-symlink, mode 0600), sends it only to a loopback daemon with no
-    `Origin`/`Cookie`, never caches, logs or returns it, and relays only the
-    daemon's status and body.
+    path itself and sends it through the shared native transport
+    (`daemon_transport.rs`, see "Shared native daemon transport" below): the
+    key file is read just before each request and goes only to a
+    numeric-loopback daemon with no `Origin`/`Cookie`, is never cached,
+    logged or returned, and only the daemon's status and JSON object body are
+    relayed.
   - Chrome extension: not covered. The side panel talks to the daemon
     directly from `chrome-extension://`, cannot read the key file, has no
     proxy session, and its origin is refused by the daemon's operator origin
@@ -489,7 +492,8 @@ Web surface session UI:
 - Builds on the daemon digest guard and invited-Member own-agent consent
   (#65, on main). Owned targets: `crates/ocean-tauri/src/room_consent.rs`, its
   `lib.rs` registration (`ConsentState` managed after the plugins; the four
-  consent commands follow `room_owner_mutation` in `generate_handler!`), its
+  consent commands follow `owner_mutation::room_owner_mutation` in
+  `generate_handler!`), its
   `Cargo.toml`/`Cargo.lock` (`libc`, `uuid` v4 only),
   `crates/ocean-surface-ui/src/{host.rs,rooms.rs,daemon.rs}`,
   `src/rooms_workspace/agents.rs` (mounted from `mod.rs` and `members.rs`),
@@ -497,9 +501,10 @@ Web surface session UI:
   store, policy or provider change.
 - Native operator custody lives in two shell modules: `owner_mutation.rs`
   (rename owner, run permission, agent settings; see above) and
-  `room_consent.rs` (Room-agent consent and revoke). Their transports are not
-  yet unified. `room_consent.rs` fetches the preview itself and freezes room,
-  package, agent, owner, digest, policies and a fresh UUIDv4 decision id; the
+  `room_consent.rs` (Room-agent consent and revoke). Both send through the
+  one shared `daemon_transport.rs` (below). `room_consent.rs` fetches the
+  preview itself and freezes room, package, agent, owner, digest, policies
+  and a fresh UUIDv4 decision id; the
   page gets a projection and an opaque consent id, never a digest it can
   supply. At most 4 consents live for 120 s; a newer preview supersedes an
   idle one for the same agent. The TTL covers the dialog too: idle and
@@ -522,15 +527,13 @@ Web surface session UI:
   refused (preview `owner_not_eligible`/`invalid_preview`, revoke
   `invalid_request`) so they are shown verbatim; display names are labels
   only, stripped of those characters and capped at 128 characters.
-- Consent transport: raw HTTP/1.1 to a numeric-loopback `OCEAN_DAEMON_URL`
-  only (hostnames, `localhost`, userinfo, TLS, paths refused); fixed typed
-  intents; no Origin/Cookie, redirects refused, replies bounded to 256 KiB
-  JSON objects. The key is read per request through `O_NOFOLLOW`, must be the
-  inspected regular file owned by the effective uid with no group/other bits
-  and a header-safe token, and never reaches JS, errors or logs. Chunked
-  replies use checked framing: a hostile chunk size is a bad reply
-  (`unknown`) that frees the slot, never a panic. Consent
-  commands also refuse any webview other than `main`.
+- Consent transport: the shared `daemon_transport.rs` (below) with fixed
+  typed intents (`Intent::{Preview, Authorize, Reauthorize, Revoke}`; only the
+  preview is unprivileged). A transport bad reply (hostile chunk size,
+  redirect, non-JSON, oversize) on a decision is `unknown` and frees the slot,
+  never a panic; an untrusted `OCEAN_DAEMON_URL` makes every consent command
+  `consent_unavailable`. Consent commands refuse any webview other than
+  `main` (`consent_window_refused`).
 - Surface: `host.rs` wrappers are absent off-Tauri, so browser/extension hosts
   render bindings but never emulate consent. `rooms.rs` owns the bindings
   client (`GET .../agents`), the consent draft (room generation + ticket
@@ -561,9 +564,53 @@ Web surface session UI:
 - Verification: `cd crates/ocean-tauri && cargo test room_consent` (disposable
   loopback daemons and key fixtures), `cargo test -p ocean-surface-ui`,
   WASM check/Clippy. Remaining: own-run status matching and exact
-  cancellation, one shared native transport with `owner_mutation.rs`, Local
-  bootstrap intent and Local invocation, workspace selection on create,
-  served native acceptance.
+  cancellation, Local bootstrap intent and Local invocation, workspace
+  selection on create, served native acceptance.
+
+### Shared native daemon transport
+
+- Owned targets: `crates/ocean-tauri/src/daemon_transport.rs` (the only
+  place the shell attaches `X-Ocean-Operator`), its callers
+  `owner_mutation.rs` (`OwnerMutation` routes + the `room_owner_mutation`
+  command and its `OwnerMutationState`) and `room_consent.rs` (`Intent`s),
+  and their `lib.rs` wiring (one `DaemonTransport` built from
+  `daemon_url_from_env()` + `operator_key_path()`, cloned into
+  `OwnerMutationState` and `ConsentBroker`). Callers keep typed intent enums
+  on top; JS never supplies a method, path or header.
+- Rules (strictest of the two former transports): daemon address from
+  `OCEAN_DAEMON_URL` restricted to `http://<numeric loopback>[:port][/]`
+  (hostnames incl. `localhost`, userinfo, TLS, paths/queries refused);
+  request paths must be `/v1/…` visible ASCII; request bodies ≤64 KiB; the
+  operator key is read per privileged request via `O_NOFOLLOW` (symlink
+  refused, opened dev/ino must equal the inspected file, owned by the
+  effective uid, no group/other bits, one 16–512 byte base64/base64url
+  token) and never reaches JS, errors or logs; headers are exactly `Host`,
+  `Accept`, `Connection: close`, `Content-Type`/`Content-Length` with a body
+  and the operator header; 3xx replies are refused; replies must be JSON
+  objects ≤256 KiB with checked chunked framing.
+- Outcomes: `NotSent(code)` (`daemon_not_loopback`, `invalid_request`,
+  `request_too_large`, `operator_credential_*`, `daemon_unreachable`),
+  `Unknown` (request written, acknowledgement lost; code `outcome_unknown`),
+  `BadReply(code)` (`redirect_refused`, `invalid_reply`, `reply_too_large`).
+  Nothing retries automatically. `room_owner_mutation` returns these codes
+  as its error string; the page already maps every error to its
+  unreachable text.
+- Intentional behavior changes for owner mutations (consent is unchanged):
+  `OCEAN_DAEMON_URL=http://localhost:…` (or any hostname, `https://`, or a
+  URL with a path) now disables owner mutations instead of sending to
+  `localhost`; any numeric loopback address (`127.0.0.0/8`, `[::1]`) is
+  accepted. An owner-only `0400` key is now accepted (formerly exactly
+  `0600`), while a key owned by another user, a key opened through a
+  swapped-in symlink, or a key that is not a header-safe token is refused.
+  Redirects, non-JSON or non-object replies and replies over 256 KiB
+  (formerly 1 MiB of any text) are errors instead of being relayed; the
+  daemon's owner routes always answer JSON objects. Error strings are now
+  fixed codes. The command refuses any webview other than `main`
+  (`owner_mutation_window_refused`).
+- Verification: `cd crates/ocean-tauri && cargo test daemon_transport`
+  (loopback refusal, key-file refusal incl. foreign owner, redirect,
+  oversize/invalid reply, lost-ack → unknown), `cargo test owner_mutation`,
+  `cargo test room_consent`, `cargo clippy --all-targets -- -D warnings`.
 
 ## Workspace Files lifecycle
 
