@@ -59,6 +59,17 @@
   font-weight: 600;
 }
 
+/* Own-invocation tag: the page's acknowledged invocation started this run.
+   Display-only; approvals stay on the operator route for every card. */
+.room-card__own {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  color: var(--fg-3);
+  font: 500 10px/1.4 var(--font);
+}
+
 .room-card__state {
   display: inline-flex;
   align-items: center;
