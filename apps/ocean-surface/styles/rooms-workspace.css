@@ -1159,6 +1159,88 @@
   font-size: 12px;
 }
 
+/* ── Agent consent sheet (ocean-private #65) ─────────────────────────
+   Native-only: rendered when the desktop shell froze a consent preview.
+   Binding and invoke menus reuse `.room-overflow__*` (rooms-cards.css);
+   geometry for all of these lives in "Layout & depth" below. */
+
+.rooms-workspace__consent {
+  display: grid;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+}
+
+.rooms-workspace__consent-head {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.rooms-workspace__consent-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.rooms-workspace__consent-digest {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-3);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.rooms-workspace__consent-caps {
+  display: flex;
+  flex-wrap: wrap;
+}
+
+.rooms-workspace__consent-cap {
+  border-radius: var(--radius-pill);
+  background: var(--bg-well);
+  color: var(--fg-3);
+  font-family: var(--mono);
+  font-size: 10px;
+}
+
+.rooms-workspace__consent-primary {
+  appearance: none;
+  justify-self: start;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: var(--fg-on-accent);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.rooms-workspace__consent-primary:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+.rooms-workspace__consent-primary:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.rooms-workspace__member-binding {
+  flex: 0 0 auto;
+  color: var(--fg-4);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
 /* ── Scrollbar ────────────────────────────────────────────────────── */
 
 .rooms-workspace__left-list,
@@ -1473,6 +1555,52 @@
 
 .rooms-workspace__addagent-picker {
   margin: 6px 8px 0;
+}
+
+/* Agent consent sheet (agents.rs), above the right-rail list. */
+.rooms-workspace__consent {
+  gap: 8px;
+  margin: 8px 12px;
+  padding: 10px 12px;
+}
+
+.rooms-workspace__consent-head {
+  gap: 8px;
+}
+
+.rooms-workspace__consent-caps {
+  gap: 4px;
+}
+
+.rooms-workspace__consent-cap {
+  padding: 1px 6px;
+}
+
+.rooms-workspace__consent-primary {
+  padding: 5px 12px;
+}
+
+.rooms-workspace__member-binding {
+  margin-left: 6px;
+}
+
+/* Binding (member row) and invoke (action rail) menus sit inline. */
+.rooms-workspace__member .room-overflow,
+.rooms-workspace__action-rail .room-overflow {
+  display: inline-flex;
+  flex: 0 0 auto;
+  vertical-align: middle;
+}
+
+.rooms-workspace__invoke-trigger {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 6px;
+}
+
+.rooms-workspace__invoke-trigger svg {
+  width: 13px;
+  height: 13px;
 }
 
 /* Preserve a useful reading column before the member rail is removed. */

@@ -2,10 +2,11 @@
 
 use leptos::prelude::*;
 
+use super::agents::{AddAgentPicker, AgentBindingMenu};
 use super::format::{avatar_identity_class, participant_kind_label};
 use crate::rooms::{
-    AgentSummary, FederatedActorType, FederatedRoomMemberProjection, FederatedRoomRole,
-    MemberPresence, RoomAccessState, RoomParticipant, Rooms,
+    FederatedActorType, FederatedRoomMemberProjection, FederatedRoomRole, MemberPresence,
+    RoomAccessState, RoomParticipant, Rooms,
 };
 
 pub(super) fn roster_presence_count(members: &[FederatedRoomMemberProjection]) -> usize {
@@ -35,7 +36,6 @@ pub(super) fn MembersPanel(rooms: Rooms) -> impl IntoView {
                     .get()
                     .map(|r| r.participants)
                     .unwrap_or_default();
-                let show_add_agent = RwSignal::new(false);
                 view! {
                     {if participants.is_empty() {
                         view! {
@@ -73,6 +73,7 @@ pub(super) fn MembersPanel(rooms: Rooms) -> impl IntoView {
                                             <span class="rooms-workspace__member-kind">
                                                 {participant_kind_label(p.kind)}
                                             </span>
+                                            <AgentBindingMenu rooms=rooms member_id=p.id.clone() />
                                         </div>
                                     }
                                 }
@@ -81,64 +82,9 @@ pub(super) fn MembersPanel(rooms: Rooms) -> impl IntoView {
                         }.into_any()
                     }}
 
-                    <button
-                        class="rooms-workspace__addagent"
-                        type="button"
-                        title="Add an agent participant"
-                        aria-controls="rooms-workspace-agent-picker"
-                        aria-expanded=move || show_add_agent.get().to_string()
-                        on:click=move |_| show_add_agent.update(|v: &mut bool| *v = !*v)
-                    >
-                        "+ agent"
-                    </button>
-                    {move || {
-                        if show_add_agent.get() {
-                            view! {
-                                <div
-                                    id="rooms-workspace-agent-picker"
-                                    class="rooms-workspace__addagent-picker"
-                                >
-                                    <select
-                                        class="rooms-workspace__addagent-select"
-                                        aria-label="Choose an agent to add"
-                                        on:change=move |ev| {
-                                            let val = event_target_value(&ev);
-                                            if !val.is_empty() {
-                                                rooms.add_agent(val);
-                                                show_add_agent.set(false);
-                                            }
-                                        }
-                                    >
-                                        <option value="" selected=true>
-                                            "-- pick an agent --"
-                                        </option>
-                                        <For
-                                            each=move || {
-                                                let present: Vec<String> = rooms
-                                                    .open_room
-                                                    .get()
-                                                    .map(|r| r.participants.into_iter().map(|p| p.id).collect())
-                                                    .unwrap_or_default();
-                                                rooms.available_agents.get().into_iter().filter(|agent| !present.contains(&agent.name)).collect::<Vec<AgentSummary>>()
-                                            }
-                                            key=|agent: &AgentSummary| agent.name.clone()
-                                            children=move |agent: AgentSummary| {
-                                                // Unresolvable folders stay visible but not addable.
-                                                let disabled = agent.error.is_some();
-                                                let v = agent.name.clone();
-                                                view! {
-                                                    <option value=v disabled=disabled>{agent.name}</option>
-                                                }
-                                            }
-                                        />
-                                    </select>
-                                </div>
-                            }.into_any()
-                        } else {
-                            ().into_any()
-                        }
-                    }}
-                }.into_any()
+                    <AddAgentPicker rooms=rooms />
+                }
+                .into_any()
             }
             Some(ref access)
                 if matches!(
@@ -159,6 +105,11 @@ pub(super) fn MembersPanel(rooms: Rooms) -> impl IntoView {
                 } else {
                     let members = access.members.clone();
                     let members_for_label = members.clone();
+                    let can_add_agent = crate::host::room_consent_supported()
+                        && matches!(
+                            access.state,
+                            RoomAccessState::Live | RoomAccessState::Recovering
+                        );
                     view! {
                         // Roster is a real list: give AT an
                         // item count + boundaries instead of
@@ -247,6 +198,7 @@ pub(super) fn MembersPanel(rooms: Rooms) -> impl IntoView {
                                         <span class="rooms-workspace__member-role">
                                             {role_label}
                                         </span>
+                                        <AgentBindingMenu rooms=rooms member_id=member.member_id.clone() />
                                         {if presence.is_some() {
                                             view! {
                                                 <span
@@ -269,6 +221,7 @@ pub(super) fn MembersPanel(rooms: Rooms) -> impl IntoView {
                             }
                         />
                         </div>
+                        {can_add_agent.then(|| view! { <AddAgentPicker rooms=rooms /> })}
                     }.into_any()
                 }
             }

@@ -12,6 +12,7 @@
 //! signals and Effects that must outlive rail re-renders, and the transcript.
 
 mod access;
+mod agents;
 mod banners;
 mod composer;
 mod format;
@@ -30,6 +31,7 @@ use crate::rooms::{author_display_name, local_speaker_id, RoomMessage, Rooms};
 
 pub(crate) use access::access_allows_sharing;
 use access::{access_allows_thread_writes, access_allows_writes};
+use agents::{ConsentSheet, InvokeMenu};
 use banners::{AccessStateBanner, InviteResult, OutboxPanel, PendingInviteBanner};
 use composer::{
     message_send_admitted, normalized_message_body, outbox_matches_failed_message,
@@ -850,6 +852,7 @@ pub fn RoomsWorkspace(
                                                                     >
                                                                         {move || thread_label()}
                                                                     </button>
+                                                                    <InvokeMenu rooms=rooms message_seq=root_seq />
                                                                     </div>
                                                                 }.into_any()
                                                             } else {
@@ -980,6 +983,7 @@ pub fn RoomsWorkspace(
                     }}
                 </div>
 
+                <ConsentSheet rooms=rooms />
                 <div class="rooms-workspace__right-list">
                     {move || {
                         if let Some(root) = thread_root_for(&rooms.transcript.get(), selected_thread_root_seq.get()) {
