@@ -492,8 +492,8 @@ Web surface session UI:
 - Builds on the daemon digest guard and invited-Member own-agent consent
   (#65, on main). Owned targets: `crates/ocean-tauri/src/room_consent.rs`, its
   `lib.rs` registration (`ConsentState` managed after the plugins; the four
-  consent commands follow `owner_mutation::room_owner_mutation` in
-  `generate_handler!`), its
+  consent commands and `room_agent_bootstrap` follow
+  `owner_mutation::room_owner_mutation` in `generate_handler!`), its
   `Cargo.toml`/`Cargo.lock` (`libc`, `uuid` v4 only),
   `crates/ocean-surface-ui/src/{host.rs,rooms.rs,daemon.rs}`,
   `src/rooms_workspace/agents.rs` (mounted from `mod.rs` and `members.rs`),
@@ -528,12 +528,32 @@ Web surface session UI:
   `invalid_request`) so they are shown verbatim; display names are labels
   only, stripped of those characters and capped at 128 characters.
 - Consent transport: the shared `daemon_transport.rs` (below) with fixed
-  typed intents (`Intent::{Preview, Authorize, Reauthorize, Revoke}`; only the
-  preview is unprivileged). A transport bad reply (hostile chunk size,
+  typed intents (`Intent::{Preview, Authorize, Reauthorize, Revoke, Me,
+  Bootstrap}`; only the preview and `Me` are unprivileged). A transport bad reply (hostile chunk size,
   redirect, non-JSON, oversize) on a decision is `unknown` and frees the slot,
   never a panic; an untrusted `OCEAN_DAEMON_URL` makes every consent command
   `consent_unavailable`. Consent commands refuse any webview other than
   `main` (`consent_window_refused`).
+- Local bootstrap (PR G): a plain Local `POST .../participants` never
+  records a Room owner, so its preview is `owner_not_eligible`. On native
+  consent hosts a Local add (`rooms::agent_add_route` → `Bootstrap`) calls
+  `room_agent_bootstrap` (main window only, `consent_window_refused`). Rust
+  reads the owner from `GET /v1/me` `participant_id` (unprivileged; the page
+  never supplies an owner), then sends the operator-gated
+  `POST .../agents/bootstrap` with exactly `{owner_member_id,
+  agent_package_id}`. 200/201, or a `room_owner_conflict` 409, proceed to
+  the normal preview freeze, which is kept only when its owner equals the
+  `/v1/me` participant (else `room_owner_conflict`); the page gets the same
+  projection as `room_consent_preview` and lands in the consent sheet.
+  Bootstrap creates no binding: authorize still needs the native dialog.
+  Fixed codes: `room_owner_required` ("Join the room before adding an
+  agent."), `local_room_required`, `room_owner_conflict`,
+  `bootstrap_target_conflict`, `room_not_found`, `agent_package_not_found`,
+  `owner_unavailable`, else `bootstrap_refused`; a lost or unparseable
+  bootstrap reply is `outcome_unknown`, fetches no preview and is never
+  retried (the page re-reads the roster). Text lives in
+  `rooms::bootstrap_error_text`. Web/extension hosts keep the plain
+  participant add and get no bootstrap control.
 - Surface: `host.rs` wrappers are absent off-Tauri, so browser/extension hosts
   render bindings but never emulate consent. `rooms.rs` owns the bindings
   client (`GET .../agents`), the consent draft (room generation + ticket
@@ -545,7 +565,8 @@ Web surface session UI:
   Human message by that caller and an active binding; it runs once per
   (agent, message) and leaves a lost acknowledgement `unknown`. Local rooms do
   have an invoker identity (the `/v1/me` owner `participant_id`, since #68),
-  but Local invocation is not wired yet.
+  but Local invocation is not wired yet (PR H; Local consent is reachable
+  since PR G's bootstrap).
 - Invocation sends no decision token (removed in PR C, together with
   `RoomInvocation::token_for` and #88's `try_mint_decision_token` split in
   `daemon.rs`): since #68 the daemon binds Room-turn permission waiters to a
@@ -581,8 +602,8 @@ Web surface session UI:
 - Verification: `cd crates/ocean-tauri && cargo test room_consent` (disposable
   loopback daemons and key fixtures), `cargo test -p ocean-surface-ui`,
   WASM check/Clippy. Remaining: own-run status in the invoke menu and exact
-  cancellation, Local bootstrap intent and Local invocation, workspace
-  selection on create, served native acceptance.
+  cancellation, Local invocation, workspace selection on create, served
+  native acceptance.
 
 ### Shared native daemon transport
 

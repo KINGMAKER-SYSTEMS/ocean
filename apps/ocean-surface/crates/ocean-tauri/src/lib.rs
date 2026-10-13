@@ -2212,7 +2212,8 @@ pub fn run() {
             room_consent::room_consent_preview,
             room_consent::room_consent_authorize,
             room_consent::room_consent_cancel,
-            room_consent::room_agent_revoke
+            room_consent::room_agent_revoke,
+            room_consent::room_agent_bootstrap
         ])
         .run(tauri::generate_context!())
         .expect("error while running ocean-tauri");

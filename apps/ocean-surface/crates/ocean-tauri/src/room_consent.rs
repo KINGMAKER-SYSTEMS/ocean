@@ -22,6 +22,11 @@
 //!   through a no-follow descriptor immediately before each privileged
 //!   request (owner-only, effective-uid owned, never cached, returned, logged
 //!   or embedded in an error).
+//! * Local rooms record their owner through the operator-gated bootstrap
+//!   ([`Intent::Bootstrap`]). The owner is the daemon's own `GET /v1/me`
+//!   `participant_id`, read natively; the page names only room and package.
+//!   A bootstrap creates no binding: it lands in the same frozen preview, so
+//!   authorization still needs the native dialog.
 //!
 //! The pure broker below owns every check; the `#[tauri::command]` glue at the
 //! bottom only adds the native dialog and the main-window gate (Tauri plugin
@@ -248,6 +253,16 @@ enum Intent {
         agent: String,
         decision_id: String,
     },
+    /// `GET /v1/me`: the daemon owner a Local bootstrap names. Unprivileged.
+    Me,
+    /// Local-room owner/agent bootstrap. `owner` is only ever the
+    /// `participant_id` this module read from [`Intent::Me`]; the page never
+    /// supplies it. Creates no binding.
+    Bootstrap {
+        room: String,
+        package_id: String,
+        owner: String,
+    },
 }
 
 impl Intent {
@@ -255,7 +270,9 @@ impl Intent {
     /// operator credential; the preview is unprivileged.
     fn request(&self) -> DaemonRequest {
         match self {
-            Self::Preview { .. } => DaemonRequest::public(Method::Get, self.path(), None),
+            Self::Preview { .. } | Self::Me => {
+                DaemonRequest::public(Method::Get, self.path(), None)
+            }
             _ => DaemonRequest::operator(Method::Post, self.path(), self.body()),
         }
     }
@@ -276,12 +293,20 @@ impl Intent {
             Self::Revoke { room: r, agent, .. } => {
                 format!("{}/agents/{}/revoke", room(r), encode_segment(agent))
             }
+            Self::Me => "/v1/me".to_string(),
+            Self::Bootstrap { room: r, .. } => format!("{}/agents/bootstrap", room(r)),
         }
     }
 
     fn body(&self) -> Option<String> {
         match self {
-            Self::Preview { .. } => None,
+            Self::Preview { .. } | Self::Me => None,
+            // Exactly the daemon's strict `{owner_member_id, agent_package_id}`.
+            Self::Bootstrap {
+                package_id, owner, ..
+            } => Some(
+                json!({ "owner_member_id": owner, "agent_package_id": package_id }).to_string(),
+            ),
             Self::Authorize { body, .. } | Self::Reauthorize { body, .. } => Some(body.to_string()),
             Self::Revoke { decision_id, .. } => {
                 Some(json!({ "decision_id": decision_id }).to_string())
@@ -515,6 +540,28 @@ fn refused(code: &'static str) -> ConsentOutcome {
     }
 }
 
+/// A bootstrap whose existing Room owner is not this daemon's owner.
+const BOOTSTRAP_OWNER_CONFLICT: &str = "room_owner_conflict";
+
+/// Map a definitive bootstrap reply. `Ok` proceeds to the preview: created
+/// (201), already bootstrapped (200), or an owner conflict the preview then
+/// settles against `/v1/me`. Every refusal is one fixed code.
+fn bootstrap_step(reply: &Reply) -> Result<(), &'static str> {
+    let code = reply.body.get("error").and_then(Value::as_str);
+    match (reply.status, code) {
+        (200 | 201, _) if reply.body.get("ok") == Some(&Value::Bool(true)) => Ok(()),
+        (409, Some("room_owner_conflict")) => Ok(()),
+        (403, Some("room_owner_required")) => Err("room_owner_required"),
+        (409, Some("local_room_required")) => Err("local_room_required"),
+        (409, Some("bootstrap_target_conflict")) => Err("bootstrap_target_conflict"),
+        (404, Some("room_not_found")) => Err("room_not_found"),
+        (404, Some("agent_package_not_found")) | (400, Some("invalid_agent_package_id")) => {
+            Err("agent_package_not_found")
+        }
+        _ => Err("bootstrap_refused"),
+    }
+}
+
 fn fresh_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
@@ -558,6 +605,17 @@ impl ConsentBroker {
         if !valid_key(room) || !valid_key(package_id) {
             return Err("invalid_request".into());
         }
+        self.freeze(room, package_id, None)
+    }
+
+    /// Fetch and freeze one preview. With `expected_owner`, a preview naming
+    /// any other owner is refused and nothing is frozen.
+    fn freeze(
+        &self,
+        room: &str,
+        package_id: &str,
+        expected_owner: Option<&str>,
+    ) -> Result<ConsentPreview, String> {
         let intent = Intent::Preview {
             room: room.to_string(),
             package_id: package_id.to_string(),
@@ -577,6 +635,9 @@ impl ConsentBroker {
                 .to_string());
         }
         let frozen = freeze_preview(room, package_id, &reply.body, fresh_id())?;
+        if expected_owner.is_some_and(|owner| owner != frozen.owner_member_id) {
+            return Err(BOOTSTRAP_OWNER_CONFLICT.into());
+        }
         let id = fresh_id();
         let mut entries = self.pending.lock();
         self.prune(&mut entries);
@@ -694,6 +755,51 @@ impl ConsentBroker {
                 entries.remove(index);
             }
         }
+    }
+
+    /// The daemon owner's `participant_id` from `GET /v1/me`, read natively.
+    fn daemon_owner(&self) -> Result<String, String> {
+        let reply = match self.transport.send(&Intent::Me.request()) {
+            Ok(reply) => reply,
+            Err(SendError::NotSent(code) | SendError::BadReply(code)) => return Err(code.into()),
+            // A lost reply to a read changed nothing.
+            Err(SendError::Unknown) => return Err("daemon_unreachable".into()),
+        };
+        if reply.status != 200 {
+            return Err("owner_unavailable".into());
+        }
+        bounded_id(reply.body.get("participant_id")).ok_or_else(|| "owner_unavailable".into())
+    }
+
+    /// Bootstrap `package_id` into the Local `room` as the daemon owner's
+    /// agent, then fetch and freeze its consent preview so the page lands in
+    /// the consent sheet. The owner comes only from `GET /v1/me`.
+    ///
+    /// The daemon records the owner role once and refuses a different owner
+    /// (`room_owner_conflict`); that refusal still proceeds to the preview,
+    /// which is frozen only when it names this daemon's owner. Nothing is
+    /// retried automatically: a lost bootstrap acknowledgement is
+    /// `outcome_unknown` and fetches no preview.
+    pub(crate) fn bootstrap(&self, room: &str, package_id: &str) -> Result<ConsentPreview, String> {
+        self.endpoint()?;
+        if !valid_key(room) || !valid_key(package_id) {
+            return Err("invalid_request".into());
+        }
+        let owner = self.daemon_owner()?;
+        let intent = Intent::Bootstrap {
+            room: room.to_string(),
+            package_id: package_id.to_string(),
+            owner: owner.clone(),
+        };
+        let reply = match self.transport.send(&intent.request()) {
+            Ok(reply) => reply,
+            Err(SendError::NotSent(code)) => return Err(code.into()),
+            Err(SendError::Unknown | SendError::BadReply(_)) => {
+                return Err("outcome_unknown".into())
+            }
+        };
+        bootstrap_step(&reply)?;
+        self.freeze(room, package_id, Some(&owner))
     }
 
     /// Drop one consent, or every consent when `consent_id` is `None`
@@ -816,6 +922,32 @@ pub(crate) async fn room_consent_authorize(
         return Ok(ConsentOutcome::declined());
     };
     blocking(move || broker.send_decision(&consent_id, &frozen)).await
+}
+
+/// Window-gated bootstrap (pure, so the gate is testable without a webview).
+fn bootstrap_from(
+    label: &str,
+    broker: &ConsentBroker,
+    room: &str,
+    package_id: &str,
+) -> Result<ConsentPreview, String> {
+    require_main_window(label, "consent_window_refused")?;
+    broker.bootstrap(room.trim(), package_id.trim())
+}
+
+/// Local-room agent bootstrap, then the same frozen preview
+/// `room_consent_preview` returns. Main window only; the owner is read
+/// natively from `GET /v1/me`.
+#[tauri::command]
+pub(crate) async fn room_agent_bootstrap(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, ConsentState>,
+    room: String,
+    package_id: String,
+) -> Result<ConsentPreview, String> {
+    let label = window.label().to_string();
+    let broker = state.0.clone();
+    blocking(move || bootstrap_from(&label, &broker, &room, &package_id)).await?
 }
 
 #[tauri::command]
@@ -1423,5 +1555,307 @@ mod tests {
         // the same decision.
         let retry = broker.begin_confirm(&preview.consent_id).unwrap();
         assert_eq!(retry.decision_id, frozen.decision_id);
+    }
+
+    // ── Local bootstrap (PR G) ──────────────────────────────────────────
+
+    fn me_body(participant: &str) -> String {
+        json!({ "participant_id": participant, "display_name": "Owner" }).to_string()
+    }
+
+    fn bootstrapped(created: bool) -> String {
+        json!({
+            "ok": true,
+            "created": created,
+            "room_id": "team.room",
+            "owner_member_id": "member-owner",
+            "agent_member_id": "scout",
+            "agent_package_id": "scout",
+            "owner_eligible": true,
+        })
+        .to_string()
+    }
+
+    fn refusal(status: &str, code: &str) -> String {
+        http(status, &json!({ "ok": false, "error": code }).to_string())
+    }
+
+    #[test]
+    fn bootstrap_intent_is_a_fixed_operator_post_with_the_strict_body() {
+        let intent = Intent::Bootstrap {
+            room: "team room".into(),
+            package_id: "scout".into(),
+            owner: "member-owner".into(),
+        };
+        let request = intent.request();
+        assert!(request.is_operator());
+        assert_eq!(
+            request,
+            DaemonRequest::operator(
+                Method::Post,
+                "/v1/rooms/persistent/team%20room/agents/bootstrap".into(),
+                Some(
+                    json!({ "owner_member_id": "member-owner", "agent_package_id": "scout" })
+                        .to_string()
+                ),
+            )
+        );
+        let me = Intent::Me.request();
+        assert!(!me.is_operator(), "the owner read is unprivileged");
+        assert_eq!(
+            me,
+            DaemonRequest::public(Method::Get, "/v1/me".into(), None)
+        );
+    }
+
+    #[test]
+    fn bootstrap_takes_the_owner_from_v1_me_and_lands_in_the_frozen_preview() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_file(dir.path(), 0o600);
+        let (port, daemon) = fake_daemon(vec![
+            Some(http("200 OK", &me_body("member-owner"))),
+            Some(http("201 Created", &bootstrapped(true))),
+            Some(http("200 OK", &preview_body(true, None))),
+        ]);
+        let broker = broker(port, &key);
+        let preview = broker.bootstrap("team.room", "scout").unwrap();
+        let seen = daemon.join().unwrap();
+        assert_eq!(seen.len(), 3);
+        assert!(seen[0].starts_with("GET /v1/me HTTP/1.1\r\n"));
+        assert!(!seen[0].contains(KEY), "the owner read is unprivileged");
+        assert!(seen[1]
+            .starts_with("POST /v1/rooms/persistent/team.room/agents/bootstrap HTTP/1.1\r\n"));
+        assert!(seen[1].contains(&format!("\r\nX-Ocean-Operator: {KEY}\r\n")));
+        let lower = seen[1].to_ascii_lowercase();
+        assert!(!lower.contains("\r\norigin:") && !lower.contains("\r\ncookie:"));
+        assert_eq!(
+            json_body(&seen[1]),
+            json!({ "owner_member_id": "member-owner", "agent_package_id": "scout" })
+        );
+        assert!(seen[2]
+            .starts_with("GET /v1/rooms/persistent/team.room/agents/preview/scout HTTP/1.1\r\n"));
+        assert!(!seen[2].contains(KEY));
+        // The same projection the preview command returns, now authorizable.
+        assert_eq!(preview.owner_member_id, "member-owner");
+        assert_eq!(preview.mode, ConsentMode::Authorize);
+        assert_eq!(preview.definition_digest, DIGEST);
+        assert!(!serde_json::to_string(&preview).unwrap().contains(KEY));
+        assert!(broker.begin_confirm(&preview.consent_id).is_ok());
+    }
+
+    #[test]
+    fn bootstrap_owner_is_only_ever_the_v1_me_participant() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_file(dir.path(), 0o600);
+        // Whatever /v1/me names is the owner sent; the page has no owner input.
+        let (port, daemon) = fake_daemon(vec![
+            Some(http("200 OK", &me_body("member-me"))),
+            Some(refusal("403 Forbidden", "room_owner_required")),
+        ]);
+        assert_eq!(
+            broker(port, &key).bootstrap("room", "scout").unwrap_err(),
+            "room_owner_required"
+        );
+        let seen = daemon.join().unwrap();
+        assert_eq!(json_body(&seen[1])["owner_member_id"], "member-me");
+
+        // An unusable /v1/me never reaches the privileged bootstrap.
+        for reply in [
+            http("200 OK", &me_body("member\nOwner: x")),
+            http("200 OK", &me_body("")),
+            http("200 OK", &me_body(" padded")),
+            http("200 OK", r#"{"display_name":"Owner"}"#),
+            http("200 OK", r#"{"participant_id":7}"#),
+            refusal("500 Internal Server Error", "room_store_error"),
+        ] {
+            let (port, daemon) = fake_daemon(vec![Some(reply)]);
+            let broker = broker(port, &key);
+            assert_eq!(
+                broker.bootstrap("room", "scout").unwrap_err(),
+                "owner_unavailable"
+            );
+            assert_eq!(daemon.join().unwrap().len(), 1, "no bootstrap sent");
+            assert!(broker.pending.lock().is_empty());
+        }
+    }
+
+    #[test]
+    fn bootstrap_refusals_map_to_fixed_codes_and_fetch_no_preview() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_file(dir.path(), 0o600);
+        let cases = [
+            (
+                refusal("403 Forbidden", "room_owner_required"),
+                "room_owner_required",
+            ),
+            (
+                refusal("409 Conflict", "local_room_required"),
+                "local_room_required",
+            ),
+            (
+                refusal("409 Conflict", "bootstrap_target_conflict"),
+                "bootstrap_target_conflict",
+            ),
+            (refusal("404 Not Found", "room_not_found"), "room_not_found"),
+            (
+                refusal("404 Not Found", "agent_package_not_found"),
+                "agent_package_not_found",
+            ),
+            (
+                refusal("400 Bad Request", "invalid_agent_package_id"),
+                "agent_package_not_found",
+            ),
+            (
+                refusal("403 Forbidden", "operator_required"),
+                "bootstrap_refused",
+            ),
+            (
+                refusal("409 Conflict", "Arbitrary\ntext"),
+                "bootstrap_refused",
+            ),
+            (http("200 OK", r#"{"ok":false}"#), "bootstrap_refused"),
+        ];
+        for (reply, code) in cases {
+            let (port, daemon) = fake_daemon(vec![
+                Some(http("200 OK", &me_body("member-owner"))),
+                Some(reply),
+            ]);
+            let broker = broker(port, &key);
+            assert_eq!(broker.bootstrap("room", "scout").unwrap_err(), code);
+            assert_eq!(daemon.join().unwrap().len(), 2, "{code}: no preview");
+            assert!(broker.pending.lock().is_empty(), "{code}");
+        }
+    }
+
+    #[test]
+    fn an_existing_bootstrap_proceeds_only_when_the_preview_names_this_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_file(dir.path(), 0o600);
+        // Already bootstrapped (200) and an owner conflict whose preview names
+        // the /v1/me owner both land in the consent sheet.
+        for reply in [
+            http("200 OK", &bootstrapped(false)),
+            refusal("409 Conflict", "room_owner_conflict"),
+        ] {
+            let (port, daemon) = fake_daemon(vec![
+                Some(http("200 OK", &me_body("member-owner"))),
+                Some(reply),
+                Some(http("200 OK", &preview_body(true, None))),
+            ]);
+            let broker = broker(port, &key);
+            let preview = broker.bootstrap("room", "scout").unwrap();
+            assert_eq!(preview.owner_member_id, "member-owner");
+            assert_eq!(daemon.join().unwrap().len(), 3);
+            assert_eq!(broker.pending.lock().len(), 1);
+        }
+        // A preview naming another owner is refused and freezes nothing.
+        for reply in [
+            refusal("409 Conflict", "room_owner_conflict"),
+            http("201 Created", &bootstrapped(true)),
+        ] {
+            let (port, daemon) = fake_daemon(vec![
+                Some(http("200 OK", &me_body("member-me"))),
+                Some(reply),
+                Some(http("200 OK", &preview_body(true, None))),
+            ]);
+            let broker = broker(port, &key);
+            assert_eq!(
+                broker.bootstrap("room", "scout").unwrap_err(),
+                "room_owner_conflict"
+            );
+            assert_eq!(daemon.join().unwrap().len(), 3);
+            assert!(broker.pending.lock().is_empty());
+        }
+    }
+
+    #[test]
+    fn bootstrap_not_sent_and_unknown_outcomes_are_never_retried() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_file(dir.path(), 0o600);
+        // Lost acknowledgement: unknown, no retry, no preview.
+        let (port, daemon) =
+            fake_daemon(vec![Some(http("200 OK", &me_body("member-owner"))), None]);
+        let broker_a = broker(port, &key);
+        assert_eq!(
+            broker_a.bootstrap("room", "scout").unwrap_err(),
+            "outcome_unknown"
+        );
+        let seen = daemon.join().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert!(seen[1].contains(KEY), "the bootstrap did reach the daemon");
+        assert!(broker_a.pending.lock().is_empty());
+
+        // A bad reply after sending is unknown too.
+        let (port, daemon) = fake_daemon(vec![
+            Some(http("200 OK", &me_body("member-owner"))),
+            Some(http("200 OK", "not json")),
+        ]);
+        assert_eq!(
+            broker(port, &key).bootstrap("room", "scout").unwrap_err(),
+            "outcome_unknown"
+        );
+        assert_eq!(daemon.join().unwrap().len(), 2);
+
+        // A refused credential: only the unprivileged owner read went out.
+        let loose = key_file(dir.path(), 0o644);
+        let (port, daemon) = fake_daemon(vec![Some(http("200 OK", &me_body("member-owner")))]);
+        assert_eq!(
+            broker(port, &loose).bootstrap("room", "scout").unwrap_err(),
+            "operator_credential_not_private"
+        );
+        let seen = daemon.join().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert!(seen[0].starts_with("GET /v1/me ") && !seen[0].contains(KEY));
+
+        // An unreachable daemon, an untrusted URL or invalid ids send nothing.
+        let unreachable = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap().port()
+        };
+        assert_eq!(
+            broker(unreachable, &key)
+                .bootstrap("room", "scout")
+                .unwrap_err(),
+            "daemon_unreachable"
+        );
+        let untrusted =
+            ConsentBroker::new(DaemonTransport::new("http://localhost:4780", key.clone()));
+        assert_eq!(
+            untrusted.bootstrap("room", "scout").unwrap_err(),
+            "consent_unavailable"
+        );
+        let (port, listener) = silent_daemon();
+        for (room, package) in [("a/b", "scout"), ("room", ".."), ("", "scout")] {
+            assert_eq!(
+                broker(port, &key).bootstrap(room, package).unwrap_err(),
+                "invalid_request"
+            );
+        }
+        assert_never_contacted(&listener);
+    }
+
+    #[test]
+    fn bootstrap_answers_only_the_main_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_file(dir.path(), 0o600);
+        let (port, listener) = silent_daemon();
+        let broker_b = broker(port, &key);
+        for label in ["floating", "Main", "", "main-2"] {
+            assert_eq!(
+                bootstrap_from(label, &broker_b, "room", "scout").unwrap_err(),
+                "consent_window_refused",
+                "{label:?}"
+            );
+        }
+        assert_never_contacted(&listener);
+
+        let (port, daemon) = fake_daemon(vec![
+            Some(http("200 OK", &me_body("member-owner"))),
+            Some(http("201 Created", &bootstrapped(true))),
+            Some(http("200 OK", &preview_body(true, None))),
+        ]);
+        let preview = bootstrap_from("main", &broker(port, &key), " room ", " scout ").unwrap();
+        assert_eq!(preview.room, "room");
+        assert_eq!(daemon.join().unwrap().len(), 3);
     }
 }

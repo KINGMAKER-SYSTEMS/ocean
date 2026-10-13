@@ -1370,7 +1370,9 @@ impl Rooms {
 
     /// Add a daemon-owned agent to the open room.
     ///
-    /// Routes on the room's access state: a `Local` room takes the
+    /// Routes on the room's access state: a `Local` room on a native consent
+    /// host goes through the shell's operator-gated bootstrap (owner recorded
+    /// from `/v1/me`, then the consent sheet); on other hosts it takes the
     /// participant path (`POST .../participants`, kind = agent); a
     /// credentialed room registers the agent through the daemon's federation
     /// bridge (`POST .../members/agents`) so the coworkers' rosters see it
@@ -1388,7 +1390,8 @@ impl Rooms {
             return;
         };
         let access_state = self.access.get_untracked().map(|access| access.state);
-        match agent_add_route(access_state) {
+        match agent_add_route(access_state, crate::host::room_consent_supported()) {
+            AgentAddRoute::Bootstrap => self.add_agent_bootstrap(key, agent_id),
             AgentAddRoute::Participant => self.add_agent_local(key, agent_id),
             AgentAddRoute::Register => self.add_agent_federated(key, agent_id),
             AgentAddRoute::Refused => {
@@ -1442,6 +1445,69 @@ impl Rooms {
                     me.refresh_open_transcript(&key, generation_id);
                 }
                 Err(error) => me.status.set(error),
+            }
+        });
+    }
+
+    /// Native Local add: the shell bootstraps the agent with this daemon's
+    /// owner and returns the frozen consent preview, which opens the consent
+    /// sheet. A lost acknowledgement is reported, never retried; the roster
+    /// is re-read because the agent may have joined.
+    fn add_agent_bootstrap(&self, key: String, agent_id: String) {
+        let me = *self;
+        let generation_id = self.generation.get_untracked();
+        self.add_agent_in_flight.set(Some(agent_id.clone()));
+        if let Some(previous) = self.consent.get_untracked() {
+            crate::host::room_consent_cancel(Some(&previous.preview.consent_id));
+        }
+        self.consent.set(None);
+        let ticket = self.consent_ticket.get_untracked().wrapping_add(1);
+        self.consent_ticket.set(ticket);
+        spawn_local(async move {
+            let result = crate::host::room_agent_bootstrap(&key, &agent_id).await;
+            me.add_agent_in_flight.set(None);
+            let Some(result) = result else {
+                return;
+            };
+            let joined =
+                result.is_ok() || matches!(&result, Err(code) if code == "outcome_unknown");
+            if joined {
+                me.fetch_rooms();
+            }
+            let current = me.room_is_current(generation_id, &key);
+            if joined && current {
+                me.refresh_open_room_record(&key, generation_id);
+            }
+            match result {
+                Ok(preview) if current && me.consent_ticket.get_untracked() == ticket => {
+                    me.consent.set(Some(RoomConsentDraft {
+                        preview,
+                        room_generation: generation_id,
+                        busy: false,
+                    }));
+                }
+                Ok(preview) => crate::host::room_consent_cancel(Some(&preview.consent_id)),
+                Err(code) if current => me.status.set(bootstrap_error_text(&code)),
+                Err(_) => {}
+            }
+        });
+    }
+
+    /// Re-read the open room record (roster) without resetting its state.
+    fn refresh_open_room_record(&self, key: &str, generation_id: u64) {
+        let base = self.base();
+        let me = *self;
+        let key = key.to_string();
+        spawn_local(async move {
+            let url = format!("{base}/v1/rooms/persistent/{}", encode(&key));
+            let Ok(resp) = Request::get(&url).send().await else {
+                return;
+            };
+            let Ok(r) = resp.json::<RoomGetResponse>().await else {
+                return;
+            };
+            if r.ok && me.room_is_current(generation_id, &key) {
+                me.open_room.set(r.room);
             }
         });
     }
@@ -3087,7 +3153,10 @@ fn parse_agent_summaries(json: &serde_json::Value) -> Vec<AgentSummary> {
 /// Which daemon route adds an agent to a room in a given access state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AgentAddRoute {
-    /// Local room: `POST .../participants` with `kind: agent`.
+    /// Local room on a native consent host: the shell's operator-gated
+    /// bootstrap records this daemon's owner, then opens the consent sheet.
+    Bootstrap,
+    /// Local room elsewhere: `POST .../participants` with `kind: agent`.
     Participant,
     /// Credentialed room: `POST .../members/agents` (Bedrock registration).
     Register,
@@ -3095,8 +3164,12 @@ pub(crate) enum AgentAddRoute {
     Refused,
 }
 
-pub(crate) fn agent_add_route(state: Option<RoomAccessState>) -> AgentAddRoute {
+pub(crate) fn agent_add_route(
+    state: Option<RoomAccessState>,
+    native_consent: bool,
+) -> AgentAddRoute {
     match state {
+        None | Some(RoomAccessState::Local) if native_consent => AgentAddRoute::Bootstrap,
         None | Some(RoomAccessState::Local) => AgentAddRoute::Participant,
         Some(RoomAccessState::Revoked) => AgentAddRoute::Refused,
         Some(RoomAccessState::Connecting | RoomAccessState::Live | RoomAccessState::Recovering) => {
@@ -3546,6 +3619,27 @@ pub(crate) fn consent_error_text(code: &str) -> String {
         _ => "Ocean could not authorize the agent.",
     }
     .to_string()
+}
+
+/// Page text for a failed native Local bootstrap.
+pub(crate) fn bootstrap_error_text(code: &str) -> String {
+    match code {
+        "room_owner_required" => "Join the room before adding an agent.".to_string(),
+        "local_room_required" => "Only local rooms add agents this way.".to_string(),
+        "room_owner_conflict" => "Another member owns this room's agents.".to_string(),
+        "bootstrap_target_conflict" => "That name is already taken in this room.".to_string(),
+        "agent_package_not_found" => "Ocean could not find that agent folder.".to_string(),
+        "room_not_found" => "That room no longer exists.".to_string(),
+        "owner_unavailable" => "Ocean could not read your identity.".to_string(),
+        "outcome_unknown" | "consent_task_failed" | "invalid_reply" => {
+            "Ocean did not hear back from the daemon.".to_string()
+        }
+        "daemon_unreachable" | "consent_unavailable" | "consent_expired" => {
+            consent_error_text(code)
+        }
+        code if code.starts_with("operator_") => consent_error_text(code),
+        _ => "Ocean could not add the agent.".to_string(),
+    }
 }
 
 /// Build the per-room LiveKit token path, percent-encoding the room key.
@@ -5466,6 +5560,67 @@ mod tests {
         assert!(!rooms.run_is_own("r1"));
 
         assert_eq!(snapshot(&daemon), before);
+    }
+
+    #[test]
+    fn native_local_rooms_bootstrap_and_web_keeps_the_participant_post() {
+        for state in [None, Some(RoomAccessState::Local)] {
+            assert_eq!(agent_add_route(state, true), AgentAddRoute::Bootstrap);
+            assert_eq!(agent_add_route(state, false), AgentAddRoute::Participant);
+        }
+        for native in [true, false] {
+            for state in [
+                RoomAccessState::Connecting,
+                RoomAccessState::Live,
+                RoomAccessState::Recovering,
+            ] {
+                assert_eq!(
+                    agent_add_route(Some(state), native),
+                    AgentAddRoute::Register,
+                    "{state:?}"
+                );
+            }
+            assert_eq!(
+                agent_add_route(Some(RoomAccessState::Revoked), native),
+                AgentAddRoute::Refused
+            );
+        }
+    }
+
+    #[test]
+    fn bootstrap_refusals_read_as_plain_text() {
+        assert_eq!(
+            bootstrap_error_text("room_owner_required"),
+            "Join the room before adding an agent."
+        );
+        assert_eq!(
+            bootstrap_error_text("local_room_required"),
+            "Only local rooms add agents this way."
+        );
+        assert_eq!(
+            bootstrap_error_text("room_owner_conflict"),
+            "Another member owns this room's agents."
+        );
+        assert_eq!(
+            bootstrap_error_text("outcome_unknown"),
+            "Ocean did not hear back from the daemon."
+        );
+        assert_eq!(
+            bootstrap_error_text("operator_credential_not_private"),
+            "The operator credential is unavailable."
+        );
+        assert_eq!(
+            bootstrap_error_text("daemon_unreachable"),
+            "Ocean could not reach the daemon."
+        );
+        assert_eq!(
+            bootstrap_error_text("bootstrap_refused"),
+            "Ocean could not add the agent."
+        );
+        assert_eq!(
+            bootstrap_error_text("Some\nraw daemon text"),
+            "Ocean could not add the agent."
+        );
     }
 
     #[test]
