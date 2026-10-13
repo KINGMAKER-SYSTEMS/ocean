@@ -1508,3 +1508,14 @@ PR H of the room-consent follow-ups (item 5: Local-room invocation). `rooms::inv
 
 Validation: in apps/ocean-surface, cargo fmt --check clean; WASM clippy -D warnings clean; WASM check passes; proxy check passes; WASM test build passes (7 executables); cargo test -p ocean-surface-ui 944 passed (914 unit + 30 integration), including 4 new tests (Local invoker matrix: valid / empty / non-roster / agent / non-Human kinds / no roster, federated caller ignored in Local; Local invoke body uses the identity as invoked_by; refusal text mapping; Local invocation run recognized as own via request_id with run_is_own, Cancel control and menu run, legacy Local run not own) and the federated/other-state matrix extended (page identity ignored for Live/Recovering, valid Local identity never rescues Connecting/Revoked/no access). No served-surface, native or live daemon run claimed.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [22:04] [12-10-26]
+agent: [Codex] [factory coordinator]
+worktree: [codex/issue94-native-custody]
+type: [bug report]
+area: [backend]
+
+Repair native consent custody from issue #94: authorize and revoke share bounded tracked decisions, confirmation queues an intent, and the blocking worker atomically validates ownership and TTL before dispatch. Cancellation received before that native claim prevents transmission; cancellation after the claim cannot retract I/O and cannot restore retry state. A native epoch captured before queued preview/bootstrap work fences late consent insertion. Unknown outcomes retain explicit reconfirmed same-decision retry.
+
+Validation: one isolated Mac mini cargo test --locked --lib room_consent::tests run passed 29/29 tests, including seven new interleaving regressions; compile2m29s, tests0.04s. Rustfmt and diff checks pass. Independent candidate source review found no actionable issue. The owning Surface contract now states the precise native boundary; root and child indexes remain unchanged because repository structure is unchanged. Final-head review and required hosted checks still follow this receipt. UI navigation acknowledgement, unmount cleanup, compact controls, bootstrap rollback and actual served acceptance remain outside this repair; issue #94 stays open. No merge, deployment or live outcome claimed; maintainer approval under #90 remains required.
