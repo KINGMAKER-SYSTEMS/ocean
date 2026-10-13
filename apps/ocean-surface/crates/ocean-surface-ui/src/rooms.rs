@@ -1828,15 +1828,21 @@ impl Rooms {
     }
 
     /// Invoke an active agent exactly once from a committed message authored
-    /// by the daemon-projected caller. A lost acknowledgement stays `Unknown`
-    /// and is never retried. No decision token is sent: since #68 the daemon
+    /// by the daemon-projected caller ([`invoke_caller`]: the `/v1/me` owner on
+    /// a Local roster, the credential caller in a Live/Recovering room). A
+    /// lost acknowledgement stays `Unknown` and is never retried; a refusal
+    /// shows [`invocation_error_text`] inline. No decision token is sent: since #68 the daemon
     /// binds Room-turn permission waiters to its own per-run token, and Room
     /// approvals go only through the operator-gated run permission route.
     pub fn invoke_agent(&self, agent_member_id: String, message_seq: u64) {
         let Some(key) = self.open_key.get_untracked() else {
             return;
         };
-        let Some(caller) = invoke_caller(self.access.get_untracked().as_ref()) else {
+        let Some(caller) = invoke_caller(
+            self.access.get_untracked().as_ref(),
+            self.open_room.get_untracked().as_ref(),
+            self.identity_id.get_untracked(),
+        ) else {
             return;
         };
         let transcript = self.transcript.get_untracked();
@@ -1898,6 +1904,9 @@ impl Rooms {
             };
             if !me.room_is_current(generation_id, &key) {
                 return;
+            }
+            if let InvocationState::Refused(code) = &state {
+                me.status.set(invocation_error_text(code));
             }
             me.invocations.update(|list| {
                 if let Some(entry) = list
@@ -3565,7 +3574,8 @@ pub struct RoomInvocation {
     pub room_generation: u64,
     pub agent_member_id: String,
     /// Package id of the invoked binding. A federated room's daemon records
-    /// it as the run's `agent_id`.
+    /// it as the run's `agent_id`; a Local room records the agent participant
+    /// id instead, so Local runs match only through `request_id`.
     pub agent_package_id: String,
     pub message_seq: u64,
     pub state: InvocationState,
@@ -3595,7 +3605,9 @@ pub(crate) fn invoke_body(caller: &str, message_seq: u64) -> serde_json::Value {
 ///   == `run.agent_id`. Room agents keep one session per (room, agent), so an
 ///   explicit invocation and a mention-convened turn on the same message can
 ///   share session and seq: if any other run in `runs` shares them, nothing
-///   distinguishes the two and neither matches.
+///   distinguishes the two and neither matches. Local runs record the agent
+///   participant id as `agent_id`, so a Local run without a request id (a
+///   daemon before #93) never matches: it fails closed to "not yours".
 ///
 /// The result is display-only. It never grants a decision: Room approvals stay
 /// on the operator-gated run permission route for every card.
@@ -3742,24 +3754,73 @@ impl RunCancels {
     }
 }
 
-/// Authoritative invoking Human: only the daemon credential's caller in a
-/// Live/Recovering room, and only when it names a projected User. Browser
-/// identity is never authority, so Local rooms have no invoker until the
-/// daemon projects a Human identity there.
-pub(crate) fn invoke_caller(access: Option<&RoomAccessProjection>) -> Option<String> {
+/// Authoritative invoking Human, from daemon projections only:
+///
+/// - Local: the daemon owner identity (`GET /v1/me` `participant_id`,
+///   [`Rooms::identity_id`]) when it is non-empty and names a Human
+///   participant on the open room's roster. The daemon requires `invoked_by`
+///   to be a non-agent roster member who authored the message.
+/// - Live/Recovering: the daemon credential's `caller_member_id`, only when
+///   it names a projected User.
+/// - Any other state (or no open room): none.
+///
+/// Browser-supplied identity is never authority.
+pub(crate) fn invoke_caller(
+    access: Option<&RoomAccessProjection>,
+    room: Option<&Room>,
+    identity_id: &str,
+) -> Option<String> {
     let access = access?;
-    if !matches!(
-        access.state,
-        RoomAccessState::Live | RoomAccessState::Recovering
-    ) {
-        return None;
+    match access.state {
+        RoomAccessState::Local => {
+            if identity_id.is_empty() {
+                return None;
+            }
+            room?
+                .participants
+                .iter()
+                .any(|p| p.id == identity_id && p.kind == RoomParticipantKind::Human)
+                .then(|| identity_id.to_string())
+        }
+        RoomAccessState::Live | RoomAccessState::Recovering => {
+            let caller = access.caller_member_id.as_deref()?;
+            access
+                .members
+                .iter()
+                .any(|m| m.member_id == caller && m.actor_type == FederatedActorType::User)
+                .then(|| caller.to_string())
+        }
+        RoomAccessState::Connecting | RoomAccessState::Revoked => None,
     }
-    let caller = access.caller_member_id.as_deref()?;
-    access
-        .members
-        .iter()
-        .any(|m| m.member_id == caller && m.actor_type == FederatedActorType::User)
-        .then(|| caller.to_string())
+}
+
+/// Page text for a refused invocation. Codes come from the daemon's invoke
+/// route (`room_agent_invoke` and the admission/turn-start gates behind it)
+/// or this page's own `invoke_refused`/`invalid_request`.
+pub(crate) fn invocation_error_text(code: &str) -> String {
+    match code {
+        "workspace_unavailable" => "This room has no workspace folder for the agent.",
+        "agent_binding_required" | "agent_binding_not_found" => {
+            "This agent is not authorized in this room."
+        }
+        "binding_revoked" => "This agent's authorization was revoked.",
+        "binding_suspended" => "This agent is suspended in this room.",
+        "binding_stale" => "The agent changed since it was authorized.",
+        "binding_inactive" | "agent_binding_package_mismatch" => {
+            "This agent's authorization is not active."
+        }
+        "room_owner_required" => "The agent's owner is no longer in this room.",
+        "invoke_membership_required" => "Only room members can invoke an agent.",
+        "invoke_author_mismatch" => "You can only invoke an agent on your own message.",
+        "invoke_message_not_found" => "That message is no longer in this room.",
+        "room_not_found" => "This room is closed.",
+        "activation_policy_refused" => "This agent does not accept explicit invocations.",
+        "credential_slot_missing" => "This agent needs a credential this Ocean does not have.",
+        "room_turn_capacity" => "Ocean is busy. Try again shortly.",
+        code if code.starts_with("agent_package_") => "Ocean could not load that agent folder.",
+        _ => "Ocean could not invoke the agent.",
+    }
+    .to_string()
 }
 
 /// A committed, confirmed message authored by `caller` as a Human.
@@ -5632,21 +5693,39 @@ mod tests {
 
     #[test]
     fn only_the_daemon_projected_human_caller_may_invoke() {
+        let room = local_room();
+        // Federated: the credential caller, whatever the page identity says.
         let live = consent_access(RoomAccessState::Live, Some("human-a"));
-        assert_eq!(invoke_caller(Some(&live)).as_deref(), Some("human-a"));
+        for identity in ["", "local-human", "human-b"] {
+            assert_eq!(
+                invoke_caller(Some(&live), Some(&room), identity).as_deref(),
+                Some("human-a")
+            );
+            assert_eq!(
+                invoke_caller(Some(&live), None, identity).as_deref(),
+                Some("human-a")
+            );
+        }
         let recovering = consent_access(RoomAccessState::Recovering, Some("human-a"));
-        assert_eq!(invoke_caller(Some(&recovering)).as_deref(), Some("human-a"));
+        assert_eq!(
+            invoke_caller(Some(&recovering), Some(&room), "").as_deref(),
+            Some("human-a")
+        );
         for access in [
-            consent_access(RoomAccessState::Local, Some("human-a")),
             consent_access(RoomAccessState::Connecting, Some("human-a")),
             consent_access(RoomAccessState::Revoked, Some("human-a")),
             consent_access(RoomAccessState::Live, None),
             consent_access(RoomAccessState::Live, Some("agent-x")),
             consent_access(RoomAccessState::Live, Some("stranger")),
         ] {
-            assert_eq!(invoke_caller(Some(&access)), None, "{access:?}");
+            // A valid Local identity never rescues another state.
+            assert_eq!(
+                invoke_caller(Some(&access), Some(&room), "local-human"),
+                None,
+                "{access:?}"
+            );
         }
-        assert_eq!(invoke_caller(None), None);
+        assert_eq!(invoke_caller(None, Some(&room), "local-human"), None);
 
         assert!(message_invocable(
             &consent_message(4, "human-a", RoomParticipantKind::Human),
@@ -5696,6 +5775,154 @@ mod tests {
         assert_eq!(
             invocation_state_from(500, &serde_json::json!({})),
             InvocationState::Refused("invoke_refused".into())
+        );
+    }
+
+    #[test]
+    fn local_invoker_is_the_daemon_identity_on_the_human_roster() {
+        let room = local_room();
+        // A projected federated caller is ignored in a Local room.
+        let local = consent_access(RoomAccessState::Local, Some("human-a"));
+        assert_eq!(
+            invoke_caller(Some(&local), Some(&room), "local-human").as_deref(),
+            Some("local-human")
+        );
+        for identity in ["", "stranger", "local-agent", "human-a"] {
+            assert_eq!(
+                invoke_caller(Some(&local), Some(&room), identity),
+                None,
+                "{identity:?}"
+            );
+        }
+        // No roster loaded yet: no invoker.
+        assert_eq!(invoke_caller(Some(&local), None, "local-human"), None);
+        // Bot/tool/system participants are not Humans.
+        let mut others = local_room();
+        for kind in [
+            RoomParticipantKind::Bot,
+            RoomParticipantKind::Tool,
+            RoomParticipantKind::System,
+        ] {
+            others.participants[1].kind = kind;
+            assert_eq!(
+                invoke_caller(Some(&local), Some(&others), "local-human"),
+                None,
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn local_invoke_body_uses_the_daemon_identity_as_invoked_by() {
+        let room = local_room();
+        let local = consent_access(RoomAccessState::Local, None);
+        let caller = invoke_caller(Some(&local), Some(&room), "local-human").unwrap();
+        assert!(message_invocable(
+            &consent_message(9, "local-human", RoomParticipantKind::Human),
+            &caller
+        ));
+        assert!(!message_invocable(
+            &consent_message(9, "local-agent", RoomParticipantKind::Agent),
+            &caller
+        ));
+        assert_eq!(
+            invoke_body(&caller, 9),
+            serde_json::json!({"invoked_by": "local-human", "message_seq": 9})
+        );
+    }
+
+    #[test]
+    fn invocation_refusals_read_as_plain_text() {
+        for (code, text) in [
+            (
+                "workspace_unavailable",
+                "This room has no workspace folder for the agent.",
+            ),
+            (
+                "agent_binding_required",
+                "This agent is not authorized in this room.",
+            ),
+            (
+                "agent_binding_not_found",
+                "This agent is not authorized in this room.",
+            ),
+            ("binding_revoked", "This agent's authorization was revoked."),
+            (
+                "binding_stale",
+                "The agent changed since it was authorized.",
+            ),
+            (
+                "room_owner_required",
+                "The agent's owner is no longer in this room.",
+            ),
+            (
+                "invoke_membership_required",
+                "Only room members can invoke an agent.",
+            ),
+            (
+                "invoke_author_mismatch",
+                "You can only invoke an agent on your own message.",
+            ),
+            (
+                "invoke_message_not_found",
+                "That message is no longer in this room.",
+            ),
+            ("room_not_found", "This room is closed."),
+            ("room_turn_capacity", "Ocean is busy. Try again shortly."),
+            (
+                "agent_package_unavailable",
+                "Ocean could not load that agent folder.",
+            ),
+            ("invoke_refused", "Ocean could not invoke the agent."),
+            ("invalid_request", "Ocean could not invoke the agent."),
+            ("Some\nraw daemon text", "Ocean could not invoke the agent."),
+        ] {
+            assert_eq!(invocation_error_text(code), text, "{code}");
+        }
+    }
+
+    #[test]
+    fn local_invocation_run_is_own_by_request_id_and_gets_cancel() {
+        let owner = Owner::new();
+        owner.set();
+        // Local: the binding's member id is the agent participant id, and the
+        // daemon records that participant id (not the package id) as the
+        // run's `agent_id`.
+        let local_invocation = invocation("local-agent", 9, acked("req-l", "sess-l"));
+        assert_eq!(local_invocation.agent_package_id, "scout");
+        let mut run = own_run("rl", "sess-l", 9, Some("req-l"));
+        run.agent_id = "local-agent".into();
+        let invocations = vec![local_invocation.clone()];
+        assert_eq!(
+            own_match(&invocations, &[run.clone()], &run),
+            Some(&local_invocation)
+        );
+        assert_eq!(
+            own_run_cancel_target(&invocations, &[run.clone()], &run, "room-1", 7).as_deref(),
+            Some("req-l")
+        );
+        let rooms = cancel_rooms(invocations.clone(), vec![run.clone()]);
+        assert!(rooms.run_is_own("rl"));
+        assert_eq!(
+            rooms.own_run_cancel("rl"),
+            Some(OwnRunCancel {
+                request_id: "req-l".into(),
+                in_flight: false,
+                error: None,
+            })
+        );
+        assert_eq!(
+            rooms.invocation_run("local-agent", 9).map(|r| r.run_id),
+            Some("rl".into())
+        );
+        // Without a request id the package-id fallback cannot match a Local
+        // run: it fails closed.
+        let mut legacy = own_run("legacy", "sess-l", 9, None);
+        legacy.agent_id = "local-agent".into();
+        assert_eq!(own_match(&invocations, &[legacy.clone()], &legacy), None);
+        assert_eq!(
+            own_run_cancel_target(&invocations, &[legacy.clone()], &legacy, "room-1", 7),
+            None
         );
     }
 
