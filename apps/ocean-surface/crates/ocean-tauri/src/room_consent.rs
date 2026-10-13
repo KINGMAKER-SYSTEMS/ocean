@@ -42,6 +42,10 @@ const MAX_PENDING: usize = 4;
 const CONSENT_TTL: Duration = Duration::from_secs(120);
 const MAX_REPLY_BYTES: usize = 256 * 1024;
 const MAX_ID_CHARS: usize = 512;
+/// Longest page- or package-supplied label shown in a native dialog.
+const MAX_DIALOG_LABEL_CHARS: usize = 128;
+/// Longest capability line shown in the authorize dialog.
+const MAX_DIALOG_CAPS_CHARS: usize = 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const IO_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -133,17 +137,31 @@ pub(crate) struct Frozen {
 }
 
 impl Frozen {
-    /// Text for the native confirmation dialog: what, where, which digest.
+    /// Text for the native confirmation dialog. Every line comes from the
+    /// natively frozen preview, never page input: which agent (package, member
+    /// id, owner), where, what it asks for and the exact digest. The display
+    /// name is a label only and is sanitized; ids are already dialog-safe.
     pub(crate) fn dialog_text(&self) -> (String, String, &'static str) {
         let action = match self.mode {
             ConsentMode::Authorize => "Authorize",
             ConsentMode::Reauthorize => "Reauthorize",
         };
-        (
-            self.display_name.clone(),
-            format!("{}\n{}", self.room, self.digest),
-            action,
-        )
+        let title = dialog_label(&self.display_name, MAX_DIALOG_LABEL_CHARS);
+        let title = if title.is_empty() {
+            self.package_id.clone()
+        } else {
+            title
+        };
+        let message = format!(
+            "Room: {}\nPackage: {}\nAgent id: {}\nOwner: {}\nCapabilities: {}\nDigest: {}",
+            self.room,
+            self.package_id,
+            self.agent_member_id,
+            self.owner_member_id,
+            capability_line(&self.requested),
+            self.digest,
+        );
+        (title, message, action)
     }
 
     fn intent(&self) -> Intent {
@@ -290,6 +308,72 @@ fn encode_segment(raw: &str) -> String {
         }
     }
     out
+}
+
+// ── native dialog text ──────────────────────────────────────────────────
+
+/// Characters that can forge or reorder dialog lines: C0/C1 controls
+/// (including CR/LF and tab), Unicode line/paragraph separators, bidi
+/// embeddings/overrides/isolates, zero-width and other invisible formatting.
+fn dialog_unsafe(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{00AD}'
+                | '\u{061C}'
+                | '\u{180E}'
+                | '\u{200B}'..='\u{200F}'
+                | '\u{2028}'..='\u{202E}'
+                | '\u{2060}'..='\u{206F}'
+                | '\u{FEFF}'
+                | '\u{FFF9}'..='\u{FFFB}'
+        )
+}
+
+/// A label for a native dialog: unsafe characters removed, whitespace
+/// trimmed, at most `max` characters (an ellipsis marks truncation).
+fn dialog_label(raw: &str, max: usize) -> String {
+    let clean: String = raw.chars().filter(|c| !dialog_unsafe(*c)).collect();
+    let clean = clean.trim();
+    if clean.chars().count() <= max {
+        return clean.to_string();
+    }
+    let mut out: String = clean.chars().take(max.saturating_sub(1)).collect();
+    out.push('\u{2026}');
+    out
+}
+
+fn capability_line(requested: &[String]) -> String {
+    if requested.is_empty() {
+        return "none".into();
+    }
+    let mut line = String::new();
+    for (shown, cap) in requested.iter().enumerate() {
+        let next = if line.is_empty() {
+            cap.clone()
+        } else {
+            format!(", {cap}")
+        };
+        if line.chars().count() + next.chars().count() > MAX_DIALOG_CAPS_CHARS {
+            line.push_str(&format!(" (+{} more)", requested.len() - shown));
+            return line;
+        }
+        line.push_str(&next);
+    }
+    line
+}
+
+/// Native revoke confirmation. The room and agent member id are the exact
+/// values the revoke request will carry (both already validated dialog-safe);
+/// the page-supplied display name is a sanitized label only.
+fn revoke_dialog_text(room: &str, agent_member_id: &str, display_name: &str) -> (String, String) {
+    let label = dialog_label(display_name, MAX_DIALOG_LABEL_CHARS);
+    let title = if label.is_empty() {
+        "Revoke agent".to_string()
+    } else {
+        format!("Revoke {label}")
+    };
+    (title, format!("Room: {room}\nAgent id: {agent_member_id}"))
 }
 
 // ── endpoint and credential custody ─────────────────────────────────────
@@ -501,11 +585,17 @@ fn parse_reply(raw: &[u8]) -> Result<Reply, SendError> {
             if size == 0 {
                 break;
             }
-            if payload.len() < size + 2 || out.len() + size > MAX_REPLY_BYTES {
+            // A hostile size must not overflow or slice out of bounds.
+            if size > MAX_REPLY_BYTES.saturating_sub(out.len()) {
                 return Err(BAD);
             }
-            out.extend_from_slice(&payload[..size]);
-            payload = &payload[size + 2..];
+            let framed = size.checked_add(2).ok_or(BAD)?;
+            let (chunk, rest) = payload.split_at_checked(framed).ok_or(BAD)?;
+            if &chunk[size..] != b"\r\n" {
+                return Err(BAD);
+            }
+            out.extend_from_slice(&chunk[..size]);
+            payload = rest;
         }
         out
     } else if let Some(length) = length {
@@ -539,10 +629,15 @@ fn valid_key(raw: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
 }
 
+/// A member id the shell will send and show verbatim: non-empty, bounded,
+/// untrimmed-equal and free of characters that could forge dialog lines.
 fn bounded_id(value: Option<&Value>) -> Option<String> {
     let text = value?.as_str()?;
-    (!text.trim().is_empty() && text.chars().count() <= MAX_ID_CHARS && text.trim() == text)
-        .then(|| text.to_string())
+    (!text.trim().is_empty()
+        && text.chars().count() <= MAX_ID_CHARS
+        && text.trim() == text
+        && !text.chars().any(dialog_unsafe))
+    .then(|| text.to_string())
 }
 
 fn valid_digest(raw: &str) -> bool {
@@ -603,7 +698,7 @@ fn freeze_preview(
             .iter()
             .map(|item| {
                 item.as_str()
-                    .filter(|s| !s.is_empty() && s.len() <= 128)
+                    .filter(|s| !s.is_empty() && s.len() <= 128 && !s.chars().any(dialog_unsafe))
                     .map(str::to_string)
                     .ok_or(BAD)
             })
@@ -706,9 +801,11 @@ impl ConsentBroker {
         self.endpoint.ok_or("consent_unavailable")
     }
 
+    /// Expire idle and still-confirming consents past the TTL. A consent
+    /// already sending keeps its slot until its outcome settles.
     fn prune(&self, entries: &mut Vec<Entry>) {
         let ttl = self.ttl;
-        entries.retain(|e| e.phase != Phase::Ready || e.created.elapsed() < ttl);
+        entries.retain(|e| e.phase == Phase::Sending || e.created.elapsed() < ttl);
     }
 
     /// Fetch and freeze the authoritative preview for `package_id` in `room`.
@@ -778,9 +875,10 @@ impl ConsentBroker {
         Ok(entry.frozen.clone())
     }
 
-    /// Settle the native confirmation. Only a still-claimed, confirmed consent
-    /// proceeds; a declined one is discarded. Either way an invalidation that
-    /// raced the dialog wins and nothing is sent.
+    /// Settle the native confirmation. Only a still-claimed, confirmed,
+    /// unexpired consent proceeds; a declined one is discarded. An
+    /// invalidation that raced the dialog, or a dialog left open past the TTL,
+    /// wins and nothing is sent.
     pub(crate) fn finish_confirm(
         &self,
         consent_id: &str,
@@ -793,6 +891,10 @@ impl ConsentBroker {
         else {
             return Err("consent_invalidated".into());
         };
+        if entries[index].created.elapsed() >= self.ttl {
+            entries.remove(index);
+            return Err("consent_expired".into());
+        }
         if !confirmed {
             entries.remove(index);
             return Ok(None);
@@ -1001,16 +1103,11 @@ pub(crate) async fn room_agent_revoke(
     main_window(&window)?;
     let room = room.trim().to_string();
     let agent = agent_member_id.trim().to_string();
-    if !valid_key(&room) || agent.is_empty() || agent.chars().count() > MAX_ID_CHARS {
+    if !valid_key(&room) || bounded_id(Some(&Value::String(agent.clone()))).is_none() {
         return Err("invalid_request".into());
     }
-    let title: String = display_name.chars().take(128).collect();
-    let title = if title.trim().is_empty() {
-        agent.clone()
-    } else {
-        title
-    };
-    if !native_confirm(&app, title, room.clone(), "Revoke", true).await {
+    let (title, message) = revoke_dialog_text(&room, &agent, &display_name);
+    if !native_confirm(&app, title, message, "Revoke", true).await {
         return Ok(ConsentOutcome::declined());
     }
     let broker = state.0.clone();
@@ -1477,5 +1574,169 @@ mod tests {
         .is_err());
         assert!(parse_reply(b"HTTP/1.1 200 OK\r\ntransfer-encoding: gzip\r\n\r\n{}").is_err());
         assert!(parse_reply(b"SSH-2.0 200\r\n\r\n{}").is_err());
+    }
+
+    #[test]
+    fn a_dialog_left_open_past_the_ttl_sends_nothing_and_confirming_entries_expire() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_file(dir.path(), 0o600);
+        let (port, daemon) = fake_daemon(vec![
+            Some(http("200 OK", &preview_body(true, None))),
+            Some(http("200 OK", &preview_body(true, None))),
+        ]);
+        let mut broker = broker(port, &key);
+        let a = broker.preview("room", "scout").unwrap();
+        broker.begin_confirm(&a.consent_id).unwrap();
+        // The operator confirms only after the frozen preview expired.
+        broker.ttl = Duration::ZERO;
+        assert_eq!(
+            broker.finish_confirm(&a.consent_id, true).unwrap_err(),
+            "consent_expired"
+        );
+        assert!(broker.pending.lock().is_empty(), "expired consent removed");
+
+        // A consent stuck in Confirming past the TTL is pruned too.
+        broker.ttl = CONSENT_TTL;
+        let b = broker.preview("room", "scout").unwrap();
+        broker.begin_confirm(&b.consent_id).unwrap();
+        broker.ttl = Duration::ZERO;
+        broker.prune(&mut broker.pending.lock());
+        assert!(
+            broker.pending.lock().is_empty(),
+            "confirming consent pruned"
+        );
+        assert_eq!(
+            broker.finish_confirm(&b.consent_id, true).unwrap_err(),
+            "consent_invalidated"
+        );
+        // Only the two unprivileged previews ever reached the daemon.
+        let seen = daemon.join().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert!(seen
+            .iter()
+            .all(|r| r.starts_with("GET ") && !r.contains(KEY)));
+    }
+
+    #[test]
+    fn revoke_dialog_names_the_exact_agent_and_sanitizes_the_page_label() {
+        let (title, message) = revoke_dialog_text(
+            "team.room",
+            "agent-scout-1",
+            "Scout\nAgent id: agent-other\r\u{2028}\u{202E}\u{200B}\t",
+        );
+        assert_eq!(title, "Revoke ScoutAgent id: agent-other");
+        assert_eq!(message, "Room: team.room\nAgent id: agent-scout-1");
+        let (title, _) = revoke_dialog_text("room", "agent-1", " \n\u{7}");
+        assert_eq!(title, "Revoke agent");
+        let (title, _) = revoke_dialog_text("room", "agent-1", &"x".repeat(1000));
+        assert_eq!(
+            title.chars().count(),
+            "Revoke ".len() + MAX_DIALOG_LABEL_CHARS
+        );
+        assert!(title.ends_with('\u{2026}'));
+
+        // An agent id that would forge dialog lines is refused unsent.
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_file(dir.path(), 0o600);
+        let (port, listener) = silent_daemon();
+        for agent in ["agent\nRoom: other", "agent\u{202E}x", "agent\u{2028}"] {
+            assert_eq!(
+                broker(port, &key).revoke("room", agent).code.as_deref(),
+                Some("invalid_request"),
+                "{agent:?}"
+            );
+        }
+        assert_never_contacted(&listener);
+    }
+
+    #[test]
+    fn authorize_dialog_shows_frozen_package_agent_owner_and_capabilities() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_file(dir.path(), 0o600);
+        let body = preview_body(true, None)
+            .replace("\"Scout\"", "\"Scout\\nOwner: someone-else\"")
+            .replace("[\"read\"]", "[\"read\",\"write\"]");
+        let (port, daemon) = fake_daemon(vec![Some(http("200 OK", &body))]);
+        let broker = broker(port, &key);
+        let preview = broker.preview("team.room", "scout").unwrap();
+        daemon.join().unwrap();
+        let frozen = broker.begin_confirm(&preview.consent_id).unwrap();
+        let (title, message, action) = frozen.dialog_text();
+        assert_eq!(action, "Authorize");
+        assert_eq!(title, "ScoutOwner: someone-else");
+        assert_eq!(
+            message,
+            format!(
+                "Room: team.room\nPackage: scout\nAgent id: agent-scout-1\nOwner: member-owner\nCapabilities: read, write\nDigest: {DIGEST}"
+            )
+        );
+
+        // Ids or capabilities that could forge dialog lines are not frozen.
+        for (body, code) in [
+            (
+                preview_body(true, None).replace("agent-scout-1", "agent\\nOwner: x"),
+                "owner_not_eligible",
+            ),
+            (
+                preview_body(true, None).replace("member-owner", "member\\u202Eowner"),
+                "owner_not_eligible",
+            ),
+            (
+                preview_body(true, None).replace("[\"read\"]", "[\"read\\nwrite\"]"),
+                "invalid_preview",
+            ),
+        ] {
+            let (port, daemon) = fake_daemon(vec![Some(http("200 OK", &body))]);
+            assert_eq!(
+                super::tests::broker(port, &key)
+                    .preview("room", "scout")
+                    .unwrap_err(),
+                code
+            );
+            daemon.join().unwrap();
+        }
+        let many: Vec<String> = (0..128).map(|i| format!("capability-{i:03}")).collect();
+        let line = capability_line(&many);
+        assert!(line.chars().count() < MAX_DIALOG_CAPS_CHARS + 32);
+        assert!(line.ends_with("more)"));
+        assert_eq!(capability_line(&[]), "none");
+    }
+
+    #[test]
+    fn hostile_chunk_sizes_are_bad_replies_and_free_the_slot() {
+        for raw in [
+            &b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\nffffffffffffffff\r\n{}\r\n0\r\n\r\n"[..],
+            b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\nfffffffffffffffe\r\n{}\r\n0\r\n\r\n",
+            b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n2\r\n{}XX0\r\n\r\n",
+            b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n40001\r\n{}\r\n0\r\n\r\n",
+        ] {
+            assert_eq!(
+                parse_reply(raw).err(),
+                Some(SendError::BadReply("invalid_reply"))
+            );
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_file(dir.path(), 0o600);
+        let hostile = "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\nffffffffffffffff\r\n{}\r\n0\r\n\r\n";
+        let (port, daemon) = fake_daemon(vec![
+            Some(http("200 OK", &preview_body(true, None))),
+            Some(hostile.to_string()),
+        ]);
+        let broker = broker(port, &key);
+        let preview = broker.preview("room", "scout").unwrap();
+        broker.begin_confirm(&preview.consent_id).unwrap();
+        let frozen = broker
+            .finish_confirm(&preview.consent_id, true)
+            .unwrap()
+            .unwrap();
+        let outcome = broker.send_decision(&preview.consent_id, &frozen);
+        assert_eq!(daemon.join().unwrap().len(), 2);
+        assert_eq!(outcome.state, OutcomeState::Unknown);
+        assert_eq!(outcome.code.as_deref(), Some("invalid_reply"));
+        // The slot is not stuck in Sending: an explicit retry can re-confirm
+        // the same decision.
+        let retry = broker.begin_confirm(&preview.consent_id).unwrap();
+        assert_eq!(retry.decision_id, frozen.decision_id);
     }
 }

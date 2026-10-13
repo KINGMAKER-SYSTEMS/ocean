@@ -36,12 +36,24 @@ fn binding_for(bindings: &[RoomAgentBinding], member_id: &str) -> Option<RoomAge
         .cloned()
 }
 
-/// Picker entries: agents not already in the room. Unresolvable folders stay
-/// listed (rendered disabled) so the operator can see why they are missing.
-fn addable_agents(available: Vec<AgentSummary>, present: &[String]) -> Vec<AgentSummary> {
+/// Picker entries: agents not already in the room. Local participants carry
+/// the agent folder name, but federated rosters project daemon member ids, so
+/// agents with a live (non-revoked) binding are hidden by package id too.
+/// Unresolvable folders stay listed (rendered disabled) so the operator can
+/// see why they are missing.
+fn addable_agents(
+    available: Vec<AgentSummary>,
+    present: &[String],
+    bindings: &[RoomAgentBinding],
+) -> Vec<AgentSummary> {
     available
         .into_iter()
-        .filter(|agent| !present.contains(&agent.name))
+        .filter(|agent| {
+            !present.contains(&agent.name)
+                && !bindings
+                    .iter()
+                    .any(|b| b.status != "revoked" && b.agent_package_id == agent.name)
+        })
         .collect()
 }
 
@@ -54,6 +66,7 @@ pub(super) fn AddAgentPicker(rooms: Rooms) -> impl IntoView {
         <button
             class="rooms-workspace__addagent"
             type="button"
+            title="Add an agent participant"
             aria-controls="rooms-workspace-agent-picker"
             aria-expanded=move || open.get().to_string()
             on:click=move |_| open.update(|v| *v = !*v)
@@ -65,7 +78,7 @@ pub(super) fn AddAgentPicker(rooms: Rooms) -> impl IntoView {
                 <div id="rooms-workspace-agent-picker" class="rooms-workspace__addagent-picker">
                     <select
                         class="rooms-workspace__addagent-select"
-                        aria-label="Agent"
+                        aria-label="Choose an agent to add"
                         on:change=move |ev| {
                             let val = event_target_value(&ev);
                             if !val.is_empty() {
@@ -74,7 +87,7 @@ pub(super) fn AddAgentPicker(rooms: Rooms) -> impl IntoView {
                             }
                         }
                     >
-                        <option value="" selected=true>"Agent"</option>
+                        <option value="" selected=true>"-- pick an agent --"</option>
                         <For
                             each=move || {
                                 let present: Vec<String> = rooms
@@ -82,7 +95,11 @@ pub(super) fn AddAgentPicker(rooms: Rooms) -> impl IntoView {
                                     .get()
                                     .map(|r| r.participants.into_iter().map(|p| p.id).collect())
                                     .unwrap_or_default();
-                                addable_agents(rooms.available_agents.get(), &present)
+                                addable_agents(
+                                    rooms.available_agents.get(),
+                                    &present,
+                                    &rooms.agent_bindings.get(),
+                                )
                             }
                             key=|agent: &AgentSummary| agent.name.clone()
                             children=move |agent: AgentSummary| {
@@ -342,10 +359,34 @@ mod tests {
             agent("flux", None),
             agent("broken", Some("unresolved")),
         ];
-        let names: Vec<String> = addable_agents(available, &["scout".into()])
+        let names: Vec<String> = addable_agents(available.clone(), &["scout".into()], &[])
             .into_iter()
             .map(|a| a.name)
             .collect();
+        assert_eq!(names, ["flux", "broken"]);
+
+        // Federated rosters carry daemon member ids, not folder names: a
+        // bound agent is hidden by its binding's package id; a revoked one
+        // can be added again.
+        let binding = |package: &str, status: &str| RoomAgentBinding {
+            agent_member_id: format!("agent-{package}-1"),
+            agent_package_id: package.into(),
+            agent_definition_digest: String::new(),
+            display_name: package.into(),
+            owner_member_id: "human-a".into(),
+            status: status.into(),
+            generation: "1".into(),
+            owner_eligible: true,
+        };
+        let present = vec!["agent-scout-1".to_string(), "agent-flux-1".to_string()];
+        let names: Vec<String> = addable_agents(
+            available,
+            &present,
+            &[binding("scout", "active"), binding("flux", "revoked")],
+        )
+        .into_iter()
+        .map(|a| a.name)
+        .collect();
         assert_eq!(names, ["flux", "broken"]);
     }
 }

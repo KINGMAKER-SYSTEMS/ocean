@@ -502,27 +502,41 @@ Web surface session UI:
   package, agent, owner, digest, policies and a fresh UUIDv4 decision id; the
   page gets a projection and an opaque consent id, never a digest it can
   supply. At most 4 consents live for 120 s; a newer preview supersedes an
-  idle one for the same agent.
+  idle one for the same agent. The TTL covers the dialog too: idle and
+  confirming consents are pruned past it, and a confirmation settled after it
+  is refused (`consent_expired`) and sends nothing; only an in-flight send
+  keeps its slot.
 - Authorize/reauthorize require a native dialog (`tauri-plugin-dialog`, Rust
   side; the webview gains no dialog permission) and always send the frozen
-  non-null `expected_definition_digest`. Decline, cancel, expiry, navigation
+  non-null `expected_definition_digest`. The authorize dialog shows only
+  frozen preview values: room, package id, agent member id, owner, requested
+  capabilities and digest. Decline, cancel, expiry, navigation
   invalidation (`room_consent_cancel(None)` from the shared room reset) or an
   invalidation racing the dialog sends zero privileged requests. A definitive
   reply consumes the consent; a lost acknowledgement is `unknown`, is never
   retried automatically, and an explicit re-confirmed retry replays the same
-  decision id. Revoke is natively confirmed with a fresh decision id.
+  decision id. Revoke is natively confirmed with a fresh decision id; its
+  dialog names the exact room and `agent_member_id` being revoked.
+- Native dialog text: member ids and capabilities containing controls,
+  line/paragraph separators, bidi or invisible formatting characters are
+  refused (preview `owner_not_eligible`/`invalid_preview`, revoke
+  `invalid_request`) so they are shown verbatim; display names are labels
+  only, stripped of those characters and capped at 128 characters.
 - Consent transport: raw HTTP/1.1 to a numeric-loopback `OCEAN_DAEMON_URL`
   only (hostnames, `localhost`, userinfo, TLS, paths refused); fixed typed
   intents; no Origin/Cookie, redirects refused, replies bounded to 256 KiB
   JSON objects. The key is read per request through `O_NOFOLLOW`, must be the
   inspected regular file owned by the effective uid with no group/other bits
-  and a header-safe token, and never reaches JS, errors or logs. Consent
+  and a header-safe token, and never reaches JS, errors or logs. Chunked
+  replies use checked framing: a hostile chunk size is a bad reply
+  (`unknown`) that frees the slot, never a panic. Consent
   commands also refuse any webview other than `main`.
 - Surface: `host.rs` wrappers are absent off-Tauri, so browser/extension hosts
   render bindings but never emulate consent. `rooms.rs` owns the bindings
   client (`GET .../agents`), the consent draft (room generation + ticket
   guarded; committed or unknown outcomes refresh authoritative bindings even
-  when navigation raced) and explicit invocation. Invocation is currently
+  when navigation raced; post-send command errors `consent_task_failed` and
+  `invalid_reply` are treated as `unknown`) and explicit invocation. Invocation is currently
   wired only for federated rooms: it needs the daemon-projected
   `caller_member_id` naming a User in Live/Recovering access, a committed
   Human message by that caller and an active binding; it runs once per
@@ -540,8 +554,9 @@ Web surface session UI:
   message action rail gets one invoke trigger after the thread button listing
   active agents with their invocation state. Menus reuse the header's
   `.room-overflow__*` styles; their in-row geometry lives in the "Layout &
-  depth" section. The `+ agent` picker hides agents already in the room and
-  keeps unresolved ones disabled; on federated rooms it is mounted only on
+  depth" section. The `+ agent` picker hides agents already in the room
+  (Local participant ids, plus any non-revoked binding's package id, since
+  federated rosters project member ids) and keeps unresolved ones disabled; on federated rooms it is mounted only on
   native consent hosts in Live/Recovering access.
 - Verification: `cd crates/ocean-tauri && cargo test room_consent` (disposable
   loopback daemons and key fixtures), `cargo test -p ocean-surface-ui`,

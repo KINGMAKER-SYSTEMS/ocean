@@ -3284,8 +3284,10 @@ pub struct RoomConsentDraft {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InvocationState {
     Pending,
-    /// The daemon queued the turn; the token is bound to exactly this
-    /// request/session/generation.
+    /// The daemon queued the turn under this request/session/generation. The
+    /// page-minted decision token is inert: since #68 the daemon binds
+    /// Room-turn permission waiters to its own per-run token, so this token
+    /// authorizes nothing and is slated for removal.
     Acknowledged {
         request_id: String,
         session_id: String,
@@ -3306,9 +3308,11 @@ pub struct RoomInvocation {
 }
 
 impl RoomInvocation {
-    /// The decision token for a permission card naming exactly this
-    /// acknowledged request and session; foreign, tokenless or unacknowledged
-    /// cards get nothing.
+    /// The page-minted token echoed for an acknowledged request/session pair.
+    /// Inert since #68: the daemon binds Room-turn permission waiters to a
+    /// per-run daemon token and Room approvals go only through the
+    /// operator-gated run permission route, so this grants no decision. Slated
+    /// for removal; do not build a permission path on it.
     #[allow(dead_code)]
     pub(crate) fn token_for(&self, request_id: &str, session_id: &str) -> Option<&str> {
         match &self.state {
@@ -3401,6 +3405,19 @@ pub(crate) struct ConsentStep {
     pub status: Option<String>,
 }
 
+/// Command errors that can only arise after the shell may have sent the
+/// decision: the native task failed (`consent_task_failed`) or its outcome
+/// could not be decoded (`invalid_reply`). Their result is unknown.
+const POST_SEND_ERRORS: [&str; 2] = ["consent_task_failed", "invalid_reply"];
+
+fn unknown_consent_step() -> ConsentStep {
+    ConsentStep {
+        refresh: true,
+        keep_draft: true,
+        status: Some("Ocean did not hear back from the daemon.".into()),
+    }
+}
+
 pub(crate) fn consent_step(
     result: &Result<crate::host::RoomConsentOutcome, String>,
 ) -> ConsentStep {
@@ -3416,11 +3433,7 @@ pub(crate) fn consent_step(
                 keep_draft: false,
                 status: None,
             },
-            "unknown" => ConsentStep {
-                refresh: true,
-                keep_draft: true,
-                status: Some("Ocean did not hear back from the daemon.".into()),
-            },
+            "unknown" => unknown_consent_step(),
             _ => ConsentStep {
                 refresh: true,
                 keep_draft: false,
@@ -3429,6 +3442,7 @@ pub(crate) fn consent_step(
                 )),
             },
         },
+        Err(code) if POST_SEND_ERRORS.contains(&code.as_str()) => unknown_consent_step(),
         Err(code) => ConsentStep {
             refresh: false,
             keep_draft: false,
@@ -5214,6 +5228,12 @@ mod tests {
             stale.status.as_deref(),
             Some("The agent changed since this review.")
         );
+        // Post-send command failures are unknown, never "could not
+        // authorize", and refresh authoritative bindings.
+        for code in ["consent_task_failed", "invalid_reply"] {
+            let lost = consent_step(&Err(code.into()));
+            assert_eq!(lost, unknown, "{code}");
+        }
         let broken = consent_step(&Err("operator_credential_not_private".into()));
         assert!(!broken.refresh);
         assert_eq!(
