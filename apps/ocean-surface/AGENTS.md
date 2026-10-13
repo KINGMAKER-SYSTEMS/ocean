@@ -583,6 +583,27 @@ Web surface session UI:
   operator route for every card, and the match never reads or writes
   `Daemon::permission_view`, decision authority or `Daemon::cancel_request`
   (focused direct-chat state is covered by a test).
+- Own-run status and exact cancel (PR E): the invoke menu shows, for an
+  `Acknowledged` invocation, the live state label of the single run
+  `rooms::run_for_invocation` attributes to it (via `own_invocation_for_run`);
+  no run yet, or several (a legacy double run on one session+seq), keeps the
+  acknowledged label ("queued"). The work card shows one Cancel icon
+  (`.room-card__cancel`, `aria-label` "Cancel this run", tokens only in
+  `styles/rooms-cards.css`) as a sibling of the disclosure head (never nested
+  in it), only while `rooms::own_run_cancel_target` holds: the page's own
+  acknowledged invocation in the current room generation, not ambiguous, and
+  the run not terminal. A click re-derives the target and calls
+  `rooms::cancel_room_request(base, request_id)` →
+  `POST /v1/requests/{request_id}/cancel` with the invocation's exact
+  acknowledged request id (equal to the run's `request_id` when projected),
+  no body and no operator key (the daemon route takes none; the web proxy
+  already forwards it, see #49). `RunCancels` latches one request in flight
+  per id; the reply settles only in its own room admission; success changes
+  nothing (the card ends Cancelled only when the daemon's `room_agent_run`
+  frame says so); transport failure, non-2xx or `ok: false` shows one inline
+  "Ocean could not cancel this run." and is never retried automatically (an
+  explicit click may try again). It never calls `Daemon::cancel_request`, a
+  session-level cancel, or touches focused direct-chat state (tested).
 - UI (`rooms_workspace/agents.rs`): one consent sheet (name, short digest,
   requested capabilities, one primary action, dismiss) above the right-rail
   list; bound agent rows get a single overflow holding Review/Revoke; the
@@ -595,9 +616,8 @@ Web surface session UI:
   native consent hosts in Live/Recovering access.
 - Verification: `cd crates/ocean-tauri && cargo test room_consent` (disposable
   loopback daemons and key fixtures), `cargo test -p ocean-surface-ui`,
-  WASM check/Clippy. Remaining: own-run status in the invoke menu and exact
-  cancellation, Local bootstrap intent and Local invocation, workspace
-  selection on create, served native acceptance.
+  WASM check/Clippy. Remaining: Local bootstrap intent and Local
+  invocation, served native acceptance.
 
 ### Shared native daemon transport
 

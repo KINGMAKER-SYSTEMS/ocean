@@ -1474,6 +1474,13 @@ Validation: in apps/ocean-surface, cargo fmt --check clean; WASM clippy -D warni
 _________________________________________________________________________________
 time: [20:33] [10-12-26]
 agent: [claude] [opus 5.5]
+worktree: [feat/room-own-run-cancel] [~/dev/oceanwork/wt-pre]
+type: [feature-request]
+area: [frontend] [testing] [docs]
+
+PR E of the room-consent follow-ups (item 2: own-agent request status and exact cancellation). The invoke menu now shows, for each acknowledged invocation, the live state label of the single run the new pure `rooms::run_for_invocation` attributes to it through `own_invocation_for_run`; no run yet, or a legacy double run on one session+seq, keeps the acknowledged "queued" label. Work cards get one Cancel icon (Stop glyph, aria-label "Cancel this run", `.room-card__cancel` styled only with tokens in rooms-cards.css) beside the disclosure head, shown only while `rooms::own_run_cancel_target` holds: the page's own acknowledged invocation in the current room generation, not ambiguous, run not terminal. The click re-derives the target and calls the new `rooms::cancel_room_request(base, request_id)` → `POST /v1/requests/{request_id}/cancel` with the invocation's exact acknowledged request id, no body and no operator key (daemon route `cancel_request` takes none; the proxy already forwards it since #49). A `RunCancels` latch on Rooms allows one request in flight per id, the reply settles only in its own room admission, success applies nothing (the card ends Cancelled only on the daemon's run frame), and a transport failure, non-2xx or `ok: false` shows one inline "Ocean could not cancel this run." with no automatic retry. `Daemon::cancel_request` and focused direct-chat state are never touched. Surface AGENTS consent section updated. No daemon, proxy or ocean-tauri change; create-room paths untouched.
+
+Validation: in apps/ocean-surface, cargo fmt --check clean; WASM clippy -D warnings clean; WASM check passes; proxy check passes; WASM test build passes; cargo test -p ocean-surface-ui 927 passed (897 unit + 30 integration; 7 new: exact request-id target and URL, hidden for foreign/terminal/ambiguous/unacknowledged/other-generation runs, single in-flight per id with no optimistic run change, failure error without retry plus stale-reply refusal, focused direct-chat state including request_cancellations unchanged, single matched run for the menu, menu label mapping); cargo test -p ocean-surface-proxy request_status 3 passed (cancel forwarding fixtures). No served-surface, live daemon or native run claimed.
 worktree: [feat/room-create-workspace] [~/dev/oceanwork/wt-prf]
 type: [feature-request]
 area: [frontend] [testing] [docs]
