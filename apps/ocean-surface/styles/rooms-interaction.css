@@ -64,21 +64,15 @@
   color: var(--fg);
 }
 
+/* A dot, not a count pill: the badge carries no number. */
 .rooms-workspace__room-unread {
   margin-left: auto;
   flex: 0 0 auto;
-  min-width: 18px;
-  height: 18px;
-  padding: 0 5px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 9px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
   background: var(--accent);
-  color: var(--fg-on-accent);
-  font-size: 11px;
-  font-weight: 700;
-  line-height: 1;
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
 /* First-unread divider inside the transcript. */

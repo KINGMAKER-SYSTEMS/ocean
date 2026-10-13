@@ -16,20 +16,10 @@
 
 /* Desktop (Tauri overlay titlebar): the header IS the titlebar — native
    traffic lights float over its left edge, so pad the brand clear of them.
-   `.is-titlebar` is set on the app root only inside the Tauri shell. */
+   `.is-titlebar` is set on the app root only inside the Tauri shell; this
+   inset is the only host-specific geometry in the shell. */
 .is-titlebar .ocean-header {
   padding-left: var(--titlebar-inset);
-}
-
-/* Native chrome spans the actual window even when the readable product shell
-   is capped at --shell-max. Without this, wide collapsed-workspace windows
-   strand the overflow and workspace controls at the shell edge and leave a
-   dead titlebar strip before the rounded window edge. The open workspace path
-   already widens the root and intentionally ends the header at the pane. */
-.ocean-surface.is-titlebar:not(.has-workspace-open) .ocean-header {
-  width: 100vw;
-  margin-left: calc((100% - 100vw) / 2);
-  flex: 0 0 auto;
 }
 
 .ocean-header__right {
@@ -309,7 +299,6 @@
 .ocean-model-control option:disabled { color: var(--fg-3); }
 
 /* Button controls -------------------------------------------------------- */
-.ocean-sessions-trigger,
 .ocean-more__btn,
 .ocean-more__item,
 .ocean-council-modal__close {
@@ -340,7 +329,6 @@
   background: var(--bg-hover);
 }
 
-.ocean-sessions-trigger:focus-visible,
 .ocean-more__btn:focus-visible,
 .ocean-council-modal__close:focus-visible {
   outline: none;
@@ -348,7 +336,6 @@
   box-shadow: var(--focus-ring);
 }
 
-.ocean-sessions-trigger:active,
 .ocean-more__btn:active {
   transform: translateY(1px);
   box-shadow: var(--pressed);
@@ -428,50 +415,6 @@
   box-shadow: var(--focus-ring);
 }
 
-/* Sessions trigger ------------------------------------------------------- */
-/* The single persistent header affordance — opens the centered sessions
-   modal (chat / create project / resume). A labeled button, not an icon, so
-   it reads as the primary entry point the rest of the chrome orbits. */
-.ocean-sessions-trigger {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;   /* label sits dead-center in the pill */
-  height: var(--ctl-h-sm);
-  padding: 0 14px;
-  color: var(--fg);
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.01em;
-  line-height: 1;
-  white-space: nowrap;
-  background: var(--bg-elevated);
-  /* Hairline edge + lit top seam is the app-chrome idiom every neighbouring
-     control (--thinking / --model-override / browser chip) shares; the old
-     borderless fill read as a flat web button. */
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: var(--elev-1);
-}
-
-.ocean-sessions-trigger:hover {
-  background: var(--bg-hover);
-  border-color: var(--border-strong);
-}
-
-/* Coarse pointers get a 44px tap target without disturbing the desktop
-   density — an invisible ::after grows the hit area along the short axis into
-   the header's own padding (TASK-42 idiom, matching the composer triggers). */
-@media (pointer: coarse) {
-  .ocean-sessions-trigger {
-    position: relative;
-  }
-  .ocean-sessions-trigger::after {
-    content: "";
-    position: absolute;
-    inset-inline: 0;
-    inset-block: -8px; /* 28 + 16 = 44 */
-  }
-}
 
 /* Council modal ---------------------------------------------------------- */
 .ocean-council-modal {
