@@ -1472,6 +1472,17 @@ PR C of the room-consent follow-ups (item 1). Room invocation no longer mints or
 
 Validation: in apps/ocean-surface, cargo fmt --check clean; WASM clippy -D warnings clean; WASM check and proxy check pass; WASM test build passes; cargo test -p ocean-surface-ui 920 passed (890 unit + 30 integration; 9 new/updated room invocation tests including request-id match, legacy fallback, foreign room, other generation/session/seq, pending/unknown/refused, ambiguous shared session+seq, tokenless invoke body, and focused direct-chat permission/status/session/token state unchanged across room run updates; the token_for test was removed). No served-surface, live daemon or native run claimed.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [20:19] [12-10-26]
+agent: [Codex] [factory coordinator]
+worktree: [codex/issue94-binding-order]
+type: [bug report]
+area: [frontend]
+
+Repair the binding-response ordering defect tracked by issue #94 after PR #88. Only the latest binding GET in the current Room admission may publish; reset retires pending reads, and failed refreshes preserve the last projection without reviving older responses. The nearest Surface contract records that ownership rule; root and child indexes are unchanged because structure is unchanged.
+
+Validation: one isolated Mac mini run of cargo test --locked -p ocean-surface-ui --bin ocean-surface-ui agent_binding -- --nocapture passed 3/3 tests in 95 seconds. Coverage includes reversed success/error completions, reset, same-key readmission, and room mismatch. Formatting and diff checks pass. Native consent lifecycle and compact-layout findings in issue #94 remain open. Independent final-head review, required hosted builds, maintainer approval under issue #90, and actual served acceptance remain separate release gates; no deployment or live outcome is claimed.
 time: [20:40] [10-12-26]
 agent: [claude] [opus 5.5]
 worktree: [feat/room-local-bootstrap] [~/dev/oceanwork/wt-prg]
@@ -1508,3 +1519,14 @@ PR H of the room-consent follow-ups (item 5: Local-room invocation). `rooms::inv
 
 Validation: in apps/ocean-surface, cargo fmt --check clean; WASM clippy -D warnings clean; WASM check passes; proxy check passes; WASM test build passes (7 executables); cargo test -p ocean-surface-ui 944 passed (914 unit + 30 integration), including 4 new tests (Local invoker matrix: valid / empty / non-roster / agent / non-Human kinds / no roster, federated caller ignored in Local; Local invoke body uses the identity as invoked_by; refusal text mapping; Local invocation run recognized as own via request_id with run_is_own, Cancel control and menu run, legacy Local run not own) and the federated/other-state matrix extended (page identity ignored for Live/Recovering, valid Local identity never rescues Connecting/Revoked/no access). No served-surface, native or live daemon run claimed.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [21:51] [12-10-26]
+agent: [Codex] [factory coordinator]
+worktree: [codex/issue94-binding-order]
+type: [refactor]
+area: [review]
+
+Integrate PR #97 with main 25599f22410c8e164dd09f13ad0a9254fa97a39d after the room-consent follow-ups landed. Resolve adjacent test-helper and contract conflicts while preserving the exact binding-order repair and incoming functionality. Preserve both complete parent ledger histories.
+
+Validation: targeted agent_binding tests pass 3/3 on the integrated tree in 20 seconds; rustfmt and diff checks pass. Only the intended binding source, owning Surface contract and ledger differ from incoming main. This integration changes the reviewed head and therefore requires fresh independent exact-head review and hosted checks. Maintainer approval under #90 and remaining issue #94 native/compact findings remain held. No deployment or served acceptance claimed.
