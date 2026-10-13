@@ -1,18 +1,17 @@
-/* Workspace pane — the permanent RIGHT-side desktop shell pane
-   (docs/OCEAN_DESKTOP_NORTH_STAR.md). Tauri-only: the component never mounts
-   on the browser PWA or Chrome extension, so these rules are inert there.
+/* Workspace pane — the permanent RIGHT-side shell pane on every host
+   (docs/OCEAN_DESKTOP_NORTH_STAR.md). Host posture is width-driven, never
+   host-driven: docked split at >=900px, overlay below.
    Colors come ONLY from tokens.css variables. Material rule (same as
    deck.css): an element takes the border recipe OR the elevation recipe,
    never both.
 
    z-index ladder (right-side surfaces):
      .workspace ........ 50  (permanent pane; above content, below reveals)
-     .deck ............. 60  (transient reveal-on-intent rail)
      modals (panels) ... 100
      palette overlay ... 1100
    The workspace sits ABOVE the in-flow transcript/composer (z auto) so it can
-   overlay on compact widths, and BELOW the deck + palette so transient
-   reveals win. */
+   overlay on compact widths, and BELOW modals + palette so transient reveals
+   win. */
 
 /* The pane width is shared by the pane itself and the layout gutter the app
    shell carves out of <main> when the pane is open on a wide viewport. */
@@ -21,9 +20,6 @@
      workspace.rs — Rust owns the live value via an inline --workspace-w
      property on <html> (set as the derived pane width changes). */
   --workspace-w: 520px;
-  /* Readable content rail: transcript turns + composer share this centered
-     column when the pane stretches the shell (desktop split view). */
-  --workspace-rail: 860px;
 }
 
 /* ── Shell ─────────────────────────────────────────────────────────── */
@@ -50,29 +46,26 @@
   pointer-events: none;
 }
 
-/* Wide viewport: the pane SPLITS the surface. The shell stops centering as a
-   1120px card in the FULL viewport (that model stranded its centering margin
-   as a dead strip between the column and the fixed-right pane) and instead
-   fills the remaining viewport, minus the pane gutter. Content rides a
-   readable centered rail inside; the header spans the full remaining width
-   like real app chrome. Below 900px the pane OVERLAYS instead (no gutter),
-   mirroring compact.css's narrow-column behavior. */
+/* One shell geometry on every host: the shell is full-bleed and the header
+   spans it like real app chrome. Reading surfaces ride the centered
+   --content-rail. On wide viewports an open pane SPLITS the surface by
+   carving its gutter out of the shell; below 900px the pane OVERLAYS instead
+   (no gutter), mirroring compact.css's narrow-column behavior. */
 @media (min-width: 900px) {
   .ocean-surface.has-workspace-open {
-    max-width: none;
     padding-right: var(--workspace-w);
   }
-  .ocean-surface.has-workspace-open .transcript > *,
-  .ocean-surface.has-workspace-open .ocean-perms {
+  .ocean-surface .transcript > *,
+  .ocean-surface .ocean-perms {
     width: 100%;
-    max-width: var(--workspace-rail);
+    max-width: var(--content-rail);
     margin-inline: auto;
   }
-  /* The workspace pane clips overflow so the transcript landing fills the rail
-     without escaping. Overflow must be `auto` for the scroll-container child,
-     not for the direct `.transcript` container. */
-  .ocean-surface.has-workspace-open .ocean-composer {
-    width: min(var(--workspace-rail), calc(100% - 36px));
+  /* The transcript landing fills the rail without escaping. Overflow must be
+     `auto` for the scroll-container child, not for the direct `.transcript`
+     container. */
+  .ocean-surface .ocean-composer {
+    width: min(var(--content-rail), calc(100% - 36px));
     margin-inline: auto;
   }
 }
@@ -196,11 +189,10 @@ html.is-resizing {
   flex-direction: column;
 }
 
-/* Repo tab body mounts the deck's RepoPanel, which was authored for the
-   deck's `.deck__body` (flex fill + vertical scroll + `0 12px 16px` padding).
-   The pane's content region is flush, so this wrapper supplies that chrome —
-   the panel itself is fully fluid (min-width:0 flex items with ellipsis) and
-   degrades cleanly from the 320px pane floor up to its max. */
+/* Repo tab body mounts RepoPanel (styles/deck.css). The pane's content region
+   is flush, so this wrapper supplies scroll + padding — the panel itself is
+   fully fluid (min-width:0 flex items with ellipsis) and degrades cleanly
+   from the 320px pane floor up to its max. */
 .workspace-repo {
   overflow-y: auto;
   padding: 0 12px 16px;
