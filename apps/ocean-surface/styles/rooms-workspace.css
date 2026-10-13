@@ -343,6 +343,18 @@
   line-height: 1.35;
 }
 
+.rooms-workspace__center-workspace {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-3);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
 .rooms-workspace__center-actions {
   flex: 0 0 auto;
   display: flex;
@@ -1347,8 +1359,16 @@
 }
 
 .rooms-workspace__left-create {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
   padding: 12px;
   background: var(--bg-raised);
+}
+
+.rooms-workspace__left-workspace {
+  color: var(--fg-2);
+  cursor: pointer;
 }
 
 .rooms-workspace__left-input {
