@@ -1658,6 +1658,8 @@ fn banner_routes() -> &'static [&'static str] {
         "GET /v1/rooms/persistent/{key}/attachments",
         "GET /v1/rooms/persistent/{key}/attachments/{attachment_id}",
         "DELETE /v1/rooms/persistent/{key}/attachments/{attachment_id}",
+        "GET /v1/rooms/persistent/{key}/profile",
+        "PUT /v1/rooms/persistent/{key}/profile",
         "POST /v1/rooms/persistent/{key}/messages",
         "POST /v1/rooms/persistent/{key}/invites",
         "POST /v1/rooms/persistent/invites/redeem",
@@ -3060,6 +3062,11 @@ fn room_routes() -> Router<AppState> {
             "/v1/rooms/persistent/{key}/attachments/{attachment_id}",
             get(room_attachments::room_download_attachment)
                 .delete(room_attachments::room_delete_attachment),
+        )
+        // Rooms Phase 2 Stage 2b: the room profile and credential-slot status.
+        .route(
+            "/v1/rooms/persistent/{key}/profile",
+            get(room_profile::room_profile_get).put(room_profile::room_profile_put),
         )
         .route(
             "/v1/rooms/persistent/{key}/messages",
@@ -26020,7 +26027,7 @@ mod tests {
         assert_eq!(admission_routes, expected_admission_routes);
         assert_eq!(
             banner.len(),
-            134,
+            136,
             "route baseline changed; review the manifest"
         );
 
