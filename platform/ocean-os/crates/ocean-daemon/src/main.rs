@@ -159,8 +159,11 @@ mod request_control;
 mod room_agent_authority;
 /// Room agent work cards: per-turn run projections over agent-session events.
 mod room_agent_runs;
+<<<<<<< HEAD
 /// Room attachments: durable file bytes beside the DB that indexes them.
 mod room_attachments;
+=======
+>>>>>>> origin/main
 /// Restart-safe outbound Bedrock room client and per-room supervisor (S2 P2-B).
 mod room_federation;
 mod room_operator;
@@ -1632,10 +1635,15 @@ fn banner_routes() -> &'static [&'static str] {
         "POST /v1/rooms/persistent/{key}/participants",
         "DELETE /v1/rooms/persistent/{key}/participants/{participant_id}",
         "POST /v1/rooms/persistent/{key}/participants/{participant_id}/retire",
+<<<<<<< HEAD
         "POST /v1/rooms/persistent/{key}/attachments",
         "GET /v1/rooms/persistent/{key}/attachments",
         "GET /v1/rooms/persistent/{key}/attachments/{attachment_id}",
         "DELETE /v1/rooms/persistent/{key}/attachments/{attachment_id}",
+=======
+        "GET /v1/rooms/persistent/{key}/profile",
+        "PUT /v1/rooms/persistent/{key}/profile",
+>>>>>>> origin/main
         "POST /v1/rooms/persistent/{key}/messages",
         "POST /v1/rooms/persistent/{key}/invites",
         "POST /v1/rooms/persistent/invites/redeem",
@@ -3006,6 +3014,7 @@ fn room_routes() -> Router<AppState> {
             "/v1/rooms/persistent/{key}/participants/{participant_id}/retire",
             post(room_retirement::room_participant_retire),
         )
+<<<<<<< HEAD
         // Room attachments: durable file bytes beside the DB. The sized cap
         // plus slack lets a just-over-cap body reach the handler for the typed
         // attachment_too_large JSON while huge bodies are refused by the layer.
@@ -3021,6 +3030,12 @@ fn room_routes() -> Router<AppState> {
             "/v1/rooms/persistent/{key}/attachments/{attachment_id}",
             get(room_attachments::room_download_attachment)
                 .delete(room_attachments::room_delete_attachment),
+=======
+        // Rooms Phase 2 Stage 2b: the room profile and credential-slot status.
+        .route(
+            "/v1/rooms/persistent/{key}/profile",
+            get(room_profile::room_profile_get).put(room_profile::room_profile_put),
+>>>>>>> origin/main
         )
         .route(
             "/v1/rooms/persistent/{key}/messages",
@@ -25965,7 +25980,11 @@ mod tests {
         assert_eq!(admission_routes, expected_admission_routes);
         assert_eq!(
             banner.len(),
+<<<<<<< HEAD
             133,
+=======
+            131,
+>>>>>>> origin/main
             "route baseline changed; review the manifest"
         );
 
