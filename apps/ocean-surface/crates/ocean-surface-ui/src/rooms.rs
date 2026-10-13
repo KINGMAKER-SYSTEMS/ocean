@@ -630,8 +630,10 @@ pub struct Rooms {
     pub consent: RwSignal<Option<RoomConsentDraft>>,
     /// Ticket owning the latest preview/authorize completion.
     consent_ticket: RwSignal<u64>,
-    /// Explicit invocations in this room admission. Memory-only: decision
-    /// tokens never leave this signal except in their one invoke request.
+    /// Explicit invocations in this room admission. Memory-only and reset
+    /// with the room; each records the room key and page generation it was
+    /// made under so a work card can be matched to it
+    /// ([`own_invocation_for_run`]).
     pub invocations: RwSignal<Vec<RoomInvocation>>,
 }
 
@@ -738,6 +740,25 @@ impl Rooms {
     /// via `room_is_current` before acting on it later.
     pub(crate) fn generation_snapshot(&self) -> u64 {
         self.generation.get_untracked()
+    }
+
+    /// Whether the open room's run `run_id` was started by one of this page's
+    /// acknowledged invocations (reactive; see [`own_invocation_for_run`]).
+    /// Display-only: it reads Room signals alone and never touches the
+    /// focused direct-chat permission, decision or cancel state.
+    pub(crate) fn run_is_own(&self, run_id: &str) -> bool {
+        let Some(key) = self.open_key.get() else {
+            return false;
+        };
+        let generation = self.generation.get();
+        self.runs.with(|runs| {
+            let Some(run) = runs.iter().find(|r| r.run_id == run_id) else {
+                return false;
+            };
+            self.invocations.with(|invocations| {
+                own_invocation_for_run(invocations, runs, run, &key, generation).is_some()
+            })
+        })
     }
 
     pub(crate) fn take_pending_thread_focus(&self) -> Option<u64> {
@@ -1618,8 +1639,10 @@ impl Rooms {
     }
 
     /// Invoke an active agent exactly once from a committed message authored
-    /// by the daemon-projected caller. Each invocation mints its own decision
-    /// token; a lost acknowledgement stays `Unknown` and is never retried.
+    /// by the daemon-projected caller. A lost acknowledgement stays `Unknown`
+    /// and is never retried. No decision token is sent: since #68 the daemon
+    /// binds Room-turn permission waiters to its own per-run token, and Room
+    /// approvals go only through the operator-gated run permission route.
     pub fn invoke_agent(&self, agent_member_id: String, message_seq: u64) {
         let Some(key) = self.open_key.get_untracked() else {
             return;
@@ -1631,10 +1654,14 @@ impl Rooms {
         let Some(message) = transcript.iter().find(|m| m.seq == message_seq) else {
             return;
         };
+        let Some(agent_package_id) = invocable_bindings(&self.agent_bindings.get_untracked())
+            .into_iter()
+            .find(|b| b.agent_member_id == agent_member_id)
+            .map(|b| b.agent_package_id)
+        else {
+            return;
+        };
         if !message_invocable(message, &caller)
-            || !invocable_bindings(&self.agent_bindings.get_untracked())
-                .iter()
-                .any(|b| b.agent_member_id == agent_member_id)
             || !may_invoke(
                 &self.invocations.get_untracked(),
                 &agent_member_id,
@@ -1643,16 +1670,14 @@ impl Rooms {
         {
             return;
         }
-        let Some(token) = crate::daemon::try_mint_decision_token() else {
-            self.status.set("Ocean could not start the agent.".into());
-            return;
-        };
         let generation_id = self.generation.get_untracked();
         self.invocations.update(|list| {
             list.push(RoomInvocation {
+                room_key: key.clone(),
+                room_generation: generation_id,
                 agent_member_id: agent_member_id.clone(),
+                agent_package_id,
                 message_seq,
-                decision_token: token.clone(),
                 state: InvocationState::Pending,
             })
         });
@@ -1664,11 +1689,7 @@ impl Rooms {
                 encode(&key),
                 encode(&agent_member_id)
             );
-            let body = serde_json::json!({
-                "invoked_by": caller,
-                "message_seq": message_seq,
-                "decision_token": token,
-            });
+            let body = invoke_body(&caller, message_seq);
             let state = match Request::post(&url)
                 .header("content-type", "application/json")
                 .json(&body)
@@ -2344,6 +2365,11 @@ pub struct RoomAgentRun {
     /// The tool approval this run is blocked on (owner-local).
     #[serde(default)]
     pub pending_permission: Option<RoomRunPermission>,
+    /// The daemon request executing this turn — the id an invoke response
+    /// acknowledges (#93). An identifier only, never a credential; absent on
+    /// runs from daemons before #93.
+    #[serde(default)]
+    pub request_id: Option<String>,
 }
 
 /// A pending tool approval on a run. Mirrors `ocean_core::RoomRunPermission`.
@@ -3284,10 +3310,7 @@ pub struct RoomConsentDraft {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InvocationState {
     Pending,
-    /// The daemon queued the turn under this request/session/generation. The
-    /// page-minted decision token is inert: since #68 the daemon binds
-    /// Room-turn permission waiters to its own per-run token, so this token
-    /// authorizes nothing and is slated for removal.
+    /// The daemon queued the turn under this request/session/generation.
     Acknowledged {
         request_id: String,
         session_id: String,
@@ -3298,42 +3321,102 @@ pub enum InvocationState {
     Unknown,
 }
 
-/// One explicit invocation in the current room admission.
-#[derive(Clone, PartialEq, Eq)]
+/// One explicit invocation in the current room admission. It carries no
+/// credential: ownership of a work card is display-only and never changes
+/// who may decide a pending tool approval.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoomInvocation {
+    /// Room key the invocation was sent for.
+    pub room_key: String,
+    /// Page room generation ([`Rooms::generation_snapshot`]) at invoke time.
+    pub room_generation: u64,
     pub agent_member_id: String,
+    /// Package id of the invoked binding. A federated room's daemon records
+    /// it as the run's `agent_id`.
+    pub agent_package_id: String,
     pub message_seq: u64,
-    decision_token: String,
     pub state: InvocationState,
 }
 
-impl RoomInvocation {
-    /// The page-minted token echoed for an acknowledged request/session pair.
-    /// Inert since #68: the daemon binds Room-turn permission waiters to a
-    /// per-run daemon token and Room approvals go only through the
-    /// operator-gated run permission route, so this grants no decision. Slated
-    /// for removal; do not build a permission path on it.
-    #[allow(dead_code)]
-    pub(crate) fn token_for(&self, request_id: &str, session_id: &str) -> Option<&str> {
-        match &self.state {
-            InvocationState::Acknowledged {
-                request_id: r,
-                session_id: s,
-                ..
-            } if r == request_id && s == session_id => Some(&self.decision_token),
-            _ => None,
-        }
-    }
+/// The invoke request body. `decision_token` is deliberately absent: the
+/// daemon accepts it as optional and, since #68, binds Room-turn permission
+/// waiters to its own per-run token, so an invoker token would grant nothing.
+pub(crate) fn invoke_body(caller: &str, message_seq: u64) -> serde_json::Value {
+    serde_json::json!({
+        "invoked_by": caller,
+        "message_seq": message_seq,
+    })
 }
 
-impl std::fmt::Debug for RoomInvocation {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RoomInvocation")
-            .field("agent_member_id", &self.agent_member_id)
-            .field("message_seq", &self.message_seq)
-            .field("decision_token", &"[redacted]")
-            .field("state", &self.state)
-            .finish()
+/// The acknowledged invocation this page made that started `run`, if any.
+///
+/// Only invocations recorded for `room_key` at page `generation` are
+/// considered, and only `Acknowledged` ones; pending, unknown and refused
+/// invocations never match, nor does a run naming another room.
+///
+/// - A run carrying a daemon `request_id` matches exactly the invocation
+///   acknowledged with that request id (and the same session); a run whose
+///   request id this page never received is not ours.
+/// - A legacy run without one (daemon before #93) falls back to session id ==
+///   `run.session_id`, message seq == `run.trigger_seq` and binding package id
+///   == `run.agent_id`. Room agents keep one session per (room, agent), so an
+///   explicit invocation and a mention-convened turn on the same message can
+///   share session and seq: if any other run in `runs` shares them, nothing
+///   distinguishes the two and neither matches.
+///
+/// The result is display-only. It never grants a decision: Room approvals stay
+/// on the operator-gated run permission route for every card.
+pub(crate) fn own_invocation_for_run<'a>(
+    invocations: &'a [RoomInvocation],
+    runs: &[RoomAgentRun],
+    run: &RoomAgentRun,
+    room_key: &str,
+    generation: u64,
+) -> Option<&'a RoomInvocation> {
+    if run.room_id != room_key {
+        return None;
+    }
+    let acknowledged = invocations.iter().filter_map(|invocation| {
+        if invocation.room_key != room_key || invocation.room_generation != generation {
+            return None;
+        }
+        match &invocation.state {
+            InvocationState::Acknowledged {
+                request_id,
+                session_id,
+                ..
+            } => Some((invocation, request_id.as_str(), session_id.as_str())),
+            _ => None,
+        }
+    });
+    let matched: Vec<_> = match run.request_id.as_deref() {
+        Some(run_request) if !run_request.is_empty() => acknowledged
+            .filter(|(_, request_id, session_id)| {
+                *request_id == run_request && *session_id == run.session_id
+            })
+            .collect(),
+        _ => {
+            let ambiguous = runs.iter().any(|other| {
+                other.run_id != run.run_id
+                    && other.room_id == run.room_id
+                    && other.session_id == run.session_id
+                    && other.trigger_seq == run.trigger_seq
+            });
+            if ambiguous {
+                return None;
+            }
+            acknowledged
+                .filter(|(invocation, _, session_id)| {
+                    *session_id == run.session_id
+                        && invocation.message_seq == run.trigger_seq
+                        && invocation.agent_package_id == run.agent_id
+                })
+                .collect()
+        }
+    };
+    match matched.as_slice() {
+        [(invocation, _, _)] => Some(*invocation),
+        _ => None,
     }
 }
 
@@ -5067,11 +5150,44 @@ mod tests {
 
     fn invocation(agent: &str, seq: u64, state: InvocationState) -> RoomInvocation {
         RoomInvocation {
+            room_key: "room-1".into(),
+            room_generation: 7,
             agent_member_id: agent.into(),
+            agent_package_id: "scout".into(),
             message_seq: seq,
-            decision_token: "secret-token-value".into(),
             state,
         }
+    }
+
+    fn acked(request: &str, session: &str) -> InvocationState {
+        InvocationState::Acknowledged {
+            request_id: request.into(),
+            session_id: session.into(),
+            generation: "3".into(),
+        }
+    }
+
+    /// A run of package `scout` in `room-1` convened by message 4.
+    fn own_run(run_id: &str, session: &str, seq: u64, request: Option<&str>) -> RoomAgentRun {
+        let mut wire = serde_json::json!({
+            "run_id": run_id, "room_id": "room-1", "agent_id": "scout",
+            "session_id": session, "trigger_seq": seq, "thread_root_seq": seq,
+            "state": "awaiting_permission",
+            "pending_permission": {"permission_id": "perm-1", "tool": "bash", "tool_label": "bash ls"},
+            "started_at": "2026-10-12T10:00:00Z", "updated_at": "2026-10-12T10:00:01Z"
+        });
+        if let Some(request) = request {
+            wire["request_id"] = request.into();
+        }
+        serde_json::from_value(wire).unwrap()
+    }
+
+    fn own_match<'a>(
+        invocations: &'a [RoomInvocation],
+        runs: &[RoomAgentRun],
+        run: &RoomAgentRun,
+    ) -> Option<&'a RoomInvocation> {
+        own_invocation_for_run(invocations, runs, run, "room-1", 7)
     }
 
     #[test]
@@ -5173,38 +5289,183 @@ mod tests {
     }
 
     #[test]
-    fn invocation_tokens_bind_only_to_their_exact_acknowledged_request() {
-        let acked = invocation(
-            "agent-x",
-            4,
-            InvocationState::Acknowledged {
-                request_id: "req-1".into(),
-                session_id: "sess-1".into(),
-                generation: "3".into(),
-            },
-        );
+    fn invoke_body_carries_no_decision_token() {
+        let body = invoke_body("human-a", 4);
         assert_eq!(
-            acked.token_for("req-1", "sess-1"),
-            Some("secret-token-value")
+            body,
+            serde_json::json!({"invoked_by": "human-a", "message_seq": 4})
         );
-        assert_eq!(acked.token_for("req-2", "sess-1"), None);
-        assert_eq!(acked.token_for("req-1", "sess-2"), None);
-        let pending = invocation("agent-x", 5, InvocationState::Pending);
-        assert_eq!(pending.token_for("req-1", "sess-1"), None);
-        let other = invocation(
-            "agent-y",
-            6,
-            InvocationState::Acknowledged {
-                request_id: "req-9".into(),
-                session_id: "sess-9".into(),
-                generation: "1".into(),
-            },
+        assert!(body.get("decision_token").is_none());
+    }
+
+    #[test]
+    fn run_decodes_the_daemon_request_id_and_legacy_runs_lack_it() {
+        assert_eq!(
+            own_run("r1", "sess-1", 4, Some("req-1"))
+                .request_id
+                .as_deref(),
+            Some("req-1")
         );
-        assert_ne!(
-            acked.token_for("req-1", "sess-1"),
-            other.token_for("req-1", "sess-1")
+        assert_eq!(own_run("r1", "sess-1", 4, None).request_id, None);
+    }
+
+    #[test]
+    fn own_run_matches_the_exact_acknowledged_request_id() {
+        let invocations = vec![
+            invocation("agent-x", 4, acked("req-1", "sess-1")),
+            invocation("agent-y", 5, acked("req-2", "sess-2")),
+        ];
+        let run = own_run("r1", "sess-1", 4, Some("req-1"));
+        let runs = vec![run.clone()];
+        assert_eq!(
+            own_match(&invocations, &runs, &run).map(|i| i.agent_member_id.as_str()),
+            Some("agent-x")
         );
-        assert!(!format!("{acked:?}").contains("secret-token-value"));
+        // A request id this page never received is foreign, even though the
+        // legacy session/seq/package triple would have matched.
+        let foreign = own_run("r2", "sess-1", 4, Some("req-other"));
+        assert_eq!(own_match(&invocations, &[foreign.clone()], &foreign), None);
+        // The acknowledged session must agree with the run's.
+        let crossed = own_run("r3", "sess-2", 4, Some("req-1"));
+        assert_eq!(own_match(&invocations, &[crossed.clone()], &crossed), None);
+    }
+
+    #[test]
+    fn legacy_run_without_request_id_matches_session_seq_and_package() {
+        let invocations = vec![invocation("agent-x", 4, acked("req-1", "sess-1"))];
+        let run = own_run("r1", "sess-1", 4, None);
+        assert_eq!(
+            own_match(&invocations, &[run.clone()], &run).map(|i| i.agent_member_id.as_str()),
+            Some("agent-x")
+        );
+        let mut other_agent = run.clone();
+        other_agent.agent_id = "helper".into();
+        assert_eq!(
+            own_match(&invocations, &[other_agent.clone()], &other_agent),
+            None,
+            "a run of another package is not ours"
+        );
+    }
+
+    #[test]
+    fn own_run_refuses_foreign_room_generation_session_and_seq() {
+        let invocations = vec![invocation("agent-x", 4, acked("req-1", "sess-1"))];
+        for request in [Some("req-1"), None] {
+            let run = own_run("r1", "sess-1", 4, request);
+            let runs = vec![run.clone()];
+            // Foreign room: the run names another room, or the caller asks
+            // about another open room than the invocation was made in.
+            let mut foreign_room = run.clone();
+            foreign_room.room_id = "room-2".into();
+            assert_eq!(
+                own_match(&invocations, &[foreign_room.clone()], &foreign_room),
+                None
+            );
+            assert_eq!(
+                own_invocation_for_run(&invocations, &runs, &run, "room-2", 7),
+                None
+            );
+            let mut invoked_elsewhere = invocations.clone();
+            invoked_elsewhere[0].room_key = "room-2".into();
+            assert_eq!(own_match(&invoked_elsewhere, &runs, &run), None);
+            // Other page generation (the room was reopened since).
+            assert_eq!(
+                own_invocation_for_run(&invocations, &runs, &run, "room-1", 8),
+                None
+            );
+            // Other session.
+            let other_session = own_run("r1", "sess-9", 4, request);
+            assert_eq!(
+                own_match(&invocations, &[other_session.clone()], &other_session),
+                None
+            );
+        }
+        // Other message seq (legacy fallback; a request id match does not
+        // consult the seq, so it is pinned by the request id instead).
+        let other_seq = own_run("r1", "sess-1", 5, None);
+        assert_eq!(
+            own_match(&invocations, &[other_seq.clone()], &other_seq),
+            None
+        );
+    }
+
+    #[test]
+    fn pending_unknown_and_refused_invocations_never_match() {
+        for request in [Some("req-1"), None] {
+            let run = own_run("r1", "sess-1", 4, request);
+            for state in [
+                InvocationState::Pending,
+                InvocationState::Unknown,
+                InvocationState::Refused("invoke_refused".into()),
+            ] {
+                let invocations = vec![invocation("agent-x", 4, state)];
+                assert_eq!(own_match(&invocations, &[run.clone()], &run), None);
+            }
+            assert_eq!(own_match(&[], &[run.clone()], &run), None);
+        }
+    }
+
+    #[test]
+    fn runs_sharing_session_and_seq_are_ambiguous_without_request_ids() {
+        // An explicit invocation and a mention-convened turn of the same agent
+        // on the same message share the room agent's session and trigger seq.
+        let invocations = vec![invocation("agent-x", 4, acked("req-1", "sess-1"))];
+        let a = own_run("a", "sess-1", 4, None);
+        let b = own_run("b", "sess-1", 4, None);
+        let runs = vec![a.clone(), b.clone()];
+        assert_eq!(own_match(&invocations, &runs, &a), None);
+        assert_eq!(own_match(&invocations, &runs, &b), None);
+        // Request ids distinguish them: only the acknowledged one is ours.
+        let a = own_run("a", "sess-1", 4, Some("req-1"));
+        let b = own_run("b", "sess-1", 4, Some("req-mention"));
+        let runs = vec![a.clone(), b.clone()];
+        assert!(own_match(&invocations, &runs, &a).is_some());
+        assert_eq!(own_match(&invocations, &runs, &b), None);
+    }
+
+    #[test]
+    fn room_run_updates_leave_focused_direct_chat_state_unchanged() {
+        let owner = Owner::new();
+        owner.set();
+        // A focused direct chat mid-turn, sharing its session id with the
+        // room agent run to prove even a colliding id does not bleed over.
+        let daemon = crate::daemon::Daemon::dummy();
+        daemon.session_id.set(Some("sess-1".into()));
+        daemon.streaming.set(true);
+        daemon.status.set("thinking".into());
+        daemon
+            .active_decision_token
+            .set(Some("direct-chat-token".into()));
+        let snapshot = |d: &crate::daemon::Daemon| {
+            (
+                d.permission_view.get_untracked(),
+                d.session_id.get_untracked(),
+                d.streaming.get_untracked(),
+                d.status.get_untracked(),
+                d.active_decision_token.get_untracked(),
+            )
+        };
+        let before = snapshot(&daemon);
+
+        let rooms = Rooms::for_test("http://127.0.0.1:4780");
+        rooms.open_key.set(Some("room-1".into()));
+        rooms.generation.set(7);
+        rooms
+            .invocations
+            .set(vec![invocation("agent-x", 4, acked("req-1", "sess-1"))]);
+        let waiting = own_run("r1", "sess-1", 4, Some("req-1"));
+        rooms.runs.update(|runs| upsert_run(runs, waiting.clone()));
+        assert!(rooms.run_is_own("r1"));
+        assert!(!rooms.run_is_own("missing"));
+        let mut settled = waiting;
+        settled.state = RoomAgentRunState::Cancelled;
+        settled.pending_permission = None;
+        rooms.runs.update(|runs| upsert_run(runs, settled));
+        assert!(rooms.run_is_own("r1"), "ownership survives a state change");
+        rooms.close_room();
+        assert!(!rooms.run_is_own("r1"));
+
+        assert_eq!(snapshot(&daemon), before);
     }
 
     #[test]

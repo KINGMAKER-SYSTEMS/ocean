@@ -543,11 +543,28 @@ Web surface session UI:
   (agent, message) and leaves a lost acknowledgement `unknown`. Local rooms do
   have an invoker identity (the `/v1/me` owner `participant_id`, since #68),
   but Local invocation is not wired yet.
-- The per-invocation token (`RoomInvocation::token_for`) grants no permission
-  decision: since #68 the daemon binds Room-turn permission waiters to a
+- Invocation sends no decision token (removed in PR C, together with
+  `RoomInvocation::token_for` and #88's `try_mint_decision_token` split in
+  `daemon.rs`): since #68 the daemon binds Room-turn permission waiters to a
   daemon-minted per-run token, and Room approvals go only through the
-  operator-gated `POST .../runs/{run_id}/permission` route above. Do not build
-  a token-gated Room permission path on it.
+  operator-gated `POST .../runs/{run_id}/permission` route above. The daemon's
+  invoke body keeps `decision_token` optional, so omitting it is accepted. Do
+  not reintroduce a token-gated Room permission path.
+- Own-run matching (`rooms::own_invocation_for_run`, pure): each
+  `RoomInvocation` records its room key, page room generation and the bound
+  `agent_package_id`. A work card is "yours" only for an `Acknowledged`
+  invocation in the open room at the current generation; pending, unknown and
+  refused invocations never match. A run carrying the daemon `request_id`
+  (#93) matches exactly the invocation acknowledged with that id and session;
+  a legacy run without one falls back to session id == `run.session_id`,
+  message seq == `run.trigger_seq` and package id == `run.agent_id` (federated
+  runs record the package id; Local runs record the participant id, which
+  matters once Local invocation lands), and any other run sharing that session
+  and seq makes it ambiguous, so neither matches. The card shows a
+  display-only "yours" tag (`Rooms::run_is_own`); approve/deny stays on the
+  operator route for every card, and the match never reads or writes
+  `Daemon::permission_view`, decision authority or `Daemon::cancel_request`
+  (focused direct-chat state is covered by a test).
 - UI (`rooms_workspace/agents.rs`): one consent sheet (name, short digest,
   requested capabilities, one primary action, dismiss) above the right-rail
   list; bound agent rows get a single overflow holding Review/Revoke; the
@@ -560,7 +577,7 @@ Web surface session UI:
   native consent hosts in Live/Recovering access.
 - Verification: `cd crates/ocean-tauri && cargo test room_consent` (disposable
   loopback daemons and key fixtures), `cargo test -p ocean-surface-ui`,
-  WASM check/Clippy. Remaining: own-run status matching and exact
+  WASM check/Clippy. Remaining: own-run status in the invoke menu and exact
   cancellation, one shared native transport with `owner_mutation.rs`, Local
   bootstrap intent and Local invocation, workspace selection on create,
   served native acceptance.
