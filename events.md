@@ -1508,3 +1508,15 @@ PR H of the room-consent follow-ups (item 5: Local-room invocation). `rooms::inv
 
 Validation: in apps/ocean-surface, cargo fmt --check clean; WASM clippy -D warnings clean; WASM check passes; proxy check passes; WASM test build passes (7 executables); cargo test -p ocean-surface-ui 944 passed (914 unit + 30 integration), including 4 new tests (Local invoker matrix: valid / empty / non-roster / agent / non-Human kinds / no roster, federated caller ignored in Local; Local invoke body uses the identity as invoked_by; refusal text mapping; Local invocation run recognized as own via request_id with run_is_own, Cancel control and menu run, legacy Local run not own) and the federated/other-state matrix extended (page identity ignored for Live/Recovering, valid Local identity never rescues Connecting/Revoked/no access). No served-surface, native or live daemon run claimed.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [22:47] [12-10-26] America/New_York
+agent: [Codex] [root release coordinator]
+worktree: codex/issue94-ui-retirement
+type: [bug report]
+area: [frontend] [review] [testing]
+
+Implemented issue94 consent UI retirement: navigation, origin changes, dismissal and workspace cleanup immediately retire callbacks and request native cancellation even without a visible draft. New consent work waits for every cancellation acknowledgement; errors keep the page closed to new dispatch. Origin/admission/ticket and disposal checks protect delayed state writes and bootstrap latch ownership. Independent review found that unconditional revoke cancellation would erase an Unknown decision identity; the repaired preparation preserves only the exact page-owned retry and retains native reconfirmation, while fresh/superseding actions still cancel older intents. No automatic mutation retry or new authority.
+
+Validation: final retirement13/13, consent-result1/1 and workspace9/9 targeted tests passed, plus rustfmt and diff checks. Separate source review ACKed the final four file hashes after the retry repair; the initial9/9 evidence is retained separately. These are production signal/preparation fixtures, not native IPC/dialog or served-client acceptance. Native PR103's epoch/tracked-revoke semantics are a release prerequisite; cancellation cannot retract an already-dispatched request. Final committed-head review and hosted builds follow; maintainer approval90, other issue94 unmerged repairs and live acceptance remain held. Surface AGENTS.md documents the current contract; root and child indexes are unchanged because ownership/hierarchy did not change.
+_________________________________________________________________________________
