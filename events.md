@@ -1046,6 +1046,89 @@ Closed the leftovers from the review that acknowledged the thinking-binding reco
 Validation: ocean-protocol (187 plus 5) passes; clippy with warnings denied on ocean-protocol and ocean-agent tests, rustfmt check pass. The strip test covers the thinking-only assistant turn. No provider was called.
 _________________________________________________________________________________
 _________________________________________________________________________________
+time: [14:38] [06-10-26]
+agent: [zcode] [glm-5.3]
+worktree: [port/rooms-attachments]
+type: [feature-request]
+area: [backend] reconciliation: room attachments
+
+Eighth bounded Track B port: durable room attachments. Attachment BYTES live
+beside the DB that indexes them (per-room subdirectories under the resolved
+root, carried on AppState), so a moved OCEAN_DB_PATH carries a room's files
+with its metadata. Four route methods land: upload (typed attachment_too_large
+via sized cap + slack on the body-limit layer; uploader must be a roster
+human — a forged agent author is 403 and leaves no bytes), list, download
+(verified reads: bytes must match the recorded digest; served content type is
+proven by the bytes, never the declared one), and delete (row + bytes + a
+transcript marker in one store transaction). Traversal defence: one blob-path
+derivation with the id validator in one place; hostile room keys never become
+paths. Adaptations: room_not_open ported into persistent_rooms and
+invalid_request_response widened; AppState gained room_attachments_root with a
+unique-per-call test root after cross-test contamination showed up in the
+first run (17/17 after). Trimmed for sibling PRs: attachment_bytes and
+write_blob_for_test ride the room_context port (their consumer).
+Router-contract parity moved 119 → 123.
+
+Validation: room_attachments tests (17) pass; router-contract parity (123)
+green; cargo test -p ocean-daemon 925 passed / 2 deterministic issue-#42
+failures reproduced on clean main; rustfmt; denied-warning Clippy zero;
+cargo check --workspace --tests; cargo xtask docs-check PASS.
+_________________________________________________________________________________
+time: [15:02] [06-10-26]
+agent: [zcode] [glm-5.3]
+worktree: [port/rooms-maintenance] (stacked on port/rooms-attachments #46)
+type: [feature-request]
+area: [backend] reconciliation: room maintenance sweeps
+
+Ninth bounded Track B port (STACKED on #46 — the sweep's orphan cleanup walks
+room_attachments' blob layout, so the branch rebases onto the attachments
+head rather than main): retention and orphan maintenance for closed rooms.
+MaintenanceConfig resolves retention window / sweep interval / orphan grace
+from env once at startup; the loop sweeps on its own cadence until shutdown;
+POST /v1/rooms/maintenance/run (operator lane) runs a sweep now. A sweep cuts
+rooms closed past the retention window (row + transcript + attachments +
+cursors + federation index in one store transaction), reclaims attachment
+bytes and directories, and removes orphaned blobs/dirs past their grace —
+never touching open rooms. GET /health gains the room_maintenance card via a
+poison-recovering snapshot: it carries the CONFIGURATION and not just counts,
+because the failure it exists to catch (a retention window that never got
+set) is silent by construction. Adaptations: write_blob_for_test restored on
+this branch (trimmed from #46 as room_context-only, but the sweep tests also
+consume it — the trim moves to whichever PR lands second); the personal-only
+main.rs fixture helper record_sweep_for_test was not ported. Router-contract
+parity 123 → 124 on the stack.
+
+Validation: room_maintenance tests (15) pass; router-contract parity green;
+cargo test -p ocean-daemon 940 passed / 2 deterministic issue-#42 failures
+reproduced on clean main; rustfmt; denied-warning Clippy zero; cargo check
+--workspace --tests; cargo xtask docs-check PASS.
+time: [14:38] [06-10-26]
+agent: [zcode] [glm-5.3]
+worktree: [port/rooms-attachments]
+type: [feature-request]
+area: [backend] reconciliation: room attachments
+
+Eighth bounded Track B port: durable room attachments. Attachment BYTES live
+beside the DB that indexes them (per-room subdirectories under the resolved
+root, carried on AppState), so a moved OCEAN_DB_PATH carries a room's files
+with its metadata. Four route methods land: upload (typed attachment_too_large
+via sized cap + slack on the body-limit layer; uploader must be a roster
+human — a forged agent author is 403 and leaves no bytes), list, download
+(verified reads: bytes must match the recorded digest; served content type is
+proven by the bytes, never the declared one), and delete (row + bytes + a
+transcript marker in one store transaction). Traversal defence: one blob-path
+derivation with the id validator in one place; hostile room keys never become
+paths. Adaptations: room_not_open ported into persistent_rooms and
+invalid_request_response widened; AppState gained room_attachments_root with a
+unique-per-call test root after cross-test contamination showed up in the
+first run (17/17 after). Trimmed for sibling PRs: attachment_bytes and
+write_blob_for_test ride the room_context port (their consumer).
+Router-contract parity moved 119 → 123.
+
+Validation: room_attachments tests (17) pass; router-contract parity (123)
+green; cargo test -p ocean-daemon 925 passed / 2 deterministic issue-#42
+failures reproduced on clean main; rustfmt; denied-warning Clippy zero;
+cargo check --workspace --tests; cargo xtask docs-check PASS.
 time: [13:41] [06-10-26]
 agent: [zcode] [glm-5.3]
 worktree: [port/rooms-phase2-profile]
@@ -1213,6 +1296,17 @@ Round 5 correction (this ledger's "failing-first" claim for the 4b tests was imp
 
 Validation: ocean-agent 278 passed / 0 failed / 2 ignored; ocean-daemon 908 passed / 2 failed (only the two known pre-existing persistent_room envelope-key assertions, identical on the c49db99 baseline); clippy -p ocean-agent --all-targets -D warnings clean; fmt --check clean; git diff --check clean.
 
+_________________________________________________________________________________
+
+time: [17:55] [06-10-26]
+agent: [ocean] [glm-5.3]
+worktree: [fix/report-model-reroute-in-session] [/Users/seenorising/dev/ocean-org-sub]
+type: [fix] [backend] [sessions] [testing]
+area: [ocean-agent] [sessions]
+
+Round 5: round-4 review follow-ups on model reroute fidelity. (F2) Selection-time reroute detection now compares the (provider, model) ROUTE pair instead of the model id alone, so a same-model cross-provider fallback (keyless claude-code/claude-opus-5-5 → anthropic/claude-opus-5-5 via an OCEAN_PROVIDER_FALLBACK `provider/model` entry) is recorded on the session and emitted; when a reroute's two routes carry the same model id, the ModelRerouted event strings are provider-qualified (fixed route identifiers only) so they never read as a no-op — applied at both the selection-time and pre-stream emission sites. (F3) Ordinary session creation in run_prompt/run_fake_prompt/create_session_with_model pins the selection ROUTE (`new_with_route(id, model.id, selection.provider)`), never the wire model's protocol provider, so a claude-code OAuth primary that fails pre-stream persists `provider = "claude-code"` at the accepted-user checkpoint; `Session::new_with_id` becomes cfg(test) scaffolding with a doc to that effect. Also fixed a resolution seam the new F3 turn-2 path exposed: the per-turn model override (`resolve_state_for_model`) read `ProviderEnv::from_process()` directly instead of `turn_env()`, so it could not see a test's injected env — now it uses `turn_env()`, the same env source as the failover decisions. Production-identical: outside tests `turn_env()` is still a fresh process-env read per call, not one cached snapshot per turn. Two failing-first tests (RED: requested_model None≠Some(claude-opus-5-5); pin anthropic≠claude-code), each re-verified by reverting ONLY its fix. Round-4b ledger corrected (F4): see the Round 5 correction paragraph above.
+
+Validation: ocean-agent 280 passed / 0 failed / 2 ignored; ocean-daemon 908 passed / 2 failed (only the two known pre-existing persistent_room envelope-key assertions); clippy -p ocean-agent --all-targets -D warnings clean; fmt --all --check clean; git diff --check clean.
 _________________________________________________________________________________
 
 time: [17:55] [06-10-26]
@@ -1519,6 +1613,50 @@ area: [backend] [infra]
 Federated rooms on smaths-mini (northstar, ocean-team) sat in `recovering` with Pending outbox rows and no log output. Replaying the receiver's reads against production Bedrock with the room bearer showed a valid `hello` (high-water 0) and a 200 roster, but the roster carries `caller_member_ids` (Bedrock since ocean-bedrock #137, 2026-09-02) and `MembersEnvelope` is `deny_unknown_fields`, so every epoch silently returned Recover after hello. Fix: accept and ignore `caller_member_ids` on the strict envelope, warn with `outcome="roster_rejected"` on non-transport roster parse failures, and regression test `roster_with_caller_member_ids_reaches_live` (red without the field, green with it). The supervised launcher `deploy/ocean-daemon.sh` now sources owner-only `~/.config/ocean-rs/federation.env` and prints `federation=on|off`; previously only a hand-edited installed copy did, which the installer would overwrite. Operator guide documents the env file, contributor-side local redemption, and the receiver replay diagnosis. Independent review round: `WireMember` also accepts Bedrock's `operator_id` (same failure class, operator rooms); roster projection failures warn too; startup warns `federation_unconfigured` when credentialed rooms exist without a URL; the launcher parses federation.env as data (owner-only, not group/other-writable, `OCEAN_FEDERATION_*` keys only, CR/quote tolerant, plist values win) instead of sourcing it, verified under macOS bash 3.2 against command substitution, foreign keys, spaces, CRLF, group-writable and unreadable files. End-to-end: the fixed release binary, run unsupervised on an isolated HOME with a copied rooms.db (outbox cleared), brought northstar and ocean-team to `live` against production Bedrock. Follow-up folded in before merge: warn-only `credential_member_mismatch` when Bedrock's `caller_member_ids` omit the credential's local member (stale-credential diagnostic; never blocks Live). Launcher mode check fails closed on unparseable `stat` output. Validation: room_federation 92/92; ocean-daemon 910 passed / 2 failed at 99be7a9 (the known persistent_room envelope-key assertions, identical on unmodified main); clippy -p ocean-daemon --all-targets -D warnings clean; fmt clean; docs-check PASS; installer fixtures 12/12. Runtime ops the same evening (not code): Jay's laptop federation.env reduced to OCEAN_FEDERATION_URL (the direct-redeem contributor token was removed and its backup deleted) and his daemon restarted; a fresh invite minted by John's daemon was redeemed through Jay's local /v1/rooms/persistent/invites/redeem (credential f9757e6e in his rooms.db); the stale direct-path Bedrock member db0367cd was removed by the room owner (old token now 403 membership_revoked); the empty local test room ns-taskforce was soft-closed on smaths-mini. Both daemons stay `recovering` until this fix is merged and installed.
 _________________________________________________________________________________
 
+_________________________________________________________________________________
+time: [23:34] [09-10-26]
+agent: [codex] [factory release]
+worktree: [codex/pr46-attachment-reconcile]
+type: [bug report]
+area: [backend] [testing] [review]
+
+PR #46 / issue #83: reconciled durable attachments with canonical main f1b22bd8 and preserved both public ledger histories. Reads reject oversized/nonregular blobs before bounded allocation and verify bytes against recorded metadata. No-follow root/room/blob descriptor custody, private exclusive temporary files, non-overwriting publication and directory sync protect bytes before indexing; retained directory custody confines rollback and post-commit cleanup. HTTP upload/delete recheck human authors inside their store transaction while generic agent-capable APIs remain intact. Returning known committed metadata eliminates the fallible post-commit lookup that could trigger cleanup of committed bytes. Relative database-path configuration remains supported.
+
+Validation: daemon attachment tests 21/21, store attachment tests 9/9, locked daemon/store check, formatting and diff checks pass. Removing both transactional human guards makes the deterministic absent-to-Agent/System author regression fail; exact source restoration passes all 21 daemon attachment tests. Remote hashes match all five changed source/docs files. Independent source review ACKed 19c24c16; this receipt precedes final exact-head review and required hosted builds. Daemon/store contracts updated; parent ownership/indexes unchanged. Safe byte I/O is Unix-only; unsupported platforms fail closed. Existing caller-asserted room authority remains unchanged. PR #47 stays held under #84 pending maintenance custody/snapshot repair and stack reconciliation. Maintainer approval and existing live-migration acceptance remain separate. No deployment, installation or live data/provider access.
+
+_________________________________________________________________________________
+time: [23:54] [09-10-26]
+agent: [codex]
+worktree: [codex/pr47-maintenance-custody]
+type: [bug report] [PR #47]
+area: [backend] [testing] [review]
+
+Reconciled maintenance with reviewed attachment PR #46 and preserved both ledger histories. Issue #84 repair coordinates upload publication with cleanup, fixes the sweep cutoff before enumeration, and rechecks live room/attachment references under the store guard through descriptor-relative unlink. Cleanup is row-first; filesystem and SQL effects are not one transaction. Flat regular files only, actual unlinked-byte accounting, verified empty-directory identity, and a fused directory iterator preserve bounded cleanup. Ambiguous inherited tracker references now name the actual live migration/installation boundary.
+
+Validation: maintenance 20/20, attachments 23/23 and router 5/5 passed, plus clean locked daemon check, formatting and diff check. Deterministic in-flight publication, new-room, delayed-cutoff, directory-replacement and iterator-error fixtures passed. Independent source review acknowledged 74e4a1c1. The nearest daemon contract is updated; parent ownership/indexes are unchanged. Final-head review, required builds, independent maintainer approval and release after #46 remain gates. No live sweep, merge or deployment is claimed.
+
+_________________________________________________________________________________
+time: [00:12] [10-10-26]
+agent: [codex] [gpt-6]
+worktree: [codex/pr47-maintenance-reporting] (PR #47, issue #30)
+type: [bug report] [workflow]
+area: [backend] maintenance failure accounting and recovery
+
+Independent review reproduced the proposed maintenance publisher counting one failed sweep twice and replacing known committed counts with zeros. The bounded repair retains cleanup custody and accumulated progress across worker/join failures, reports fixed stage/classification plus complete/incomplete/unknown accounting and in-progress start, and publishes terminal facts once without calling the failing logger. A later scheduler tick recovers; blocked workers retain custody rather than admitting overlapping cleanup.
+
+Validation at source8171961: maintenance24/24, attachments23/23 and router5/5 fixtures passed; locked daemon compilation, formatting, diff and docs checks passed (30 packages,153 active Markdown files,170 local links). Local and remote changed-source hashes matched; exact-source independent review ACK received. The daemon devlog records the changed reporting contract; parent ownership/index contracts are unchanged. Fixtures cover queued cancellation, exceptional join failure, committed retention before panic, publication panic, next-tick recovery and dropped-waiter custody. No live sweep, incident-cause attribution, installation or deployment occurred. Final-head review/builds, maintainer approval, #46 dependency and live migration/installation acceptance remain separate gates.
+
+_________________________________________________________________________________
+
+time: [23:34] [09-10-26]
+agent: [codex] [factory release]
+worktree: [codex/pr46-attachment-reconcile]
+type: [bug report]
+area: [backend] [testing] [review]
+
+PR #46 / issue #83: reconciled durable attachments with canonical main f1b22bd8 and preserved both public ledger histories. Reads reject oversized/nonregular blobs before bounded allocation and verify bytes against recorded metadata. No-follow root/room/blob descriptor custody, private exclusive temporary files, non-overwriting publication and directory sync protect bytes before indexing; retained directory custody confines rollback and post-commit cleanup. HTTP upload/delete recheck human authors inside their store transaction while generic agent-capable APIs remain intact. Returning known committed metadata eliminates the fallible post-commit lookup that could trigger cleanup of committed bytes. Relative database-path configuration remains supported.
+
+Validation: daemon attachment tests 21/21, store attachment tests 9/9, locked daemon/store check, formatting and diff checks pass. Removing both transactional human guards makes the deterministic absent-to-Agent/System author regression fail; exact source restoration passes all 21 daemon attachment tests. Remote hashes match all five changed source/docs files. Independent source review ACKed 19c24c16; this receipt precedes final exact-head review and required hosted builds. Daemon/store contracts updated; parent ownership/indexes unchanged. Safe byte I/O is Unix-only; unsupported platforms fail closed. Existing caller-asserted room authority remains unchanged. PR #47 stays held under #84 pending maintenance custody/snapshot repair and stack reconciliation. Maintainer approval and existing live-migration acceptance remain separate. No deployment, installation or live data/provider access.
 time: [22:48] [09-10-26]
 agent: [codex] [factory release]
 worktree: [codex/pr60-reviewed-reconcile]
@@ -1567,6 +1705,18 @@ area: [infra]
 _________________________________________________________________________________
 
 _________________________________________________________________________________
+time: [15:49] [10-12-26]
+agent: [Codex]
+worktree: [PR47 port/rooms-maintenance; factory-pr47-maintenance-reporting/ocean]
+type: [workflow]
+area: [review]
+Reconciled PR47 1bff98d41e7084e67bb6c2c1a6fb2a7b5a7d58dd with canonical main 1dfc6802bb74fecdcf83f6f17732b671c892b632. Only events.md conflicted; both complete parent histories remain verbatim and ordered. All non-ledger blobs/modes match automatic merge. Maintenance, attachments, persistent-room routes and store source match validated8171961bf23a6a2d1068ee2bac6c171f6d32aaa1; previous24/24 maintenance,23/23 attachments and5/5 router evidence applies to unchanged bytes. Incoming federation/launcher/installer source equals main. Narrow formatting, shell syntax and staged diff checks pass; no duplicate heavy validation. Automatically merged contracts preserve both scopes with no additional index/ownership change. Root owns final commit, separate exact-head review and fresh hosted builds. Preserve release46 before47 before87; no child87 or new unmerged46 imported, external87 custody untouched. Issue90, live migration and issue30 historical-incident acceptance remain holds. No actual maintenance sweep, provider call, restart or deployment.
+time: [14:59] [10-12-26]
+agent: [Codex]
+worktree: [PR46; factory-pr46-attachment-reconcile/ocean]
+type: [workflow]
+area: [review]
+Reconciled reviewed PR46 2c26a132e3a7e1e6f31b3918dd8a698f6f30bdef with canonical main1dfc6802bb74fecdcf83f6f17732b671c892b632 after external79/89 release. Only events.md conflicted; both ordered parent histories preserved. All non-ledger index entries exactly match automatic merge; existing PR-specific source remains unchanged, incoming release source retained. Installer14/14, shell syntax, formatting and diff-check pass; no heavy build/live action. Root takes exclusive release custody for this candidate; fresh independent final-head review and required hosted builds follow this entry. Approval-policy issue90, stack rollout and live acceptance remain separate gates. Applicable AGENTS contracts intentionally unchanged: source behavior and ownership contracts unchanged.
 time: [15:52] [10-12-26]
 agent: [Codex]
 worktree: [PR43 port/rooms-phase2-profile; factory-pr43-reviewed-replay/ocean]
@@ -1675,6 +1825,26 @@ Validation: in apps/ocean-surface, cargo fmt --check clean; WASM clippy -D warni
 _________________________________________________________________________________
 
 _________________________________________________________________________________
+time: [23:21] [10-12-26]
+agent: [codex] [gpt-6]
+worktree: [codex/pr46-main255-reconcile] [macmini-ip factory-pr46-main255-reconcile]
+type: [refactor]: PR #46 current-main reconciliation
+area: [backend] [testing] [review]
+
+Reconciled attachment PR #46 head 1491c98172c6f771e0e33ccb59c386002673758a with canonical main 25599f22410c8e164dd09f13ad0a9254fa97a39d. Manual resolutions retain attachment/run modules, both daemon contract sections, all four attachment guide rows and current message-authority wording. Registered, banner and documented routes agree at 133. No manual runtime-body changes: attachment daemon source and all 14 attachment-named store functions retain prior bytes; incoming run/tool files match main. Other 1,174 non-ledger entries match AUTO_MERGE exactly.
+
+Five existing pure router/banner fixtures passed via standalone rustc extraction against merged source; existing direct-rustc docs-check passed 30 packages, 153 Markdown files, 170 links. Nonledger whitespace checks passed. No full Cargo build or fresh attachment runtime/provider test execution claimed; earlier attachment regressions remain unchanged-source historical evidence. Both public parent ledger histories survive line-for-line in original order, followed only by this public-safe canonical receipt. The devlog union retains both contracts and requires no child-index change. Independent final-head review, hosted builds, maintainer approval under #54/#90 and live acceptance remain separate. Preserve #46 before #47 before #87; no merge or deployment claimed.
+
+_________________________________________________________________________________
+time: [23:26] [10-12-26]
+agent: [codex] [gpt-6]
+worktree: [codex/pr47-parent46-reconcile] [macmini-ip factory-pr47-parent46-reconcile]
+type: [refactor]: PR #47 attachment-parent reconciliation
+area: [backend] [testing] [review]
+
+Reconciled maintenance PR #47 head 27ac803b9fe2bf192eb4d4b0a8c1af688572ac9a with exact attachment PR #46 head fa2a26a6db75e50e86efcbb502cef23dd2fcce70, which contains canonical main 25599f22410c8e164dd09f13ad0a9254fa97a39d. Manual resolutions retain maintenance and consent contracts, the maintenance guide row with current message authority, and 134 registered/banner/documented routes. No manual runtime-body changes: maintenance and attachment files equal both prior PR #47 and validated source8171961; incoming run/tool files equal the parent. Other 1,175 non-ledger entries match AUTO_MERGE exactly.
+
+Five existing pure router/banner fixtures passed using standalone rustc extraction; existing direct-rustc docs-check passed 30 packages, 153 Markdown files, 170 links. Nonledger whitespace checks passed. Earlier maintenance/attachment behavioral evidence remains unchanged-source history, not fresh runtime execution. Automatic ledger union failed ordered parent preservation; instead merged whole original time-labelled records, preserving each parent's complete records and line order without mixing their fields. Only this public-safe canonical receipt is new. Devlog contract union needs no child-index change. Independent final-head review, hosted builds, maintainer approval under #54/#90 and issue #84/#30 release/live acceptance remain gates. Preserve #46 before #47 before #87 and external #87 custody. No live sweep, merge, deployment or incident-resolution claim.
 time: [23:32] [10-12-26]
 agent: [codex] [gpt-6]
 worktree: [codex/pr43-main255-reconcile] [macmini-ip factory-pr43-main255-reconcile]
@@ -1684,3 +1854,22 @@ area: [backend] [testing] [review]
 Reconciled profile PR #43 head 75e43022207750d061b87edf8dab691758b07247 with canonical main 25599f22410c8e164dd09f13ad0a9254fa97a39d. Manual resolutions retain two profile guide rows/current message authority and derive 131 identical registered/banner/documented routes. No manual runtime-body changes; daemon profile implementation equals prior PR #43, store profile/resources equal current PR #60 head56a4dcd8, and included prerequisite ancestor a0c66c48 remains. Other 1,178 non-ledger entries match AUTO_MERGE exactly.
 
 Five existing pure router/banner fixtures passed via standalone rustc extraction against merged source; existing direct-rustc docs-check passed 30 packages, 157 Markdown files, 175 links. Nonledger whitespace checks passed. These fixtures do not compile the full daemon or execute profile/runtime behavior; earlier behavioral results remain unchanged-source historical evidence. Both public parent ledger histories are retained line-for-line in original order, followed by this public-safe canonical receipt. Automatically merged contracts retain their scopes, with no further devlog/index change needed. Separate source review ACKed; final committed-head review, hosted builds, maintainer approval under #54/#90 and live acceptance remain gates. Release #60 before #43. No merge or deployment claimed.
+
+_________________________________________________________________________________
+time: [18:36] [10-13-26]
+agent: [copilot]
+worktree: [port/rooms-maintenance] [/home/runner/work/ocean/ocean]
+type: [workflow] canonical main conflict resolution
+area: [backend] [testing] [docs] [review]
+
+Merged canonical main at f6e0b1a. Resolved the additive Room route, operator-guide and
+daemon-contract conflicts; profile, attachment and maintenance routes are all retained,
+with the route baseline set to 136. Both parent event histories remain line-for-line
+present and in order. Release #46 before #47 before #87, maintainer approval, hosted
+builds and live acceptance remain separate gates; no deployment or issue acceptance
+claimed.
+
+Validation: daemon banner tests passed (3) and
+`router_contract_source_banner_and_operator_guide_are_in_parity` passed;
+`cargo xtask docs-check` passed (30 packages, 157 Markdown files, 175 local links);
+`git diff --check` passed.
