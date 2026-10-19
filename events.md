@@ -2757,3 +2757,12 @@ type: [bug report]
 area: [backend] [testing]
 
 The browser proxy imported Unix file APIs unconditionally. Added Windows credential/session-secret reads and create-new writes through the daemon's existing protected-owner-ACL file primitive, plus absolute HOME/USERPROFILE defaults. Existing Unix file semantics, login gate, exact owner routes and browser credential boundary remain unchanged. Converted transport fixtures to platform-private file creation; added Windows persistence, unsafe-file/link refusal and profile fixtures. Full 38-test host proxy suite, all-target Clippy, actionlint, workflow contracts and docs-check pass. Native Windows proxy execution is added to the manual read-only probe and remains pending. Updated Surface, runtime file-owner and workflow contracts; parent boundary indexes unchanged. No Windows installer, native Tauri consent, real-provider or deployed-client acceptance claimed.
+
+_________________________________________________________________________________
+time: [18:37] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/windows-surface-proxy]
+type: [workflow]
+area: [testing]
+
+Keep Windows Surface validation separate from the daemon candidate: opt-in windows_surface_probe runs the full proxy suite and real release build without unrelated daemon/TUI builds or Mac packaging. It remains read-only, bounded and same-ref cancelling. Workflow contracts/actionlint pass; the committed Surface source at 0c61d800 also passed all 38 proxy tests from a clean detached checkout before push.

@@ -99,11 +99,18 @@ require(
     "release publication follows registry convergence",
 )
 require("-F draft=false" in source, "verified release is made public only after registry convergence")
-require("if: github.event_name == 'push' || !inputs.windows_probe" in source, "Windows probe does not also run Mac packaging")
+require("if: github.event_name == 'push' || (!inputs.windows_probe && !inputs.windows_surface_probe)" in source, "Windows probes do not also run Mac packaging")
 windows_job = source[source.index("  windows-probe:") :]
 require("if: github.event_name == 'workflow_dispatch' && inputs.windows_probe" in windows_job, "Windows probe is manual and opt-in")
 require("contents: read" in windows_job and ": write" not in windows_job, "Windows probe has no write authority")
 require("cargo build --locked --release -p ocean-daemon -p ocean-tui" in windows_job, "Windows probe compiles the actual release binaries")
 require("cancel-in-progress: true" in windows_job, "superseded Windows probes cancel by ref")
 
+surface_job = source[source.index("  windows-surface-probe:") :]
+require("if: github.event_name == 'workflow_dispatch' && inputs.windows_surface_probe" in surface_job, "Windows Surface probe is manual and opt-in")
+require("contents: read" in surface_job and ": write" not in surface_job, "Windows Surface probe has no write authority")
+require("working-directory: apps/ocean-surface" in surface_job, "Surface probe uses its own component")
+require("cargo test --locked -p ocean-surface-proxy" in surface_job, "Surface probe runs production router and credential fixtures")
+require("cargo build --locked --release -p ocean-surface-proxy" in surface_job, "Surface probe builds the real executable")
+require("cancel-in-progress: true" in surface_job, "superseded Surface probes cancel by ref")
 print("Ocean release workflow root/path/security contract: PASS")

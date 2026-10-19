@@ -14,8 +14,10 @@ Root GitHub Actions builds for the public Ocean monorepo.
   Registry authentication, publication and latest-tag reconciliation target
   `@kingmaker-systems/ocean`, linked to this canonical repository.
   Manual `windows_probe` builds daemon/TUI executables and runs Observatory
-  credential, operator-key and guarded skill-file tests on Windows, plus the
-  full Surface proxy suite with synthetic local credentials/upstreams. The probe
+  credential, operator-key and guarded skill-file tests on Windows. The separate
+  manual `windows_surface_probe` runs the full Surface proxy suite with synthetic
+  local credentials/upstreams and builds its release executable. Neither Windows
+  probe starts Mac packaging, and each is limited to its component. The probe
   has read-only permissions and never publishes. This probe is separate from routine CI and Mac package validation.
   The publish job has no source checkout: its first shell starts at the existing
   workspace root, verifies the artifact digest, then creates the component
