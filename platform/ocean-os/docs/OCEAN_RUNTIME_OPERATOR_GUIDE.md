@@ -523,6 +523,7 @@ Grouped by concern:
 # Liveness / observability
 GET    /                                  root banner (JSON route list)
 GET    /health                            liveness check
+GET    /v1/identity                      who this daemon says its human is (member.toml, then OCEAN_MEMBER_ID; null when unset)
 GET    /ready                             readiness (model/credentials wired)
 GET    /metrics                           Prometheus text (v0.0.4); Content-Type: text/plain; version=0.0.4
 
@@ -595,7 +596,7 @@ POST   /v1/permissions/{id}/decision      allow/deny a mutating-tool request
 # Rooms — persistent lifecycle (SQLite-backed; survives restarts)
 GET    /v1/me                             daemon owner identity { participant_id, display_name }; id = member.toml / OCEAN_MEMBER_ID member id, else minted once from OCEAN_OWNER_NAME / USER
 PUT    /v1/me                             rename the owner { display_name } (1-64 chars); requires X-Ocean-Operator; id is stable; renames the owner's Human roster rows
-GET    /v1/rooms/persistent               list persistent rooms
+GET    /v1/rooms/persistent               list persistent rooms (each room carries additive owner-local "muted")
 POST   /v1/rooms/persistent               create a room { key, name, trigger_policy?, workspace_root? }
 GET    /v1/rooms/persistent/{key}         room + transcript
 POST   /v1/rooms/persistent/{key}/close  soft-close; flush final marker and cancel this Room’s active turns
@@ -612,6 +613,22 @@ POST   /v1/rooms/persistent/{key}/agents/{agent_member_id}/invoke  invoke from a
 POST   /v1/rooms/persistent/{key}/participants            join { kind?, id?, display_name?, owner_id? }; a human join is always the daemon owner (id/display_name ignored)
 DELETE /v1/rooms/persistent/{key}/participants/{participant_id}  leave
 POST   /v1/rooms/persistent/{key}/participants/{participant_id}/retire  merge a placeholder human into a real member (operator lane, replay-safe)
+POST   /v1/rooms/persistent/{key}/attachments   upload a room attachment (bytes stored beside the DB)
+GET    /v1/rooms/persistent/{key}/attachments   list a room's attachments
+GET    /v1/rooms/persistent/{key}/attachments/{attachment_id}  download attachment bytes
+DELETE /v1/rooms/persistent/{key}/attachments/{attachment_id}  remove an attachment
+POST   /v1/rooms/maintenance/run             run a retention/orphan sweep now (operator lane)
+GET    /v1/rooms/persistent/{key}/resources   list contributed-folder grants (safe projection)
+POST   /v1/rooms/persistent/{key}/resources   grant a canonical local folder to room agents (operator decision)
+GET    /v1/rooms/persistent/{key}/resources/{resource_id}  one grant (safe projection, no local_root)
+DELETE /v1/rooms/persistent/{key}/resources/{resource_id}  revoke a grant
+POST   /v1/rooms/persistent/{key}/resources/{resource_id}/suspend  suspend a grant
+POST   /v1/rooms/persistent/{key}/resources/{resource_id}/resume  resume a suspended grant
+POST   /v1/rooms/persistent/{key}/resources/{resource_id}/list  operator preview: confined listing
+POST   /v1/rooms/persistent/{key}/resources/{resource_id}/read  operator preview: confined file read
+POST   /v1/rooms/persistent/{key}/summarize      one bounded model turn folded into the room's summary artifact (amends in place)
+GET    /v1/rooms/persistent/{key}/profile        room profile and credential-slot status (never a value)
+PUT    /v1/rooms/persistent/{key}/profile        replace the room profile (operator decision, replay-safe)
 POST   /v1/rooms/persistent/{key}/messages                post message { author_kind?, author_id?, body, thread_parent_seq? }; a human post is always authored by the daemon owner (author_id ignored)
 GET    /v1/rooms/persistent/{key}/transcript              read transcript (?after_seq=N&limit=M)
 POST   /v1/rooms/persistent/{key}/artifacts               record what the room produced { id, kind: task|decision|note, title, body?, author_id }; 201 { artifact }. Author must be on the roster (403). Every create writes a System transcript line in the SAME transaction, so an artifact can never exist that the room's history does not explain.
@@ -624,6 +641,10 @@ GET    /v1/rooms/persistent/{key}/runs                    recent agent work card
 POST   /v1/rooms/persistent/{key}/runs/{run_id}/permission  owner approve/deny for the run's pending tool permission ({permission_id, tool?, decision: allow|allow_session|deny}); requires X-Ocean-Operator; 409 unless permission_id is the one pending now
 GET    /v1/rooms/persistent/{key}/agents/{agent_id}/settings  per-room agent overrides (instructions overlay, model); local only, never federated
 PUT    /v1/rooms/persistent/{key}/agents/{agent_id}/settings  replace per-room agent overrides; empty body fields clear them
+GET    /v1/rooms/persistent/{key}/search                  ?q=&limit= case-insensitive chat-message body search, newest first (q 2..200 chars, else 400 query_too_short / query_too_long; limit 1..50, default 20)
+GET    /v1/rooms/inbox                                    ?limit= mentions of and thread replies to the local owner across the 50 most recently active open rooms, newest first (limit 1..100, default 30)
+GET    /v1/rooms/persistent/{key}/prefs                   per-room owner prefs {muted}; local only, never federated
+PUT    /v1/rooms/persistent/{key}/prefs                   replace per-room owner prefs ({"muted":bool})
 GET    /v1/rooms/persistent/{key}/events                  SSE: initial full room_access projection (no id) + id-bearing room_message frames via ?after_seq=N / Last-Event-ID replay, then post-commit access-update + message tail; open non-call rooms only
 GET    /v1/rooms/persistent/{key}/read-cursor             fetch the daemon-owned read cursor projection for Local/Live rooms; closed/pending/revoked return typed unsupported
 PATCH  /v1/rooms/persistent/{key}/read-cursor             advance the daemon-owned read cursor { read_seq }; Local/Live only, monotonic, publishes room_read_cursor wake on success

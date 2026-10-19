@@ -24,7 +24,9 @@ use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
+mod daemon_transport;
 mod owner_mutation;
+mod room_consent;
 
 /// One surfaced filesystem change, serialized to the webview as `path-changed`.
 ///
@@ -1245,34 +1247,6 @@ fn spawn_daemon_poller(app: AppHandle, daemon: Arc<DaemonSup>) {
     });
 }
 
-/// One of the three Room owner mutations (`PUT /v1/me`, run permission
-/// decision, room agent settings), sent to the loopback daemon with the
-/// operator key read on the Rust side (operator decision 2026-10-08; see
-/// `owner_mutation.rs`). The page picks a fixed `kind` and the ids; it never
-/// supplies a method, path or header, and never sees the key.
-#[tauri::command]
-async fn room_owner_mutation(
-    state: State<'_, AppState>,
-    kind: String,
-    room: Option<String>,
-    target: Option<String>,
-    body: String,
-) -> Result<owner_mutation::OwnerMutationReply, String> {
-    let mutation = owner_mutation::OwnerMutation::parse(&kind, room.as_deref(), target.as_deref())?;
-    let (host, port) = (state.daemon.host.clone(), state.daemon.port);
-    tauri::async_runtime::spawn_blocking(move || {
-        owner_mutation::send(
-            &host,
-            port,
-            &owner_mutation::operator_key_path(),
-            &mutation,
-            &body,
-        )
-    })
-    .await
-    .map_err(|_| "owner mutation failed".to_string())?
-}
-
 /// Current daemon supervision state (cached from the poller). The wasm side
 /// reads this on mount to seed its indicator before the first on-change event.
 #[tauri::command]
@@ -1850,6 +1824,8 @@ pub fn run() {
     // and the wasm bundle share one configurable origin (default 127.0.0.1:4780).
     let url = daemon_url_from_env();
     let (host, port) = parse_host_port(&url).unwrap_or_else(|| ("127.0.0.1".to_string(), 4780));
+    let operator_transport =
+        daemon_transport::DaemonTransport::new(&url, daemon_transport::operator_key_path());
     tauri::Builder::default()
         // Single-instance guard (QA-005). Close-requested hides the main
         // window to the tray instead of quitting, so an "invisible" Ocean is
@@ -1874,6 +1850,15 @@ pub fn run() {
                 })
                 .build(),
         )
+        // Operator-gated Room requests (owner mutations, agent consent) share
+        // one numeric-loopback transport; an untrusted OCEAN_DAEMON_URL
+        // (including `localhost`) leaves every one of them unsent.
+        .manage(owner_mutation::OwnerMutationState(
+            operator_transport.clone(),
+        ))
+        .manage(room_consent::ConsentState(Arc::new(
+            room_consent::ConsentBroker::new(operator_transport),
+        )))
         .manage(AppState {
             watchers: Default::default(),
             scoped_watchers: Default::default(),
@@ -2223,7 +2208,12 @@ pub fn run() {
             deep_link_ready,
             ui_debug_resize,
             open_external_url,
-            room_owner_mutation
+            owner_mutation::room_owner_mutation,
+            room_consent::room_consent_preview,
+            room_consent::room_consent_authorize,
+            room_consent::room_consent_cancel,
+            room_consent::room_agent_revoke,
+            room_consent::room_agent_bootstrap
         ])
         .run(tauri::generate_context!())
         .expect("error while running ocean-tauri");

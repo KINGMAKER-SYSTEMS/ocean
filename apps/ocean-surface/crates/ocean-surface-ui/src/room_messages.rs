@@ -4,7 +4,7 @@
 //! compact system rows, and day separators.
 //!
 //! Deliberately NOT wired into markup yet: the timeline region of
-//! `rooms_workspace.rs` is being restructured by the thread slice
+//! `rooms_workspace/` is being restructured by the thread slice
 //! (root-only timeline + reply rail), so the density model lands here as a
 //! reviewed, test-locked contract that the timeline adopts. Class names it
 //! maps to are defined in the stylesheets:
@@ -68,6 +68,13 @@ fn day_key(msg: &RoomMessage) -> Option<&str> {
 /// system) instead of a full message card.
 pub(crate) fn is_compact_system_row(msg: &RoomMessage) -> bool {
     !matches!(msg.kind, RoomMessageKind::Message)
+}
+
+/// The daemon's "auto-convene: …" audit row. The agent's work card already
+/// shows the convene (team-platform P3), so the timeline hides the duplicate;
+/// "auto-convene failed …" rows stay visible.
+pub(crate) fn is_convene_audit(msg: &RoomMessage) -> bool {
+    matches!(msg.kind, RoomMessageKind::System) && msg.body.starts_with("auto-convene: ")
 }
 
 /// Whether `cur` renders grouped under `prev` (avatar once, tight spacing):
@@ -156,6 +163,18 @@ mod tests {
 
     fn m(seq: u64, author: &str, ts: &str) -> RoomMessage {
         msg(seq, author, RoomMessageKind::Message, ts)
+    }
+
+    #[test]
+    fn convene_audit_rows_are_recognized_but_failures_are_not() {
+        let mut audit = msg(1, "system", RoomMessageKind::System, "2026-07-29T12:00:00Z");
+        audit.body = "auto-convene: helper (on_mention: @helper mentioned)".into();
+        assert!(is_convene_audit(&audit));
+        audit.body = "auto-convene failed for helper: boom".into();
+        assert!(!is_convene_audit(&audit));
+        let mut chat = m(2, "ada", "2026-07-29T12:00:00Z");
+        chat.body = "auto-convene: quoted".into();
+        assert!(!is_convene_audit(&chat));
     }
 
     #[test]

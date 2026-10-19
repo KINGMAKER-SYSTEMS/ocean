@@ -27,6 +27,10 @@ This crate owns shared protocol types used across Ocean clients, daemon, runtime
 - `TokenUsage.context_is_floor` is additive and legacy-default false. It marks
   a `context_tokens` reading taken before a failure or a turn-limit stop;
   consumers must not present a marked reading as the final request.
+- `RoomAgentRun.request_id` is optional, additive, and legacy-default absent
+  (`skip_serializing_if`), so run bodies stored before it still decode. It is
+  the daemon request id a client may cancel, never a decision token or other
+  credential.
 - The closed Track-0 `RoomId` projection family is retired. Durable room contracts use the open `RoomKey` model; do not recreate projection DTOs without a new audited API design.
 
 ### Federation types

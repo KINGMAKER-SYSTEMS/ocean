@@ -92,7 +92,7 @@ use ocean_core::{
     bounded_prose, FederatedMessageMeta, FederatedRoomMemberProjection, OutboxItemState, Room,
     RoomAccessProjection, RoomAccessState, RoomAgentRun, RoomAgentRunState, RoomAgentSettings,
     RoomArtifact, RoomArtifactKind, RoomArtifactState, RoomAttachment, RoomKey, RoomMessage,
-    RoomMessageKind, RoomOutboxItem, RoomParticipant, RoomParticipantKind,
+    RoomMessageKind, RoomOutboxItem, RoomParticipant, RoomParticipantKind, RoomPrefs,
     RoomReadCursorProjection, RoomReadCursorUpdateRequest, RoomTriggerPolicy,
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
@@ -466,6 +466,8 @@ pub enum RoomStoreError {
     /// Same rule as an artifact author: a file attributed to somebody who is
     /// not in the room is a lie.
     AttachmentUploaderNotInRoster { room: RoomKey, uploader: String },
+    /// HTTP attachment mutations require a human inside the write transaction.
+    AttachmentActorNotHuman { room: RoomKey, actor: String },
     /// The member closing a room is not on its roster. Same rule as an artifact
     /// author and an attachment uploader, and it earns its own variant rather
     /// than borrowing theirs because the close marker names this person in the
@@ -613,6 +615,9 @@ impl std::fmt::Display for RoomStoreError {
             }
             Self::AttachmentUploaderNotInRoster { room, uploader } => {
                 write!(f, "room '{room}' has no participant '{uploader}'")
+            }
+            Self::AttachmentActorNotHuman { room, actor } => {
+                write!(f, "participant '{actor}' in room '{room}' is not human")
             }
             Self::RoomCloserNotInRoster { room, closer } => {
                 write!(f, "room '{room}' has no participant '{closer}'")
@@ -2152,6 +2157,12 @@ impl SqliteRoomStore {
                 PRIMARY KEY (room_id, agent_id)
             );
 
+            -- Per-room owner preferences (team-platform P6). Local only.
+            CREATE TABLE IF NOT EXISTS room_prefs (
+                room_id TEXT PRIMARY KEY REFERENCES rooms(id) ON DELETE CASCADE,
+                body    TEXT NOT NULL          -- JSON RoomPrefs
+            );
+
             CREATE TABLE IF NOT EXISTS daemon_owner (
                 singleton      INTEGER PRIMARY KEY CHECK (singleton = 1),
                 participant_id TEXT NOT NULL,     -- stable; canonical id alphabet
@@ -3087,6 +3098,58 @@ impl SqliteRoomStore {
         uploader: &str,
         now: DateTime<Utc>,
     ) -> Result<(RoomAttachment, RoomMessage)> {
+        self.add_attachment_checked(
+            key,
+            attachment_id,
+            filename,
+            content_type,
+            byte_len,
+            sha256,
+            uploader,
+            now,
+            false,
+        )
+    }
+
+    /// Caller-asserted HTTP identity must still be human when the mutation commits.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_human_attachment(
+        &mut self,
+        key: &RoomKey,
+        attachment_id: &str,
+        filename: &str,
+        content_type: &str,
+        byte_len: u64,
+        sha256: &str,
+        uploader: &str,
+        now: DateTime<Utc>,
+    ) -> Result<(RoomAttachment, RoomMessage)> {
+        self.add_attachment_checked(
+            key,
+            attachment_id,
+            filename,
+            content_type,
+            byte_len,
+            sha256,
+            uploader,
+            now,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn add_attachment_checked(
+        &mut self,
+        key: &RoomKey,
+        attachment_id: &str,
+        filename: &str,
+        content_type: &str,
+        byte_len: u64,
+        sha256: &str,
+        uploader: &str,
+        now: DateTime<Utc>,
+        require_human: bool,
+    ) -> Result<(RoomAttachment, RoomMessage)> {
         if !self.room_is_open(key)? {
             return Err(RoomStoreError::UnknownRoom(key.clone()));
         }
@@ -3109,6 +3172,19 @@ impl SqliteRoomStore {
                 room: key.clone(),
                 uploader: uploader.to_string(),
             });
+        }
+        if require_human {
+            let kind: String = tx.query_row(
+                "SELECT kind FROM participants WHERE room_id = ?1 AND id = ?2",
+                params![key.as_str(), uploader],
+                |row| row.get(0),
+            )?;
+            if kind != "human" {
+                return Err(RoomStoreError::AttachmentActorNotHuman {
+                    room: key.clone(),
+                    actor: uploader.to_string(),
+                });
+            }
         }
         let on_behalf_of = Self::acting_for_on(&tx, key, uploader)?;
         tx.execute(
@@ -3153,10 +3229,17 @@ impl SqliteRoomStore {
             now,
         )?;
         Self::touch_on(&tx, key, now)?;
+        let attachment = RoomAttachment {
+            id: attachment_id.to_string(),
+            filename: filename.to_string(),
+            content_type: content_type.to_string(),
+            byte_len,
+            sha256: sha256.to_string(),
+            uploaded_by: uploader.to_string(),
+            uploaded_at: now.to_rfc3339(),
+            on_behalf_of,
+        };
         tx.commit()?;
-        let attachment = self
-            .attachment(key, attachment_id)?
-            .expect("attachment just inserted");
         Ok((attachment, message))
     }
 
@@ -3175,6 +3258,30 @@ impl SqliteRoomStore {
         remover: &str,
         now: DateTime<Utc>,
     ) -> Result<(RoomAttachment, RoomMessage)> {
+        self.remove_attachment_checked(key, attachment_id, remover, now, false)
+    }
+
+    /// Caller-asserted HTTP identity must still be human when the mutation commits.
+    #[allow(clippy::too_many_arguments)]
+    pub fn remove_human_attachment(
+        &mut self,
+        key: &RoomKey,
+        attachment_id: &str,
+        remover: &str,
+        now: DateTime<Utc>,
+    ) -> Result<(RoomAttachment, RoomMessage)> {
+        self.remove_attachment_checked(key, attachment_id, remover, now, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn remove_attachment_checked(
+        &mut self,
+        key: &RoomKey,
+        attachment_id: &str,
+        remover: &str,
+        now: DateTime<Utc>,
+        require_human: bool,
+    ) -> Result<(RoomAttachment, RoomMessage)> {
         if !self.room_is_open(key)? {
             return Err(RoomStoreError::UnknownRoom(key.clone()));
         }
@@ -3189,6 +3296,19 @@ impl SqliteRoomStore {
                 room: key.clone(),
                 uploader: remover.to_string(),
             });
+        }
+        if require_human {
+            let kind: String = tx.query_row(
+                "SELECT kind FROM participants WHERE room_id = ?1 AND id = ?2",
+                params![key.as_str(), remover],
+                |row| row.get(0),
+            )?;
+            if kind != "human" {
+                return Err(RoomStoreError::AttachmentActorNotHuman {
+                    room: key.clone(),
+                    actor: remover.to_string(),
+                });
+            }
         }
         // Read the row before deleting it: the caller needs the filename for the
         // marker and the id for the unlink, and reading inside this transaction
@@ -4172,6 +4292,14 @@ impl SqliteRoomStore {
             out.push(r?);
         }
         Ok(out)
+    }
+
+    /// Open-room roster only, without loading or decoding transcript rows.
+    pub fn room_participants(&self, key: &RoomKey) -> Result<Vec<RoomParticipant>> {
+        if !self.room_is_open(key)? {
+            return Err(RoomStoreError::UnknownRoom(key.clone()));
+        }
+        self.load_participants(key)
     }
 
     fn load_participants(&self, key: &RoomKey) -> Result<Vec<RoomParticipant>> {
@@ -6268,6 +6396,140 @@ impl SqliteRoomStore {
             params![key.as_str(), agent_id, body],
         )?;
         Ok(())
+    }
+
+    /// The room's owner preferences; default when never set (team-platform
+    /// P6). Open rooms only.
+    pub fn room_prefs(&self, key: &RoomKey) -> Result<RoomPrefs> {
+        if !self.room_is_open(key)? {
+            return Err(RoomStoreError::UnknownRoom(key.clone()));
+        }
+        let body: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT body FROM room_prefs WHERE room_id = ?1",
+                params![key.as_str()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match body {
+            Some(b) => serde_json::from_str(&b)
+                .map_err(|e| RoomStoreError::Encode(format!("room prefs: {e}"))),
+            None => Ok(RoomPrefs::default()),
+        }
+    }
+
+    /// Replace the room's owner preferences. Default prefs delete the row.
+    pub fn put_room_prefs(&mut self, key: &RoomKey, prefs: &RoomPrefs) -> Result<()> {
+        if !self.room_is_open(key)? {
+            return Err(RoomStoreError::UnknownRoom(key.clone()));
+        }
+        if *prefs == RoomPrefs::default() {
+            self.conn.execute(
+                "DELETE FROM room_prefs WHERE room_id = ?1",
+                params![key.as_str()],
+            )?;
+            return Ok(());
+        }
+        let body = serde_json::to_string(prefs)
+            .map_err(|e| RoomStoreError::Encode(format!("room prefs: {e}")))?;
+        self.conn.execute(
+            "INSERT INTO room_prefs (room_id, body) VALUES (?1, ?2)
+             ON CONFLICT (room_id) DO UPDATE SET body = excluded.body",
+            params![key.as_str(), body],
+        )?;
+        Ok(())
+    }
+
+    /// Chat messages in an open room whose body contains `query` (ASCII
+    /// case-insensitive substring; `%`, `_`, and `\` match literally), newest
+    /// first, at most `limit` (team-platform P6). Join/leave/system rows never
+    /// match.
+    pub fn search_room_messages(
+        &self,
+        key: &RoomKey,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<RoomMessage>> {
+        if !self.room_is_open(key)? {
+            return Err(RoomStoreError::UnknownRoom(key.clone()));
+        }
+        let mut pattern = String::with_capacity(query.len() + 2);
+        pattern.push('%');
+        for c in query.chars() {
+            if matches!(c, '%' | '_' | '\\') {
+                pattern.push('\\');
+            }
+            pattern.push(c);
+        }
+        pattern.push('%');
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {MESSAGE_ROW_COLUMNS} FROM messages
+             WHERE room_id = ?1 AND kind = 'message'
+               AND body LIKE ?2 ESCAPE '\\' COLLATE NOCASE
+             ORDER BY seq DESC LIMIT ?3"
+        ))?;
+        let rows = stmt.query_map(
+            params![
+                key.as_str(),
+                pattern,
+                i64::try_from(limit).unwrap_or(i64::MAX)
+            ],
+            RawMessageRow::read,
+        )?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?.decode()?);
+        }
+        Ok(out)
+    }
+
+    /// At most `limit` open room keys/names, most-recently-updated first.
+    /// SQL bounds materialization; it does not guarantee an indexed scan.
+    pub fn open_room_names(&self, limit: usize) -> Result<Vec<(RoomKey, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name FROM rooms WHERE closed_at IS NULL
+             ORDER BY updated_at DESC, id ASC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map([i64::try_from(limit).unwrap_or(i64::MAX)], |r| {
+            Ok((RoomKey::new(r.get::<_, String>(0)?), r.get::<_, String>(1)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// The newest `scan` rows of an open room (any kind), newest first, each
+    /// paired with its thread parent's author when it is a reply whose parent
+    /// still exists (team-platform P6 inbox window).
+    pub fn recent_room_messages_with_parent_author(
+        &self,
+        key: &RoomKey,
+        scan: usize,
+    ) -> Result<Vec<(RoomMessage, Option<String>)>> {
+        if !self.room_is_open(key)? {
+            return Err(RoomStoreError::UnknownRoom(key.clone()));
+        }
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {MESSAGE_ROW_COLUMNS},
+                    (SELECT p.author_id FROM messages p
+                      WHERE p.room_id = messages.room_id
+                        AND p.seq = messages.thread_parent_seq) AS parent_author
+             FROM messages WHERE room_id = ?1 ORDER BY seq DESC LIMIT ?2"
+        ))?;
+        let rows = stmt.query_map(
+            params![key.as_str(), i64::try_from(scan).unwrap_or(i64::MAX)],
+            |row| {
+                Ok((
+                    RawMessageRow::read(row)?,
+                    row.get::<_, Option<String>>("parent_author")?,
+                ))
+            },
+        )?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (raw, parent_author) = r?;
+            out.push((raw.decode()?, parent_author));
+        }
+        Ok(out)
     }
 
     /// Restart recovery: every non-terminal run belonged to a turn that died
@@ -11184,6 +11446,48 @@ mod tests {
         artifact_room()
     }
 
+    #[test]
+    fn attachment_committed_result_matches_metadata_and_marker_failure_rolls_back() {
+        let (mut s, key) = attachment_room();
+        let (saved, _) = s
+            .add_human_attachment(
+                &key,
+                "returned",
+                "spec.md",
+                "text/markdown",
+                12,
+                "digest",
+                "alice",
+                now(),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&saved).unwrap(),
+            serde_json::to_value(s.attachment(&key, "returned").unwrap().unwrap()).unwrap()
+        );
+        let before = s.get(&key).unwrap().unwrap().transcript.len();
+        s.conn
+            .execute_batch(
+                "CREATE TRIGGER refuse_attachment_marker BEFORE INSERT ON messages
+            BEGIN SELECT RAISE(ABORT, 'synthetic marker failure'); END;",
+            )
+            .unwrap();
+        assert!(s
+            .add_human_attachment(
+                &key,
+                "rollback",
+                "other.md",
+                "text/markdown",
+                12,
+                "digest",
+                "alice",
+                now()
+            )
+            .is_err());
+        assert!(s.attachment(&key, "rollback").unwrap().is_none());
+        assert_eq!(s.get(&key).unwrap().unwrap().transcript.len(), before);
+    }
+
     /// A file attributed to somebody who is not in the room is the same lie an
     /// artifact author would be. Mutation: delete the `roster_has_on` guard in
     /// `add_attachment` -> a stranger's file lands with nothing written about
@@ -15286,6 +15590,60 @@ mod tests {
         assert_eq!(mode, 0o600, "reopen must repair a loosened mode");
     }
 
+    /// A run row written before `request_id` existed has no such key in its
+    /// JSON body. It must still load through every read path, and a turn's
+    /// later write adds the id without disturbing the row.
+    /// Mutation: drop `#[serde(default)]` on `RoomAgentRun::request_id` -> RED.
+    #[test]
+    fn legacy_agent_run_rows_without_request_id_still_load() {
+        let mut s = store();
+        let key = RoomKey::new("legacy-runs");
+        s.create(key.clone(), "legacy-runs", None, now()).unwrap();
+        let started = now();
+        let legacy_body = serde_json::json!({
+            "run_id": "old",
+            "room_id": key.as_str(),
+            "agent_id": "helper",
+            "session_id": "s-old",
+            "trigger_seq": 1,
+            "thread_root_seq": 1,
+            "state": "awaiting_reply",
+            "started_at": started,
+            "updated_at": started,
+            "summary": "which branch?"
+        })
+        .to_string();
+        assert!(!legacy_body.contains("request_id"));
+        s.conn
+            .execute(
+                "INSERT INTO room_agent_runs (run_id, room_id, started_at, body)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params!["old", key.as_str(), started.to_rfc3339(), legacy_body],
+            )
+            .unwrap();
+
+        let loaded = s.room_agent_run("old").unwrap().unwrap();
+        assert_eq!(loaded.request_id, None);
+        assert_eq!(loaded.state, RoomAgentRunState::AwaitingReply);
+        assert_eq!(loaded.summary.as_deref(), Some("which branch?"));
+        assert_eq!(s.room_agent_runs(&key, 10).unwrap(), vec![loaded.clone()]);
+        assert_eq!(s.parked_room_agent_runs(&key, 1).unwrap().len(), 1);
+
+        let mut turn = loaded;
+        turn.request_id = Some("req-1".into());
+        let (stored, landed) = s.put_room_agent_run_from_turn(&turn).unwrap();
+        assert!(landed);
+        assert_eq!(stored.request_id.as_deref(), Some("req-1"));
+        assert_eq!(
+            s.room_agent_run("old")
+                .unwrap()
+                .unwrap()
+                .request_id
+                .as_deref(),
+            Some("req-1")
+        );
+    }
+
     fn agent_run(room: &RoomKey, id: &str, started: DateTime<Utc>) -> RoomAgentRun {
         RoomAgentRun {
             run_id: id.into(),
@@ -15303,6 +15661,7 @@ mod tests {
             reply_seq: None,
             pending_permission: None,
             answer_seq: None,
+            request_id: None,
         }
     }
 
@@ -15538,6 +15897,185 @@ mod tests {
         assert!(s
             .room_agent_settings(&RoomKey::new("nope"), "helper")
             .is_err());
+    }
+
+    fn post(s: &mut SqliteRoomStore, key: &RoomKey, author: &str, body: &str) -> u64 {
+        s.append_message(
+            key,
+            author,
+            RoomParticipantKind::Human,
+            RoomMessageKind::Message,
+            body,
+            now(),
+        )
+        .unwrap()
+        .seq
+    }
+
+    #[test]
+    fn search_room_messages_is_case_insensitive_newest_first_and_bounded() {
+        let mut s = store();
+        let key = RoomKey::new("search");
+        s.create(key.clone(), "search", None, now()).unwrap();
+        let a = post(&mut s, &key, "ada", "Deploy the Daemon");
+        post(&mut s, &key, "ada", "unrelated");
+        let b = post(&mut s, &key, "bob", "daemon restart done");
+        s.append_message(
+            &key,
+            "system",
+            RoomParticipantKind::System,
+            RoomMessageKind::System,
+            "daemon notice",
+            now(),
+        )
+        .unwrap();
+        let hits = s.search_room_messages(&key, "DAEMON", 20).unwrap();
+        assert_eq!(hits.iter().map(|m| m.seq).collect::<Vec<_>>(), vec![b, a]);
+        let one = s.search_room_messages(&key, "daemon", 1).unwrap();
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].seq, b);
+        assert!(s
+            .search_room_messages(&RoomKey::new("nope"), "daemon", 5)
+            .is_err());
+    }
+
+    #[test]
+    fn search_room_messages_escapes_like_wildcards() {
+        let mut s = store();
+        let key = RoomKey::new("escape");
+        s.create(key.clone(), "escape", None, now()).unwrap();
+        let pct = post(&mut s, &key, "ada", "100% done");
+        let under = post(&mut s, &key, "ada", "snake_case name");
+        let slash = post(&mut s, &key, "ada", r"C:\path");
+        post(&mut s, &key, "ada", "100 percent; snakeXcase; C:path");
+        let seqs = |q: &str| {
+            s.search_room_messages(&key, q, 20)
+                .unwrap()
+                .into_iter()
+                .map(|m| m.seq)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(seqs("0%"), vec![pct]);
+        assert_eq!(seqs("e_c"), vec![under]);
+        assert_eq!(seqs(r":\p"), vec![slash]);
+    }
+
+    #[test]
+    fn room_participants_does_not_decode_transcript_rows() {
+        let mut s = store();
+        let key = RoomKey::new("roster-only");
+        s.create(key.clone(), "Roster", None, now()).unwrap();
+        s.add_participant(&key, human("ada", "Ada"), now()).unwrap();
+        let seq = post(&mut s, &key, "ada", "old message");
+        s.conn.execute(
+            "UPDATE messages SET author_kind = 'invalid-fixture-kind' WHERE room_id = ?1 AND seq = ?2",
+            params![key.as_str(), seq as i64],
+        ).unwrap();
+        assert!(
+            s.get(&key).is_err(),
+            "full hydration reaches the invalid transcript row"
+        );
+        assert_eq!(
+            s.room_participants(&key).unwrap(),
+            vec![human("ada", "Ada")]
+        );
+        assert!(s.room_participants(&RoomKey::new("missing")).is_err());
+        s.conn
+            .execute(
+                "UPDATE messages SET author_kind = 'human' WHERE room_id = ?1 AND seq = ?2",
+                params![key.as_str(), seq as i64],
+            )
+            .unwrap();
+        s.close(&key).unwrap();
+        assert!(s.room_participants(&key).is_err());
+    }
+
+    #[test]
+    fn open_room_names_limits_materialization_and_preserves_order() {
+        let mut s = store();
+        let stamp = now();
+        for name in ["b", "a", "c", "closed"] {
+            let updated = if name == "c" || name == "closed" {
+                stamp + chrono::Duration::seconds(1)
+            } else {
+                stamp
+            };
+            s.create(RoomKey::new(name), name, None, updated).unwrap();
+        }
+        s.close(&RoomKey::new("closed")).unwrap();
+        assert!(s.open_room_names(0).unwrap().is_empty());
+        // If rows beyond LIMIT are materialized, their invalid SQL type fails
+        // String decoding. A Rust-side take/truncate after query cannot pass.
+        s.conn
+            .execute("UPDATE rooms SET name = x'ff' WHERE id = 'b'", [])
+            .unwrap();
+        assert_eq!(
+            s.open_room_names(2).unwrap(),
+            vec![
+                (RoomKey::new("c"), "c".into()),
+                (RoomKey::new("a"), "a".into()),
+            ]
+        );
+        assert!(s.open_room_names(3).is_err());
+        s.conn
+            .execute("UPDATE rooms SET name = 'b' WHERE id = 'b'", [])
+            .unwrap();
+        assert_eq!(s.open_room_names(usize::MAX).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn recent_room_messages_pair_replies_with_parent_author() {
+        let mut s = store();
+        let key = RoomKey::new("window");
+        s.create(key.clone(), "window", None, now()).unwrap();
+        let root = post(&mut s, &key, "ada", "root");
+        s.append_message_threaded(
+            &key,
+            "bob",
+            RoomParticipantKind::Human,
+            RoomMessageKind::Message,
+            "reply",
+            now(),
+            Some(root),
+            None,
+        )
+        .unwrap();
+        post(&mut s, &key, "bob", "top");
+        let window = s.recent_room_messages_with_parent_author(&key, 2).unwrap();
+        assert_eq!(window.len(), 2);
+        assert_eq!(window[0].0.body, "top");
+        assert_eq!(window[0].1, None);
+        assert_eq!(window[1].0.body, "reply");
+        assert_eq!(window[1].1.as_deref(), Some("ada"));
+        let names = s.open_room_names(50).unwrap();
+        assert_eq!(names, vec![(key.clone(), "window".to_string())]);
+        s.close(&key).unwrap();
+        assert!(s.open_room_names(50).unwrap().is_empty());
+    }
+
+    #[test]
+    fn room_prefs_roundtrip_default_and_cascade() {
+        let mut s = store();
+        let key = RoomKey::new("prefs");
+        s.create(key.clone(), "prefs", None, now()).unwrap();
+        assert_eq!(s.room_prefs(&key).unwrap(), RoomPrefs::default());
+        let muted = RoomPrefs { muted: true };
+        s.put_room_prefs(&key, &muted).unwrap();
+        assert_eq!(s.room_prefs(&key).unwrap(), muted);
+        s.put_room_prefs(&key, &RoomPrefs::default()).unwrap();
+        assert_eq!(s.room_prefs(&key).unwrap(), RoomPrefs::default());
+        assert!(s.room_prefs(&RoomKey::new("nope")).is_err());
+        assert!(s.put_room_prefs(&RoomKey::new("nope"), &muted).is_err());
+
+        s.put_room_prefs(&key, &muted).unwrap();
+        s.conn
+            .execute("DELETE FROM rooms WHERE id = ?1", params![key.as_str()])
+            .unwrap();
+        let left: i64 = s
+            .conn
+            .query_row("SELECT COUNT(*) FROM room_prefs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 0, "prefs cascade with the room");
     }
 
     #[test]
