@@ -1046,6 +1046,31 @@ Closed the leftovers from the review that acknowledged the thinking-binding reco
 Validation: ocean-protocol (187 plus 5) passes; clippy with warnings denied on ocean-protocol and ocean-agent tests, rustfmt check pass. The strip test covers the thinking-only assistant turn. No provider was called.
 _________________________________________________________________________________
 _________________________________________________________________________________
+time: [15:20] [06-10-26]
+agent: [zcode] [glm-5.3]
+worktree: [port/team-onboarding]
+type: [feature-request]
+area: [automations] reconciliation: team onboarding ops bundle
+
+Tenth bounded Track B port: the team onboarding ops bundle —
+ops/onboard-teammate.sh (idempotent macOS arm64 onboarding: brew/gh preflight
+that fails closed rather than logging in for you, GitHub Packages npmrc for
+the @risingtides-dev scope, package install, 0600 federation.env and
+member.toml) with its runbook docs/TEAM_ONBOARDING.md, plus
+ops/set-ocean-federation.sh which docs-check pulled in via the runbook link
+(the reviewed owner-only federation credential install/activation procedure:
+bearer never on a command line, plist lint, guarded supervised restart).
+Adapted the runbook's provenance line (it named a personal-repo commit sha).
+Deliberately NOT ported: docs/linear-teams-routing.md — it routes the
+Ocean-OS Linear team to the personal repository and names sibling private
+repos, which contradicts the monorepo's canonical ownership and is not public
+material. Re-scoped this turn and rejected as unbounded: room_workspace_proxy
+(its RawReply/RelayBudget federation seam is a +4590/−3791 rewrite) and
+output_economy (agent_loop is a true both-changed conflict: Kingmaker +46/−9
+fixes vs personal +219/−31 — needs a careful hunk-level merge, not a port).
+
+Validation: bash -n on both scripts; cargo xtask docs-check PASS (154 active
+Markdown files). Docs/ops-only; no code paths changed.
 time: [16:24] [06-10-26]
 agent: [zcode] [glm-5.3]
 worktree: [docs/reconciliation-ledger-20261006]
@@ -1630,6 +1655,15 @@ Federated rooms on smaths-mini (northstar, ocean-team) sat in `recovering` with 
 _________________________________________________________________________________
 
 _________________________________________________________________________________
+time: [23:54] [09-10-26]
+agent: [codex]
+worktree: [codex/pr48-onboarding-reconcile]
+type: [bug report] [PR #48]
+area: [backend] [testing] [review]
+
+Reconciled onboarding preparation with canonical main and repaired issue #85. The port now prepares actual package commands and strict host identity, removes unsupported federation activation and alternate service promotion, and retains explicit identity/runtime installation prerequisites. Configuration uses no-follow directory descriptors, private atomic writes and successful credential-producer gating. Public documentation excludes organization-specific host/access inventory.
+
+Validation: 13 isolated mocked tests passed, including regressions that fail on the previous candidate for partial-output token failure and parent-directory substitution. Independent root review re-ran all 13 tests and acknowledged source 2da76c2d; shell syntax, diff check and docs-check (30 packages, 154 Markdown files, 174 links) passed. Owning component/docs contracts updated; root ownership/indexes unchanged. Final receipt review and required checks remain release gates. No actual package installation, credential lookup, service operation, federation activation, merge or deployment is claimed.
 time: [00:04] [10-10-26]
 agent: [codex] [gpt-6]
 worktree: [codex/pr40-reconciliation-ledger] (PR #40)
@@ -1710,6 +1744,12 @@ area: [infra]
 _________________________________________________________________________________
 
 _________________________________________________________________________________
+time: [15:34] [10-12-26]
+agent: [Codex]
+worktree: [PR48 port/team-onboarding; factory-pr48-onboarding-reconcile/ocean]
+type: [workflow]
+area: [review]
+Reconciled PR48 97e32472263d16fe1a096caeb99a76bf3ba65005 with canonical main 1dfc6802bb74fecdcf83f6f17732b671c892b632. Only events.md conflicted; both complete parent histories remain verbatim and ordered. All1157 non-ledger modes/blobs match automatic merge and disjoint parent-source expectations. Onboarding repair source and issue85 scope remain unchanged. Shell/Python syntax and diff checks pass; prior13/13 onboarding, docs-check and14/14 installer evidence retained without duplicate execution. Existing contracts remain accurate; no ownership/index changes. Root owns final commit, separate adversarial review and fresh hosted checks. Issue90 approval policy, PR41 installed identity prerequisite and live acceptance remain separate holds. No heavy build, installation, credential lookup or live operation during preparation.
 time: [15:48] [10-12-26]
 agent: [Codex]
 worktree: [PR40; factory-pr40-reconciliation-ledger/ocean]
