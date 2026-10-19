@@ -29,7 +29,7 @@
 //! than threading rooms state through the `Daemon` handle — so it never touches
 //! the live agent loop / session SSE code.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use futures_util::future::Either;
 use futures_util::StreamExt;
@@ -651,6 +651,10 @@ pub struct Rooms {
     pub consent: RwSignal<Option<RoomConsentDraft>>,
     /// Ticket owning the latest preview/authorize completion.
     consent_ticket: RwSignal<u64>,
+    /// Native cancellation receipts outlive workspace mounts and room changes.
+    consent_cancels: RwSignal<ConsentCancellations>,
+    revoke_attempt: RwSignal<Option<RevokeAttempt>>,
+    room_origin: RwSignal<String>,
     /// Explicit invocations in this room admission. Memory-only and reset
     /// with the room; each records the room key and page generation it was
     /// made under so a work card can be matched to it
@@ -660,6 +664,61 @@ pub struct Rooms {
     /// request id. Memory-only and reset with the room.
     run_cancels: RwSignal<RunCancels>,
 }
+
+/// Every cancellation owns a receipt. One success cannot release a second
+/// pending cancellation; failure stays closed for this page lifetime.
+#[derive(Clone, Debug, Default)]
+struct ConsentCancellations {
+    next: u64,
+    pending: HashSet<u64>,
+    failed: bool,
+}
+
+impl ConsentCancellations {
+    fn begin(&mut self) -> u64 {
+        self.next = self.next.wrapping_add(1);
+        self.pending.insert(self.next);
+        self.next
+    }
+
+    fn finish(&mut self, ticket: u64, result: &Result<(), String>) {
+        if self.pending.remove(&ticket) && result.is_err() {
+            self.failed = true;
+        }
+    }
+
+    fn ready(&self) -> bool {
+        self.pending.is_empty() && !self.failed
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ConsentRequest {
+    origin: String,
+    room: String,
+    generation: u64,
+    ticket: u64,
+}
+
+/// A pending revoke is latched against duplicate clicks. Only an Unknown
+/// completion admits an explicit retry without deleting the shell's retained
+/// decision id; the id and reconfirmation remain wholly native-owned.
+#[derive(Clone, Debug)]
+struct RevokeAttempt {
+    request: ConsentRequest,
+    agent: String,
+    retry: bool,
+}
+
+fn revoke_outcome_is_unknown(result: &Result<crate::host::RoomConsentOutcome, String>) -> bool {
+    match result {
+        Ok(outcome) => outcome.state == "unknown",
+        Err(code) => POST_SEND_ERRORS.contains(&code.as_str()),
+    }
+}
+
+const CONSENT_CANCEL_FAILED: &str = "Ocean could not confirm consent cancellation.";
+const CONSENT_CANCEL_PENDING: &str = "Waiting for consent cancellation.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RoomsFetchMode {
@@ -726,6 +785,9 @@ impl Rooms {
             agent_bindings_request_ticket: RwSignal::new(0),
             consent: RwSignal::new(None),
             consent_ticket: RwSignal::new(0),
+            consent_cancels: RwSignal::new(ConsentCancellations::default()),
+            revoke_attempt: RwSignal::new(None),
+            room_origin: RwSignal::new(url.get_untracked()),
             invocations: RwSignal::new(Vec::new()),
             run_cancels: RwSignal::new(RunCancels::default()),
         }
@@ -751,12 +813,16 @@ impl Rooms {
     /// `generation`, so a stale pair is rejected even though the key still
     /// matches the newly-reopened room.
     pub(crate) fn room_is_current(&self, generation_id: u64, key: &str) -> bool {
-        room_request_is_current(
-            generation_id,
-            self.generation.get_untracked(),
-            key,
-            self.open_key.get_untracked().as_deref(),
-        )
+        let (Some(generation), Some(open_key), Some(origin), Some(room_origin)) = (
+            self.generation.try_get_untracked(),
+            self.open_key.try_get_untracked(),
+            self.url.try_get_untracked(),
+            self.room_origin.try_get_untracked(),
+        ) else {
+            return false;
+        };
+        origin == room_origin
+            && room_request_is_current(generation_id, generation, key, open_key.as_deref())
     }
 
     /// `pub(crate)` snapshot of the live room-identity generation counter —
@@ -766,6 +832,185 @@ impl Rooms {
     /// via `room_is_current` before acting on it later.
     pub(crate) fn generation_snapshot(&self) -> u64 {
         self.generation.get_untracked()
+    }
+
+    /// Retire before any new-origin work, including callbacks that resume
+    /// before the workspace's reactive origin Effect runs.
+    pub(crate) fn sync_room_origin(&self) {
+        let (Some(origin), Some(previous)) = (
+            self.url.try_get_untracked(),
+            self.room_origin.try_get_untracked(),
+        ) else {
+            return;
+        };
+        if origin != previous {
+            self.close_room();
+            self.room_origin.set(origin);
+        }
+    }
+
+    fn consent_room_is_current(&self, request: &ConsentRequest) -> bool {
+        self.url.try_get_untracked().as_ref() == Some(&request.origin)
+            && self.room_is_current(request.generation, &request.room)
+    }
+
+    fn consent_request_is_current(&self, request: &ConsentRequest) -> bool {
+        self.consent_room_is_current(request)
+            && self.consent_ticket.try_get_untracked() == Some(request.ticket)
+    }
+
+    fn consent_dispatch_is_current(&self, request: &ConsentRequest) -> bool {
+        self.consent_request_is_current(request) && self.consent_gate_ready()
+    }
+
+    fn finish_bootstrap_latch(&self, request: &ConsentRequest) {
+        if self.consent_request_is_current(request) {
+            self.add_agent_in_flight.set(None);
+        }
+    }
+
+    fn consent_gate_ready(&self) -> bool {
+        self.consent_cancels
+            .try_get_untracked()
+            .is_some_and(|state| state.ready())
+    }
+
+    fn admit_consent_action(&self) -> bool {
+        self.sync_room_origin();
+        let Some(state) = self.consent_cancels.try_get_untracked() else {
+            return false;
+        };
+        if !state.ready() {
+            self.status.try_set(
+                if state.failed {
+                    CONSENT_CANCEL_FAILED
+                } else {
+                    CONSENT_CANCEL_PENDING
+                }
+                .into(),
+            );
+            return false;
+        }
+        true
+    }
+
+    fn consent_request(&self) -> Option<ConsentRequest> {
+        Some(ConsentRequest {
+            origin: self.url.try_get_untracked()?,
+            room: self.open_key.try_get_untracked()??,
+            generation: self.generation.try_get_untracked()?,
+            ticket: self.consent_ticket.try_get_untracked()?,
+        })
+    }
+
+    fn begin_consent_cancellation(&self) -> Option<u64> {
+        self.consent_cancels.try_update(|state| state.begin())
+    }
+
+    fn finish_consent_cancellation(&self, ticket: u64, result: Result<(), String>) {
+        self.consent_cancels
+            .try_update(|state| state.finish(ticket, &result));
+        if result.is_err() {
+            self.status.try_set(CONSENT_CANCEL_FAILED.into());
+        }
+    }
+
+    async fn await_consent_cancellation(&self, ticket: u64, consent_id: Option<String>) {
+        let result = crate::host::room_consent_cancel(consent_id.as_deref()).await;
+        // This task was admitted on a native host. Losing that bridge does
+        // not count as an acknowledgement.
+        self.finish_consent_cancellation(
+            ticket,
+            result.unwrap_or_else(|| Err("consent_unavailable".into())),
+        );
+    }
+
+    fn cancel_native_consent(&self, consent_id: Option<String>) {
+        if !crate::host::room_consent_supported() {
+            return;
+        }
+        let ticket = self.begin_consent_cancellation();
+        let me = *self;
+        spawn_local(async move {
+            if let Some(ticket) = ticket {
+                me.await_consent_cancellation(ticket, consent_id).await;
+            } else {
+                // Full page disposal can retire the signals before this
+                // cleanup; native invalidation must still be dispatched.
+                let _ = crate::host::room_consent_cancel(consent_id.as_deref()).await;
+            }
+        });
+    }
+
+    /// Local retirement is synchronous and independent of whether a visible
+    /// draft exists (a preview, bootstrap or revoke may still be pending).
+    fn retire_consent_state(&self) {
+        self.consent_ticket
+            .try_update(|ticket| *ticket = ticket.wrapping_add(1));
+        self.consent.try_set(None);
+        self.revoke_attempt.try_set(None);
+        self.add_agent_in_flight.try_set(None);
+    }
+
+    /// An explicit replacement action first cancels all old native decisions.
+    /// It may continue only after its receipt AND every overlapping receipt.
+    fn prepare_consent_action(&self) -> Option<(ConsentRequest, u64)> {
+        if !self.admit_consent_action() {
+            return None;
+        }
+        self.open_key.try_get_untracked()??;
+        self.retire_consent_state();
+        let request = self.consent_request()?;
+        let cancellation = self.begin_consent_cancellation()?;
+        Some((request, cancellation))
+    }
+
+    fn prepare_revoke_action(&self, agent: &str) -> Option<(ConsentRequest, Option<u64>)> {
+        if !self.admit_consent_action() {
+            return None;
+        }
+        let previous = self
+            .revoke_attempt
+            .try_get_untracked()
+            .flatten()
+            .filter(|previous| {
+                previous.agent == agent && self.consent_request_is_current(&previous.request)
+            });
+        if previous.as_ref().is_some_and(|previous| !previous.retry) {
+            return None;
+        }
+        let (request, cancellation) = if previous.is_some() {
+            // A matching Unknown retry keeps the native entry, but never its
+            // previous page callback/draft ownership.
+            self.retire_consent_state();
+            (self.consent_request()?, None)
+        } else {
+            let (request, cancellation) = self.prepare_consent_action()?;
+            (request, Some(cancellation))
+        };
+        self.revoke_attempt.set(Some(RevokeAttempt {
+            request: request.clone(),
+            agent: agent.into(),
+            retry: false,
+        }));
+        Some((request, cancellation))
+    }
+
+    fn finish_revoke_attempt(
+        &self,
+        request: &ConsentRequest,
+        agent: &str,
+        result: &Result<crate::host::RoomConsentOutcome, String>,
+    ) {
+        if !self.consent_request_is_current(request) {
+            return;
+        }
+        self.revoke_attempt
+            .set(revoke_outcome_is_unknown(result).then(|| RevokeAttempt {
+                request: request.clone(),
+                agent: agent.into(),
+                retry: true,
+            }));
     }
 
     /// Whether the open room's run `run_id` was started by one of this page's
@@ -915,11 +1160,8 @@ impl Rooms {
         self.agent_bindings.set(Vec::new());
         self.invocations.set(Vec::new());
         self.run_cancels.set(RunCancels::default());
-        self.consent_ticket.update(|t| *t = t.wrapping_add(1));
-        if self.consent.get_untracked().is_some() {
-            crate::host::room_consent_cancel(None);
-        }
-        self.consent.set(None);
+        self.retire_consent_state();
+        self.cancel_native_consent(None);
     }
 
     /// Whether the current identity is joined according to the room's explicit
@@ -1386,6 +1628,7 @@ impl Rooms {
     /// Open a room: load its record + full transcript, bump the generation, and
     /// start the room-scoped SSE live tail (TASK-10/TASK-11).
     pub fn open_room(&self, key: String) {
+        self.sync_room_origin();
         let base = self.base();
         let me = *self;
         let generation_id = self.generation.get_untracked().wrapping_add(1);
@@ -1443,6 +1686,10 @@ impl Rooms {
     }
     /// Close the open room and stop its live loops.
     pub fn close_room(&self) {
+        if self.generation.try_get_untracked().is_none() {
+            self.cancel_native_consent(None);
+            return;
+        }
         self.generation.update(|g| *g = g.wrapping_add(1));
         self.open_key.set(None);
         self.reset_room_state();
@@ -1581,41 +1828,42 @@ impl Rooms {
     /// owner and returns the frozen consent preview, which opens the consent
     /// sheet. A lost acknowledgement is reported, never retried; the roster
     /// is re-read because the agent may have joined.
-    fn add_agent_bootstrap(&self, key: String, agent_id: String) {
+    fn add_agent_bootstrap(&self, _key: String, agent_id: String) {
+        let Some((request, cancellation)) = self.prepare_consent_action() else {
+            return;
+        };
+        let key = request.room.clone();
         let me = *self;
-        let generation_id = self.generation.get_untracked();
         self.add_agent_in_flight.set(Some(agent_id.clone()));
-        if let Some(previous) = self.consent.get_untracked() {
-            crate::host::room_consent_cancel(Some(&previous.preview.consent_id));
-        }
-        self.consent.set(None);
-        let ticket = self.consent_ticket.get_untracked().wrapping_add(1);
-        self.consent_ticket.set(ticket);
         spawn_local(async move {
+            me.await_consent_cancellation(cancellation, None).await;
+            if !me.consent_dispatch_is_current(&request) {
+                me.finish_bootstrap_latch(&request);
+                return;
+            }
             let result = crate::host::room_agent_bootstrap(&key, &agent_id).await;
-            me.add_agent_in_flight.set(None);
+            let current = me.consent_room_is_current(&request);
+            let owns_request = me.consent_request_is_current(&request);
+            me.finish_bootstrap_latch(&request);
             let Some(result) = result else {
                 return;
             };
             let joined =
                 result.is_ok() || matches!(&result, Err(code) if code == "outcome_unknown");
-            if joined {
-                me.fetch_rooms();
-            }
-            let current = me.room_is_current(generation_id, &key);
+            // An already-sent bootstrap may have joined. Reconcile only into
+            // its still-current origin/admission; a later open fetches afresh.
             if joined && current {
-                me.refresh_open_room_record(&key, generation_id);
+                me.fetch_rooms();
+                me.refresh_open_room_record(&key, request.generation);
             }
             match result {
-                Ok(preview) if current && me.consent_ticket.get_untracked() == ticket => {
-                    me.consent.set(Some(RoomConsentDraft {
-                        preview,
-                        room_generation: generation_id,
-                        busy: false,
-                    }));
-                }
-                Ok(preview) => crate::host::room_consent_cancel(Some(&preview.consent_id)),
-                Err(code) if current => me.status.set(bootstrap_error_text(&code)),
+                Ok(preview) if owns_request => me.consent.set(Some(RoomConsentDraft {
+                    preview,
+                    room_generation: request.generation,
+                    busy: false,
+                })),
+                Ok(preview) => me.cancel_native_consent(Some(preview.consent_id)),
+                Err(code) if owns_request => me.status.set(bootstrap_error_text(&code)),
                 Err(_) => {}
             }
         });
@@ -1736,31 +1984,31 @@ impl Rooms {
         if !crate::host::room_consent_supported() {
             return;
         }
-        let Some(key) = self.open_key.get_untracked() else {
+        let Some((request, cancellation)) = self.prepare_consent_action() else {
             return;
         };
         let me = *self;
-        let generation_id = self.generation.get_untracked();
-        if let Some(previous) = self.consent.get_untracked() {
-            crate::host::room_consent_cancel(Some(&previous.preview.consent_id));
-        }
-        self.consent.set(None);
-        let ticket = self.consent_ticket.get_untracked().wrapping_add(1);
-        self.consent_ticket.set(ticket);
         spawn_local(async move {
-            let Some(result) = crate::host::room_consent_preview(&key, &package_id).await else {
+            me.await_consent_cancellation(cancellation, None).await;
+            if !me.consent_dispatch_is_current(&request) {
+                return;
+            }
+            let Some(result) = crate::host::room_consent_preview(&request.room, &package_id).await
+            else {
                 return;
             };
-            let current = me.room_is_current(generation_id, &key)
-                && me.consent_ticket.get_untracked() == ticket;
             match result {
-                Ok(preview) if current => me.consent.set(Some(RoomConsentDraft {
-                    preview,
-                    room_generation: generation_id,
-                    busy: false,
-                })),
-                Ok(preview) => crate::host::room_consent_cancel(Some(&preview.consent_id)),
-                Err(code) if current => me.status.set(consent_error_text(&code)),
+                Ok(preview) if me.consent_request_is_current(&request) => {
+                    me.consent.set(Some(RoomConsentDraft {
+                        preview,
+                        room_generation: request.generation,
+                        busy: false,
+                    }))
+                }
+                Ok(preview) => me.cancel_native_consent(Some(preview.consent_id)),
+                Err(code) if me.consent_request_is_current(&request) => {
+                    me.status.set(consent_error_text(&code))
+                }
                 Err(_) => {}
             }
         });
@@ -1770,6 +2018,9 @@ impl Rooms {
     /// consent. A committed or unknown outcome always refreshes authoritative
     /// bindings for the room it was decided in.
     pub fn authorize_consent(&self) {
+        if !self.admit_consent_action() {
+            return;
+        }
         let Some(draft) = self.consent.get_untracked() else {
             return;
         };
@@ -1782,20 +2033,32 @@ impl Rooms {
             return;
         }
         let me = *self;
-        let ticket = self.consent_ticket.get_untracked();
-        let generation_id = draft.room_generation;
+        let Some(request) = self.consent_request() else {
+            return;
+        };
+        self.revoke_attempt.set(None);
         self.consent.update(|c| {
             if let Some(c) = c {
                 c.busy = true;
             }
         });
         spawn_local(async move {
+            if !me.consent_dispatch_is_current(&request) {
+                if me.consent_request_is_current(&request) {
+                    me.consent.update(|draft| {
+                        if let Some(draft) = draft {
+                            draft.busy = false;
+                        }
+                    });
+                }
+                return;
+            }
             let Some(result) = crate::host::room_consent_authorize(&draft.preview.consent_id).await
             else {
                 return;
             };
-            let room_current = me.room_is_current(generation_id, &key);
-            let owns_draft = room_current && me.consent_ticket.get_untracked() == ticket;
+            let room_current = me.consent_room_is_current(&request);
+            let owns_draft = me.consent_request_is_current(&request);
             let step = consent_step(&result);
             if step.refresh && room_current {
                 me.fetch_agent_bindings();
@@ -1817,41 +2080,54 @@ impl Rooms {
         });
     }
 
-    /// Discard the frozen consent without sending anything privileged.
+    /// Retire page callbacks immediately and request a native receipt even
+    /// when no draft exists yet. No privileged mutation is sent here.
     pub fn dismiss_consent(&self) {
-        if let Some(draft) = self.consent.get_untracked() {
-            crate::host::room_consent_cancel(Some(&draft.preview.consent_id));
-        }
-        self.consent_ticket.update(|t| *t = t.wrapping_add(1));
-        self.consent.set(None);
+        self.retire_consent_state();
+        self.cancel_native_consent(None);
     }
 
     /// Natively confirm and revoke an own agent's binding.
     pub fn revoke_agent(&self, binding: RoomAgentBinding) {
-        let Some(key) = self.open_key.get_untracked() else {
+        if !crate::host::room_consent_supported() {
+            return;
+        }
+        let Some((request, cancellation)) = self.prepare_revoke_action(&binding.agent_member_id)
+        else {
             return;
         };
         let me = *self;
-        let generation_id = self.generation.get_untracked();
         spawn_local(async move {
-            let Some(result) = crate::host::room_agent_revoke(
-                &key,
+            if let Some(cancellation) = cancellation {
+                me.await_consent_cancellation(cancellation, None).await;
+            }
+            if !me.consent_dispatch_is_current(&request) {
+                me.finish_revoke_attempt(
+                    &request,
+                    &binding.agent_member_id,
+                    &Err("consent_invalidated".into()),
+                );
+                return;
+            }
+            let result = crate::host::room_agent_revoke(
+                &request.room,
                 &binding.agent_member_id,
                 &binding.display_name,
             )
             .await
-            else {
-                return;
-            };
-            if !me.room_is_current(generation_id, &key) {
+            .unwrap_or_else(|| Err("consent_unavailable".into()));
+            me.finish_revoke_attempt(&request, &binding.agent_member_id, &result);
+            if !me.consent_room_is_current(&request) {
                 return;
             }
             let step = consent_step(&result);
             if step.refresh {
                 me.fetch_agent_bindings();
             }
-            if let Some(text) = step.status {
-                me.status.set(text);
+            if me.consent_request_is_current(&request) {
+                if let Some(text) = step.status {
+                    me.status.set(text);
+                }
             }
         });
     }
@@ -6559,6 +6835,279 @@ mod tests {
                 agent_add_route(Some(RoomAccessState::Revoked), native),
                 AgentAddRoute::Refused
             );
+        }
+    }
+
+    fn consent_retirement_rooms() -> Rooms {
+        let rooms = Rooms::for_test("https://first.example");
+        rooms.open_key.set(Some("room".into()));
+        rooms.generation.set(7);
+        rooms
+    }
+
+    #[test]
+    fn consent_retirement_requires_every_overlapping_receipt() {
+        let owner = Owner::new();
+        owner.set();
+        let rooms = consent_retirement_rooms();
+        let (request, first) = rooms.prepare_consent_action().unwrap();
+        let second = rooms.begin_consent_cancellation().unwrap();
+        assert!(!rooms.consent_dispatch_is_current(&request));
+        rooms.finish_consent_cancellation(second, Ok(()));
+        assert!(!rooms.consent_dispatch_is_current(&request));
+        assert!(rooms.prepare_consent_action().is_none());
+        rooms.finish_consent_cancellation(second, Ok(())); // duplicate is not another receipt
+        assert!(!rooms.consent_dispatch_is_current(&request));
+        rooms.finish_consent_cancellation(first, Ok(()));
+        assert!(rooms.consent_dispatch_is_current(&request));
+    }
+
+    #[test]
+    fn consent_retirement_failure_stays_closed_after_later_success_and_room_reset() {
+        let owner = Owner::new();
+        owner.set();
+        let rooms = consent_retirement_rooms();
+        let first = rooms.begin_consent_cancellation().unwrap();
+        let second = rooms.begin_consent_cancellation().unwrap();
+        rooms.finish_consent_cancellation(first, Err("consent_unavailable".into()));
+        rooms.finish_consent_cancellation(second, Ok(()));
+        rooms.close_room();
+        rooms.open_key.set(Some("room".into()));
+        assert!(!rooms.admit_consent_action());
+        assert_eq!(rooms.status.get_untracked(), CONSENT_CANCEL_FAILED);
+        assert!(rooms.prepare_consent_action().is_none());
+    }
+
+    #[test]
+    fn consent_retirement_without_a_draft_retires_pending_preview_and_revoke() {
+        let owner = Owner::new();
+        owner.set();
+        let rooms = consent_retirement_rooms();
+        for _pending_action in ["preview", "revoke", "bootstrap"] {
+            let request = rooms.consent_request().unwrap();
+            assert!(rooms.consent.get_untracked().is_none());
+            rooms.dismiss_consent();
+            assert!(!rooms.consent_request_is_current(&request));
+            assert!(rooms.consent_room_is_current(&request));
+        }
+    }
+
+    #[test]
+    fn consent_retirement_same_key_reopen_cannot_readmit_an_old_request() {
+        let owner = Owner::new();
+        owner.set();
+        let rooms = consent_retirement_rooms();
+        let (request, cancellation) = rooms.prepare_consent_action().unwrap();
+        rooms.close_room();
+        rooms.open_key.set(Some("room".into()));
+        rooms.finish_consent_cancellation(cancellation, Ok(()));
+        assert!(!rooms.consent_dispatch_is_current(&request));
+        assert!(rooms.consent_request_is_current(&rooms.consent_request().unwrap()));
+    }
+
+    #[test]
+    fn consent_retirement_unmount_retires_parent_owned_rooms_before_remount() {
+        let owner = Owner::new();
+        owner.set();
+        let rooms = consent_retirement_rooms();
+        let request = rooms.consent_request().unwrap();
+        let workspace = owner.child();
+        workspace.with(|| Owner::on_cleanup(move || rooms.close_room()));
+        workspace.cleanup();
+        assert!(rooms.open_key.get_untracked().is_none());
+        assert!(!rooms.consent_request_is_current(&request));
+        rooms.open_key.set(Some("room".into()));
+        assert!(!rooms.consent_request_is_current(&request));
+    }
+
+    #[test]
+    fn consent_retirement_origin_change_rejects_before_effect_and_after_return() {
+        let owner = Owner::new();
+        owner.set();
+        let rooms = consent_retirement_rooms();
+        let request = rooms.consent_request().unwrap();
+        rooms.url.set("https://second.example".into());
+        assert!(!rooms.consent_request_is_current(&request));
+        rooms.sync_room_origin();
+        assert!(rooms.open_key.get_untracked().is_none());
+        rooms.url.set("https://first.example".into());
+        rooms.sync_room_origin();
+        rooms.open_key.set(Some("room".into()));
+        assert!(!rooms.consent_request_is_current(&request));
+    }
+
+    #[test]
+    fn consent_retirement_late_bootstrap_cannot_clear_a_new_latch() {
+        let owner = Owner::new();
+        owner.set();
+        let rooms = consent_retirement_rooms();
+        let old = rooms.consent_request().unwrap();
+        rooms.dismiss_consent();
+        let current = rooms.consent_request().unwrap();
+        rooms.add_agent_in_flight.set(Some("new-agent".into()));
+        rooms.finish_bootstrap_latch(&old);
+        assert_eq!(
+            rooms.add_agent_in_flight.get_untracked().as_deref(),
+            Some("new-agent")
+        );
+        rooms.finish_bootstrap_latch(&current);
+        assert!(rooms.add_agent_in_flight.get_untracked().is_none());
+    }
+
+    #[test]
+    fn consent_retirement_disposed_owner_rejects_completions_without_signal_panics() {
+        let owner = Owner::new();
+        owner.set();
+        let rooms = consent_retirement_rooms();
+        let (request, cancellation) = rooms.prepare_consent_action().unwrap();
+        owner.cleanup();
+        assert!(!rooms.consent_dispatch_is_current(&request));
+        rooms.finish_bootstrap_latch(&request);
+        rooms.finish_consent_cancellation(cancellation, Err("lost_ack".into()));
+        rooms.retire_consent_state();
+        rooms.close_room();
+    }
+
+    #[test]
+    fn consent_retirement_keeps_reconciliation_separate_from_draft_ownership() {
+        let owner = Owner::new();
+        owner.set();
+        let rooms = consent_retirement_rooms();
+        let old = rooms.consent_request().unwrap();
+        rooms.dismiss_consent();
+        assert!(rooms.consent_room_is_current(&old));
+        assert!(!rooms.consent_request_is_current(&old));
+        for state in ["applied", "unknown"] {
+            let result = Ok(crate::host::RoomConsentOutcome {
+                state: state.into(),
+                ..Default::default()
+            });
+            assert!(consent_step(&result).refresh);
+        }
+        rooms.close_room();
+        assert!(!rooms.consent_room_is_current(&old));
+    }
+
+    fn unknown_revoke_result() -> Result<crate::host::RoomConsentOutcome, String> {
+        Ok(crate::host::RoomConsentOutcome {
+            state: "unknown".into(),
+            ..Default::default()
+        })
+    }
+
+    fn own_unknown_revoke(rooms: Rooms, agent: &str) -> ConsentRequest {
+        let (request, cancellation) = rooms.prepare_revoke_action(agent).unwrap();
+        rooms.finish_consent_cancellation(cancellation.expect("fresh revoke cancels all"), Ok(()));
+        assert!(rooms.consent_dispatch_is_current(&request));
+        rooms.finish_revoke_attempt(&request, agent, &unknown_revoke_result());
+        request
+    }
+
+    #[test]
+    fn consent_retirement_revoke_retry_routing_preserves_only_owned_unknown_target() {
+        let owner = Owner::new();
+        owner.set();
+        let rooms = consent_retirement_rooms();
+        let old = own_unknown_revoke(rooms, "agent-a");
+        let (retry, cancellation) = rooms.prepare_revoke_action("agent-a").unwrap();
+        assert!(
+            cancellation.is_none(),
+            "same-target Unknown retry must not cancel its native entry"
+        );
+        assert!(!rooms.consent_request_is_current(&old));
+        assert!(rooms.consent_dispatch_is_current(&retry));
+        assert!(
+            rooms.prepare_revoke_action("agent-a").is_none(),
+            "duplicate pending retry must not cancel or redispatch"
+        );
+        rooms.finish_revoke_attempt(&retry, "agent-a", &unknown_revoke_result());
+        let (_, cancellation) = rooms.prepare_revoke_action("agent-b").unwrap();
+        assert!(
+            cancellation.is_some(),
+            "different target must cancel superseded native intents"
+        );
+    }
+
+    #[test]
+    fn consent_retirement_revoke_retry_is_gated_by_all_receipts_and_failure() {
+        let owner = Owner::new();
+        owner.set();
+        let rooms = consent_retirement_rooms();
+        own_unknown_revoke(rooms, "agent-a");
+        let a = rooms.begin_consent_cancellation().unwrap();
+        let b = rooms.begin_consent_cancellation().unwrap();
+        rooms.finish_consent_cancellation(b, Ok(()));
+        assert!(rooms.prepare_revoke_action("agent-a").is_none());
+        rooms.finish_consent_cancellation(a, Err("lost_ack".into()));
+        assert!(rooms.prepare_revoke_action("agent-a").is_none());
+    }
+
+    #[test]
+    fn consent_retirement_revoke_marker_clears_on_dismiss_review_and_context_change() {
+        let owner = Owner::new();
+        owner.set();
+        for action in ["dismiss", "review", "close", "origin"] {
+            let rooms = consent_retirement_rooms();
+            let old = own_unknown_revoke(rooms, "agent-a");
+            match action {
+                "dismiss" => rooms.dismiss_consent(),
+                "review" => {
+                    let (_, cancellation) = rooms.prepare_consent_action().unwrap();
+                    rooms.finish_consent_cancellation(cancellation, Ok(()));
+                }
+                "close" => rooms.close_room(),
+                "origin" => {
+                    rooms.url.set("https://second.example".into());
+                    rooms.sync_room_origin();
+                }
+                _ => unreachable!(),
+            }
+            rooms.open_key.set(Some("room".into()));
+            // A late Unknown completion cannot recreate retry ownership.
+            rooms.finish_revoke_attempt(&old, "agent-a", &unknown_revoke_result());
+            assert!(rooms.revoke_attempt.get_untracked().is_none(), "{action}");
+            assert!(
+                rooms.prepare_revoke_action("agent-a").unwrap().1.is_some(),
+                "{action}"
+            );
+        }
+    }
+
+    #[test]
+    fn consent_retirement_revoke_unknown_classification_preserves_native_retry_contract() {
+        let owner = Owner::new();
+        owner.set();
+        let rooms = consent_retirement_rooms();
+        for result in [
+            unknown_revoke_result(),
+            Err("consent_task_failed".into()),
+            Err("invalid_reply".into()),
+        ] {
+            let (request, cancellation) = rooms.prepare_revoke_action("agent-a").unwrap();
+            if let Some(cancellation) = cancellation {
+                rooms.finish_consent_cancellation(cancellation, Ok(()));
+            }
+            rooms.finish_revoke_attempt(&request, "agent-a", &result);
+            assert!(rooms.revoke_attempt.get_untracked().unwrap().retry);
+        }
+        for result in [
+            Ok(crate::host::RoomConsentOutcome {
+                state: "applied".into(),
+                ..Default::default()
+            }),
+            Ok(crate::host::RoomConsentOutcome {
+                state: "declined".into(),
+                ..Default::default()
+            }),
+            Err("consent_invalidated".into()),
+            Err("daemon_unreachable".into()),
+        ] {
+            let (request, cancellation) = rooms.prepare_revoke_action("agent-a").unwrap();
+            if let Some(cancellation) = cancellation {
+                rooms.finish_consent_cancellation(cancellation, Ok(()));
+            }
+            rooms.finish_revoke_attempt(&request, "agent-a", &result);
+            assert!(rooms.revoke_attempt.get_untracked().is_none());
         }
     }
 

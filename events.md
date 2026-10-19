@@ -2439,6 +2439,18 @@ Validation: in apps/ocean-surface, cargo fmt --check clean; WASM clippy -D warni
 _________________________________________________________________________________
 
 _________________________________________________________________________________
+time: [22:47] [12-10-26] America/New_York
+agent: [Codex] [root release coordinator]
+worktree: codex/issue94-ui-retirement
+type: [bug report]
+area: [frontend] [review] [testing]
+
+Implemented issue94 consent UI retirement: navigation, origin changes, dismissal and workspace cleanup immediately retire callbacks and request native cancellation even without a visible draft. New consent work waits for every cancellation acknowledgement; errors keep the page closed to new dispatch. Origin/admission/ticket and disposal checks protect delayed state writes and bootstrap latch ownership. Independent review found that unconditional revoke cancellation would erase an Unknown decision identity; the repaired preparation preserves only the exact page-owned retry and retains native reconfirmation, while fresh/superseding actions still cancel older intents. No automatic mutation retry or new authority.
+
+Validation: final retirement13/13, consent-result1/1 and workspace9/9 targeted tests passed, plus rustfmt and diff checks. Separate source review ACKed the final four file hashes after the retry repair; the initial9/9 evidence is retained separately. These are production signal/preparation fixtures, not native IPC/dialog or served-client acceptance. Native PR103's epoch/tracked-revoke semantics are a release prerequisite; cancellation cannot retract an already-dispatched request. Final committed-head review and hosted builds follow; maintainer approval90, other issue94 unmerged repairs and live acceptance remain held. Surface AGENTS.md documents the current contract; root and child indexes are unchanged because ownership/hierarchy did not change.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
 time: [22:04] [12-10-26]
 agent: [Codex] [factory coordinator]
 worktree: [codex/issue94-native-custody]
@@ -2448,6 +2460,19 @@ area: [backend]
 Repair native consent custody from issue #94: authorize and revoke share bounded tracked decisions, confirmation queues an intent, and the blocking worker atomically validates ownership and TTL before dispatch. Cancellation received before that native claim prevents transmission; cancellation after the claim cannot retract I/O and cannot restore retry state. A native epoch captured before queued preview/bootstrap work fences late consent insertion. Unknown outcomes retain explicit reconfirmed same-decision retry.
 
 Validation: one isolated Mac mini cargo test --locked --lib room_consent::tests run passed 29/29 tests, including seven new interleaving regressions; compile2m29s, tests0.04s. Rustfmt and diff checks pass. Independent candidate source review found no actionable issue. The owning Surface contract now states the precise native boundary; root and child indexes remain unchanged because repository structure is unchanged. Final-head review and required hosted checks still follow this receipt. UI navigation acknowledgement, unmount cleanup, compact controls, bootstrap rollback and actual served acceptance remain outside this repair; issue #94 stays open. No merge, deployment or live outcome claimed; maintainer approval under #90 remains required.
+
+_________________________________________________________________________________
+time: [23:38] [10-12-26]
+agent: [codex] [gpt-6]
+worktree: [codex/pr105-native103-integration] [macmini-ip factory-pr105-native103-integration]
+type: [bug report] [refactor]: PR #105 native dependency integration
+area: [frontend] [testing] [review]
+
+Integrated exact reviewed native PR #103 head9f979b6eb2bec54b8bc5bebccc9aa4c657d61b4b into UI retirement PR #105 headf9a9fdbb05a375f56283b0ceca98cac1f2bd8088. This substantively addresses automated findings4254230132 and4254230138: the awaited registered native cancellation now clears shared pending decisions and advances their epoch before returning, and tracked Unknown revoke retains its decision identity for the owning UI's explicit reconfirmed retry. Cancellation cannot retract a request after its native dispatch claim.
+
+All 1,176 non-ledger entries match AUTO_MERGE; no manual source changes. Whole UI/native crates and relevant manifests/locks match their respective reviewed parents; Surface devlog contracts combine automatically. Separate adversarial integration review found no remaining actionable integration finding. Source-identical retained test binaries reran native29/29 and UI retirement13/13, consent1/1, workspace9/9 successfully, with fresh disposable auth/config fixtures and HOME preserved. Original logs, depinfo and binary hashes establish retained-artifact provenance; this is not fresh combined compilation or real IPC/dialog/served acceptance. Evidence: factory-pr105-integrated-consent-i67kn8m7 on the Mini.
+
+Both parent ledger suffixes follow their shared byte-identical base and precede this public-safe canonical receipt. Final committed-head review and fresh hosted compilation remain required. Keep #105 draft, release #103 before #105, and preserve maintainer approval under #54/#90 and actual native/served acceptance holds. No merge, deployment or live verification claimed.
 time: [21:51] [12-10-26]
 agent: [Codex] [factory coordinator]
 worktree: [codex/issue94-binding-order]
