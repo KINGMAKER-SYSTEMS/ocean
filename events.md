@@ -1046,6 +1046,71 @@ Closed the leftovers from the review that acknowledged the thinking-binding reco
 Validation: ocean-protocol (187 plus 5) passes; clippy with warnings denied on ocean-protocol and ocean-agent tests, rustfmt check pass. The strip test covers the thinking-only assistant turn. No provider was called.
 _________________________________________________________________________________
 _________________________________________________________________________________
+time: [16:24] [06-10-26]
+agent: [zcode] [glm-5.3]
+worktree: [docs/reconciliation-ledger-20261006]
+type: [workflow]
+area: [docs] reconciliation ledger
+
+PR #25 (Rooms S0 participant retirement) merged at 03:06Z and PR #31
+(observatory durability cluster) merged at 04:28Z — Track B's second and
+third bounded ports to land, each with Build scope, Build Ocean, and
+`validate package (macos-arm64)` successful before merge; Build Surface was
+path-skipped. PR #31's final head included the retention-boundary replay and
+Observatory cursor-consistency fixes added during parallel work before merge;
+they were not post-merge deltas. Updated the Reconciled slices section in
+docs/SOURCE_RECONCILIATION.md to record both landings and their scope
+boundaries, per the contract to keep the table current when reconciliation
+actually lands.
+
+Validation: cargo xtask docs-check PASS. Docs-only.
+_________________________________________________________________________________
+time: [17:29] [06-10-26]
+agent: [codex] [gpt-6]
+worktree: [codex/factory-ledger-accuracy] (PR #40)
+type: [review] [documentation]
+area: [analysis] source reconciliation ledger
+
+Independent review found that the PR #25 entry understated its landed
+ocean-store changes and the PR #31 entry called fixes already included in its
+final pre-merge head post-merge deltas. Corrected both claims from the merged
+PR diffs and commit history. `git diff --check` and `cargo xtask docs-check`
+pass (30 packages, 153 active Markdown files, 170 local links). The docs check
+compiled only xtask with 1.9 GiB free; no Ocean release build was run. The PR
+needs fresh review and hosted checks at the amended head before merge; no
+deployment was made.
+_________________________________________________________________________________
+time: [17:39] [06-10-26]
+agent: [codex] [gpt-6]
+worktree: [codex/factory-ledger-accuracy] (PR #40 ledger)
+type: [review] [issues]
+area: [review] daemon identity and room-profile contracts
+
+Independent review of exact PR #41/#43 heads found malformed identity values
+accepted by `unquote`, an operator-guide liveness label attached to the wrong
+endpoint, resolver metadata beyond PR #43's stated credential-slot response,
+and whole-file auth.json parsing despite its token-isolation claim. Posted
+these findings as PR review comments; source branches remain with their
+owners. Both PRs' hosted Build Ocean checks pass and Build Surface is
+path-skipped. No code tests ran here: free disk was 821 MiB. The review is not
+approval or merge; no deployment was made.
+time: [16:12] [06-10-26]
+agent: [zcode] [glm-5.3]
+worktree: [docs/reconciliation-ledger-20261006]
+type: [workflow]
+area: [docs] reconciliation ledger
+
+PR #49 (minimizer M2 output economy — the first conflict-class three-way
+merge) MERGED at 19:54Z: Track B's sixth landed port and the program's proof
+that both-changed conflict files reconcile cleanly with Kingmaker fixes
+preserved. Appended #49 to the Reconciled slices ledger on this branch (the
+open ledger PR #40), per the contract to keep the table current when
+reconciliation lands. The remaining Rooms queue (#41/#43/#44/#45/#46/#47) is
+unaffected by #49's file set (ocean-runtime/agent/lsp/longhouse — no daemon
+main.rs overlap), so the repaired-stack reconciles (baseline 136) stand
+unchanged.
+
+Validation: cargo xtask docs-check PASS.
 time: [13:41] [06-10-26]
 agent: [zcode] [glm-5.3]
 worktree: [port/rooms-phase2-profile]
@@ -1519,6 +1584,18 @@ area: [backend] [infra]
 Federated rooms on smaths-mini (northstar, ocean-team) sat in `recovering` with Pending outbox rows and no log output. Replaying the receiver's reads against production Bedrock with the room bearer showed a valid `hello` (high-water 0) and a 200 roster, but the roster carries `caller_member_ids` (Bedrock since ocean-bedrock #137, 2026-09-02) and `MembersEnvelope` is `deny_unknown_fields`, so every epoch silently returned Recover after hello. Fix: accept and ignore `caller_member_ids` on the strict envelope, warn with `outcome="roster_rejected"` on non-transport roster parse failures, and regression test `roster_with_caller_member_ids_reaches_live` (red without the field, green with it). The supervised launcher `deploy/ocean-daemon.sh` now sources owner-only `~/.config/ocean-rs/federation.env` and prints `federation=on|off`; previously only a hand-edited installed copy did, which the installer would overwrite. Operator guide documents the env file, contributor-side local redemption, and the receiver replay diagnosis. Independent review round: `WireMember` also accepts Bedrock's `operator_id` (same failure class, operator rooms); roster projection failures warn too; startup warns `federation_unconfigured` when credentialed rooms exist without a URL; the launcher parses federation.env as data (owner-only, not group/other-writable, `OCEAN_FEDERATION_*` keys only, CR/quote tolerant, plist values win) instead of sourcing it, verified under macOS bash 3.2 against command substitution, foreign keys, spaces, CRLF, group-writable and unreadable files. End-to-end: the fixed release binary, run unsupervised on an isolated HOME with a copied rooms.db (outbox cleared), brought northstar and ocean-team to `live` against production Bedrock. Follow-up folded in before merge: warn-only `credential_member_mismatch` when Bedrock's `caller_member_ids` omit the credential's local member (stale-credential diagnostic; never blocks Live). Launcher mode check fails closed on unparseable `stat` output. Validation: room_federation 92/92; ocean-daemon 910 passed / 2 failed at 99be7a9 (the known persistent_room envelope-key assertions, identical on unmodified main); clippy -p ocean-daemon --all-targets -D warnings clean; fmt clean; docs-check PASS; installer fixtures 12/12. Runtime ops the same evening (not code): Jay's laptop federation.env reduced to OCEAN_FEDERATION_URL (the direct-redeem contributor token was removed and its backup deleted) and his daemon restarted; a fresh invite minted by John's daemon was redeemed through Jay's local /v1/rooms/persistent/invites/redeem (credential f9757e6e in his rooms.db); the stale direct-path Bedrock member db0367cd was removed by the room owner (old token now 403 membership_revoked); the empty local test room ns-taskforce was soft-closed on smaths-mini. Both daemons stay `recovering` until this fix is merged and installed.
 _________________________________________________________________________________
 
+_________________________________________________________________________________
+time: [00:04] [10-10-26]
+agent: [codex] [gpt-6]
+worktree: [codex/pr40-reconciliation-ledger] (PR #40)
+type: [workflow]
+area: [review] public reconciliation receipts
+
+Reconciled existing PR #40 onto f1b22bd8 and verified the public merge commits for #25, #31 and #49. The record now includes bounded alias inspection, retention/replay and snapshot consistency, and the redacted artifact Debug regression. Removed unsupported source-history absolutes from the active documentation; inherited chronological event entries remain historical observations, not renewed claims of source parity or current stack compatibility. Both parent ledger histories are preserved.
+
+Validation: docs-check passed (30 packages, 153 active Markdown files, 170 local links), and diff-check passed. Root/docs AGENTS are intentionally unchanged because scope, ownership and verification contracts remain unchanged. Documentation only; no new implementation merge, install, deployment or live verification is claimed. Final-head independent review and required hosted gates remain required.
+_________________________________________________________________________________
+
 time: [22:48] [09-10-26]
 agent: [codex] [factory release]
 worktree: [codex/pr60-reviewed-reconcile]
@@ -1567,6 +1644,12 @@ area: [infra]
 _________________________________________________________________________________
 
 _________________________________________________________________________________
+time: [15:48] [10-12-26]
+agent: [Codex]
+worktree: [PR40; factory-pr40-reconciliation-ledger/ocean]
+type: [workflow]
+area: [review]
+Reconciled PR40 a8bf0fb4d46b0457755123828ff6ef2a329b40ba with canonical main 1dfc6802bb74fecdcf83f6f17732b671c892b632. Only events.md conflicted; both complete public parent histories remain verbatim and ordered (77/74 records). All1153 non-ledger blobs/modes match automatic merge. Root documentation remains unchanged; Ocean OS equals main. Cited public merge commits for PR25/31/49 are ancestors of main; issue50 is closed. Cached diff and shell syntax checks pass; previous unchanged documentation validation remains applicable without duplicate builds. Root/docs contracts remain accurate with no ownership/index changes. Root retains final commit, separate independent review, push and fresh hosted validation. Policy90, independent approval and live acceptance holds remain; no live action.
 time: [15:52] [10-12-26]
 agent: [Codex]
 worktree: [PR43 port/rooms-phase2-profile; factory-pr43-reviewed-replay/ocean]
