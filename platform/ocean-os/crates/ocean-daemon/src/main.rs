@@ -123,6 +123,8 @@ mod github;
 mod history_search;
 /// Daemon-wide Host allowlist against DNS rebinding.
 mod host_guard;
+/// Rooms S0 — `GET /v1/identity`: who this daemon says its human is.
+mod identity;
 /// Persisted-title and read-projection mutation HTTP adapters.
 mod longhouse_governance_control;
 /// State-free Longhouse prepare, inspect, and workflow HTTP adapters.
@@ -716,6 +718,9 @@ fn app_router(origins: BrowserOrigins, hosts: AllowedHosts) -> Router<AppState> 
         .route("/ready", get(ready))
         // OCEAN-303: Prometheus-text turn metrics (latency histogram + counters).
         .route("/metrics", get(metrics))
+        // Rooms S0: who this daemon says its human is (member.toml, then
+        // OCEAN_MEMBER_ID, never the process user). Credential-free.
+        .route("/v1/identity", get(identity::identity))
         .route("/v1/agent/turns", post(agent_turn))
         .route("/v1/agent/voice", post(agent_voice))
         .route("/v1/agent/events", get(agent_events))
@@ -1571,6 +1576,7 @@ fn banner_routes() -> &'static [&'static str] {
         "GET /health",
         "GET /ready",
         "GET /metrics",
+        "GET /v1/identity",
         "POST /v1/agent/turns",
         "POST /v1/agent/voice",
         "GET /v1/agent/events",
@@ -1621,6 +1627,8 @@ fn banner_routes() -> &'static [&'static str] {
         "DELETE /v1/rooms/persistent/{key}/participants/{participant_id}",
         "POST /v1/rooms/persistent/{key}/participants/{participant_id}/retire",
         "POST /v1/rooms/persistent/{key}/summarize",
+        "GET /v1/rooms/persistent/{key}/profile",
+        "PUT /v1/rooms/persistent/{key}/profile",
         "POST /v1/rooms/persistent/{key}/messages",
         "POST /v1/rooms/persistent/{key}/invites",
         "POST /v1/rooms/persistent/invites/redeem",
@@ -2996,6 +3004,11 @@ fn room_routes() -> Router<AppState> {
         .route(
             "/v1/rooms/persistent/{key}/summarize",
             post(persistent_rooms::room_summarize),
+        )
+        // Rooms Phase 2 Stage 2b: the room profile and credential-slot status.
+        .route(
+            "/v1/rooms/persistent/{key}/profile",
+            get(room_profile::room_profile_get).put(room_profile::room_profile_put),
         )
         .route(
             "/v1/rooms/persistent/{key}/messages",
@@ -13231,6 +13244,8 @@ mod tests {
             &[
                 "access",
                 "agent_owners",
+                "aliases",
+                "aliases_truncated",
                 "ok",
                 "room",
                 "transcript",
@@ -13238,6 +13253,8 @@ mod tests {
                 "next_seq",
             ],
         );
+        assert_eq!(detail["aliases"], json!([]));
+        assert_eq!(detail["aliases_truncated"], false);
         assert_eq!(detail["ok"], true);
         assert_eq!(detail["has_more"], false);
         assert!(detail["next_seq"].is_null());
@@ -13318,6 +13335,8 @@ mod tests {
             &[
                 "access",
                 "agent_owners",
+                "aliases",
+                "aliases_truncated",
                 "ok",
                 "room",
                 "transcript",
@@ -13325,6 +13344,8 @@ mod tests {
                 "next_seq",
             ],
         );
+        assert_eq!(detail["aliases"], json!([]));
+        assert_eq!(detail["aliases_truncated"], false);
         assert_eq!(detail["ok"], true);
         assert_eq!(detail["has_more"], false);
         assert!(detail["next_seq"].is_null());
@@ -21491,6 +21512,8 @@ mod tests {
             &snapshot,
             &[
                 "access",
+                "aliases",
+                "aliases_truncated",
                 "closed",
                 "ok",
                 "room",
@@ -21501,6 +21524,8 @@ mod tests {
                 "has_more",
             ],
         );
+        assert_eq!(snapshot["aliases"], json!([]));
+        assert_eq!(snapshot["aliases_truncated"], false);
         assert_eq!(snapshot["ok"], true);
         assert_eq!(snapshot["closed"], true);
         assert_eq!(snapshot["room"]["id"], "closed-audit");
@@ -25936,7 +25961,7 @@ mod tests {
         assert_eq!(admission_routes, expected_admission_routes);
         assert_eq!(
             banner.len(),
-            130,
+            133,
             "route baseline changed; review the manifest"
         );
 
@@ -26147,6 +26172,114 @@ mod tests {
                 .is_none(),
             "untrusted origins must not receive CORS authorization"
         );
+    }
+
+    /// Every method the router serves must pass a real browser preflight from
+    /// each trusted first-party origin, or a cross-origin client (the Tauri
+    /// webview calls the daemon directly) can never send it. Foreign origins
+    /// receive no CORS authorization for any of them, and the real PUT still
+    /// meets its route's operator gate rather than a 405.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn router_contract_preflight_admits_every_served_method() {
+        use axum::{body::Body, http::Request};
+        use tower::ServiceExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let app = app_router(BrowserOrigins::default(), AllowedHosts::default())
+            .with_state(route_contract_state(&tmp).await);
+
+        let mut served: Vec<(&str, &str)> = Vec::new();
+        for route in banner_routes() {
+            let (method, path) = route.split_once(' ').expect("well-formed banner route");
+            if !served.iter().any(|(seen, _)| *seen == method) {
+                served.push((method, path));
+            }
+        }
+        assert!(
+            served.iter().any(|(method, _)| *method == "PUT"),
+            "this router serves PUT routes; the preflight must be exercised for them"
+        );
+
+        let preflight = |origin: &'static str, method: &str, path: &str| {
+            Request::builder()
+                .method(Method::OPTIONS)
+                .uri(materialize_route_path(path))
+                .header(header::ORIGIN, origin)
+                .header(header::ACCESS_CONTROL_REQUEST_METHOD, method)
+                .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "content-type")
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        for (method, path) in &served {
+            for origin in ["tauri://localhost", "http://localhost:8080"] {
+                let response = app
+                    .clone()
+                    .oneshot(preflight(origin, method, path))
+                    .await
+                    .unwrap();
+                assert!(
+                    response.status().is_success(),
+                    "{method} {path} preflight from {origin} failed: {}",
+                    response.status()
+                );
+                assert_eq!(
+                    response.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
+                    Some(&HeaderValue::from_static(origin)),
+                    "{method} preflight from {origin} was not authorized"
+                );
+                let methods = response
+                    .headers()
+                    .get(header::ACCESS_CONTROL_ALLOW_METHODS)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default();
+                assert!(
+                    methods.split(',').any(|m| m.trim() == *method),
+                    "preflight omitted served method {method}: {methods}"
+                );
+            }
+
+            let foreign = app
+                .clone()
+                .oneshot(preflight("https://evil.example", method, path))
+                .await
+                .unwrap();
+            assert!(
+                foreign
+                    .headers()
+                    .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                    .is_none(),
+                "{method} preflight from a foreign origin must not be authorized"
+            );
+        }
+
+        for path in [
+            "/v1/me",
+            "/v1/rooms/persistent/route-probe/agents/route-probe/settings",
+        ] {
+            let put = app
+                .clone()
+                .oneshot(
+                    Request::put(path)
+                        .header(header::ORIGIN, "tauri://localhost")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from("{}"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_ne!(put.status(), StatusCode::METHOD_NOT_ALLOWED, "PUT {path}");
+            assert!(
+                put.status().is_client_error(),
+                "PUT {path} without the operator credential must be refused: {}",
+                put.status()
+            );
+            assert_eq!(
+                put.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
+                Some(&HeaderValue::from_static("tauri://localhost")),
+                "the Tauri webview must be able to read the PUT {path} response"
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

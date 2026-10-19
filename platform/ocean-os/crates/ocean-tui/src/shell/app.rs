@@ -227,7 +227,10 @@ impl ProviderRow {
     /// a browser flow — every other row is a plain API key. Drives the Enter
     /// behavior in the popup (login vs inline key entry).
     fn is_oauth(&self) -> bool {
-        matches!(self.block_key, "claude-code" | "openai-codex")
+        matches!(
+            self.block_key,
+            "claude-code" | "openai-codex" | "openai-chatgpt"
+        )
     }
 }
 
@@ -240,10 +243,11 @@ const PROVIDER_TABLE: &[(ProviderSection, &str, &str, &[&str])] = &[
         "claude-code",
         &[],
     ),
+    (ProviderSection::Agent, "Codex OAuth", "openai-codex", &[]),
     (
         ProviderSection::Agent,
-        "Codex (ChatGPT OAuth)",
-        "openai-codex",
+        "ChatGPT plan OAuth",
+        "openai-chatgpt",
         &[],
     ),
     (
@@ -311,7 +315,7 @@ enum ProvidersMode {
 }
 
 /// Derive a `/providers` row status: env var (first hit) > auth-file block >
-/// "not configured". OAuth blocks (`claude-code`, `openai-codex`) report
+/// "not configured". OAuth blocks report
 /// `oauth ok` / `oauth expired` based on the block's `expires` field; API-key
 /// blocks report `auth file` when a non-empty key is present.
 fn provider_status(
@@ -333,7 +337,7 @@ fn provider_status(
     let Some(entry) = json.pointer(&format!("/{block_key}")) else {
         return "not configured".into();
     };
-    if matches!(block_key, "claude-code" | "openai-codex") {
+    if matches!(block_key, "claude-code" | "openai-codex" | "openai-chatgpt") {
         let is_oauth = entry.pointer("/type").and_then(serde_json::Value::as_str) == Some("oauth");
         if !is_oauth {
             return "not configured".into();
@@ -3507,7 +3511,7 @@ impl App {
                     }
                 }
             }
-            // `/login [claude|codex]`: run the REAL OAuth flow off-thread
+            // `/login [claude|codex|chatgpt]`: run the OAuth flow off-thread
             // (begin → browser → token exchange → persist) so the TUI never
             // blocks on the callback server or browser/OS integration. A second
             // `/login` while one is already running is rejected with a busy
@@ -3521,6 +3525,7 @@ impl App {
                     let provider = match *target {
                         LoginTarget::Claude => ocean_oauth::OAuthProvider::Claude,
                         LoginTarget::Codex => ocean_oauth::OAuthProvider::Codex,
+                        LoginTarget::ChatGptPlan => ocean_oauth::OAuthProvider::ChatGptPlan,
                     };
                     tokio::spawn(async move {
                         let label = provider.label();
@@ -5627,6 +5632,7 @@ impl App {
                             // exactly as a `/login <target>` would.
                             let target = match row.block_key {
                                 "claude-code" => LoginTarget::Claude,
+                                "openai-chatgpt" => LoginTarget::ChatGptPlan,
                                 _ => LoginTarget::Codex,
                             };
                             self.providers_open = false;

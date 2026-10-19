@@ -41,6 +41,64 @@ pub(crate) fn remove_and_write(auth_file: &Path, key: &str) -> Result<bool> {
     Ok(true)
 }
 
+/// Persist installation identity before exposing a first authorization URL.
+/// The read and conditional write share custody, including concurrent attempts.
+pub(crate) fn ensure_chatgpt_host(auth_file: &Path) -> Result<Value> {
+    let guard = ocean_providers::lock_auth_file(auth_file).context("auth file custody failed")?;
+    let mut root = read_root(&guard)?;
+    let block = root
+        .as_object_mut()
+        .unwrap()
+        .entry("openai-chatgpt")
+        .or_insert_with(|| json!({}));
+    let object = block
+        .as_object_mut()
+        .context("ChatGPT registration is not an object")?;
+    if object
+        .get("ext_agent_host_id")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        return Ok(block.clone());
+    }
+    object.insert(
+        "ext_agent_host_id".into(),
+        json!(format!("urn:uuid:{}", uuid::Uuid::new_v4())),
+    );
+    let prior = block.clone();
+    guard.publish(serde_json::to_vec_pretty(&root)?.as_slice())?;
+    Ok(prior)
+}
+
+/// Atomically remove credential usability, returning the detached token set
+/// only to the in-memory logout operation. In-flight refresh publication is
+/// compare-fenced against this changed block. No lock spans network work.
+pub(crate) fn detach_chatgpt_tokens(auth_file: &Path) -> Result<Option<Value>> {
+    let guard = ocean_providers::lock_auth_file(auth_file).context("auth file custody failed")?;
+    let mut root = read_root(&guard)?;
+    let Some(prior) = root.get("openai-chatgpt").cloned() else {
+        return Ok(None);
+    };
+    let mut registration = serde_json::Map::new();
+    for key in [
+        "ext_agent_host_id",
+        "client_id",
+        "issuer",
+        "subject",
+        "email",
+    ] {
+        if let Some(value) = prior.get(key).and_then(Value::as_str) {
+            registration.insert(key.into(), json!(value));
+        }
+    }
+    let retained = Value::Object(registration);
+    if retained != prior {
+        root["openai-chatgpt"] = retained;
+        guard.publish(serde_json::to_vec_pretty(&root)?.as_slice())?;
+    }
+    Ok(Some(prior))
+}
+
 /// Read one block without writing anything. `None` when the file or the key is
 /// absent. Read after acquiring custody, so a status read never observes a
 /// mid-merge snapshot.

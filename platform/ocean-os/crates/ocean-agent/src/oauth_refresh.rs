@@ -65,6 +65,13 @@ const BLOCKS: &[RefreshableBlock] = &[
         client_id_env: "OCEAN_OAUTH_OPENAI_CLIENT_ID",
         default_client_id: "app_EMoamEEZ73f0CkXaXp7hrann",
     },
+    RefreshableBlock {
+        block: "openai-chatgpt",
+        endpoint_env: "OCEAN_OAUTH_CHATGPT_TOKEN_URL",
+        default_endpoint: "https://auth.openai.com/api/accounts/oauth/token",
+        client_id_env: "OCEAN_OAUTH_CHATGPT_CLIENT_ID",
+        default_client_id: "",
+    },
 ];
 
 /// Single-flight + per-block failure cooldowns. One global refresh pass runs
@@ -88,6 +95,16 @@ fn state() -> &'static tokio::sync::Mutex<RefreshState> {
 /// refresh failure degrades to today's behavior (expired block → missing
 /// credential) with a warning and a cooldown.
 pub async fn ensure_fresh(auth_file: &Path) {
+    ensure_fresh_blocks(auth_file, None).await;
+}
+
+/// Refresh one provider block before callers that need fresh provider-specific
+/// metadata (for example the account model catalog) resolve its access token.
+pub async fn ensure_provider_fresh(auth_file: &Path, provider_block: &str) {
+    ensure_fresh_blocks(auth_file, Some(provider_block)).await;
+}
+
+async fn ensure_fresh_blocks(auth_file: &Path, provider_block: Option<&str>) {
     if !auth_file.exists() {
         return;
     }
@@ -101,7 +118,7 @@ pub async fn ensure_fresh(auth_file: &Path) {
     };
 
     let mut refreshed = Vec::new();
-    for def in BLOCKS {
+    for def in refreshable_blocks(provider_block) {
         let Some((refresh, needs)) = block_needs_refresh(&json, def.block) else {
             continue;
         };
@@ -115,9 +132,29 @@ pub async fn ensure_fresh(auth_file: &Path) {
         }
         let endpoint =
             std::env::var(def.endpoint_env).unwrap_or_else(|_| def.default_endpoint.to_string());
-        let client_id =
-            std::env::var(def.client_id_env).unwrap_or_else(|_| def.default_client_id.to_string());
-        match ocean_protocol::oauth::refresh_token(&endpoint, &client_id, &refresh).await {
+        let issued_client_id = json
+            .get(def.block)
+            .and_then(|block| block.get("client_id"))
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty());
+        let client_id = issued_client_id.map(str::to_owned).unwrap_or_else(|| {
+            std::env::var(def.client_id_env).unwrap_or_else(|_| def.default_client_id.to_string())
+        });
+        if client_id.is_empty() {
+            continue;
+        }
+        let result = if def.block == "openai-chatgpt" {
+            ocean_protocol::oauth::refresh_token_with_resource(
+                &endpoint,
+                &client_id,
+                &refresh,
+                "https://api.openai.com/v1",
+            )
+            .await
+        } else {
+            ocean_protocol::oauth::refresh_token(&endpoint, &client_id, &refresh).await
+        };
+        match result {
             Ok(fresh) => {
                 refreshed.push(Refreshed {
                     block: def.block,
@@ -125,6 +162,8 @@ pub async fn ensure_fresh(auth_file: &Path) {
                     used_refresh: refresh,
                     access: fresh.access_token,
                     refresh: fresh.refresh_token,
+                    id_token: fresh.id_token,
+                    scope: fresh.scope,
                     expires_ms: fresh
                         .expires_in_secs
                         .map(|secs| (unix_secs() + secs) * 1_000),
@@ -181,6 +220,13 @@ pub async fn ensure_fresh(auth_file: &Path) {
     }
 }
 
+fn refreshable_blocks(provider_block: Option<&str>) -> Vec<&'static RefreshableBlock> {
+    BLOCKS
+        .iter()
+        .filter(move |def| provider_block.map_or(true, |block| def.block == block))
+        .collect()
+}
+
 fn refresh_error_class(error: &ocean_protocol::Error) -> (&'static str, Option<u16>) {
     use ocean_protocol::Error;
     match error {
@@ -204,6 +250,8 @@ struct Refreshed {
     used_refresh: String,
     access: String,
     refresh: Option<String>,
+    id_token: Option<String>,
+    scope: Option<String>,
     expires_ms: Option<i64>,
 }
 
@@ -271,6 +319,22 @@ fn merge_refreshed(
         entry.insert("access".into(), Value::String(item.access.clone()));
         if let Some(refresh) = &item.refresh {
             entry.insert("refresh".into(), Value::String(refresh.clone()));
+        }
+        if let Some(id_token) = &item.id_token {
+            entry.insert("id_token".into(), Value::String(id_token.clone()));
+        }
+        if item.block == "openai-chatgpt" {
+            if let Some(scope) = &item.scope {
+                entry.insert(
+                    "scopes".into(),
+                    Value::Array(
+                        scope
+                            .split_whitespace()
+                            .map(|scope| Value::String(scope.to_owned()))
+                            .collect(),
+                    ),
+                );
+            }
         }
         if let Some(expires) = item.expires_ms {
             entry.insert("expires".into(), Value::from(expires));
@@ -365,6 +429,8 @@ mod tests {
             used_refresh: root[block]["refresh"].as_str().unwrap().trim().to_string(),
             access: "synthetic-refreshed-access".into(),
             refresh: Some("synthetic-rotated-refresh".into()),
+            id_token: None,
+            scope: None,
             expires_ms: Some((unix_secs() + 3600) * 1_000),
         }
     }
@@ -465,6 +531,47 @@ mod tests {
     }
 
     #[test]
+    fn chatgpt_refresh_rotates_tokens_without_losing_registration_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let original = json!({
+            "openai-chatgpt": {
+                "type":"oauth", "access":"old", "refresh":"old-refresh", "expires":1,
+                "client_id":"issued-client", "ext_agent_host_id":"urn:uuid:host",
+                "subject":"verified-subject", "id_token":"old-id",
+                "scopes":["chatgpt.tokens.use.direct"]
+            }
+        });
+        seed(&path, &original);
+        let mut refreshed = response(&original, "openai-chatgpt");
+        refreshed.id_token = Some("new-id".into());
+        refreshed.scope = Some("openid profile chatgpt.tokens.use.direct".into());
+
+        assert_eq!(
+            merge_refreshed(&path, &[refreshed]).unwrap(),
+            ["openai-chatgpt"]
+        );
+        let after = read(&path)["openai-chatgpt"].clone();
+        assert_eq!(after["client_id"], "issued-client");
+        assert_eq!(after["ext_agent_host_id"], "urn:uuid:host");
+        assert_eq!(after["subject"], "verified-subject");
+        assert_eq!(after["id_token"], "new-id");
+        assert_eq!(
+            after["scopes"],
+            json!(["openid", "profile", "chatgpt.tokens.use.direct"])
+        );
+    }
+
+    #[test]
+    fn provider_catalog_refresh_only_selects_the_requested_oauth_block() {
+        let blocks: Vec<_> = refreshable_blocks(Some("openai-chatgpt"))
+            .into_iter()
+            .map(|definition| definition.block)
+            .collect();
+        assert_eq!(blocks, ["openai-chatgpt"]);
+    }
+
+    #[test]
     fn merge_invalid_latest_file_is_never_overwritten() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("auth.json");
@@ -555,5 +662,63 @@ mod tests {
         let exp = round["claude-code"]["expires"].as_i64().unwrap();
         assert!(exp > unix_secs() * 1_000, "expiry moved into the future");
         assert!(round["deepseek"]["api_key"] == "keep-me");
+    }
+
+    #[tokio::test]
+    async fn provider_catalog_refreshes_expired_chatgpt_token_before_model_discovery() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let _ = socket.read(&mut request).await;
+            let body = r#"{"access_token":"fresh-access","refresh_token":"rotated-refresh","expires_in":3600,"id_token":"fresh-id","scope":"openid chatgpt.tokens.use.direct"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(), body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let original = json!({
+            "openai-chatgpt": {
+                "type":"oauth", "access":"stale-access", "refresh":"old-refresh",
+                "expires":1, "client_id":"issued-client", "ext_agent_host_id":"urn:uuid:host",
+                "subject":"verified-subject", "id_token":"old-id",
+                "scopes":["chatgpt.tokens.use.direct"]
+            },
+            "deepseek":{"api_key":"keep-me"}
+        });
+        seed(&path, &original);
+
+        struct RestoreEndpoint(Option<std::ffi::OsString>);
+        impl Drop for RestoreEndpoint {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(value) => std::env::set_var("OCEAN_OAUTH_CHATGPT_TOKEN_URL", value),
+                    None => std::env::remove_var("OCEAN_OAUTH_CHATGPT_TOKEN_URL"),
+                }
+            }
+        }
+        let _restore = RestoreEndpoint(std::env::var_os("OCEAN_OAUTH_CHATGPT_TOKEN_URL"));
+        std::env::set_var(
+            "OCEAN_OAUTH_CHATGPT_TOKEN_URL",
+            format!("http://{addr}/oauth/token"),
+        );
+        ensure_provider_fresh(&path, "openai-chatgpt").await;
+        server.await.unwrap();
+
+        let refreshed = read(&path);
+        assert_eq!(refreshed["openai-chatgpt"]["access"], "fresh-access");
+        assert_eq!(refreshed["openai-chatgpt"]["refresh"], "rotated-refresh");
+        assert_eq!(refreshed["openai-chatgpt"]["client_id"], "issued-client");
+        assert_eq!(refreshed["openai-chatgpt"]["subject"], "verified-subject");
+        assert_eq!(refreshed["openai-chatgpt"]["id_token"], "fresh-id");
+        assert_eq!(refreshed["deepseek"]["api_key"], "keep-me");
     }
 }
