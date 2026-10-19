@@ -19,6 +19,9 @@ Root GitHub Actions builds for the public Ocean monorepo.
   The publish job has no source checkout: its first shell starts at the existing
   workspace root, verifies the artifact digest, then creates the component
   staging directory used by subsequent steps.
+- The release workflow's manual `windows_native_probe` is a read-only Windows
+  Tauri candidate check. It builds the real web bundle, runs native shell/Room-consent tests and
+  builds the executable. It does not package, publish or install the app.
 - `build-scope.py` selects changed components; `test-build-scope.py` checks scope decisions, including NUL-terminated Git output. Unknown or unavailable diffs build both.
 - Root CI builds Ocean OS and the active Surface deliverables. Publishing and
   deployment remain owned by their component workflows and installers.

@@ -2748,3 +2748,12 @@ type: [bug report]
 area: [backend] [testing]
 
 Native Windows probe 39326283845 passed all 20 credential tests, then exposed the next compiler blocker: the skill reader treated every non-Linux host as Unix. Added a Windows reader for absolute local-drive paths, retaining directory handles and opening each child relative to its parent with reparse refusal; device, UNC, parent-traversal and alternate-stream paths stay refused. Added actual-source native integration fixtures for guarded reads, parent retargeting and operator-key/header behavior; existing Unix skill reads remain unchanged. Windows cross-target Clippy passes; fresh native execution and review remain pending. Updated daemon and workflow contracts; no new devlog boundary or changed parent index. Release repair PR #115 merged at 50985671 after review and exact-head CI; immutable v0.2.1 validation/publication is running as 39328117964. No release availability or Windows runtime acceptance claimed.
+
+_________________________________________________________________________________
+time: [18:47] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/windows-native-room-consent]
+type: [bug report]
+area: [frontend] [backend] [testing]
+
+Replace the desktop transport's unconditional non-Unix credential refusal with a Windows checked owner-only file read, bounded header-token validation and absolute HOME/USERPROFILE defaults. Preserve the fixed native intents, main-window gate, frozen consent preview/dialog, numeric-loopback restriction and no automatic retry. Port existing transport, owner-mutation and consent fixtures to Windows with protected/inherited ACL fixtures and link refusal. Add a separate opt-in read-only Windows native probe that builds the actual web bundle, runs the full shell suite and builds the native executable. Host Trunk build, 49 changed-domain tests, Clippy, docs-check and workflow checks pass. The full host suite passed 81 tests and timed out one unchanged macOS watcher test; that test passed alone on retry. Native Windows execution and fresh independent review remain pending. Updated Surface, runtime file-owner and workflow contracts; indexes unchanged. No installer, served desktop or coworker acceptance claimed.

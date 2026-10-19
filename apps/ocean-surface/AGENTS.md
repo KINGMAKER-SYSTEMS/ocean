@@ -740,6 +740,16 @@ Web surface session UI:
   daemon's owner routes always answer JSON objects. Error strings are now
   fixed codes. The command refuses any webview other than `main`
   (`owner_mutation_window_refused`).
+- Windows native transport uses the daemon's `ocean_observatory::auth::windows_file`
+  reader: protected current-user-only ACL, regular single-link file, no reparse
+  points, bounded read and the same header-safe token predicate. It never repairs
+  unsafe files. Default config uses absolute HOME or USERPROFILE; explicit config
+  and key paths retain precedence. Unix ownership/mode behavior is unchanged.
+  The target-only dependency shares file validation, not runtime policy.
+- The transport, owner-mutation and consent fixtures run on Windows and Unix;
+  Windows fixtures create protected files or deliberately inherited ACLs. The
+  manual native workflow builds the real UI and shell; no test bypasses the
+  existing native confirmation, frozen preview or main-window gates.
 - Verification: `cd crates/ocean-tauri && cargo test daemon_transport`
   (loopback refusal, key-file refusal incl. foreign owner, redirect,
   oversize/invalid reply, lost-ack → unknown), `cargo test owner_mutation`,

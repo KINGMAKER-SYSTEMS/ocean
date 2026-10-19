@@ -99,11 +99,17 @@ require(
     "release publication follows registry convergence",
 )
 require("-F draft=false" in source, "verified release is made public only after registry convergence")
-require("if: github.event_name == 'push' || !inputs.windows_probe" in source, "Windows probe does not also run Mac packaging")
+require("if: github.event_name == 'push' || (!inputs.windows_probe && !inputs.windows_native_probe)" in source, "Windows probes do not also run Mac packaging")
 windows_job = source[source.index("  windows-probe:") :]
 require("if: github.event_name == 'workflow_dispatch' && inputs.windows_probe" in windows_job, "Windows probe is manual and opt-in")
 require("contents: read" in windows_job and ": write" not in windows_job, "Windows probe has no write authority")
 require("cargo build --locked --release -p ocean-daemon -p ocean-tui" in windows_job, "Windows probe compiles the actual release binaries")
 require("cancel-in-progress: true" in windows_job, "superseded Windows probes cancel by ref")
 
+native_job = source[source.index("  windows-native-probe:") :]
+require("if: github.event_name == 'workflow_dispatch' && inputs.windows_native_probe" in native_job, "Native probe is manual and opt-in")
+require("contents: read" in native_job and ": write" not in native_job, "Native probe has no write authority")
+require("trunk build --locked" in native_job, "Native probe builds the actual UI")
+require("cargo test --locked --release --lib" in native_job, "Native probe runs shell and consent fixtures")
+require("working-directory: apps/ocean-surface/crates/ocean-tauri" in native_job and "cargo build --locked --release" in native_job, "Native probe builds the actual shell")
 print("Ocean release workflow root/path/security contract: PASS")
