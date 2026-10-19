@@ -1,4 +1,5 @@
 import io
+import plistlib
 from pathlib import Path
 import struct
 import subprocess
@@ -23,13 +24,20 @@ class DesktopArtifactTests(unittest.TestCase):
 
     def test_busy_owned_image_is_retried_before_force(self):
         busy = subprocess.CalledProcessError(16, 'hdiutil')
-        with patch.object(desktop, 'run', side_effect=[busy, None]) as run, patch.object(desktop.time, 'sleep'):
-            desktop.detach_image(Path('/owned/mount'))
+        with patch.object(desktop, 'image_attached', return_value=True), patch.object(desktop, 'run', side_effect=[busy, None]) as run, patch.object(desktop.time, 'sleep'):
+            desktop.detach_image(Path('/owned/mount'), Path('/owned/image.dmg'))
             self.assertEqual(run.call_count, 2)
             self.assertTrue(all('-force' not in call.args[0] for call in run.call_args_list))
-        with patch.object(desktop, 'run', side_effect=[busy, busy, busy, None]) as run, patch.object(desktop.time, 'sleep'):
-            desktop.detach_image(Path('/owned/mount'))
+        with patch.object(desktop, 'image_attached', return_value=True), patch.object(desktop, 'run', side_effect=[busy, busy, busy, None]) as run, patch.object(desktop.time, 'sleep'):
+            desktop.detach_image(Path('/owned/mount'), Path('/owned/image.dmg'))
             self.assertEqual(run.call_args.args[0], ['hdiutil', 'detach', '-force', Path('/owned/mount')])
+
+    def test_completed_detach_after_timeout_is_not_retried(self):
+        info = plistlib.dumps({'images': [{'image-path': '/another/image.dmg'}]}).decode()
+        with patch.object(desktop, 'run', side_effect=[subprocess.TimeoutExpired('hdiutil', 15), info]) as run:
+            desktop.detach_image(Path('/owned/mount'), Path('/owned/image.dmg'))
+            self.assertEqual(run.call_count, 2)
+            self.assertEqual(run.call_args.args[0], ['hdiutil', 'info', '-plist'])
 
     def test_developer_machine_libraries_are_refused(self):
         system = "Ocean:\n\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1.0.0)\n"

@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import plistlib
 import re
 import shutil
 import struct
@@ -237,10 +238,18 @@ def mount_image(image, temporary):
     try:
         yield mount / "Ocean.app"
     finally:
-        detach_image(mount)
+        detach_image(mount, image)
 
 
-def detach_image(mount):
+def image_attached(image):
+    info = plistlib.loads(run(["hdiutil", "info", "-plist"], capture=True, timeout=15).encode())
+    images = info.get("images")
+    if not isinstance(images, list) or any(not isinstance(item, dict) for item in images):
+        raise RuntimeError("Couldn't verify disk-image cleanup")
+    return any(os.path.realpath(item.get("image-path", "")) == os.path.realpath(image) for item in images)
+
+
+def detach_image(mount, image):
     # The fixture has reaped its daemon, but macOS may briefly retain the image.
     # Only this build's newly created read-only mount can reach the force path.
     for _ in range(3):
@@ -248,8 +257,16 @@ def detach_image(mount):
             run(["hdiutil", "detach", mount], timeout=15)
             return
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            # A command timeout is not proof that the detach failed. Inspect
+            # disk-image authority before retrying the same owned mount.
+            if not image_attached(image):
+                return
             time.sleep(1)
-    run(["hdiutil", "detach", "-force", mount], timeout=15)
+    try:
+        run(["hdiutil", "detach", "-force", mount], timeout=15)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        if image_attached(image):
+            raise
 
 
 def verify_payload(app_root, daemon, legal, target):

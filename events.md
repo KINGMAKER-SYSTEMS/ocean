@@ -2910,3 +2910,12 @@ type: [bug report]
 area: [testing]
 
 Actual Mac candidate inspection found Homebrew OpenSSL imports in the desktop executable. Disable unused native Git network transports; local repository checks still pass (2 tests), and native cargo check passes. Packaging now rejects non-system Mac dependencies, inventories Tauri's release feature, builds the Windows daemon with static CRT and checks extracted app/daemon imports for redistributable DLL dependencies. Seven artifact tests pass. The first Mac candidate's bundled daemon boot passed, then its read-only image was briefly busy at detach; retry only the owned mount before a bounded force detach. Its stale mount was detached normally. Docs-check passes; final native installers and first-run setup remain unaccepted.
+
+_________________________________________________________________________________
+time: [19:51] [19-10-26]
+agent: [Codex] [GPT-6]
+worktree: [codex/desktop-installer-repairs]
+type: [bug report]
+area: [testing]
+
+The revised actual Mac disk image passes system-library checks and bundled-daemon startup. hdiutil completed detach after the command observation timed out; retries then incorrectly treated the absent image as failure. Inspect authoritative hdiutil image state after a timeout/error before retrying only the owned mount. Eight artifact tests pass, including a timeout-after-completed-detach regression. Packaging ownership and publication contracts are unchanged. Final installer acceptance remains pending.
