@@ -77,6 +77,8 @@ Native surface direction:
 
 - Tauri 2.x shell (`crates/ocean-tauri`) loads `dist/` as `frontendDist` — the
   same Trunk-built Leptos WASM bundle the browser PWA ships.
+  Windows release builds use the GUI subsystem so app launch opens no console;
+  the native probe checks that setting in the built PE executable.
 - Rust commands in the Tauri backend replace the GPUI crate's `rfd` (folder
   dialogs) and `notify` (path watcher) native bits.
 - Native LiveKit Rust client is a later phase behind a feature flag, not part
