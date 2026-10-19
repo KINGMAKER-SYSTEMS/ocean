@@ -58,5 +58,11 @@ require(
     "release publication follows registry convergence",
 )
 require("-F draft=false" in source, "verified release is made public only after registry convergence")
+require("if: github.event_name == 'push' || !inputs.windows_probe" in source, "Windows probe does not also run Mac packaging")
+windows_job = source[source.index("  windows-probe:") :]
+require("if: github.event_name == 'workflow_dispatch' && inputs.windows_probe" in windows_job, "Windows probe is manual and opt-in")
+require("contents: read" in windows_job and ": write" not in windows_job, "Windows probe has no write authority")
+require("cargo build --locked --release -p ocean-daemon -p ocean-tui" in windows_job, "Windows probe compiles the actual release binaries")
+require("cancel-in-progress: true" in windows_job, "superseded Windows probes cancel by ref")
 
 print("Ocean release workflow root/path/security contract: PASS")

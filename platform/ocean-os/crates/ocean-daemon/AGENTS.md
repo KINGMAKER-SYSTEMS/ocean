@@ -222,7 +222,10 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   `0abb558179af3ff848d3bd19ac67aff246299ce1`. This stage restores local
   generation-bound execution, not full #22 parity or deployment acceptance.
 - `room_operator.rs` owns the header-only, owner-only local operator key and
-  cookie/origin refusals. `room_agent_authority.rs` owns package preview,
+  cookie/origin refusals. Windows key storage shares Observatory's checked
+  owner-only credential-file primitive; existing unsafe ACLs are refused rather
+  than repaired. Header authority and Unix permissions remain unchanged.
+  `room_agent_authority.rs` owns package preview,
   Local bootstrap, binding reads/authorize/reauthorize/status mutations,
   immutable admission, fixed-code audits and per-call/lifetime authority checks.
   Missing key/header is 503; invalid authority is 403. Roster, browser trust,

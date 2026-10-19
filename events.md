@@ -2712,3 +2712,12 @@ type: [bug report]
 area: [frontend] [testing]
 
 Restored missing persistent-room PATCH forwarding in the authenticated browser proxy. The read cursor could previously fail to save despite a successful room load. All 38 proxy tests and denied-warning Clippy pass, including an actual upstream fixture proving method/path/query/body preservation and refusal without a proxy session; browser cookies and forged operator headers stay stripped. Safari on the localhost candidate saved the room cursor from 24 to 40, cleared its unread dot, and retained that state after reload. Owning Surface contract updated; parent indexes unchanged. The paired Rooms changes at 015a3b1c passed independent review and hosted Ocean/Surface builds, but this proxy delta still requires fresh-head review and CI. Distribution PR #113 merged at 945c91cb; its release validation is running and no package is published. Live Surface remains unchanged because legacy recovery bytes are missing.
+
+_________________________________________________________________________________
+time: [17:17] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/windows-credential-files]
+type: [feature-request]
+area: [backend] [testing]
+
+Added Windows credential-file primitives for observer secret/token and local operator keys, with protected current-user-only DACLs and handle-based owner/type/link/reparse validation. Unsafe existing files remain refused without ACL repair. Windows publication flushes/closes before same-volume write-through move; no power-loss parity claim. Existing Unix behavior remains, with 17 auth regressions and Observatory Clippy passing. Actual-source Windows GNU cross-target Clippy passes including ACL/publication tests; native Windows execution is still pending. Added a manual read-only Windows probe, separate from routine builds and package publishing. Updated Observatory, daemon and workflow contracts; parent indexes unchanged. No Windows support or deployment acceptance claimed.
