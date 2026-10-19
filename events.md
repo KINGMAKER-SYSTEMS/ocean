@@ -2732,6 +2732,24 @@ area: [testing] [workflow]
 Stable-tag run 39324095372 validated the Mac package and npm/Bun installs, then publication failed before shell execution because its checkout-free job inherited a nonexistent component directory. Start artifact download at the existing workspace root, retain exact ZIP digest verification, and create component staging only after verification. The regression executes the actual workflow shell with a local artifact in an empty workspace, and proves a bad digest fails before staging. Actionlint, workflow contract tests and diff checks pass. Updated the owning workflow contract; parent indexes unchanged. Browser invitation PR #114 merged at 8723a1d1 after exact-head review and CI. No package publication or live Surface replacement claimed.
 
 _________________________________________________________________________________
+time: [17:17] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/windows-credential-files]
+type: [feature-request]
+area: [backend] [testing]
+
+Added Windows credential-file primitives for observer secret/token and local operator keys, with protected current-user-only DACLs and handle-based owner/type/link/reparse validation. Unsafe existing files remain refused without ACL repair. Windows publication flushes/closes before same-volume write-through move; no power-loss parity claim. Existing Unix behavior remains, with 17 auth regressions and Observatory Clippy passing. Actual-source Windows GNU cross-target Clippy passes including ACL/publication tests; native Windows execution is still pending. Added a manual read-only Windows probe, separate from routine builds and package publishing. Updated Observatory, daemon and workflow contracts; parent indexes unchanged. No Windows support or deployment acceptance claimed.
+
+_________________________________________________________________________________
+time: [17:32] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/windows-credential-files]
+type: [bug report]
+area: [backend] [testing]
+
+Native Windows probe 39326283845 passed all 20 credential tests, then exposed the next compiler blocker: the skill reader treated every non-Linux host as Unix. Added a Windows reader for absolute local-drive paths, retaining directory handles and opening each child relative to its parent with reparse refusal; device, UNC, parent-traversal and alternate-stream paths stay refused. Added actual-source native integration fixtures for guarded reads, parent retargeting and operator-key/header behavior; existing Unix skill reads remain unchanged. Windows cross-target Clippy passes; fresh native execution and review remain pending. Updated daemon and workflow contracts; no new devlog boundary or changed parent index. Release repair PR #115 merged at 50985671 after review and exact-head CI; immutable v0.2.1 validation/publication is running as 39328117964. No release availability or Windows runtime acceptance claimed.
+
+_________________________________________________________________________________
 time: [17:49] [19-10-26] EDT UTC-04:00
 agent: [Codex] [GPT-6]
 worktree: [codex/release-first-tag]
