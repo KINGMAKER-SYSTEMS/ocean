@@ -815,11 +815,59 @@ const EXECUTING_EXTENSIONS: &[&str] = &[
     "osascript",
 ];
 
+/// Windows shell launchers are not document-viewing targets. Keep this guard
+/// independent of the caller's root: both root and path come from the webview.
+#[cfg(any(windows, test))]
+fn windows_launch_target(target: &Path) -> bool {
+    let Some(name) = target.file_name() else {
+        return false;
+    };
+    let name = name.to_string_lossy();
+    // Win32 shell handling can normalize trailing dots/spaces; do not let
+    // that spelling disguise an executable or shortcut suffix.
+    let name = name.trim_end_matches(['.', ' ']);
+    let Some((_, extension)) = name.rsplit_once('.') else {
+        return false;
+    };
+    matches!(
+        extension.to_ascii_lowercase().as_str(),
+        "exe"
+            | "com"
+            | "bat"
+            | "cmd"
+            | "ps1"
+            | "psm1"
+            | "vbs"
+            | "vbe"
+            | "js"
+            | "jse"
+            | "wsf"
+            | "wsh"
+            | "hta"
+            | "scr"
+            | "pif"
+            | "cpl"
+            | "msc"
+            | "msi"
+            | "msp"
+            | "mst"
+            | "reg"
+            | "lnk"
+            | "url"
+            | "application"
+            | "appref-ms"
+    )
+}
+
 /// True when opening this target would EXECUTE it rather than view it —
 /// either because macOS treats the extension as runnable, or because the
 /// file carries an executable bit (a `#!` script `open(1)` will hand to a
 /// shell).
 fn opens_as_executable(target: &Path) -> bool {
+    #[cfg(windows)]
+    if windows_launch_target(target) {
+        return true;
+    }
     if let Some(ext) = target.extension().and_then(|e| e.to_str()) {
         let ext = ext.to_ascii_lowercase();
         if EXECUTING_EXTENSIONS.iter().any(|e| *e == ext) {
@@ -853,7 +901,7 @@ fn opens_as_executable(target: &Path) -> bool {
 /// session workspace, which it does not today.
 ///
 /// So the real gate is the consequence, not the location: this refuses to
-/// open anything macOS would EXECUTE (`opens_as_executable`). That closes
+/// open known launch targets (`opens_as_executable`). That closes
 /// the primitive that matters here — the daemon runs tools ungated, so it
 /// can already write a payload and mark it executable; without this check
 /// `open_file` was the launcher. Viewing a document in its default app,
@@ -1584,6 +1632,72 @@ mod tests {
     /// caller supplies both root and path), so the load-bearing gate is
     /// refusing targets macOS would EXECUTE. These drive the real predicate
     /// against real files on disk.
+    #[test]
+    fn windows_document_open_refuses_launchers_and_disguised_suffixes() {
+        for name in [
+            "payload.exe",
+            "payload.COM",
+            "run.bat",
+            "run.CMD",
+            "run.ps1",
+            "module.psm1",
+            "script.vbs",
+            "encoded.vbe",
+            "script.js",
+            "encoded.jse",
+            "script.wsf",
+            "script.wsh",
+            "page.hta",
+            "screen.scr",
+            "old.pif",
+            "panel.cpl",
+            "console.msc",
+            "setup.msi",
+            "patch.msp",
+            "transform.mst",
+            "settings.reg",
+            "document.pdf.lnk",
+            "website.url",
+            "setup.application",
+            "app.appref-ms",
+            "payload.ExE. ",
+            "link.LNK...",
+            "settings.REG ",
+        ] {
+            assert!(windows_launch_target(Path::new(name)), "{name}");
+        }
+        for name in [
+            "notes.md",
+            "report.pdf",
+            "image.png",
+            "data.json",
+            "LICENSE",
+            "source.rs",
+            "example.exe.txt",
+            "not-a-launcher.exe.notes.md",
+        ] {
+            assert!(!windows_launch_target(Path::new(name)), "{name}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_document_command_refuses_before_launching() {
+        let root = tempfile::tempdir().unwrap();
+        for name in ["payload.exe", "shortcut.LNK", "script.CMD", "script.ps1"] {
+            let target = root.path().join(name);
+            std::fs::write(&target, b"inert fixture, never execute").unwrap();
+            assert_eq!(
+                open_file(
+                    root.path().display().to_string(),
+                    target.display().to_string()
+                ),
+                Err("refusing to open an executable file".into()),
+                "{name}"
+            );
+        }
+    }
+
     #[test]
     fn open_file_refuses_targets_that_would_execute() {
         let dir = tempfile::tempdir().expect("tempdir");

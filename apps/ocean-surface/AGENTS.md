@@ -757,6 +757,16 @@ Web surface session UI:
 
 ## Workspace Files lifecycle
 
+- Native Open Externally is a document action. On Windows it refuses known
+  executable, script-host, installer, registry, shortcut and application-link
+  suffixes, case-insensitively and after trailing dot/space normalization.
+  The canonical target is checked before the OS opener; caller-supplied root
+  containment is not an execution permission. Unix executable-bit/Mac suffix
+  behavior is unchanged. This is a known-launcher guard, not an audit of every
+  user-customized file association. Verify with `cargo test --lib document_open`
+  and `cargo test --lib open_file_refuses_targets_that_would_execute` in Tauri.
+
+
 - Native empty Files exposes the host folder picker as pane-local browsing; picking never rewrites daemon session cwd. Session/cwd intent changes retire picked roots, previews, tree caches and asynchronous results synchronously, including A-B-A; disposal rejects late picker/watch/read completions.
 - Files acquires one native root lease per generation and drops only that lease on change or cleanup. `watch_paths`/`unwatch_paths` accept an optional owner token scoped by the injected native window label; scoped canonical maps are independent of legacy Repo watchers and other consumers/windows. Page-load Started and window destruction retire only that window’s scoped leases; a native page generation rejects pending old-page admissions, while Finished leaves new watches intact. Events carry the lease owner and canonical paths map back to the requested alias. Never clear the legacy canonical map for Files cleanup.
 - The private `host/native_events.mjs` adapter belongs to the `host.rs` seam and uses Tauri 2 IPC callback registration and `plugin:event|listen/unlisten`; legacy subscribers retain their app lifetime. Workspace path listeners belong to the component; cleanup unregisters even late native registration. Ignore events outside the root by path-component boundary. All transcript tool argument previews, including browser tools, are capped at 60 Unicode characters; no remaining consumer parses whole preview JSON.
