@@ -16,13 +16,19 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   Serialize start, cancel, and logout under an independent per-provider
   operation lease through cancel/bind/register or removal. Retain each attempt's
   OAuth publication fence even when an HTTP future drops; revoke and settle it
-  before replacement/logout. Blocking removal retains its operation lease.
+  before replacement/logout. Logout retains its operation lease in an owned task through local credential removal and bounded remote revocation even if the HTTP waiter drops. The response exposes `remote_revocation` and a fixed message so local sign-out never implies confirmed remote revocation.
   Status runs custody/native reads off Tokio workers and projects the shared
   runtime resolver's token-free origin separately from stored OAuth facts.
   Login failure logs and responses contain only fixed classifications/provider
   identifiers; never log callback descriptions or arbitrary error chains.
 
 - Daemon health is `GET /health`, not `/v1/health`.
+- `identity.rs` owns credential-free `GET /v1/identity`: resolve strict top-level
+  `member.toml` in the daemon config directory at request time, then validated
+  `OCEAN_MEMBER_ID`, otherwise explicit null identity. Malformed/duplicate/
+  unknown/nested file fields fall back without rewriting the file; never infer
+  identity from the process user. The projection is local configuration, not
+  caller authentication or permission to bypass Room/operator authority.
 - `/v1/models` preserves current/id/provider/label/readiness/provenance and
   additively exposes provider-owned `effort_levels` (an empty list is
   authoritative: that route sends no effort parameter); the route fixture verifies
@@ -31,6 +37,13 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   selections. Session creation/config accept both legacy ids and qualified
   catalog routes, persist the wire model/provider pair, and reconstruct the
   qualified route for resumed turns through `SessionModelConfig::model_spec`.
+- ChatGPT-plan choices are account-specific: query public `/v1/models` with
+  the `openai-chatgpt` bearer token, preserve the response's listed order and
+  `display_name`, and expose only `models[]` entries with
+  `visibility:"list"` as provider-qualified routes. These routes may use
+  dynamically listed slugs that are absent from the bundled catalog. Failure
+  to fetch leaves bundled ChatGPT routes unready; a stored credential alone
+  never proves model entitlement.
 - Restart the daemon only by specific PID; do not use blind `pkill` sweeps.
 - HTTP turn routes must resolve effective cwd from client cwd/project metadata and must never fall back to daemon process cwd.
 - Do not bypass runtime permission gates from daemon route code.
@@ -51,6 +64,11 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   configured origins remain accepted. These guards do not authenticate callers
   or replace route/runtime permission checks; public proxy login remains owned
   by Surface. DNS-based daemon consumers must configure their upstream host.
+- `cors_allowed_methods()` advertises every method in `banner_routes()` (GET,
+  POST, PUT, PATCH, DELETE plus OPTIONS) so the cross-origin Tauri webview can
+  send each one; `router_contract_preflight_admits_every_served_method` derives
+  the served set and fails when a new method is not added. Advertising a method
+  never widens trusted origins or skips route authority.
 - Global approval policy is exposed at `GET/POST /v1/settings/permissions` with
   manual, automatic (default), and skip-all modes; the legacy yolo endpoint
   remains a compatibility adapter and request-wire `yolo` remains inert.
@@ -170,7 +188,7 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
 - Persistent-room mention tokens use the canonical participant-id alphabet:
   alphanumeric, `-`, `_`, and `.`. Keep parser, roster lookup, folder-agent
   resolution, Surface completion, and federated outbox mention ids aligned.
-- `GET /v1/rooms/persistent/{key}/events` is the open, non-call persistent-room merged SSE tail: it bootstraps full `room_access` and JS-safe decimal-string `room_read_cursor` projections without `event.id`, preserves id-bearing `room_message` replay via `Last-Event-ID` (numeric or 400; wins over `after_seq`), then tails three post-commit wake buses (`RoomAccessWakeBus`, `RoomReadCursorWakeBus`, `RoomWakeBus`). Wake hints are payload-free; relevant and lagged hints reread SQLite. Cursor tails use the daemon Local principal or the credential-owned federated human principal, suppress unsupported/transient projections rather than emitting false clears, and deduplicate the unified `{room_id,read_seq}` wire body. Message gap recovery pages ascending; access dedup compares the full projection. Unknown/closed rooms return 404, `call:` rooms return the typed unsupported rejection, and the stream uses the shared 3-second keepalive plus shutdown wrapper. Every non-call production transcript writer must publish only after its allocating transaction commits. Tail tasks must select downstream `tx.closed()` so disconnected clients release state and wake receivers without a new hint.
+- `GET /v1/rooms/persistent/{key}/events` is the open, non-call persistent-room merged SSE tail: it bootstraps full `room_access` and JS-safe decimal-string `room_read_cursor` projections without `event.id`, preserves id-bearing `room_message` replay via `Last-Event-ID` (numeric or 400; wins over `after_seq`), then tails three post-commit wake buses (`RoomAccessWakeBus`, `RoomReadCursorWakeBus`, `RoomWakeBus`). Wake hints are payload-free; relevant and lagged hints reread SQLite. Cursor tails use the daemon Local principal or the credential-owned federated human principal, suppress unsupported/transient projections rather than emitting false clears, and deduplicate the unified `{room_id,read_seq}` wire body. Message gap recovery pages ascending; access dedup compares the full projection. Unknown/closed rooms return 404, `call:` rooms return the typed unsupported rejection, and the stream uses the shared 3-second keepalive plus shutdown wrapper. Every non-call production transcript writer must publish only after its allocating transaction commits. Tail tasks must select downstream `tx.closed()` so disconnected clients release state and wake receivers without a new hint. A tail that observes its room closed runs one final durable catch-up before ending, so a close committing between a page read and the openness check still delivers its marker.
 - Room agent work cards (team-platform P3): `room_agent_runs.rs` owns `RunTracker`, which `spawn_room_agent_turn` starts in `Queued` after admission, the session lease and request registration and before it spawns the turn task, so the card is durable before the start returns `Ok` (a resumed answer settles its parked run `Done` on that `Ok`, and restart recovery reads the card as the successor; a task aborted before it settles fails the card through the turn finalizer), folds the turn's own runtime events from its `PromptControl` event sink into (`TurnStart`/deltas/`ToolExecutionEnd` → `Thinking`, `ToolExecutionStart` → `RunningTool{label}` + tool count + written paths; room turns have no product SSE bridge onto the agent bus), drains that watcher before the terminal write, and ends `Done{summary, reply_seq}`, `Failed{reason}`, or `Cancelled` — the card projects the request's authoritative terminal state, so a request the registry settled `Cancelled` (owner cancel, including a late success the cancel won) while its admission is still current ends `Cancelled`; an admission that lost authority ends `Failed{room_request_authority_changed}`. Each change is an ocean-store `put_room_agent_run_from_turn` followed by a room access wake: the turn's write never rewrites a run another writer already closed (the tracker adopts that row and stops) and always keeps the stored answer claim, so a late progress line or finish from an asking turn cannot reopen a claimed or settled answer; the merged room SSE tail runs a fourth subscriber on `RoomAccessWakeBus` that emits recent runs on connect and every changed run as a `room_agent_run` frame (dedup by full projection). `GET /v1/rooms/persistent/{key}/runs` lists the last 50. `RunTracker::start` stamps the card's `request_id` with the request `spawn_room_agent_turn` registered for the turn (the id the invoke response returns and `POST /v1/requests/{id}/cancel` accepts; auto-convene, thread-reply and federated dispatch turns carry their own registered id) — never a fresh id and never the decision token; both projections carry it, and rows stored before the field decode it as absent. Startup marks every non-terminal run `Failed` (restart interruption). Runs are owner-local and never cross federation; tool args, outputs, and diffs stay in the agent session.
 - Room model selection uses a routable admission-snapshot override, otherwise the admitted package model, then the runtime's existing global fallback. Check overrides with the runtime resolver, not picker membership or provider readiness; explicit per-turn `model_id` keeps priority and no global selection is changed.
 - Run admission and `room_ask` parking propagate work-card store failures. No successor is admitted before its card commits; a failed park returns a tool error without ending the turn or retaining an in-memory parked state. The already-posted question remains in the append-only transcript. Progress-only projections remain best-effort.
@@ -260,11 +278,20 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   before grant-reference validation and profile writes. Exact retries remain
   no-ops after revocation; mismatched/cross-ledger retries return 409, and new
   missing/revoked references retain 400 `resource_not_found`. Slot projections
-  omit resolver strings and credential values. `room_resources.rs` owns only
+  omit resolver strings and credential values. `room_resources.rs` owns
   cwd/catalog selection plus scoped list/read authority and content-free audit
   callbacks. Return the stored canonical grant root unchanged to #24 descriptor
-  I/O; catalog/handle issuance alone is not an in-flight operation proof. No
-  grant mutation/preview routes are opened by Stage 2b.
+  I/O; catalog/handle issuance alone is not an in-flight operation proof. The
+  Stage 2c resource-management routes add header-authorized grant/status and
+  operator-preview routes; preserve the admitted-turn scope, digest,
+  cancellation, and current owner/access checks. Previews capture their own
+  current binding and request-lifetime token, reuse per-call checks, and never
+  cancel an executing turn. All outcomes use fixed error classifications.
+  Normalize grant request spelling without filesystem reads; consumed decisions
+  reach transactional exact/mismatch/cross-ledger replay before mutable
+  expiry/root validation. Fresh requests still reject dangerous, unavailable or
+  symlinked roots. Public projections omit local roots. This does not lift
+  architecture acceptance or live-migration holds.
 - Approved consumer fanout: Agent `memory_tools.rs` adds a private optional
   operation callback on the opaque admitted handle, with fixed typed refusal;
   Agent `lib.rs` only reexports that interface and Agent `AGENTS.md` records it.
@@ -298,6 +325,25 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
 - Deferred: Room metrics/sampler, attachment context/maintenance,
   profile/resource writes,
   retirement/summary/maintenance/workspace bridge, client onboarding/UI, extension
+- `room_summary.rs` owns the bounded summarize candidate: one timed, permit-
+  limited provider call, no tools/session creation, then post-commit artifact
+  wake publication. Prefer explicit `summarize`, then `fast` roles; otherwise
+  preserve the bound provider/model pair through qualified runtime resolution,
+  including fake and custom endpoint models. Capture artifact absence/version
+  before the provider and preserve that expectation through store CAS,
+  including unchanged results.
+  Reject unknown/agent/system requesters before provider work. Reclassify the
+  current requester after provider completion under the same store guard as
+  create/amend/no-op handling, using the shared client-artifact author gate;
+  leave/rejoin as Agent or System must refuse without an artifact or marker
+  change. Preserve the artifact expectation captured before the provider.
+  Identical model
+  and prose in an exact generated header preserve the stored artifact and its
+  original coverage/timestamp; a no-op does not claim newly read coverage.
+  `has_more` and the partial-window warning report omitted rows on either side.
+  This repair does not lift independent acceptance or live-migration holds.
+- Deferred: Room metrics/sampler, attachments/context,
+  retirement/maintenance/workspace bridge, client onboarding/UI, extension
   scheduling, Unknown build execution and CI orchestration. Keep #22/#48 holds;
   automated CI remains only Build Ocean and Build Surface.
 
@@ -490,6 +536,9 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
 
 ## Verification
 
+- `cargo test -p ocean-daemon room_summary --locked -- --test-threads=1`
+- `cargo test -p ocean-daemon identity::tests --locked -- --test-threads=1`
+
 - `cargo test -p ocean-daemon provider_auth:: --locked -- --test-threads=1`
 
 - `cargo test -p ocean-daemon bus::tests::`
@@ -522,6 +571,7 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
 - `cargo test -p ocean-daemon persistent_room_http_ -- --nocapture`
 - `cargo test -p ocean-daemon room_read_cursor_ --locked -- --nocapture`
 - `cargo test -p ocean-daemon room_ -- --nocapture`
+- `cargo test -p ocean-daemon room_resources::tests --locked -- --nocapture`
 - `cargo test -p ocean-daemon room_reviewed_digest_ --locked -- --nocapture --test-threads=1`
 - `cargo test -p ocean-daemon room_sovereign_ --locked -- --nocapture --test-threads=1`
 - `cargo test -p ocean-daemon p2c_ --locked -- --nocapture --test-threads=1`

@@ -41,12 +41,14 @@ use crate::request_control::{
     attach_request_handle, cancel_permission_waiter, register_room_agent_request_checked,
     RoomAgentRequestAuthority,
 };
+
 use crate::room_agent_authority::{
     self, AdmissionTrigger, ApiError, RoomAgentAdmission, RoomOperationAuthority,
 };
 use crate::room_federation::{
     AgentRegistrationInput, FederatedTriggerDispatch, FederatedTriggerKind, IntentError,
 };
+use crate::room_summary;
 use crate::yolo_settings::effective_permission_mode;
 
 fn canonical_submitted_workspace_root(
@@ -2044,7 +2046,7 @@ pub(super) struct AmendArtifactRequest {
 /// Classify and mutate under the same guard: a leave/rejoin cannot change the
 /// author kind between the HTTP authorization decision and the committed write.
 /// `None` rejects a daemon-owned author; unreadable roster state fails closed.
-fn with_client_artifact_author<T>(
+pub(super) fn with_client_artifact_author<T>(
     rooms: &RoomStoreHandle,
     key: &RoomKey,
     author_id: &str,
@@ -2219,6 +2221,190 @@ pub(super) async fn room_list_artifacts(
             Json(json!({ "ok": true, "artifacts": artifacts })),
         ),
         Err(e) => room_store_error_response(e),
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SummarizeRequest {
+    /// Roster participant the summary artifact is attributed to. Required, not
+    /// optional: `create_artifact`/`amend_artifact` demand a real roster author
+    /// and rooms are created with an EMPTY roster, so there is no daemon
+    /// identity to fall back on. The requester owns the write; the model that
+    /// actually wrote the words is recorded in the artifact body.
+    pub(super) requested_by: String,
+    /// Size of the transcript window. Omitted ⇒ the store's default cap; any
+    /// value is clamped by `clamp_transcript_limit`, exactly as `/transcript` is.
+    #[serde(default)]
+    pub(super) limit: Option<usize>,
+    /// Pin an explicit window instead of the newest `limit` rows. Omitted — the
+    /// ordinary case — summarizes the tail of the room.
+    #[serde(default)]
+    pub(super) after_seq: Option<u64>,
+}
+
+/// `POST /v1/rooms/persistent/{key}/summarize` — read a bounded tail of this
+/// room's transcript, run ONE model turn over it, and fold the result into the
+/// room's single well-known `room-summary` artifact.
+///
+/// A long room is unreadable, and the answer is not another wall of chat: the
+/// summary lands as a durable thing the room OWNS, versioned by the same
+/// compare-and-swap every other artifact uses and announced on the SSE tail
+/// every client already listens to. Repeated calls amend that one artifact in
+/// place rather than accumulating near-duplicate summaries.
+///
+/// This adds no provider client. The model turn goes through
+/// `AgentRuntime::complete_once` — the same fresh-context, no-session, no-tools
+/// seam the post-turn advisor runs on — and the logic lives in `room_summary.rs`
+/// behind a closure so it is testable without process-global provider env.
+pub(super) async fn room_summarize(
+    State(state): State<AppState>,
+    Path(key): Path<String>,
+    Json(req): Json<SummarizeRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let trimmed_key = key.trim();
+    let requested_by = req.requested_by.trim();
+    if trimmed_key.is_empty() || requested_by.is_empty() {
+        return invalid_request_response();
+    }
+    let key = RoomKey::new(trimmed_key);
+
+    // Backpressure, the same gate every other provider-calling route takes
+    // (`agent_turn`, `POST /v1/sessions/{id}/compact`): claim a turn permit
+    // BEFORE any work and reject immediately at capacity rather than queueing,
+    // so a client looping summarize cannot fan out into unbounded concurrent
+    // provider calls. The owned permit is held for the whole handler and
+    // returned on every exit path, including a panic.
+    let _turn_permit = match state.turn_limiter.clone().try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            tracing::warn!(room = %key, "room summarize: at concurrency cap; rejecting with 429");
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(json!({
+                    "ok": false,
+                    "code": "at_capacity",
+                    "error": "daemon at concurrent-turn capacity; busy, try again shortly",
+                })),
+            );
+        }
+    };
+
+    // A cheap role if the operator configured one, otherwise whatever model the
+    // daemon is already bound to — the feature works with zero config rather
+    // than being dead by default.
+    let (provider, model) = state.runtime.current_model();
+    let alias = room_summary::resolve_summary_alias(&state.roles, &provider, &model);
+    let runtime = state.runtime.clone();
+    let outcome =
+        room_summary::summarize_room(
+            &state.rooms,
+            room_summary::SummarizeInput {
+                key: key.clone(),
+                requested_by: requested_by.to_string(),
+                limit: req.limit,
+                after_seq: req.after_seq,
+                alias,
+                timeout: room_summary::ROOM_SUMMARY_TIMEOUT,
+            },
+            move |alias, system, user| async move {
+                runtime.complete_once(&alias, &system, &user).await
+            },
+        )
+        .await;
+
+    // Post-commit only: the store adapter has returned, so the artifact and the
+    // System transcript line it wrote in the same transaction are both durable
+    // before any tail is told to re-read.
+    if let room_summary::SummarizeOutcome::Wrote { message, .. } = &outcome {
+        publish_room_wake(&state, &key, message);
+    }
+    summarize_response(outcome)
+}
+
+/// Map a summarize outcome onto its HTTP shape. Pure — no `AppState`, no env —
+/// so the contract that matters here is unit-testable: a room with nothing to
+/// say, a model that returned nothing, and a model that repeated itself are all
+/// clean 200s, and a provider failure is a fixed 502 that never carries the
+/// provider's own message (which can embed response fragments).
+fn summarize_response(
+    outcome: room_summary::SummarizeOutcome,
+) -> (StatusCode, Json<serde_json::Value>) {
+    use room_summary::SummarizeOutcome::*;
+    match outcome {
+        // 200 for both create and amend so the route has ONE success shape;
+        // `created` is what tells the caller which of the two happened.
+        Wrote {
+            artifact,
+            created,
+            model,
+            messages_summarized,
+            from_seq,
+            to_seq,
+            has_more,
+            ..
+        } => (
+            StatusCode::OK,
+            Json(json!({
+                "ok": true,
+                "summarized": true,
+                "created": created,
+                "artifact": artifact,
+                "model": model,
+                "messages_summarized": messages_summarized,
+                "from_seq": from_seq,
+                "to_seq": to_seq,
+                "has_more": has_more,
+            })),
+        ),
+        // The store refused a no-op amend, which is correct: the model looked at
+        // the same conversation and said the same thing. Nothing moved, and the
+        // caller gets back the artifact that already stands.
+        Unchanged { artifact } => (
+            StatusCode::OK,
+            Json(json!({
+                "ok": true,
+                "summarized": false,
+                "code": "unchanged",
+                "artifact": artifact,
+            })),
+        ),
+        NoMessages => (
+            StatusCode::OK,
+            Json(json!({ "ok": true, "summarized": false, "code": "no_messages" })),
+        ),
+        EmptySummary => (
+            StatusCode::OK,
+            Json(json!({ "ok": true, "summarized": false, "code": "empty_summary" })),
+        ),
+        // Same rule and the same code as `room_create_artifact`.
+        ForgedAuthor => (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "ok": false,
+                "code": "forged_artifact_author",
+                "error": "an agent's artifact is authored by the daemon, not by a client claiming its identity",
+            })),
+        ),
+        ProviderError => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({
+                "ok": false,
+                "code": "summary_provider_error",
+                "error": "the summary model call failed",
+            })),
+        ),
+        Timeout => (
+            StatusCode::GATEWAY_TIMEOUT,
+            Json(json!({
+                "ok": false,
+                "code": "summary_timeout",
+                "error": "the summary model call timed out",
+            })),
+        ),
+        // Unknown room, a soft-closed room (the write requires `room_is_open`),
+        // and a non-roster author all already have a truthful mapping.
+        Store(e) => room_store_error_response(e),
     }
 }
 
@@ -4077,7 +4263,7 @@ pub(super) struct TranscriptQuery {
 /// back an identical `TranscriptPage` shape regardless of room state. `Ok(None)`
 /// from the audit view (room never existed) is mapped back to `UnknownRoom` so the
 /// handlers preserve their 404.
-fn read_transcript_page(
+pub(super) fn read_transcript_page(
     reg: &ocean_store::SqliteRoomStore,
     key: &RoomKey,
     after_seq: Option<u64>,
@@ -4495,7 +4681,7 @@ async fn run_room_tail(
         }
     }
 
-    if !with_rooms(&state, |store| store.get(&room).ok().flatten().is_some()) {
+    if !room_tail_still_open(&state, &room, &mut last_sent_seq, &tx).await {
         return;
     }
     // Tests can hold this exact replay/live seam open. The broadcast receiver was
@@ -4517,7 +4703,7 @@ async fn run_room_tail(
         match hint {
             Ok(hint) if hint.room != room => continue,
             Ok(hint) if Some(hint.seq) <= last_sent_seq => {
-                if !with_rooms(&state, |store| store.get(&room).ok().flatten().is_some()) {
+                if !room_tail_still_open(&state, &room, &mut last_sent_seq, &tx).await {
                     return;
                 }
                 continue;
@@ -4547,10 +4733,31 @@ async fn run_room_tail(
                 return;
             }
         }
-        if !with_rooms(&state, |store| store.get(&room).ok().flatten().is_some()) {
+        if !room_tail_still_open(&state, &room, &mut last_sent_seq, &tx).await {
             return;
         }
     }
+}
+
+/// Answers whether the tail should keep waiting on `room`. A room observed
+/// closed gets one final durable catch-up first: `close_with_marker` commits the
+/// marker and `closed_at` atomically, so a close that lands between the previous
+/// page read and this openness check would otherwise end the stream before the
+/// marker row is sent. Closed rooms accept no further rows, so this last page is
+/// complete.
+async fn room_tail_still_open(
+    state: &AppState,
+    room: &RoomKey,
+    last_sent_seq: &mut Option<u64>,
+    tx: &mpsc::Sender<RoomMessage>,
+) -> bool {
+    if with_rooms(state, |store| store.get(room).ok().flatten().is_some()) {
+        return true;
+    }
+    if let Err(error) = send_room_catch_up(state, room, last_sent_seq, tx).await {
+        tracing::warn!(room = %room, %error, "room SSE final catch-up failed");
+    }
+    false
 }
 
 #[allow(dead_code)]
@@ -13242,6 +13449,57 @@ env = { FIXTURE = "1" }
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_close_between_replay_and_openness_check_still_sends_the_marker() {
+        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
+        let _env = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _restore = TestEnvRestore::capture(&[
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+            "OCEAN_AGENTS_DIR",
+            "OCEAN_AUTH_FILE",
+            "OCEAN_CODEX_AUTH_FILE",
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let state = crate::tests::isolated_room_fixture_state(&tmp);
+        let key = RoomKey::new("tail-close-gap-room");
+        with_rooms(&state, |store| {
+            store.create(key.clone(), "Tail Close Gap", None, Utc::now())
+        })
+        .unwrap();
+        join_participant(&state, &key, "alice", RoomParticipantKind::Human, "Alice");
+
+        // The tail has replayed everything up to the join row...
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut last_sent_seq = None;
+        assert!(send_room_catch_up(&state, &key, &mut last_sent_seq, &tx)
+            .await
+            .unwrap());
+        assert_eq!(rx.recv().await.unwrap().body, "Alice joined");
+
+        // ...then the close commits before its openness check runs.
+        let (status, _) = room_close(
+            State(state.clone()),
+            Path(key.as_str().to_string()),
+            HeaderMap::new(),
+            Query(CloseRoomQuery {
+                actor_id: Some("alice".into()),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        assert!(!room_tail_still_open(&state, &key, &mut last_sent_seq, &tx).await);
+        drop(tx);
+        let marker = tokio::time::timeout(std::time::Duration::from_millis(250), rx.recv())
+            .await
+            .expect("tail channel closed promptly")
+            .expect("the close marker is sent before the tail ends");
+        assert_eq!(marker.body, "alice closed the room");
+        assert!(rx.recv().await.is_none(), "no rows follow the close marker");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
