@@ -346,6 +346,10 @@ This crate owns the full-screen terminal steering cockpit (`ocean` binary) for i
   spawn (cwd=$HOME, reaped child) only when unsupervised. Eligibility gates
   run BEFORE any process probe: default `127.0.0.1:4780` only,
   `OCEAN_TUI_AUTOSTART=0` disables, `OCEAN_DAEMON_BIN` overrides discovery.
+  Discovery uses native PATH splitting and the Windows `.exe` suffix, and
+  refuses directories as executable candidates. On Windows, neutral cwd/log
+  placement uses an absolute `USERPROFILE` or the native temporary directory;
+  Unix HOME behavior and launchd ownership checks remain unchanged.
   Blocking work stays in `spawn_blocking`; never on an async worker.
 - Error copy (`shell/errfmt.rs`): daemon/provider error text reaching the user
   goes through the context-appropriate humanizer (no raw reqwest blobs);

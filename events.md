@@ -2730,3 +2730,12 @@ type: [bug report]
 area: [testing] [workflow]
 
 Stable-tag run 39324095372 validated the Mac package and npm/Bun installs, then publication failed before shell execution because its checkout-free job inherited a nonexistent component directory. Start artifact download at the existing workspace root, retain exact ZIP digest verification, and create component staging only after verification. The regression executes the actual workflow shell with a local artifact in an empty workspace, and proves a bad digest fails before staging. Actionlint, workflow contract tests and diff checks pass. Updated the owning workflow contract; parent indexes unchanged. Browser invitation PR #114 merged at 8723a1d1 after exact-head review and CI. No package publication or live Surface replacement claimed.
+
+_________________________________________________________________________________
+time: [17:37] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/windows-daemon-discovery]
+type: [bug report]
+area: [testing] [backend]
+
+Corrected TUI daemon discovery for Windows: native PATH parsing, .exe sibling/default lookup and suffix-free overrides, rejection of directory candidates, and absolute USERPROFILE/native temporary fallback for neutral cwd/log placement. Unix HOME and launchd ownership behavior are preserved. All 28 standalone boot-module tests pass under pinned Rust; actual-source Windows metadata compilation and cargo check -p ocean-tui pass. Release build and native Windows execution remain pending. Updated the owning TUI contract; no child index or ownership boundary changed. No installation or team-readiness claim.
