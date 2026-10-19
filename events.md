@@ -2588,3 +2588,14 @@ area: [backend]
 
 Ported Risingtides-dev/ocean-os#528 (menu half). `gpt-5.4`, `gpt-5.4-mini` and `gpt-5.3-codex-spark` leave `known_models()` because the Codex backend refuses them for ChatGPT accounts (400, verified live 2026-10-02 in the legacy PR); they stay routable as legacy arms in `resolve_model_selection` so pinned sessions still resolve and then fail over at selection. The fallback half of the legacy PR already landed via #63 (`gpt-6-astra`). New test `retired_codex_ids_stay_routable_but_leave_the_menu_and_fallback`; the menu snapshot test drops the three ids. Validation: `cargo test -p ocean-providers --lib`.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [15:19] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/rooms-daily-use]
+type: [workflow]
+area: [frontend] [review] [testing]
+
+Reconciled with canonical main 69e2c83b after PRs #108 and #109 landed. Removed this branch's duplicate credential implementation and regression; PR #111 now changes Surface and documentation only. The superseded local agent implementation passed 285 tests with 2 opt-in live probes skipped; that result does not validate the distinct upstream implementation. UI checks passed 951 tests and Trunk; hosted Build Surface passed at 5ede8209. Rendered wide/compact Safari checks found a desktop focus defect, now repaired by focusing every explicitly opened details pane and retaining the actual clicked trigger for return focus. Removed the repeated Thread heading. Final checks for these last UI changes continue.
+
+No merge or deployment claimed. Independent reviewer acknowledgement is still needed. Legacy Surface recovery bytes remain missing, and the existing daemon has active intake. A separate merged-main daemon release build was stopped before installation as free disk fell below 7 GiB; only this task's runtime scratch outputs were removed. The current live daemon and Surface were preserved. Owning Surface, product and onboarding contracts were updated; runtime devlogs were restored unchanged because the runtime delta was superseded upstream.
