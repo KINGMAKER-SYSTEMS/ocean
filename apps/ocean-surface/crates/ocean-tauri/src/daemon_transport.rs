@@ -87,7 +87,7 @@ pub(crate) fn loopback_endpoint(url: &str) -> Option<SocketAddr> {
 // ── credential custody ──────────────────────────────────────────────────
 
 /// Select an absolute Windows home, preserving the existing Unix HOME rule.
-fn profile_home(
+pub(crate) fn profile_home(
     home: Option<std::ffi::OsString>,
     profile: Option<std::ffi::OsString>,
 ) -> Option<PathBuf> {

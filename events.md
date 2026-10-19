@@ -2766,3 +2766,12 @@ type: [bug report]
 area: [frontend] [testing]
 
 Include the Windows document-opener guard in the native desktop candidate: refuse known executable, script, installer, registry and shortcut suffixes before the OS opener while preserving normal documents and Unix behavior. Host policy and existing executable-refusal tests plus all-target Clippy pass. The added Windows command-level refusal test awaits native execution. Surface contract updated; parent indexes unchanged. No installer or live replacement.
+
+_________________________________________________________________________________
+time: [19:02] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/windows-native-room-consent]
+type: [bug report]
+area: [frontend] [testing]
+
+Native desktop start now finds a daemon executable beside the app before PATH, preserves the operator environment override, uses the absolute home/profile or OS temporary directory for child cwd, and suppresses Windows console windows. No executable path is accepted from the webview; start/restart remains explicit. A real child-process test verifies cwd and discovery fixtures cover absent/directory/nonexecutable siblings and override precedence. All 21 filtered launch/transport tests and all-target Clippy pass on the pinned host toolchain. The earlier native Windows probe at f7154629 has passed its full shell suite and is building the release executable; these additional launch/document changes still need exact-head native validation. Updated the Surface contract; other ownership and child indexes remain unchanged.

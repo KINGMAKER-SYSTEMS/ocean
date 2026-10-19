@@ -82,6 +82,13 @@ Native surface direction:
 - Native LiveKit Rust client is a later phase behind a feature flag, not part
   of this batch.
 - Ocean daemon stays the session/runtime authority.
+- Native daemon start resolves the operator's `OCEAN_DAEMON_BIN`, then the
+  installed executable sibling, then the platform binary on PATH. No IPC
+  argument may select an executable. Explicit start/restart remains unchanged.
+  Children run from the absolute home/profile (or OS temporary directory),
+  never the app's inherited workspace; Windows children have no console window.
+  Home/profile also owns native daemon logs. Verify native launch with
+  `cargo test --lib daemon_` from `crates/ocean-tauri`.
 - Canvas ledger/state injected into turns as surface context; the Leptos canvas
   already lives at `crates/ocean-surface-ui/src/canvas.rs`.
 - `docs/OCEAN_GPUI_CANVAS_LIVEKIT_SPEC.md` is retained as a historical reference
