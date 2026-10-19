@@ -238,6 +238,8 @@ jobs:
       # run's immutable artifact ZIP by id and compare its SHA-256 to the upload
       # action's recorded digest before extracting or executing any payload.
       - name: Download and verify exact validated artifact
+        # This job consumes only the validated artifact; it has no checkout.
+        working-directory: ${{ github.workspace }}
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -250,6 +252,8 @@ jobs:
           gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$RUNNER_TEMP/ocean-release.zip"
           actual_digest="$(sha256sum "$RUNNER_TEMP/ocean-release.zip" | awk '{ print $1 }')"
           test "$actual_digest" = "$EXPECTED_DIGEST"
+          mkdir -p platform/ocean-os
+          cd platform/ocean-os
           mkdir -p release-staging
           unzip -q "$RUNNER_TEMP/ocean-release.zip" -d release-staging
 
