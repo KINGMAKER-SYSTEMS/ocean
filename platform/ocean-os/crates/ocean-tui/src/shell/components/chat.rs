@@ -2602,8 +2602,10 @@ impl ChatComponent {
         }
         match target.to_ascii_lowercase().as_str() {
             "claude" | "claude-code" | "anthropic" => Ok(LoginTarget::Claude),
-            "codex" | "openai-codex" | "chatgpt" | "openai" => Ok(LoginTarget::Codex),
-            _ => Err("usage: /login [claude|codex]".into()),
+            "codex" | "openai-codex" => Ok(LoginTarget::Codex),
+            "chatgpt" | "openai-chatgpt" => Ok(LoginTarget::ChatGptPlan),
+            "openai" => Ok(LoginTarget::Codex),
+            _ => Err("usage: /login [claude|codex|chatgpt]".into()),
         }
     }
 
@@ -6056,6 +6058,16 @@ mod tests {
             chat.turns.is_empty(),
             "command line must not become a User turn"
         );
+    }
+
+    #[test]
+    fn typed_login_chatgpt_routes_to_plan_oauth_not_codex() {
+        let mut chat = chat_with("/login chatgpt");
+
+        let act = chat.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(matches!(act, Some(Action::Login(LoginTarget::ChatGptPlan))));
+        assert!(chat.turns.is_empty());
     }
 
     #[test]

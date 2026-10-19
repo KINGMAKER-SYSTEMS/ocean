@@ -24,6 +24,13 @@ transcripts by session id.
   original provider block/token identity. Removed or changed blocks/files are
   never resurrected; unrelated latest provider edits survive. Blocking custody
   runs off the async worker and retains existing refresh singleflight/cooldowns.
+- Provider-owned catalog requests may call `ensure_oauth_provider_fresh` for
+  only the provider block they need; this uses the same expiry checks,
+  singleflight, cooldown and compare-before-publish refresh path as turns.
+- `openai-chatgpt` refresh uses the issued `client_id` in its OAuth block and a
+  form-encoded grant with `resource=https://api.openai.com/v1`; it preserves
+  account metadata and persists rotated access/refresh/id tokens under the
+  same compare-before-publish custody. It never uses the Codex CLI client id.
 - The shared create-new publisher sets Unix0600 before bytes and distinguishes
   pre-rename failure from published bytes whose directory durability is
   unconfirmed. Never roll back a stale credential snapshot, hold custody across
