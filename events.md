@@ -2721,3 +2721,12 @@ type: [feature-request]
 area: [frontend] [testing]
 
 Added browser invitation entry through one Add room disclosure containing Create room and Join room. Reuses the existing strict Ocean-link parser and daemon-owned redemption flow; session links are rejected, codes stay only in the input/in-memory pending invitation, and Continue stages confirmation without redeeming. Cancellation clears invitation drafts, restores focus and consumes Escape before Rooms; compact staging closes the drawer and focuses the existing confirmation. Creation retains its optional project selection and operation-id guards. Removed redundant confirmation copy and aligned form actions. All 954 UI tests, WASM Clippy with denied warnings, Trunk and diff checks pass. Safari checked desktop/narrow entry, menu/form Escape, invalid session-link rejection, cleared draft on reopen, and synthetic invitation staging/dismissal without redemption. Owning Surface contract and team setup guide updated; parent indexes unchanged because ownership is unchanged. Independent review, exact-head CI and real coworker redemption remain pending.
+
+_________________________________________________________________________________
+time: [17:15] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/release-publish-directory]
+type: [bug report]
+area: [testing] [workflow]
+
+Stable-tag run 39324095372 validated the Mac package and npm/Bun installs, then publication failed before shell execution because its checkout-free job inherited a nonexistent component directory. Start artifact download at the existing workspace root, retain exact ZIP digest verification, and create component staging only after verification. The regression executes the actual workflow shell with a local artifact in an empty workspace, and proves a bad digest fails before staging. Actionlint, workflow contract tests and diff checks pass. Updated the owning workflow contract; parent indexes unchanged. Browser invitation PR #114 merged at 8723a1d1 after exact-head review and CI. No package publication or live Surface replacement claimed.
