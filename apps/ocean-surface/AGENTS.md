@@ -578,6 +578,7 @@ Web surface session UI:
   retried (the page re-reads the roster). Text lives in
   `rooms::bootstrap_error_text`. Web/extension hosts keep the plain
   participant add and get no bootstrap control.
+- Binding GETs publish only for the newest request in the current Room generation; reset retires pending reads, and failed refreshes keep the last projection without reviving older responses.
 - Surface: `host.rs` wrappers are absent off-Tauri, so browser/extension hosts
   render bindings but never emulate consent. `rooms.rs` owns the bindings
   client (`GET .../agents`), the consent draft (room generation + ticket
@@ -710,6 +711,7 @@ Web surface session UI:
 - The private `host/native_events.mjs` adapter belongs to the `host.rs` seam and uses Tauri 2 IPC callback registration and `plugin:event|listen/unlisten`; legacy subscribers retain their app lifetime. Workspace path listeners belong to the component; cleanup unregisters even late native registration. Ignore events outside the root by path-component boundary. All transcript tool argument previews, including browser tools, are capped at 60 Unicode characters; no remaining consumer parses whole preview JSON.
 - Verify the production event adapter with `node --test scripts/native-events.test.mjs`; its mocked pinned Tauri API exercises delivery, cancellation, late admission and failure cleanup.
 - Pinned cards use the vertical gutter only with the workspace closed; open-workspace layouts retain the horizontal strip.
+- Below 900px, the existing workspace toggle stays above the open pane in a safe-area-aware corner outside its scrolling tabs. It uses the same pane visibility state for dismissal and reopening; do not add a second permanent close control. Desktop docking and reveal/Escape policy stay unchanged.
 
 ## Workspace Map
 

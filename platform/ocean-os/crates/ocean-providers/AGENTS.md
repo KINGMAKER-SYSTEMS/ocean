@@ -30,6 +30,11 @@ auth-file write custody. Provider wire encoding remains in `ocean-protocol`.
   1,050,000/128,000 limits. `openai_uses_responses` is the shared exact-model
   selection predicate for runtime construction and history replay; bare ids
   keep their existing Codex OAuth routing.
+- `openai-chatgpt` is a distinct ChatGPT-plan OAuth route to the public
+  Responses API. It reads only the `openai-chatgpt` auth block and never falls
+  back to Codex CLI credentials, the `openai` API key, or Codex request headers.
+  The daemon's ChatGPT model readiness additionally requires that the signed-in
+  account lists the model through `/v1/models`.
 - `model_routes` owns provider-qualified picker ids (`provider/model`), wire
   `model_id`, legacy aliases and separate API/subscription choices. Qualified
   selections override ambient `OCEAN_PROVIDER`; bare ids retain prior routing.
