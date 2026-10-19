@@ -3,11 +3,8 @@
 //! transcript entries, decide grouped rendering, conversation-gap headers,
 //! compact system rows, and day separators.
 //!
-//! Deliberately NOT wired into markup yet: the timeline region of
-//! `rooms_workspace/` is being restructured by the thread slice
-//! (root-only timeline + reply rail), so the density model lands here as a
-//! reviewed, test-locked contract that the timeline adopts. Class names it
-//! maps to are defined in the stylesheets:
+//! Consumed by the room timeline. Original transcript rows and durable audit
+//! records remain unchanged. Class names map to the stylesheets:
 //! `.rooms-workspace__msg--grouped`, `.rooms-workspace__day-separator`.
 
 use crate::rooms::{RoomMessage, RoomMessageKind};
@@ -70,11 +67,62 @@ pub(crate) fn is_compact_system_row(msg: &RoomMessage) -> bool {
     !matches!(msg.kind, RoomMessageKind::Message)
 }
 
-/// The daemon's "auto-convene: …" audit row. The agent's work card already
-/// shows the convene (team-platform P3), so the timeline hides the duplicate;
-/// "auto-convene failed …" rows stay visible.
+/// Routine daemon audit rows duplicate the conversation and work cards.
+/// Keep failures and authority changes visible; filter presentation only.
 pub(crate) fn is_convene_audit(msg: &RoomMessage) -> bool {
-    matches!(msg.kind, RoomMessageKind::System) && msg.body.starts_with("auto-convene: ")
+    matches!(msg.kind, RoomMessageKind::System)
+        && (msg.body.starts_with("auto-convene: ")
+            || [
+                "[room agent bootstrap audit] ",
+                "[room agent admission audit] ",
+                "[room agent output audit] ",
+            ]
+            .iter()
+            .any(|prefix| msg.body.starts_with(prefix)))
+}
+
+/// Authority records are signals to re-read the daemon, never authority to
+/// manufacture a binding state in the browser. Refusals also repair a stale
+/// projection after a missed authority event or reconnect.
+pub(crate) fn refreshes_agent_bindings(msg: &RoomMessage) -> bool {
+    matches!(msg.kind, RoomMessageKind::System)
+        && (msg.body.starts_with("[room agent authority audit] ")
+            || msg.body.starts_with("[room agent bootstrap audit] ")
+            || msg.body.starts_with("[room agent admission refused: "))
+}
+
+/// Translate the daemon's bounded system projection for the conversation.
+/// The original message and durable audit remain unchanged.
+pub(crate) fn conversation_body(msg: &RoomMessage) -> String {
+    if !matches!(msg.kind, RoomMessageKind::System) {
+        return msg.body.clone();
+    }
+    if let Some(agent) = msg.body.strip_prefix("[room agent authority audit] ") {
+        return format!("Agent access updated · {agent}");
+    }
+    if let Some(agent) = msg
+        .body
+        .strip_prefix("auto-convene failed for ")
+        .and_then(|body| body.strip_suffix(": turn_failed"))
+    {
+        return format!("{agent} couldn't reply.");
+    }
+    if let Some((code, agent)) = msg
+        .body
+        .strip_prefix("[room agent admission refused: ")
+        .and_then(|body| body.split_once("] "))
+    {
+        let reason = match code {
+            "suspended" => "is paused in this room.",
+            "revoked" => "no longer has access to this room.",
+            "stale" => "needs its access reviewed before it can reply.",
+            "workspace_unavailable" => "needs a project before it can reply.",
+            "credential_slot_missing" => "needs a connection before it can reply.",
+            _ => "could not start. Check its access in Members.",
+        };
+        return format!("{agent} {reason}");
+    }
+    msg.body.clone()
 }
 
 /// Whether `cur` renders grouped under `prev` (avatar once, tight spacing):
@@ -175,6 +223,37 @@ mod tests {
         let mut chat = m(2, "ada", "2026-07-29T12:00:00Z");
         chat.body = "auto-convene: quoted".into();
         assert!(!is_convene_audit(&chat));
+    }
+
+    #[test]
+    fn routine_audits_hide_but_refusals_and_access_changes_remain() {
+        let mut audit = msg(1, "system", RoomMessageKind::System, "2026-10-19T18:32:00Z");
+        for body in [
+            "[room agent bootstrap audit] kobe",
+            "[room agent admission audit] kobe",
+            "[room agent output audit] kobe",
+        ] {
+            audit.body = body.into();
+            assert!(is_convene_audit(&audit));
+        }
+        audit.body = "[room agent admission refused: suspended] kobe".into();
+        assert!(!is_convene_audit(&audit));
+        assert!(refreshes_agent_bindings(&audit));
+        assert_eq!(conversation_body(&audit), "kobe is paused in this room.");
+        audit.body = "[room agent authority audit] kobe".into();
+        assert!(!is_convene_audit(&audit));
+        assert!(refreshes_agent_bindings(&audit));
+        assert_eq!(conversation_body(&audit), "Agent access updated · kobe");
+        audit.body = "auto-convene failed for kobe: turn_failed".into();
+        assert!(!is_convene_audit(&audit));
+        assert_eq!(conversation_body(&audit), "kobe couldn't reply.");
+        audit.body = "auto-convene failed for kobe: unknown_error".into();
+        assert_eq!(conversation_body(&audit), audit.body);
+        audit.kind = RoomMessageKind::Message;
+        assert!(!refreshes_agent_bindings(&audit));
+        assert_eq!(conversation_body(&audit), audit.body);
+        audit.body = "[room agent output audit] quoted".into();
+        assert!(!is_convene_audit(&audit));
     }
 
     #[test]

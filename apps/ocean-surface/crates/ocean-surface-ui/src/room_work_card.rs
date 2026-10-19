@@ -28,6 +28,7 @@ pub(crate) fn state_label(state: &RoomAgentRunState) -> String {
         RoomAgentRunState::AwaitingPermission => "needs approval".into(),
         RoomAgentRunState::AwaitingReply => "waiting on reply".into(),
         RoomAgentRunState::Done => "done".into(),
+        RoomAgentRunState::Failed { reason } if reason == "turn_failed" => "failed".into(),
         RoomAgentRunState::Failed { reason } => format!("failed · {reason}"),
         RoomAgentRunState::Cancelled => "cancelled".into(),
         RoomAgentRunState::Unknown => "working".into(),
@@ -484,6 +485,12 @@ mod tests {
 
     #[test]
     fn labels_and_tokens_cover_every_state() {
+        assert_eq!(
+            state_label(&RoomAgentRunState::Failed {
+                reason: "turn_failed".into()
+            }),
+            "failed"
+        );
         assert_eq!(state_label(&RoomAgentRunState::Queued), "queued");
         assert_eq!(
             state_label(&RoomAgentRunState::RunningTool {

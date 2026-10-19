@@ -40,4 +40,4 @@ All four Kingmaker maintainers work from this repository.
 - `platform/ocean-os/` — runtime, daemon, and tool contracts → `platform/ocean-os/AGENTS.md`
 - `apps/ocean-surface/` — client contracts → `apps/ocean-surface/AGENTS.md`
 - `packages/ocean-agents/` — reusable package contracts → `packages/ocean-agents/AGENTS.md`
-- `docs/` — canonical repository migration and split boundary → `docs/AGENTS.md`
+- `docs/` — canonical repository migration, split boundary and team setup → `docs/AGENTS.md`

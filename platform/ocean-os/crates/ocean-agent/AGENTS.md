@@ -24,6 +24,12 @@ transcripts by session id.
   original provider block/token identity. Removed or changed blocks/files are
   never resurrected; unrelated latest provider edits survive. Blocking custody
   runs off the async worker and retains existing refresh singleflight/cooldowns.
+- Default-model turns re-resolve file/keychain-backed credentials after refresh,
+  preserving the selected route, endpoint and limits without mutating global
+  model state. Removed or malformed credentials never fall back to the cached
+  secret; existing preflight/failover handles missing credentials. Per-turn model
+  overrides already resolve fresh, and process-environment credentials retain
+  their existing behavior. Verify with `cargo test -p ocean-agent default_stored_credentials`.
 - Provider-owned catalog requests may call `ensure_oauth_provider_fresh` for
   only the provider block they need; this uses the same expiry checks,
   singleflight, cooldown and compare-before-publish refresh path as turns.

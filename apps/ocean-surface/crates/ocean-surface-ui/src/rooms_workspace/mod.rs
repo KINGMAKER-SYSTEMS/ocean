@@ -111,8 +111,8 @@ fn rooms_right_rail_is_overlay() -> bool {
         .is_some_and(right_rail_is_overlay)
 }
 
-fn right_rail_escape(overlay: bool, open: bool, default_prevented: bool) -> bool {
-    overlay && open && !default_prevented
+fn right_rail_escape(open: bool, default_prevented: bool) -> bool {
+    open && !default_prevented
 }
 
 /// Display name for an author/member id in the open room (tracked, so a late
@@ -642,7 +642,6 @@ pub fn RoomsWorkspace(
                     return;
                 }
                 if right_rail_escape(
-                    rooms_right_rail_is_overlay(),
                     right_open(),
                     ev.default_prevented(),
                 ) {
@@ -925,7 +924,7 @@ pub fn RoomsWorkspace(
                                                             </time>
                                                         </div>
                                                         <div class="rooms-workspace__msg-text">
-                                                            {crate::room_markdown::body_view(m.body.clone(), member_ids)}
+                                                            {crate::room_markdown::body_view(room_messages::conversation_body(&m), member_ids)}
                                                         </div>
                                                         {move || {
                                                             if should_show_thread_button(&m) {
@@ -933,9 +932,9 @@ pub fn RoomsWorkspace(
                                                                 let thread_label = move || {
                                                                     let count = reply_count();
                                                                     if count > 0 {
-                                                                        format!("Open thread ({count})")
+                                                                        format!("{count} {}", if count == 1 { "reply" } else { "replies" })
                                                                     } else {
-                                                                        "Open thread".to_string()
+                                                                        "Reply".to_string()
                                                                     }
                                                                 };
                                                                 // Hover/focus action rail. ONLY real actions live
@@ -1171,11 +1170,10 @@ mod tests {
     }
 
     #[test]
-    fn right_rail_escape_respects_nested_handlers_and_desktop_docking() {
-        assert!(right_rail_escape(true, true, false));
-        assert!(!right_rail_escape(true, true, true));
-        assert!(!right_rail_escape(true, false, false));
-        assert!(!right_rail_escape(false, true, false));
+    fn right_rail_escape_closes_explicit_panels_and_respects_nested_handlers() {
+        assert!(right_rail_escape(true, false));
+        assert!(!right_rail_escape(true, true));
+        assert!(!right_rail_escape(false, false));
     }
 
     #[test]

@@ -2562,3 +2562,14 @@ area: [docs]
 
 Removed the second, byte-identical copy of the `[17:55] [06-10-26]` model-reroute ledger entry. It was duplicated when PR #47 (port/rooms-maintenance), whose branch carried an older copy of the ledger, was brought current with main during the 2026-10-18 PR triage sweep and the two ledger histories were concatenated. No other entry changed; the sweep's results are recorded outside the repo in ~/dev/pr-triage-2026-10-18-results.md.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [14:59] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/rooms-daily-use]
+type: [bug report]
+area: [frontend] [backend] [testing]
+
+Prepared conversation-first Rooms presentation: details open on intent at every width, routine system audits stay out of the timeline, access changes refresh authoritative bindings, browser members show paused/revoked status, and room creation exposes its optional project choice after a name. Human messages, durable audit records and native-only consent authority remain unchanged. Added default-model refresh of stored provider credentials and a regression for rotation, source removal and malformed storage. Added the Mac/Windows team setup matrix and explicit multi-machine acceptance requirements. Updated owning devlogs and root documentation index.
+
+Live diagnostic on the existing daemon confirmed an admitted room turn failed with an expired cached provider token despite current credentials on disk. Reselecting the same model restored a real no-tools reply in the existing room session. This proves one host, not coworker federation. Initial UI tests (921 unit tests plus integration suites), Trunk build and credential regression pass; final source checks and rendered verification continue. The running Surface predates canonical source, and its legacy rollback executable is missing, so no live Surface promotion was attempted. Windows and Intel Mac packages are not supplied by the current release workflow.

@@ -202,15 +202,11 @@ pub(super) fn ConsentSheet(rooms: Rooms) -> impl IntoView {
     }
 }
 
-/// One overflow per bound agent row; Review and Revoke live inside it.
-/// Native hosts only — browser hosts never emulate consent.
+/// Binding status on every host; only native hosts expose Review and Revoke.
 #[component]
 pub(super) fn AgentBindingMenu(rooms: Rooms, member_id: String) -> impl IntoView {
     let open = RwSignal::new(false);
     move || {
-        if !crate::host::room_consent_supported() {
-            return None;
-        }
         let binding = binding_for(&rooms.agent_bindings.get(), &member_id)?;
         let status = binding.status.clone();
         let review_package = binding.agent_package_id.clone();
@@ -218,8 +214,9 @@ pub(super) fn AgentBindingMenu(rooms: Rooms, member_id: String) -> impl IntoView
         let revocable = status != "revoked";
         Some(view! {
             {(status != "active").then(|| view! {
-                <span class="rooms-workspace__member-binding">{status.clone()}</span>
+                <span class="rooms-workspace__member-binding">{binding_status_label(&status)}</span>
             })}
+            {crate::host::room_consent_supported().then(|| view! {
             <span class="room-overflow">
                 <button
                     class="room-overflow__trigger"
@@ -264,7 +261,18 @@ pub(super) fn AgentBindingMenu(rooms: Rooms, member_id: String) -> impl IntoView
                     }
                 })}
             </span>
+            })}
         })
+    }
+}
+
+fn binding_status_label(status: &str) -> &'static str {
+    match status {
+        "suspended" => "Paused",
+        "stale" => "Review needed",
+        "revoked" => "Access removed",
+        "active" => "Ready",
+        _ => "Unavailable",
     }
 }
 
@@ -348,6 +356,14 @@ pub(super) fn InvokeMenu(rooms: Rooms, message_seq: u64) -> impl IntoView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn binding_labels_distinguish_paused_review_and_removed_access() {
+        assert_eq!(binding_status_label("suspended"), "Paused");
+        assert_eq!(binding_status_label("stale"), "Review needed");
+        assert_eq!(binding_status_label("revoked"), "Access removed");
+        assert_eq!(binding_status_label("future-status"), "Unavailable");
+    }
 
     #[test]
     fn consent_digest_is_shortened_and_bindings_match_member_ids() {

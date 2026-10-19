@@ -820,6 +820,38 @@ impl AgentRuntime {
         state_from_provider_config(provider_config)
     }
 
+    /// File/keychain credentials can rotate while this daemon stays alive.
+    /// Keep the selected route and model limits, but never reuse its old secret
+    /// after the turn's refresh pass. Environment credentials are process-local.
+    fn refresh_default_credentials(&self, state: RuntimeState) -> anyhow::Result<RuntimeState> {
+        use ocean_providers::CredentialSource;
+        let stored = state
+            .provider_config
+            .credential
+            .as_ref()
+            .is_some_and(|cred| {
+                matches!(
+                    cred.source,
+                    CredentialSource::OceanAuthFile { .. }
+                        | CredentialSource::CodexCliAuthFile { .. }
+                        | CredentialSource::ClaudeCodeKeychain
+                        | CredentialSource::ClaudeCodeCliAuthFile { .. }
+                )
+            });
+        if !stored {
+            return Ok(state);
+        }
+        let selection = state.provider_config.selection;
+        let mut env = self.turn_env();
+        env.vars.insert(
+            "OCEAN_MODEL".into(),
+            format!("{}/{}", selection.provider.as_str(), selection.model),
+        );
+        let mut config = resolve_provider_config(&env)?;
+        config.selection = selection;
+        state_from_provider_config(config)
+    }
+
     /// Whether the current turn resolver can construct this model's wire route.
     /// This does not mutate selection, contact the provider, or prove readiness
     /// or entitlement. Callers must leave actual turn resolution to `prompt`.
@@ -994,8 +1026,25 @@ impl AgentRuntime {
                 None => None,
             },
         };
-        let global_snapshot = self.snapshot();
-        let turn_snapshot: RuntimeState = turn_state.unwrap_or_else(|| global_snapshot.clone());
+        let turn_snapshot = match turn_state {
+            Some(state) => state,
+            None => match self.refresh_default_credentials(self.snapshot()) {
+                Ok(state) => state,
+                Err(error) => {
+                    return PromptResponse {
+                        request_id: Some(request_id),
+                        ok: false,
+                        session_id: req.session_id,
+                        code: None,
+                        wall_ms: start.elapsed().as_millis() as u64,
+                        stdout: String::new(),
+                        stderr: error.to_string(),
+                        cwd,
+                        usage: TokenUsage::default(),
+                    };
+                }
+            },
+        };
 
         // Resolve the environment ONCE for the whole failover decision (selection
         // + connect-failure), so the fallback list is computed against a single
@@ -9025,6 +9074,110 @@ done
     }
 
     // ---- Provider failover wiring (OCEAN-275) -----------------------------
+
+    #[tokio::test]
+    async fn default_stored_credentials_follow_rotation_without_changing_selection() {
+        struct RotatedCredentialProvider;
+        #[async_trait]
+        impl ocean_protocol::Provider for RotatedCredentialProvider {
+            async fn stream(
+                &self,
+                _model: &ocean_protocol::Model,
+                _context: &ocean_protocol::Context,
+                options: &ocean_protocol::StreamOptions,
+            ) -> ocean_protocol::Result<ocean_protocol::AssistantMessageEventStream> {
+                assert_eq!(options.api_key.as_deref(), Some("new-test-token"));
+                assert_eq!(
+                    options
+                        .headers
+                        .get("chatgpt-account-id")
+                        .map(String::as_str),
+                    Some("new-account")
+                );
+                Ok(Box::pin(futures::stream::iter(vec![Ok(
+                    ocean_protocol::AssistantMessageEvent::Done {
+                        reason: ocean_protocol::StopReason::Stop,
+                        message: scripted_assistant("fresh connection"),
+                    },
+                )])))
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let auth_file = dir.path().join("auth.json");
+        let write_auth = |token: &str, account: &str| {
+            std::fs::write(
+                &auth_file,
+                serde_json::json!({"openai-codex": {
+                    "type": "oauth", "access": token, "accountId": account
+                }})
+                .to_string(),
+            )
+            .unwrap();
+        };
+        write_auth("old-test-token", "old-account");
+        let mut env = provider_env(&[("OCEAN_MODEL", "openai-codex/gpt-5.6-sol")]);
+        env.auth_file = Some(auth_file.clone());
+        let mut config = resolve_provider_config(&env).unwrap();
+        config.selection.base_url = "http://127.0.0.1:12345/custom".into();
+        config.selection.context_window = 12345;
+        let mut runtime = runtime_with_env(dir.path().to_owned(), config, Some(env));
+        runtime.test_turn_provider = Some(TestCompactProvider(Arc::new(RotatedCredentialProvider)));
+        let original = runtime.snapshot();
+
+        write_auth("new-test-token", "new-account");
+        let fresh = runtime
+            .refresh_default_credentials(original.clone())
+            .unwrap();
+        assert_eq!(
+            fresh.provider_config.credential.unwrap().secret.expose(),
+            "new-test-token"
+        );
+        assert_eq!(
+            fresh.provider_config.account_id.as_deref(),
+            Some("new-account")
+        );
+        assert_eq!(
+            fresh.provider_config.selection,
+            original.provider_config.selection
+        );
+        assert_eq!(
+            runtime
+                .snapshot()
+                .provider_config
+                .credential
+                .unwrap()
+                .secret
+                .expose(),
+            "old-test-token"
+        );
+
+        // Exercise the real default turn path: no per-session/agent model pin.
+        let reply = runtime
+            .prompt(
+                prompt_req("check", None),
+                PromptControl::yolo(false).without_tools(),
+            )
+            .await;
+        assert!(reply.ok, "{}", reply.stderr);
+
+        // Deleting the source must not retain the old credential in a turn.
+        std::fs::remove_file(&auth_file).unwrap();
+        let missing = runtime
+            .refresh_default_credentials(original.clone())
+            .unwrap();
+        assert!(missing.provider_config.credential.is_none());
+        assert!(AgentRuntime::preflight_error_for(&missing).is_some());
+
+        std::fs::write(&auth_file, "malformed").unwrap();
+        assert!(runtime.refresh_default_credentials(original).is_err());
+        let refused = runtime
+            .prompt(
+                prompt_req("check", None),
+                PromptControl::yolo(false).without_tools(),
+            )
+            .await;
+        assert!(!refused.ok);
+    }
 
     /// Build a `ProviderEnv` from key/value pairs for deterministic failover
     /// tests (no process-env mutation).

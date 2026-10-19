@@ -2310,6 +2310,11 @@ impl Rooms {
                             );
                         }
                         RoomTailFrame::Message(entry) => {
+                            let refresh_bindings =
+                                crate::room_messages::refreshes_agent_bindings(&entry)
+                                    && !me.transcript.with_untracked(|messages| {
+                                        messages.iter().any(|message| message.seq == entry.seq)
+                                    });
                             if entry.seq > last_seq.get_untracked() {
                                 last_seq.set(entry.seq);
                             }
@@ -2324,6 +2329,9 @@ impl Rooms {
                                 }
                                 t.push(entry);
                             });
+                            if refresh_bindings {
+                                me.fetch_agent_bindings();
+                            }
                             update_open_summary_from_open_room(
                                 &me.read_summaries,
                                 Some(&key),

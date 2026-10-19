@@ -450,17 +450,28 @@ Web surface session UI:
   center and right rails re-render on room state.
 - The existing Room options overflow always offers Members, including an empty
   agent roster. It reveals the same MembersPanel and ConsentSheet; native consent
-  and browser/extension authority gates remain in those components. Through
-  1080px Members, Search, and Thread use one dismissible right-rail overlay; at
-  650px and below it is full width, while above 1080px the rail stays docked.
+  and browser/extension authority gates remain in those components. Members, Search, and Thread stay closed until requested at every width. Through
+  1080px they use one dismissible right-rail overlay; at 650px and below it is
+  full width, while above 1080px the requested rail docks beside the conversation.
   Explicit picks select one rail mode. Close and unhandled Escape dismiss the
-  overlay and restore its trigger focus (Room options for Members); nested
+  requested rail and restore its trigger focus (Room options for Members); nested
   Escape handlers take precedence. Room admission/origin changes retire open
   rail modes without moving focus or altering consent authority.
-- The timeline hides the daemon's `auto-convene: …` audit rows
-  (`room_messages::is_convene_audit`) because the work card shows the
-  convene; `auto-convene failed …` rows stay. System rows render as one quiet
-  line; grouped rows keep the avatar gutter with the time revealed on intent.
+- The timeline hides routine convene, bootstrap, admission and output audit
+  rows (`room_messages::is_convene_audit`); durable records stay untouched.
+  Refusals and access changes remain visible as plain language. Never hide
+  unknown failures or rewrite human messages. System rows wrap legibly; grouped
+  messages keep the avatar gutter with time revealed on intent.
+- Agent binding status is visible on every host, including browser and extension.
+  Fresh authority/bootstrap/refusal SSE messages refresh bindings through the
+  existing room-generation and latest-request guards; duplicate replay rows do
+  not dispatch refreshes. Native consent controls remain native-only.
+- Room creation reveals its optional project picker and Create action only after
+  a name is entered. Enter and Create share the same guarded operation.
+- Coworkers use both Macs and Windows. Installation, updates and acceptance
+  must account for both; a macOS-only package or local smoke test is not team
+  readiness. Keep Rooms conversation-first, with quiet sentence-case headings,
+  one secondary menu, and no raw filesystem setup instructions in the main flow.
 - Attention (P6, `room_attention.rs`, `styles/rooms-attention.css`): the
   left-rail @ icon swaps the room list for the mentions inbox
   (`GET /v1/rooms/inbox`, also forwarded by the proxy; render the daemon's
