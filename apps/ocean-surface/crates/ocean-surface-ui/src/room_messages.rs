@@ -67,6 +67,16 @@ pub(crate) fn is_compact_system_row(msg: &RoomMessage) -> bool {
     !matches!(msg.kind, RoomMessageKind::Message)
 }
 
+/// Audit projections may omit the agent name. Reject concatenated suffixes.
+fn audit_agent<'a>(body: &'a str, label: &str) -> Option<&'a str> {
+    let suffix = body.strip_prefix(label)?;
+    if suffix.is_empty() {
+        Some(suffix)
+    } else {
+        suffix.strip_prefix(' ')
+    }
+}
+
 /// Routine daemon audit rows duplicate the conversation and work cards.
 /// Keep failures and authority changes visible; filter presentation only.
 pub(crate) fn is_convene_audit(msg: &RoomMessage) -> bool {
@@ -78,11 +88,7 @@ pub(crate) fn is_convene_audit(msg: &RoomMessage) -> bool {
                 "[room agent output audit]",
             ]
             .iter()
-            .any(|label| {
-                msg.body
-                    .strip_prefix(label)
-                    .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with(' '))
-            }))
+            .any(|label| audit_agent(&msg.body, label).is_some()))
 }
 
 /// Authority records are signals to re-read the daemon, never authority to
@@ -90,8 +96,8 @@ pub(crate) fn is_convene_audit(msg: &RoomMessage) -> bool {
 /// projection after a missed authority event or reconnect.
 pub(crate) fn refreshes_agent_bindings(msg: &RoomMessage) -> bool {
     matches!(msg.kind, RoomMessageKind::System)
-        && (msg.body.starts_with("[room agent authority audit] ")
-            || msg.body.starts_with("[room agent bootstrap audit] ")
+        && (audit_agent(&msg.body, "[room agent authority audit]").is_some()
+            || audit_agent(&msg.body, "[room agent bootstrap audit]").is_some()
             || msg.body.starts_with("[room agent admission refused: "))
 }
 
@@ -101,8 +107,12 @@ pub(crate) fn conversation_body(msg: &RoomMessage) -> String {
     if !matches!(msg.kind, RoomMessageKind::System) {
         return msg.body.clone();
     }
-    if let Some(agent) = msg.body.strip_prefix("[room agent authority audit] ") {
-        return format!("Agent access updated · {agent}");
+    if let Some(agent) = audit_agent(&msg.body, "[room agent authority audit]") {
+        return if agent.is_empty() {
+            "Agent access updated.".into()
+        } else {
+            format!("Agent access updated · {agent}")
+        };
     }
     if let Some(agent) = msg
         .body
@@ -114,7 +124,14 @@ pub(crate) fn conversation_body(msg: &RoomMessage) -> String {
     if let Some((code, agent)) = msg
         .body
         .strip_prefix("[room agent admission refused: ")
-        .and_then(|body| body.split_once("] "))
+        .and_then(|body| body.split_once(']'))
+        .and_then(|(code, suffix)| {
+            if suffix.is_empty() {
+                Some((code, "The agent"))
+            } else {
+                suffix.strip_prefix(' ').map(|agent| (code, agent))
+            }
+        })
     {
         let reason = match code {
             "suspended" => "is paused in this room.",
@@ -122,7 +139,7 @@ pub(crate) fn conversation_body(msg: &RoomMessage) -> String {
             "stale" => "needs its access reviewed before it can reply.",
             "workspace_unavailable" => "needs a project before it can reply.",
             "credential_slot_missing" => "needs a connection before it can reply.",
-            _ => "could not start. Check its access in Members.",
+            _ => return msg.body.clone(),
         };
         return format!("{agent} {reason}");
     }
@@ -245,6 +262,42 @@ mod tests {
             audit.kind = RoomMessageKind::Message;
             audit.body = label.into();
             assert!(!is_convene_audit(&audit));
+        }
+    }
+
+    #[test]
+    fn anonymous_access_events_refresh_bindings_and_keep_readable_notices() {
+        let mut audit = msg(1, "system", RoomMessageKind::System, "2026-10-19T18:32:00Z");
+        for label in [
+            "[room agent authority audit]",
+            "[room agent bootstrap audit]",
+        ] {
+            for body in [label.to_string(), format!("{label} kobe")] {
+                audit.body = body;
+                assert!(refreshes_agent_bindings(&audit));
+                audit.kind = RoomMessageKind::Message;
+                assert!(!refreshes_agent_bindings(&audit));
+                assert_eq!(conversation_body(&audit), audit.body);
+                audit.kind = RoomMessageKind::System;
+            }
+            audit.body = format!("{label}unexpected");
+            assert!(!refreshes_agent_bindings(&audit));
+        }
+        audit.body = "[room agent authority audit]".into();
+        assert_eq!(conversation_body(&audit), "Agent access updated.");
+        audit.body = "[room agent admission refused: suspended]".into();
+        assert!(refreshes_agent_bindings(&audit));
+        assert_eq!(
+            conversation_body(&audit),
+            "The agent is paused in this room."
+        );
+        for body in [
+            "[room agent admission refused: future_code]",
+            "[room agent admission refused: future_code] kobe",
+        ] {
+            audit.body = body.into();
+            assert!(refreshes_agent_bindings(&audit));
+            assert_eq!(conversation_body(&audit), audit.body);
         }
     }
 

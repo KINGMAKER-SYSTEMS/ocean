@@ -468,7 +468,9 @@ Web surface session UI:
   provider connectivity, workspace availability or successful inference.
   Fresh authority/bootstrap/refusal SSE messages refresh bindings through the
   existing room-generation and latest-request guards; duplicate replay rows do
-  not dispatch refreshes. Native consent controls remain native-only.
+  not dispatch refreshes. Authority/bootstrap records without an agent suffix
+  still refresh bindings; known anonymous access/refusal notices remain readable,
+  while unknown refusal codes retain their original text. Native consent controls remain native-only.
 - Room creation reveals its optional project picker and Create action only after
   a name is entered. Enter and Create share the same guarded operation.
 - Coworkers use both Macs and Windows. Installation, updates and acceptance

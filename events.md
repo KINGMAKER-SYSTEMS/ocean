@@ -2628,3 +2628,12 @@ type: [bug report]
 area: [frontend] [review] [testing]
 
 Addressed the second independent PR #111 finding: active bindings previously rendered no status on browser/extension hosts. All bindings now expose the existing quiet status label independently of native consent controls. Active reads Authorized rather than Ready, since binding authority alone does not prove provider/workspace readiness. Updated the owning Surface contract. Six focused binding tests, formatting, Trunk and diff checks pass; delta WASM Clippy is running. Safari rendered the real active binding as Authorized, with no browser Review/Revoke controls; Escape restored Room options focus. A screenshot is retained locally. Prior full-suite evidence remains 951 passing tests at 199ab049; fresh-head review/build remains required.
+
+_________________________________________________________________________________
+time: [16:11] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/rooms-daily-use]
+type: [bug report]
+area: [frontend] [review] [testing]
+
+Repaired suffix-free authority/bootstrap projections from independent review. Both exact labels and space-delimited agent forms refresh daemon binding state; anonymous notices remain readable and unknown refusal codes retain their diagnostic text. Human messages are unchanged. All 952 UI tests (922 unit, 30 integration), WASM Clippy with denied warnings, formatting and diff checks pass. Owning Surface contract updated; parent indexes and runtime contracts unchanged because ownership and runtime behavior are unchanged. Fresh exact-head review and hosted build are still required; no merge or deployment claimed.
