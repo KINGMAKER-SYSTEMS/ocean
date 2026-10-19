@@ -4,6 +4,11 @@ name: Release
 # vMAJOR.MINOR.PATCH tag on main validates and publishes the exact artifact.
 on:
   workflow_dispatch:
+    inputs:
+      windows_probe:
+        description: Build the Windows candidate without publishing
+        type: boolean
+        default: false
   push:
     tags: ["v*"]
 
@@ -17,6 +22,7 @@ env:
 jobs:
   validate:
     name: validate package (macos-arm64)
+    if: github.event_name == 'push' || !inputs.windows_probe
     runs-on: macos-latest
     timeout-minutes: 60
     defaults:
@@ -486,3 +492,44 @@ jobs:
           [[ "$release_id" =~ ^[0-9]+$ ]]
           gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$release_id" \
             -F draft=false --jq '.draft' | grep -qx false
+
+  windows-probe:
+    name: build candidate (windows-x64)
+    if: github.event_name == 'workflow_dispatch' && inputs.windows_probe
+    runs-on: windows-2025
+    timeout-minutes: 60
+    concurrency:
+      group: windows-candidate-${{ github.ref }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: platform/ocean-os
+        shell: pwsh
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Install repository-pinned Rust toolchain
+        run: |
+          $match = Select-String -Path rust-toolchain.toml -Pattern '^channel = "([^"]+)"'
+          $toolchain = $match.Matches.Groups[1].Value
+          if (!$toolchain) { throw 'Missing Rust toolchain pin' }
+          rustup toolchain install $toolchain --profile minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "RUSTUP_TOOLCHAIN=$toolchain" >> $env:GITHUB_ENV
+      - name: Cache cargo and target
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: platform/ocean-os -> target
+      - name: Build Windows daemon and TUI
+        run: cargo build --locked --release -p ocean-daemon -p ocean-tui
+      - name: Verify both executable outputs
+        run: |
+          foreach ($binary in @('ocean-daemon.exe', 'ocean-tui.exe')) {
+            $path = Join-Path 'target/release' $binary
+            if (!(Test-Path -PathType Leaf $path)) { throw "Missing $path" }
+            Get-FileHash -Algorithm SHA256 $path
+          }

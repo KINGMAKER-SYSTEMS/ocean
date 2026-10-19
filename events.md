@@ -2589,3 +2589,12 @@ area: [backend] [testing]
 
 Ported Risingtides-dev/ocean-surface#222. The Surface proxy allow-list now carries the three `/v1` route families the Surface calls and the daemon serves but the table never listed: `GET /v1/fs/file`, `GET /v1/agent/history/search`, and the five read-only `GET /v1/repo/github/{project_id}/...` projections. In the shipped PWA every one of these was same-origin, fell through to ServeDir and answered 404 with an empty body, which the callers render as blank rather than as an error. The GitHub family rebuilds its upstream path from the matched route template and refuses dot-segment captures so `%2e%2e` cannot collapse upstream. The other three families from the legacy PR (`/v1/requests`, `/v1/browser/screencast`, `/v1/browser/input`) were already routed here. New guard test `every_surface_v1_path_is_routed` scans the UI crate's URL builders against `build_app` and fails naming any unrouted path (mutation-checked by dropping `/v1/fs/file`); `github_routes_refuse_dot_segments_before_they_collapse_upstream` runs the router against a recording stub daemon. Validation: `cargo test -p ocean-surface-proxy` 37 passed, clippy `-D warnings` and rustfmt clean.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [15:53] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/windows-candidate]
+type: [workflow]
+area: [testing]
+
+Added an opt-in Windows x64 compilation probe to the existing manual Release workflow. windows_probe selects a real Windows runner and locked release builds of ocean-daemon and ocean-tui, with read-only permissions, pinned actions/toolchain and same-ref cancellation. It skips Mac packaging and never publishes. Root PR builds are unchanged. Owning workflow devlog and release contract checks cover the new dispatch boundary. Workflow validation with ShellCheck disabled and release contract/diff checks pass; inherited shell lint findings are repaired separately in PR #113. Actual Windows compilation and installation remain unverified pending the hosted probe.
