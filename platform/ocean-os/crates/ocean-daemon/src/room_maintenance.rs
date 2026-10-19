@@ -219,6 +219,10 @@ pub(super) struct RoomMaintenanceReport {
     /// Set before queueing blocking work; a stalled worker remains visible and
     /// retains its permit. Counts remain the last completed attempt's counts.
     pub(super) in_progress_since: Option<String>,
+    /// When the scheduler will start its next sweep. Republished after every
+    /// scheduled iteration, including one that panicked, so a value in the
+    /// past means the loop itself has stopped rather than a sweep failing.
+    pub(super) next_due_at: Option<String>,
 }
 
 impl RoomMaintenanceReport {
@@ -244,6 +248,7 @@ impl RoomMaintenanceReport {
             classification: MaintenanceClassification::NotRun,
             accounting: MaintenanceAccounting::Unknown,
             in_progress_since: None,
+            next_due_at: None,
         }
     }
 }
@@ -918,17 +923,75 @@ async fn sweep_once(
 
 /// A blocked worker remains visibly in progress and retains cleanup custody.
 /// Do not add a timeout which admits another sweep while that worker runs.
-async fn maintenance_loop<F, R>(interval: Duration, mut sweep: F)
+///
+/// Each iteration runs as its own task, so a panic anywhere in it (including
+/// the async join fallback and its publication) ends that iteration, never the
+/// scheduler. Cadence is fixed-delay: the next sweep is due one interval after
+/// the previous one settled, which is what `next_due_at` reports.
+async fn maintenance_loop<F, R>(handle: MaintenanceHandle, interval: Duration, mut sweep: F)
 where
     F: FnMut() -> R,
-    R: std::future::Future<Output = RoomMaintenanceReport>,
+    R: std::future::Future<Output = RoomMaintenanceReport> + Send + 'static,
 {
     let mut ticker = tokio::time::interval(interval);
     ticker.tick().await;
+    settle_iteration(&handle, interval, false);
     loop {
         ticker.tick().await;
-        sweep().await;
+        let panicked = tokio::spawn(sweep()).await.is_err();
+        ticker.reset();
+        settle_iteration(&handle, interval, panicked);
     }
+}
+
+/// Scheduler bookkeeping after one iteration. Fenced by its own unwind
+/// boundary and free of logging, so it cannot become the path that ends the
+/// loop.
+fn settle_iteration(handle: &MaintenanceHandle, interval: Duration, panicked: bool) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if panicked {
+            settle_abandoned_sweep(handle);
+        }
+        let next_due = chrono::Duration::from_std(interval)
+            .ok()
+            .and_then(|interval| Utc::now().checked_add_signed(interval))
+            .map(|due| due.to_rfc3339());
+        handle
+            .report
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .next_due_at = next_due;
+    }));
+}
+
+/// Close out an iteration that panicked before publishing its outcome.
+///
+/// Records exactly once: a worker still holding custody publishes its own
+/// outcome, and a sweep that already published has cleared
+/// `in_progress_since`. The iteration's progress died with it, so counts are
+/// the only known lower bound (zero) and accounting is `unknown`.
+fn settle_abandoned_sweep(handle: &MaintenanceHandle) {
+    let Ok(_custody) = handle.sweep.try_lock() else {
+        return;
+    };
+    let mut report = handle
+        .report
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if report.in_progress_since.take().is_none() {
+        return;
+    }
+    let stage = report.stage;
+    let outcome = SweepOutcome {
+        error: Some("room maintenance loop iteration panicked".into()),
+        stage,
+        failure_stage: Some(stage),
+        failure: Some(MaintenanceClassification::Panicked),
+        accounting_unknown: true,
+        ..SweepOutcome::default()
+    };
+    drop(report);
+    record_sweep(handle, &outcome, Utc::now(), Duration::ZERO);
 }
 
 pub(super) fn spawn_maintenance_loop(state: &AppState) {
@@ -937,7 +1000,7 @@ pub(super) fn spawn_maintenance_loop(state: &AppState) {
     let config = state.room_maintenance_config;
     let handle = state.room_maintenance.clone();
     tokio::spawn(async move {
-        maintenance_loop(config.interval, || {
+        maintenance_loop(handle.clone(), config.interval, || {
             sweep_once(rooms.clone(), blob_root.clone(), config, handle.clone())
         })
         .await;
@@ -1054,15 +1117,33 @@ mod tests {
         assert_eq!(clean.last_error, None);
     }
 
+    /// Wait until the scheduler has republished `next_due_at` after an
+    /// iteration. Only yields: callers first await any blocking worker's
+    /// report, so what remains is runtime-local scheduler work.
+    async fn settled(
+        handle: &MaintenanceHandle,
+        previous: &Option<String>,
+    ) -> RoomMaintenanceReport {
+        for _ in 0..10_000 {
+            let report = report_snapshot(handle);
+            if report.next_due_at.is_some() && &report.next_due_at != previous {
+                return report;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("scheduler did not settle the iteration");
+    }
+
     #[tokio::test(start_paused = true)]
     async fn publication_panic_does_not_double_count_or_stop_next_scheduler_tick() {
         let config = MaintenanceConfig::default();
         let handle = new_handle(&config);
         let task_handle = handle.clone();
+        let loop_handle = handle.clone();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let mut attempt = 0;
         let task = tokio::spawn(async move {
-            maintenance_loop(Duration::from_secs(60), || {
+            maintenance_loop(loop_handle, Duration::from_secs(60), || {
                 attempt += 1;
                 let first = attempt == 1;
                 let handle = task_handle.clone();
@@ -1088,7 +1169,7 @@ mod tests {
             })
             .await;
         });
-        tokio::task::yield_now().await;
+        let idle = settled(&handle, &None).await;
         tokio::time::advance(Duration::from_secs(60)).await;
         let failed = rx.recv().await.unwrap();
         assert_eq!(
@@ -1103,12 +1184,127 @@ mod tests {
         assert_eq!(failed.stage, MaintenanceStage::Publication);
         assert_eq!(failed.classification, MaintenanceClassification::Panicked);
         assert_eq!(failed.accounting, MaintenanceAccounting::Incomplete);
+        let after_failed = settled(&handle, &idle.next_due_at).await;
+        assert_eq!(after_failed.runs_total, 1);
         tokio::time::advance(Duration::from_secs(60)).await;
         let clean = rx.recv().await.unwrap();
         assert_eq!(clean.runs_total, 2);
         assert_eq!(clean.last_error, None);
         assert_eq!(clean.accounting, MaintenanceAccounting::Complete);
         assert_eq!(clean.classification, MaintenanceClassification::Ok);
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+    }
+
+    type ReportTx = tokio::sync::mpsc::UnboundedSender<RoomMaintenanceReport>;
+    type ReportRx = tokio::sync::mpsc::UnboundedReceiver<RoomMaintenanceReport>;
+
+    /// Drive `maintenance_loop` where the first iteration's future is `first`
+    /// and every later one is a clean sweep cutting one room. Clean iterations
+    /// send their report once their blocking worker has finished.
+    fn spawn_loop_with_first_iteration<F, Fut>(
+        handle: &MaintenanceHandle,
+        first: F,
+    ) -> (tokio::task::JoinHandle<()>, ReportRx)
+    where
+        F: FnOnce(MaintenanceHandle, ReportTx) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = RoomMaintenanceReport> + Send + 'static,
+    {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let loop_handle = handle.clone();
+        let task_handle = handle.clone();
+        let mut first = Some(first);
+        let task = tokio::spawn(async move {
+            maintenance_loop(loop_handle, Duration::from_secs(60), move || {
+                let handle = task_handle.clone();
+                let tx = tx.clone();
+                let first = first.take().map(|first| first(handle.clone(), tx.clone()));
+                async move {
+                    match first {
+                        Some(first) => first.await,
+                        None => {
+                            let report = sweep_once_with(
+                                handle,
+                                |outcome, _| outcome.rooms_cut = 1,
+                                test_log_sweep,
+                            )
+                            .await;
+                            tx.send(report.clone()).unwrap();
+                            report
+                        }
+                    }
+                }
+            })
+            .await;
+        });
+        (task, rx)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn panic_in_async_publication_path_is_recorded_once_and_next_tick_runs() {
+        let handle = new_handle(&MaintenanceConfig::default());
+        // Panic on the loop side after custody and `in_progress_since` are
+        // taken but before any outcome is published: the path the deployed
+        // JoinError fallback took when its own publication re-panicked.
+        let (task, mut rx) = spawn_loop_with_first_iteration(&handle, |handle, _| async move {
+            let _run = start_sweep(&handle).await;
+            panic!("private async publication payload");
+        });
+        let idle = settled(&handle, &None).await;
+        assert_eq!(idle.runs_total, 0);
+        tokio::time::advance(Duration::from_secs(60)).await;
+        let failed = settled(&handle, &idle.next_due_at).await;
+        assert_eq!(failed.runs_total, 1, "abandoned iteration counted once");
+        assert_eq!(failed.classification, MaintenanceClassification::Panicked);
+        assert_eq!(failed.accounting, MaintenanceAccounting::Unknown);
+        assert_eq!(
+            failed.last_error.as_deref(),
+            Some("room maintenance loop iteration panicked")
+        );
+        assert_eq!(failed.rooms_cut, 0);
+        assert!(failed.in_progress_since.is_none());
+        assert!(failed.last_run_at.is_some());
+        assert!(!serde_json::to_string(&failed).unwrap().contains("private"));
+        assert!(handle.sweep.try_lock().is_ok(), "custody released");
+
+        tokio::time::advance(Duration::from_secs(60)).await;
+        rx.recv().await.unwrap();
+        let clean = settled(&handle, &failed.next_due_at).await;
+        assert_eq!(clean.runs_total, 2, "scheduler ran its next tick");
+        assert_eq!(clean.classification, MaintenanceClassification::Ok);
+        assert_eq!(clean.accounting, MaintenanceAccounting::Complete);
+        assert_eq!(clean.rooms_cut, 1);
+        assert_eq!(clean.last_error, None);
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn panic_after_publication_does_not_double_count_and_next_tick_runs() {
+        let handle = new_handle(&MaintenanceConfig::default());
+        let (task, mut rx) = spawn_loop_with_first_iteration(&handle, |handle, tx| async move {
+            let report = sweep_once_with(
+                handle,
+                |outcome, _| outcome.messages_removed = 17,
+                test_log_sweep,
+            )
+            .await;
+            tx.send(report).unwrap();
+            panic!("fixed post-publication fixture");
+        });
+        let idle = settled(&handle, &None).await;
+        tokio::time::advance(Duration::from_secs(60)).await;
+        rx.recv().await.unwrap();
+        let first = settled(&handle, &idle.next_due_at).await;
+        assert_eq!(first.runs_total, 1);
+        assert_eq!(first.messages_removed, 17);
+        assert_eq!(first.classification, MaintenanceClassification::Ok);
+        assert_eq!(first.accounting, MaintenanceAccounting::Complete);
+        tokio::time::advance(Duration::from_secs(60)).await;
+        rx.recv().await.unwrap();
+        let next = settled(&handle, &first.next_due_at).await;
+        assert_eq!(next.runs_total, 2);
+        assert_eq!(next.rooms_cut, 1);
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
     }
