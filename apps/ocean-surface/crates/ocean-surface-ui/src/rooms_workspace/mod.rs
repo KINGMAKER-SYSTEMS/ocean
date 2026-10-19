@@ -98,19 +98,6 @@ fn rooms_layout_is_compact() -> bool {
         .is_some_and(|width| width <= 650.0)
 }
 
-/// The right rail is an overlay through 1080px, independently of the
-/// room-list drawer's 650px breakpoint.
-fn right_rail_is_overlay(width: f64) -> bool {
-    width <= 1080.0
-}
-
-fn rooms_right_rail_is_overlay() -> bool {
-    web_sys::window()
-        .and_then(|window| window.inner_width().ok())
-        .and_then(|width| width.as_f64())
-        .is_some_and(right_rail_is_overlay)
-}
-
 fn right_rail_escape(open: bool, default_prevented: bool) -> bool {
     open && !default_prevented
 }
@@ -230,7 +217,10 @@ pub fn RoomsWorkspace(
         admission
     });
     Effect::new(move |_| {
-        if right_open() && rooms_right_rail_is_overlay() {
+        // Every rail is an explicit reveal, including the docked desktop rail.
+        // Safari does not focus mouse-clicked buttons by default; move focus
+        // inside so Escape reaches this workspace before the global handler.
+        if right_open() {
             request_animation_frame(move || {
                 if right_open() {
                     if let Some(close) = right_close_ref.get() {
@@ -1159,14 +1149,6 @@ mod tests {
         rooms.close_room();
         assert_eq!(rooms.take_pending_thread_focus(), None);
         assert_eq!(rooms.focus_thread.get_untracked(), None);
-    }
-
-    #[test]
-    fn right_rail_overlay_covers_all_collapsed_widths() {
-        for width in [390.0, 650.0, 900.0, 901.0, 1080.0] {
-            assert!(right_rail_is_overlay(width), "{width}");
-        }
-        assert!(!right_rail_is_overlay(1081.0));
     }
 
     #[test]
