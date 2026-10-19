@@ -23,6 +23,13 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   identifiers; never log callback descriptions or arbitrary error chains.
 
 - Daemon health is `GET /health`, not `/v1/health`.
+- `windows_skill_file.rs` supplies the Windows skill reader's no-follow open.
+  Accept only absolute local-drive paths; retain directory handles and open each
+  component relative to its parent, refusing every reparse point and alternate
+  stream. Do not weaken this to final-component checks or resolve-then-reopen.
+  Native fixtures live in `tests/windows_file_security.rs` and include the actual
+  sources, including operator-key load and header authority; run `cargo test --locked --release -p ocean-daemon --test windows_file_security`
+  on Windows. This does not enable the separate Room package/attachment paths.
 - `identity.rs` owns credential-free `GET /v1/identity`: resolve strict top-level
   `member.toml` in the daemon config directory at request time, then validated
   `OCEAN_MEMBER_ID`, otherwise explicit null identity. Malformed/duplicate/
@@ -211,7 +218,7 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
 - `github.rs` owns exactly five public, read-only `GET /v1/repo/github/{project_id}/*` projections: pulls, one pull, full-head-SHA checks, reviews, and commits. Resolve only the registered workspace-root `origin`; accept only exact GitHub remote forms; never send credentials or `Authorization`; and add no aggregate or write route. Preserve route-owned sanitized extractor errors, two-phase byte/field/vector bounds, Link-only pagination, full-SHA Moka singleflight caches (256 entries/60s), pinned GitHub headers, and bounded kill-on-drop git stdout handling.
 - `POST /v1/longhouse/inspect` is a read-only projection of the exact ordinary preparation ranking: preserve the shared request/cwd roots/cache/cap/exact-token scorer/tie-break path, path-redacted compact response, raw-prompt/session/cwd/body non-echo (only contributing prompt terms and the additive `exact_name_phrase` flag are returned), and separation from turn execution, capabilities, models, and automatic prompt injection.
 - `harness_profile.rs` owns only the effective per-turn profile gates currently applied to `PromptControl`: hashline edits and artifact spill. LSP/memory remain globally registered, and stream rules, rich context, and minimization remain unavailable rather than logged-only profile claims. Preserve the unknown/missing → CLI fallback; `acp-zed` resolves explicitly with the same effective gates as its former fallback. New external surface classifications require a separate cross-repository policy decision.
-- `observatory_auth.rs` owns the typed Axum auth-state/extractor seam: accept `Authorization: Bearer` or the `Authorization-Observer` compatibility cookie, never query credentials, and map every credential failure to 401. Startup loads the secure secret, atomically mints the mode-0600 boot-bound `.ocean/observatory-token`, mounts typed extension state, and rotates the token file every ten minutes; no public token-creation route exists, the daemon never emits `Set-Cookie`, and the signing secret is never distributed. Observer tokens are stateless bearers replayable within scope until expiry or daemon restart; their nonce provides issuance uniqueness, not one-time consumption. Any compatibility-cookie issuance and its `Secure`/`HttpOnly`/`SameSite=Strict`/scoped-Path attributes belong to the authenticated Ocean Surface proxy.
+- `observatory_auth.rs` owns the typed Axum auth-state/extractor seam: accept `Authorization: Bearer` or the `Authorization-Observer` compatibility cookie, never query credentials, and map every credential failure to 401. Startup loads the secure secret, atomically mints the private boot-bound `.ocean/observatory-token` (mode 0600 on Unix, protected owner-only DACL on Windows), mounts typed extension state, and rotates the token file every ten minutes; no public token-creation route exists, the daemon never emits `Set-Cookie`, and the signing secret is never distributed. Observer tokens are stateless bearers replayable within scope until expiry or daemon restart; their nonce provides issuance uniqueness, not one-time consumption. Any compatibility-cookie issuance and its `Secure`/`HttpOnly`/`SameSite=Strict`/scoped-Path attributes belong to the authenticated Ocean Surface proxy.
 - `observatory_adapter.rs` owns the one-way bridge from the runtime `AgentTurnEvent` stream to redacted Observatory facts: content-bearing variants (text/thinking deltas, tool chunks, component/canvas/extension payloads) return `None`, tool args/output bodies and free-text errors/titles/paths are stripped by construction, and reroute/error reasons are classified to fixed codes. Startup runs the restart interruption sweep (nonterminal executions close as canceled), emits `DaemonStarted`, and spawns the append pump off `AgentEventBus::subscribe_with_full_replay`; graceful shutdown appends `DaemonStopping`. Pump lag is `warn!`-loud because the pump is the durability path.
 - `observatory.rs` owns the read-only Observatory data routes (`GET /v1/observatory/snapshot|events|replay`) behind the `ObservatoryAuth` extractor: snapshot/replay answer 410 only against the durable retention-boundary watermark (a natural log start at cursor 1 is not a crossing), with replay boundary validation and page reads in one store lock (after is exclusive, so equality at the boundary resumes cleanly); successful snapshot cursor headers come from the returned projection watermark, the SSE tail always replays from the durable store before live attach and emits explicit `reset`/`error`/`stream.gap` frames instead of silently skipping, and every response carries the manifest §7.4 no-store/X-Observatory headers. The store is optional at runtime: open failure degrades routes to explicit 503, never daemon startup. V1 projection gaps (empty session/turn/request ids, empty attention shelf) stay empty until Task 6 wires real daemon facts.
 
@@ -222,7 +229,10 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   `0abb558179af3ff848d3bd19ac67aff246299ce1`. This stage restores local
   generation-bound execution, not full #22 parity or deployment acceptance.
 - `room_operator.rs` owns the header-only, owner-only local operator key and
-  cookie/origin refusals. `room_agent_authority.rs` owns package preview,
+  cookie/origin refusals. Windows key storage shares Observatory's checked
+  owner-only credential-file primitive; existing unsafe ACLs are refused rather
+  than repaired. Header authority and Unix permissions remain unchanged.
+  `room_agent_authority.rs` owns package preview,
   Local bootstrap, binding reads/authorize/reauthorize/status mutations,
   immutable admission, fixed-code audits and per-call/lifetime authority checks.
   Missing key/header is 503; invalid authority is 403. Roster, browser trust,
