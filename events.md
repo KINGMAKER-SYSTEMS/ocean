@@ -1046,6 +1046,140 @@ Closed the leftovers from the review that acknowledged the thinking-binding reco
 Validation: ocean-protocol (187 plus 5) passes; clippy with warnings denied on ocean-protocol and ocean-agent tests, rustfmt check pass. The strip test covers the thinking-only assistant turn. No provider was called.
 _________________________________________________________________________________
 _________________________________________________________________________________
+time: [16:24] [06-10-26]
+agent: [zcode] [glm-5.3]
+worktree: [docs/reconciliation-ledger-20261006]
+type: [workflow]
+area: [docs] reconciliation ledger
+
+PR #25 (Rooms S0 participant retirement) merged at 03:06Z and PR #31
+(observatory durability cluster) merged at 04:28Z — Track B's second and
+third bounded ports to land, each with Build scope, Build Ocean, and
+`validate package (macos-arm64)` successful before merge; Build Surface was
+path-skipped. PR #31's final head included the retention-boundary replay and
+Observatory cursor-consistency fixes added during parallel work before merge;
+they were not post-merge deltas. Updated the Reconciled slices section in
+docs/SOURCE_RECONCILIATION.md to record both landings and their scope
+boundaries, per the contract to keep the table current when reconciliation
+actually lands.
+
+Validation: cargo xtask docs-check PASS. Docs-only.
+_________________________________________________________________________________
+time: [17:29] [06-10-26]
+agent: [codex] [gpt-6]
+worktree: [codex/factory-ledger-accuracy] (PR #40)
+type: [review] [documentation]
+area: [analysis] source reconciliation ledger
+
+Independent review found that the PR #25 entry understated its landed
+ocean-store changes and the PR #31 entry called fixes already included in its
+final pre-merge head post-merge deltas. Corrected both claims from the merged
+PR diffs and commit history. `git diff --check` and `cargo xtask docs-check`
+pass (30 packages, 153 active Markdown files, 170 local links). The docs check
+compiled only xtask with 1.9 GiB free; no Ocean release build was run. The PR
+needs fresh review and hosted checks at the amended head before merge; no
+deployment was made.
+_________________________________________________________________________________
+time: [17:39] [06-10-26]
+agent: [codex] [gpt-6]
+worktree: [codex/factory-ledger-accuracy] (PR #40 ledger)
+type: [review] [issues]
+area: [review] daemon identity and room-profile contracts
+
+Independent review of exact PR #41/#43 heads found malformed identity values
+accepted by `unquote`, an operator-guide liveness label attached to the wrong
+endpoint, resolver metadata beyond PR #43's stated credential-slot response,
+and whole-file auth.json parsing despite its token-isolation claim. Posted
+these findings as PR review comments; source branches remain with their
+owners. Both PRs' hosted Build Ocean checks pass and Build Surface is
+path-skipped. No code tests ran here: free disk was 821 MiB. The review is not
+approval or merge; no deployment was made.
+time: [16:12] [06-10-26]
+agent: [zcode] [glm-5.3]
+worktree: [docs/reconciliation-ledger-20261006]
+type: [workflow]
+area: [docs] reconciliation ledger
+
+PR #49 (minimizer M2 output economy — the first conflict-class three-way
+merge) MERGED at 19:54Z: Track B's sixth landed port and the program's proof
+that both-changed conflict files reconcile cleanly with Kingmaker fixes
+preserved. Appended #49 to the Reconciled slices ledger on this branch (the
+open ledger PR #40), per the contract to keep the table current when
+reconciliation lands. The remaining Rooms queue (#41/#43/#44/#45/#46/#47) is
+unaffected by #49's file set (ocean-runtime/agent/lsp/longhouse — no daemon
+main.rs overlap), so the repaired-stack reconciles (baseline 136) stand
+unchanged.
+
+Validation: cargo xtask docs-check PASS.
+time: [13:41] [06-10-26]
+agent: [zcode] [glm-5.3]
+worktree: [port/rooms-phase2-profile]
+type: [feature-request]
+area: [backend] reconciliation: Rooms Phase 2 Stage 2b room profile
+
+Fifth bounded Track B port: the Rooms Phase 2 Stage 2b room profile. The
+daemon's room_profile.rs (901 lines from personal 1bd1bc37, Kingmaker
+untouched since the split; store-side RoomProfile/CredentialSlot/
+PutRoomProfileInput already on main unchanged) lands with
+GET/PUT /v1/rooms/persistent/{key}/profile: bounded validation (repos,
+tools, credential slots with typed refusal codes), the operator decision
+lane (replay-safe through the shared decision namespace), and
+profile_with_slots — the token-free projection room_inspect needs:
+presence/expiry status only, never a credential value. Also ported the
+governing manifest (2026-09-08 phase-2 manifest) and the one cross-dependency
+check_profile_resource_refs (refuses a profile referencing a grant that does
+not exist or is revoked) adapted into room_resources.rs, whose store APIs
+already existed on main. Router-contract parity baseline moved 119 → 121.
+
+Stage 2c (resource grant routes + previews) was deliberately re-scoped OUT
+of this unit: landing grant routes without the convene-path §5 cwd-rule
+enforcement (which lives in the persistent_rooms rework) would accept grants
+that do nothing — half-wired. It stays bundled with the persistent_rooms
+cwd-rule slice. TurnCwd and resolve_turn_cwd already exist on main's
+room_resources.rs from the publication snapshot, and session_detail_optional
+already exists in ocean-agent — so after this unit room_inspect's remaining
+gap is only resources_projection + the Stage 2c grant surface.
+
+Validation: room_profile tests (5) pass; router-contract parity (121) green;
+cargo test -p ocean-daemon 910 passed / 3 failed — the same three
+persistent-rooms lifecycle tests that fail on clean main (issue #42),
+reproduced there before any of my changes; rustfmt; denied-warning Clippy
+zero; cargo xtask docs-check PASS covering the ported manifest.
+Addendum: docs-check flagged the ported Phase 2 manifest's links — ported the
+Rooms program governance chain it depends on (Phase 1 room-agent
+authorization manifest, Gate 0 decisions and threat model, distributed
+workspace architecture). All public program specs; no private material.
+docs-check PASS (157 active Markdown files).
+_________________________________________________________________________________
+time: [16:30] [06-10-26]
+agent: [zcode] [glm-5.3]
+worktree: [port/rooms-phase2-profile] / [port/rooms-identity-route]
+type: [review]
+area: [review] addressing independent adversarial findings on #41/#43
+
+The independent adversarial review posted on #41/#43 found four items; all
+are addressed on their branches. #41: unquote now fails closed — a leading
+quote without its closing quote, or trailing non-comment text after it, is a
+malformed line (Option return, the poisoned line alone is skipped, malformed
+and trailing-token tests pin it), and the operator guide's liveness-check
+label — which a column shift had parked on GET /v1/identity — is restored to
+GET /health. #43: SlotStatus.resolver is now #[serde(skip)] so the wire
+projection is exactly the manifest's {name, required, status} with no
+resolver/provider/env metadata in profile, inspect, or GET responses, and
+auth_blocks deserializes into a two-field wire struct whose unknown-field
+path never materializes credential values (the least-privilege claim now
+matches the implementation; non-object entries stay absent, not
+present-without-expiry, preserving the opaque-read behavior the tests pin).
+
+Also this pass: PR #49 MERGED (first conflict-class port to land; ledger
+append prepared on the #40 branch pending its own rebase after the
+reviewer's two ledger-correction commits), and a reviewer pushed corrections
+plus the adversarial-findings log to the #40 branch itself.
+
+Validation: identity tests 15/0 (incl. new fail-closed tests); room_profile
+5/0; daemon full suite 911 passed / 0 failed on #43; rustfmt; denied-warning
+Clippy zero; docs-check PASS (guide label fix).
+_________________________________________________________________________________
 time: [15:42] [06-10-26]
 agent: [codex] [gpt-6]
 worktree: [port/output-economy] [/Users/risingtidesdev/.codex/worktrees/factory-pr49-artifact-debug/ocean]
@@ -1155,6 +1289,28 @@ area: [ocean-agent] [sessions]
 Round 5: round-4 review follow-ups on model reroute fidelity. (F2) Selection-time reroute detection now compares the (provider, model) ROUTE pair instead of the model id alone, so a same-model cross-provider fallback (keyless claude-code/claude-opus-5-5 → anthropic/claude-opus-5-5 via an OCEAN_PROVIDER_FALLBACK `provider/model` entry) is recorded on the session and emitted; when a reroute's two routes carry the same model id, the ModelRerouted event strings are provider-qualified (fixed route identifiers only) so they never read as a no-op — applied at both the selection-time and pre-stream emission sites. (F3) Ordinary session creation in run_prompt/run_fake_prompt/create_session_with_model pins the selection ROUTE (`new_with_route(id, model.id, selection.provider)`), never the wire model's protocol provider, so a claude-code OAuth primary that fails pre-stream persists `provider = "claude-code"` at the accepted-user checkpoint; `Session::new_with_id` becomes cfg(test) scaffolding with a doc to that effect. Also fixed a resolution seam the new F3 turn-2 path exposed: the per-turn model override (`resolve_state_for_model`) read `ProviderEnv::from_process()` directly instead of `turn_env()`, so it could not see a test's injected env — now it uses `turn_env()`, the same env source as the failover decisions. Production-identical: outside tests `turn_env()` is still a fresh process-env read per call, not one cached snapshot per turn. Two failing-first tests (RED: requested_model None≠Some(claude-opus-5-5); pin anthropic≠claude-code), each re-verified by reverting ONLY its fix. Round-4b ledger corrected (F4): see the Round 5 correction paragraph above.
 
 Validation: ocean-agent 280 passed / 0 failed / 2 ignored; ocean-daemon 908 passed / 2 failed (only the two known pre-existing persistent_room envelope-key assertions); clippy -p ocean-agent --all-targets -D warnings clean; fmt --all --check clean; git diff --check clean.
+
+_________________________________________________________________________________
+time: [16:27] [06-10-26]
+agent: [codex] [gpt-6]
+worktree: [codex/issue52-public-doc-provenance-fix]
+type: [privacy fix] [issue #52] [PR #51]
+area: [docs] [release]
+
+Removed source-repository PR, reviewer, branch, and release history from the
+public extension manifests and ledger, along with the noncanonical source-side
+A5 evidence attachment. Preserved the Stage A sequencing and acceptance gates;
+clarified canonical status: A1–A2b accepted, A3a next, and later slices
+unaccepted absent public implementation, review, checks, and operator
+acceptance.
+
+Validation: canonical xtask docs-check source compiled directly with `rustc`
+and passed (30 packages, 153 active Markdown files, 170 local links);
+`git diff --check` passed. Fresh review is pending after this precision
+correction. Merge remains held pending the required-review enforcement audit
+in issue #54.
+_________________________________________________________________________________
+
 _________________________________________________________________________________
 time: [16:47] [07-10-26]
 agent: [claude] [claude code]
@@ -1392,6 +1548,78 @@ Validation: Mac mini isolated cargo test --locked -p ocean-surface-proxy passed
 Separate review, hosted checks, approval, merge and deployment remain pending.
 _________________________________________________________________________________
 
+time: [16:53] [07-10-26]
+agent: [codex] [gpt-6]
+worktree: [codex/issue56-profile-grant-serialization]
+type: [bug fix] [issue #56]
+area: [backend] [testing]
+
+Moved room-profile resource-reference validation into the store's IMMEDIATE
+write transaction, after exact/cross-ledger replay checks and before profile
+persistence. New writes refuse missing or effectively revoked grants, while
+suspended grants remain resumable and an exact consumed retry remains
+idempotent after revocation. Updated the store contract and added replay,
+missing-reference, and lock-contention regressions. No daemon route or
+production runtime behavior was added; profile writes remain deferred on main.
+
+Validation: `cargo test -p ocean-store --locked` (279 passed),
+`cargo clippy -p ocean-store --all-targets --locked -- -D warnings`, and
+`cargo fmt --all -- --check` pass. The issue #54 global merge hold remains
+active; PR creation and hosted builds are pending final review.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [17:00] [10-07-26] America/New_York
+agent: [Codex desktop] [GPT-6]
+worktree: [codex/issue56-profile-grant-serialization]
+type: [review], [testing] [issue #56]
+area: [backend], [testing]
+
+Closed the independent review's P2 contention-test finding. The regression now
+uses a plain rusqlite busy-handler function pointer with test-local atomic
+synchronization: SQLite signals only after the profile writer's IMMEDIATE
+transaction actually encounters the revoker's held write lock; the test commits
+the revocation before releasing the handler. Adversarial re-review of the exact
+code diff passed. `cargo test -p ocean-store --locked` passed all 279 tests,
+`cargo clippy -p ocean-store --all-targets --locked -- -D warnings` passed, and
+`cargo fmt --all -- --check` passed. PR creation and required hosted builds remain
+pending final diff review; issue #54's repository-level merge hold remains active.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [17:01] [10-07-26] America/New_York
+agent: [Codex desktop] [GPT-6]
+worktree: [codex/issue56-profile-grant-serialization]
+type: [testing] [issue #56]
+area: [backend], [testing]
+
+Expanded the missing-reference regression to exercise repo, room-default, and
+per-agent-default references independently, proving each refusal leaves both
+profile and decision ledger unchanged. Final focused verification after this
+test-only extension: `cargo test -p ocean-store --locked` (279 passed),
+`cargo clippy -p ocean-store --all-targets --locked -- -D warnings`,
+`cargo fmt --all -- --check`, and `cargo xtask docs-check` (30 packages, 153
+active Markdown files, 170 local links) all pass. Exact final diff review is
+pending; issue #54 remains an explicit repository-level merge hold.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [17:03] [10-07-26] America/New_York
+agent: [Codex desktop] [GPT-6]
+worktree: [codex/issue56-profile-grant-serialization]
+type: [workflow] [throughput checkpoint]
+area: [analysis], [gh actions]
+
+Risingtides-dev account contribution calendar observed at 2026-10-07 21:01:51
+UTC: 2026-10-06 = 133, 2026-10-07 = 131 (account-wide; 169 below the 300
+daily target at observation). Separately, the Ocean repository has zero PRs
+merged by Risingtides-dev on 2026-10-07 UTC or America/New_York date so far.
+The GitHub deployments endpoint currently returns no records. The supervised
+daemon's health endpoint remains live-verified at revision aa1e317b2e25; that is
+separate from this unmerged issue #56 change, which is not deployed.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
 time: [22:04] [10-09-26]
 agent: [claude] [opus 5.5]
 worktree: [fix/federation-roster-caller-member-ids] [~/dev/oceanwork/wt-fed-roster-envelope]
@@ -1401,6 +1629,36 @@ area: [backend] [infra]
 Federated rooms on smaths-mini (northstar, ocean-team) sat in `recovering` with Pending outbox rows and no log output. Replaying the receiver's reads against production Bedrock with the room bearer showed a valid `hello` (high-water 0) and a 200 roster, but the roster carries `caller_member_ids` (Bedrock since ocean-bedrock #137, 2026-09-02) and `MembersEnvelope` is `deny_unknown_fields`, so every epoch silently returned Recover after hello. Fix: accept and ignore `caller_member_ids` on the strict envelope, warn with `outcome="roster_rejected"` on non-transport roster parse failures, and regression test `roster_with_caller_member_ids_reaches_live` (red without the field, green with it). The supervised launcher `deploy/ocean-daemon.sh` now sources owner-only `~/.config/ocean-rs/federation.env` and prints `federation=on|off`; previously only a hand-edited installed copy did, which the installer would overwrite. Operator guide documents the env file, contributor-side local redemption, and the receiver replay diagnosis. Independent review round: `WireMember` also accepts Bedrock's `operator_id` (same failure class, operator rooms); roster projection failures warn too; startup warns `federation_unconfigured` when credentialed rooms exist without a URL; the launcher parses federation.env as data (owner-only, not group/other-writable, `OCEAN_FEDERATION_*` keys only, CR/quote tolerant, plist values win) instead of sourcing it, verified under macOS bash 3.2 against command substitution, foreign keys, spaces, CRLF, group-writable and unreadable files. End-to-end: the fixed release binary, run unsupervised on an isolated HOME with a copied rooms.db (outbox cleared), brought northstar and ocean-team to `live` against production Bedrock. Follow-up folded in before merge: warn-only `credential_member_mismatch` when Bedrock's `caller_member_ids` omit the credential's local member (stale-credential diagnostic; never blocks Live). Launcher mode check fails closed on unparseable `stat` output. Validation: room_federation 92/92; ocean-daemon 910 passed / 2 failed at 99be7a9 (the known persistent_room envelope-key assertions, identical on unmodified main); clippy -p ocean-daemon --all-targets -D warnings clean; fmt clean; docs-check PASS; installer fixtures 12/12. Runtime ops the same evening (not code): Jay's laptop federation.env reduced to OCEAN_FEDERATION_URL (the direct-redeem contributor token was removed and its backup deleted) and his daemon restarted; a fresh invite minted by John's daemon was redeemed through Jay's local /v1/rooms/persistent/invites/redeem (credential f9757e6e in his rooms.db); the stale direct-path Bedrock member db0367cd was removed by the room owner (old token now 403 membership_revoked); the empty local test room ns-taskforce was soft-closed on smaths-mini. Both daemons stay `recovering` until this fix is merged and installed.
 _________________________________________________________________________________
 
+_________________________________________________________________________________
+time: [00:04] [10-10-26]
+agent: [codex] [gpt-6]
+worktree: [codex/pr40-reconciliation-ledger] (PR #40)
+type: [workflow]
+area: [review] public reconciliation receipts
+
+Reconciled existing PR #40 onto f1b22bd8 and verified the public merge commits for #25, #31 and #49. The record now includes bounded alias inspection, retention/replay and snapshot consistency, and the redacted artifact Debug regression. Removed unsupported source-history absolutes from the active documentation; inherited chronological event entries remain historical observations, not renewed claims of source parity or current stack compatibility. Both parent ledger histories are preserved.
+
+Validation: docs-check passed (30 packages, 153 active Markdown files, 170 local links), and diff-check passed. Root/docs AGENTS are intentionally unchanged because scope, ownership and verification contracts remain unchanged. Documentation only; no new implementation merge, install, deployment or live verification is claimed. Final-head independent review and required hosted gates remain required.
+_________________________________________________________________________________
+
+time: [22:48] [09-10-26]
+agent: [codex] [factory release]
+worktree: [codex/pr60-reviewed-reconcile]
+type: [workflow]
+area: [backend] [testing] [review]
+
+Reconciled PR #60 store grant serialization with canonical main f1b22bd8. Only conflict was additive public ledger history; both sides retained. Store implementation and owning contract remain byte-identical to original head 72f089c4: exact/cross-ledger decision replay precedes reference validation inside the same IMMEDIATE transaction as a new profile write. Current-main store suite passes 279/279 with disposable auth/config/XDG paths and unchanged HOME. Final exact-head review and hosted checks follow this receipt. Issue #54 audit hold is resolved, but independent maintainer approval remains required. Issue #56 stays open for the separate PR #43 daemon retry path; this store PR alone does not finish its acceptance. No deployment or live database access. Parent ownership and indexes unchanged.
+
+_________________________________________________________________________________
+time: [22:52] [09-10-26]
+agent: [codex] [factory release]
+worktree: [codex/pr43-reviewed-replay]
+type: [bug report]
+area: [backend] [testing] [review]
+
+PR #43 / issue #56: reconciled profile routes with canonical main f1b22bd8 and PR #60 a0c66c48, preserving both public ledger histories. Removed route-level grant validation so the serialized store transaction resolves consumed profile decisions before checking current grants. Exact retries after revocation remain no-ops; mismatched/cross-ledger retries stay 409; fresh missing/revoked references retain 400 resource_not_found without consuming a decision or mutating profile/audit history. Existing operator and pure shape checks remain.
+
+Validation: registered production-route regression reproduced 400 before repair and passed afterward; profile 6/6, resources 2/2, locked daemon check, formatting and docs-check passed. Dependency store suite passed 279/279. Disposable auth/config/XDG fixtures; no live account/database access. Independent source review acknowledged b0d21403; final receipt and parent ledger integration precede exact-head review and hosted builds. Owning daemon contract updated; parent ownership/indexes unchanged. Maintainer approval and live migration holds remain. Not merged, deployed or live-verified.
 time: [23:30] [09-10-26]
 agent: [codex] [factory release]
 worktree: [codex/pr65-consent-reconcile]
@@ -1423,6 +1681,25 @@ Validation: docs-check passed (30 packages, 155 active Markdown files, 175 local
 
 _________________________________________________________________________________
 
+time: [23:44] [09-10-26]
+agent: [codex]
+worktree: [codex/issue52-public-doc-provenance-fix]
+type: [workflow] [PR #51]
+area: [docs] [review]
+
+Reconciled the existing public Stage A clarification with canonical main, preserving both ledger histories. Issue #54 now resolves the historical review-policy hold; the effective required maintainer approval and exact-head checks still apply. The two manifest changes remain unchanged: implementation presence does not establish slice acceptance. No runtime behavior or acceptance gate changed.
+
+Validation: canonical xtask source compiled with rustc; docs-check passed (30 packages, 153 active Markdown files, 170 local links), and git diff --check passed. Owning devlog contracts/indexes remain unchanged because scope, authority and structure are unchanged. Independent final-head review and required checks remain release gates; no merge or deployment is claimed.
+time: [19:13] [10-10-26]
+agent: [claude] [claude-opus-5-5]
+worktree: [fix/room-consent-consumer] [~/dev/oceanwork/wt-consent-consumer]
+type: [feature-request]: Refs KINGMAKER-SYSTEMS/ocean-private#65
+area: [frontend] [backend] [testing]
+
+First consumer slice for native Room agent consent, stacked on port/room-agent-consent. New Tauri `room_consent.rs` is the only native holder of Room-agent operator custody: Rust fetches the preview itself and freezes room, package, agent, owner, digest, policies and a UUIDv4 decision id (bounded 4 consents / 120 s); authorize and reauthorize require a Rust-side native dialog and always send the frozen non-null expected_definition_digest; decline, cancel, expiry or navigation invalidation sends zero privileged requests; a lost acknowledgement is unknown and only an explicit re-confirmed retry replays the same decision id; revoke is natively confirmed with a fresh decision id. Transport is raw HTTP/1.1 to a numeric-loopback daemon with fixed typed intents, no Origin/Cookie, redirects refused and bounded JSON-object replies; the key is read per request via O_NOFOLLOW with owner/mode/inode checks and never reaches JS. Surface adds absent-off-Tauri host wrappers, a bindings client, the consent draft (generation + ticket guarded), explicit once-per-message invocation with per-invocation CSPRNG tokens bound to the acknowledged request/session, one consent sheet, one overflow per bound agent (Review/Revoke) and one invoke trigger in the message rail. Surface AGENTS records the owned targets and remaining work.
+
+Validation: `cargo test room_consent` in crates/ocean-tauri (11 passed, disposable loopback daemons and key fixtures); `cargo clippy -p ocean-surface-ui --target wasm32-unknown-unknown -- -D warnings` clean; Surface UI room tests recorded in the PR. No live daemon, provider, install or native acceptance run is claimed.
+_________________________________________________________________________________
 time: [14:44] [10-12-26]
 agent: [claude] [opus 5.5]
 worktree: [fix/installer-launchctl-enabled-spelling] [~/dev/oceanwork/wt-installer-spelling]
@@ -1433,6 +1710,18 @@ area: [infra]
 _________________________________________________________________________________
 
 _________________________________________________________________________________
+time: [15:48] [10-12-26]
+agent: [Codex]
+worktree: [PR40; factory-pr40-reconciliation-ledger/ocean]
+type: [workflow]
+area: [review]
+Reconciled PR40 a8bf0fb4d46b0457755123828ff6ef2a329b40ba with canonical main 1dfc6802bb74fecdcf83f6f17732b671c892b632. Only events.md conflicted; both complete public parent histories remain verbatim and ordered (77/74 records). All1153 non-ledger blobs/modes match automatic merge. Root documentation remains unchanged; Ocean OS equals main. Cited public merge commits for PR25/31/49 are ancestors of main; issue50 is closed. Cached diff and shell syntax checks pass; previous unchanged documentation validation remains applicable without duplicate builds. Root/docs contracts remain accurate with no ownership/index changes. Root retains final commit, separate independent review, push and fresh hosted validation. Policy90, independent approval and live acceptance holds remain; no live action.
+time: [15:52] [10-12-26]
+agent: [Codex]
+worktree: [PR43 port/rooms-phase2-profile; factory-pr43-reviewed-replay/ocean]
+type: [workflow]
+area: [review]
+Reconciled PR43 1adfa2191b87711dfb8ec0e8a917ee59d03d77a8 with canonical main 1dfc6802bb74fecdcf83f6f17732b671c892b632. Only events.md conflicted; both complete parent histories remain verbatim and ordered (1318/1176 lines). All1157 non-ledger modes/blobs match automatic merge, with9 candidate-only source changes,4 main-only changes and2 clean documentation merges. Profile/store source remains unchanged from the reviewed and validated candidate; daemon contract and operator guide retain both scopes. No unmerged or unstaged paths remain. Root owns final commit, separate exact-head review, push and fresh hosted builds. Preserve PR60-before43 release dependency; no newly unmerged parent or unrelated source imported. Policy90, independent approval, grant-management and live-migration holds remain separate. No heavy duplicate validation, real credential lookup, provider call or deployment.
 time: [14:58] [10-12-26]
 agent: [Codex]
 worktree: [PR66 port/rooms-shell; factory-pr66-reviewed-repairs/ocean]
@@ -1460,3 +1749,101 @@ type: [refactor]
 area: [writing] [review]
 
 Reconciled PR59 with canonical main34751752. Only additive events.md history conflicted; both complete parent histories are preserved verbatim and ordered. Original five proposal/index documents remain byte-identical; both proposals stay PROPOSED and require public operator decisions before implementation. Accepted Stage A manifest equals canonical main; all other non-ledger content equals main. Direct-rustc canonical docs-check passed 30 packages, 155 active documents and 175 links. Diff check passed. Owning contracts and indexes intentionally unchanged because this integration changes no proposal or runtime contract. Final exact-head independent review and required hosted checks follow. Standing independent maintainer approval and policy90 holds remain; no operator ratification, slice acceptance, merge, deployment or live outcome claimed.
+worktree: [port/extension-stage-a-governance; PR51]
+type: [refactor]
+area: [writing] [review]
+
+Reconciled PR51 with canonical main34751752. Only additive events.md history conflicted; both complete parent histories are preserved verbatim and ordered. Original two public Stage A manifests remain byte-identical: A1 through A2b accepted, A3a implementation present with acceptance pending, later slices gated. All other non-ledger content equals canonical main. Direct-rustc canonical docs-check passed 30 packages, 153 active documents and 170 links. Diff check passed. Owning contracts and indexes intentionally unchanged because this integration changes no proposal or runtime contract. Final exact-head independent review and required hosted checks follow. Standing independent maintainer approval and policy90 holds remain; no operator ratification, slice acceptance, merge, deployment or live outcome claimed.
+_________________________________________________________________________________
+time: [17:48] [10-12-26]
+agent: [claude] [opus 5.5]
+worktree: [feat/room-run-request-id] [~/dev/oceanwork/wt-run-request-id]
+type: [feature-request]
+area: [backend]
+
+PR D of the room-consent follow-ups: `RoomAgentRun` gains optional, legacy-default-absent `request_id` so Surface can tie a work card to the exact daemon request it may cancel through `POST /v1/requests/{id}/cancel`. `RunTracker::start` now takes the request id that `spawn_room_agent_turn` registered for the turn (the same id the invoke response returns; auto-convene, thread-reply and federated dispatch turns carry their own registered id), so no id is invented. `GET .../runs` and the room tail's `room_agent_run` frames serialize the struct directly and carry it; the decision token never enters the projection. Run bodies are JSON in ocean-store, so no migration; rows written before the field still load. Nearest owning contracts updated: ocean-daemon (work-card entry) and ocean-core (additive field). Validation: ocean-core 64/64 (new legacy-decode test), ocean-store 288/288 (new legacy-row load + turn-write test), new daemon `room_invoke_run_carries_the_invoke_request_id` (invoke response id == stored run, GET runs and SSE frame ids; token absent; RED when the run is started with any other id), `persistent_rooms --test-threads=1` 114/114, `room_` 220/222 with only the two known main failures (closed_persistent_room_preserves_audit_http_asymmetry, persistent_room_http_lifecycle_preserves_envelopes_and_ordering), workspace `check --tests`, clippy -D warnings on daemon/core/store, fmt check and docs-check all green. `closing_a_room_ends_the_message_tail_after_the_marker` failed in one `room_` run and fails standalone on unmodified main too; it is a pre-existing timing flake, not part of this change. No Surface, installation or live action.
+_________________________________________________________________________________
+time: [19:45] [10-12-26]
+agent: [claude] [opus 5.5]
+worktree: [fix/room-consent-consumer] [~/dev/oceanwork/wt-consent-consumer]
+type: [merge]
+area: [frontend] [docs] [testing]
+
+Brought PR #88 (native Room agent consent consumer) up to date with main carrying #65-#69 and the daemon-only #93, by merge (events.md was the only conflict with #93). #69 split the Rooms workspace into a module, so the old rooms_workspace.rs is deleted and #88's ConsentSheet, InvokeMenu, AgentBindingMenu and AddAgentPicker plus their helpers and tests now live in rooms_workspace/agents.rs: InvokeMenu after the thread button in the message action rail, ConsentSheet above the right-rail list, AgentBindingMenu after the Local kind label and federated role label, and AddAgentPicker replacing the members.rs add-agent block while keeping #69's already-in-room filter (now the tested addable_agents helper) and disabled unresolved entries; federated rooms mount the picker only on native consent hosts in Live/Recovering access. The binding and invoke menus reuse the header's .room-overflow__* styles instead of #88's duplicate overflow rules, and consent/menu geometry moved into the canonical Layout & depth section. host.rs keeps #68's owner-mutation section followed by the consent section; the Tauri shell keeps both modules and registers the four consent commands after room_owner_mutation. One #88 test fixture gained #68's local_member_id field. Surface AGENTS now carries the consent section as a ### at the end of the Rooms Contract, corrected for two custody modules, the rooms_workspace module, the /v1/me Local invoker identity, and Room approvals going only through the operator-gated run-permission route. No behavior beyond #88's intent; Cargo.lock delta against main is still libc + uuid only.
+
+Validation: in apps/ocean-surface, cargo fmt --check clean; WASM clippy -D warnings clean; WASM check and proxy check pass; WASM test build passes; cargo test -p ocean-surface-ui 913 passed (883 unit + 30 integration), including the two agents.rs tests. In crates/ocean-tauri (placeholder dist/ for generate_context!), cargo check passes, cargo test room_consent 11 passed, cargo test owner_mutation 4 passed, clippy --all-targets -D warnings clean. No native-dialog, served-surface, live daemon or install run claimed.
+_________________________________________________________________________________
+time: [20:00] [10-12-26]
+agent: [claude] [opus 5.5]
+worktree: [fix/room-consent-consumer] [~/dev/oceanwork/wt-consent-consumer]
+type: [bug-report]
+area: [frontend] [testing] [docs]
+
+Fixed the independent-review findings on PR #88. room_consent.rs: finish_confirm now refuses a confirmation settled past the 120 s TTL (entry removed, `consent_expired`, nothing sent) and prune expires Confirming as well as Ready entries (only Sending keeps its slot). The revoke dialog message names the exact room and agent_member_id being revoked; the authorize dialog adds the frozen package id, agent member id, owner and requested capabilities alongside room and digest, all from the native preview. Display names shown in native dialogs are stripped of controls, line/paragraph separators, bidi and invisible formatting characters and capped at 128 chars; member ids and capabilities containing them are refused at freeze/revoke so ids are always shown verbatim. Chunked reply parsing uses checked arithmetic and split_at_checked plus a CRLF terminator check, so `ffffffffffffffff` is a bad reply (unknown) that returns the slot to Ready instead of panicking it into Sending forever. rooms.rs: post-send command errors (`consent_task_failed`, `invalid_reply`) now take the unknown path (refresh bindings, keep draft); InvocationState/token_for docs now say the token is inert since #68 and slated for removal. agents.rs: restored #69's picker title, "Choose an agent to add" aria-label and "-- pick an agent --" placeholder; federated rosters project daemon member ids, not folder names, so the picker now also hides agents with a non-revoked binding by package id. Surface AGENTS consent section updated for TTL-at-confirm, dialog contents, label sanitization, checked chunk framing, post-send unknown and the picker filter. Transport design and token_for unchanged (follow-up PRs B and C).
+
+Validation: in apps/ocean-surface, cargo fmt --check clean; WASM clippy -D warnings clean; WASM check passes; cargo test -p ocean-surface-ui 913 passed (883 unit + 30 integration). In crates/ocean-tauri (placeholder dist/), cargo fmt --check clean, cargo test room_consent 15 passed (4 new; the TTL and hostile-chunk tests were confirmed RED against the pre-fix logic), cargo test owner_mutation 4 passed, clippy --all-targets -D warnings clean. No native-dialog, served-surface, live daemon or install run claimed.
+_________________________________________________________________________________
+time: [20:18] [10-12-26]
+agent: [claude] [opus 5.5]
+worktree: [refactor/tauri-room-transport] [~/dev/oceanwork/wt-prb]
+type: [refactor]
+area: [frontend] [testing] [docs]
+
+PR B of the room-consent follow-ups (item 7): the Tauri shell's two operator-credential transports (owner_mutation.rs and room_consent.rs) are now one module, crates/ocean-tauri/src/daemon_transport.rs, applying the strictest rule of each. It owns the numeric-loopback endpoint (from daemon_url_from_env(); hostnames incl. localhost, userinfo, TLS, paths refused), the operator key path and O_NOFOLLOW key read (symlink refused, same dev/ino, effective-uid owner, no group/other bits, header-safe token, key never in errors/logs/JS), path-segment encoding, request building (fixed headers, /v1/ visible-ASCII paths, bodies <=64 KiB), redirect refusal, checked reply parsing (JSON objects <=256 KiB, checked chunked framing) and a NotSent / Unknown (lost ack) / BadReply outcome. Callers keep their typed intents on top: OwnerMutation routes and consent Intents; JS still never supplies a method, path or header. room_owner_mutation moved into owner_mutation.rs with a managed OwnerMutationState and gained the main-window-only check (owner_mutation_window_refused); lib.rs builds one DaemonTransport and clones it into both callers. Consent behavior is unchanged. Intentional owner-mutation tightening, documented in Surface AGENTS (new "Shared native daemon transport" section; consent section and Tauri desktop bullet updated): OCEAN_DAEMON_URL=http://localhost... (or https/paths) now disables owner mutations, any numeric loopback is accepted, a 0400 key is accepted and a foreign-owned key refused, redirects/non-JSON/>256 KiB replies are errors instead of being relayed, and errors are fixed codes (the page already maps every error to its unreachable text). The daemon's owner routes always answer JSON objects.
+
+Validation: in apps/ocean-surface/crates/ocean-tauri (placeholder dist/ for generate_context!, removed after), cargo fmt --check clean, cargo check clean, cargo test 68 passed (daemon_transport 14 new: loopback refusal cases, key-file refusals incl. foreign owner and 0400 acceptance, redirect refusal over the wire, oversize/invalid replies, lost ack -> unknown, unreachable -> not sent, malformed path/oversized body never sent, main-window gate; owner_mutation 6 = 4 existing adapted to fixed codes + 2 new; room_consent 15 existing all passing), cargo clippy --all-targets -- -D warnings clean. In apps/ocean-surface, cargo check -p ocean-surface-ui --target wasm32-unknown-unknown passes (UI untouched). No native-dialog, served-surface, live daemon or install run claimed.
+worktree: [feat/room-own-invocation-runs] [~/dev/oceanwork/wt-prc]
+type: [refactor]
+area: [frontend] [testing] [docs]
+
+PR C of the room-consent follow-ups (item 1). Room invocation no longer mints or sends a decision token: `RoomInvocation::token_for` and its token field are gone, the invoke body is the tested `invoke_body` ({invoked_by, message_seq}) and #88's `try_mint_decision_token` split in daemon.rs is reverted to the pre-#88 `mint_decision_token` (direct-chat dispatch keeps using it unchanged). The daemon's `InvokeRoomAgentBody.decision_token` is `#[serde(default)] Option`, so the tokenless body is accepted; no daemon change. Since #68 the daemon binds Room-turn permission waiters to its own per-run token, so the invoker token had granted nothing. Surface `RoomAgentRun` now decodes #93's optional `request_id`, and each `RoomInvocation` records its room key, page room generation and bound `agent_package_id`. New pure `rooms::own_invocation_for_run(invocations, runs, run, room_key, generation)` returns the acknowledged invocation that started a run: exact request id (+ session) when the run carries one, otherwise the legacy session id / trigger seq / package id fallback, only in the current room and generation; pending, unknown and refused invocations never match, and a legacy run sharing session+seq with another run is ambiguous and matches nothing. Work cards show a display-only "yours" tag via `Rooms::run_is_own`; approve/deny stays on the operator-gated run permission route for every card, and nothing reads or writes `Daemon::permission_view`, decision authority or `Daemon::cancel_request`. Surface AGENTS consent section updated for the token removal and the matcher. ocean-tauri untouched.
+
+Validation: in apps/ocean-surface, cargo fmt --check clean; WASM clippy -D warnings clean; WASM check and proxy check pass; WASM test build passes; cargo test -p ocean-surface-ui 920 passed (890 unit + 30 integration; 9 new/updated room invocation tests including request-id match, legacy fallback, foreign room, other generation/session/seq, pending/unknown/refused, ambiguous shared session+seq, tokenless invoke body, and focused direct-chat permission/status/session/token state unchanged across room run updates; the token_for test was removed). No served-surface, live daemon or native run claimed.
+_________________________________________________________________________________
+time: [20:40] [10-12-26]
+agent: [claude] [opus 5.5]
+worktree: [feat/room-local-bootstrap] [~/dev/oceanwork/wt-prg]
+type: [feature-request]
+area: [frontend] [testing] [docs]
+
+PR G of the room-consent follow-ups (item 3): typed native intent for Local Room agent bootstrap, which makes Local consent reachable (a plain Local participants POST never records a Room owner, so #88's preview freeze refused owner_not_eligible). room_consent.rs gains Intent::Me (unprivileged GET /v1/me) and Intent::Bootstrap (operator-gated POST /v1/rooms/persistent/{key}/agents/bootstrap with exactly {owner_member_id, agent_package_id}) through the shared daemon_transport. ConsentBroker::bootstrap reads the owner participant_id from /v1/me natively (the page names only room and package), sends the bootstrap, and on 200/201 or a 409 room_owner_conflict reruns the existing preview freeze, keeping it only when the frozen owner equals the /v1/me participant; it returns the same projection as room_consent_preview so the page lands in the consent sheet. Bootstrap creates no binding; authorize still needs the native dialog. Refusals are fixed codes (room_owner_required, local_room_required, room_owner_conflict, bootstrap_target_conflict, room_not_found, agent_package_not_found, owner_unavailable, else bootstrap_refused); a lost or unparseable bootstrap reply is outcome_unknown, fetches no preview and is never retried. New main-window-only command room_agent_bootstrap (consent_window_refused) registered in lib.rs generate_handler!. host.rs adds the room_agent_bootstrap wrapper (None off-Tauri). rooms.rs: agent_add_route takes the native-consent flag and routes Local (and not-yet-loaded) rooms to Bootstrap on native hosts only; add_agent_bootstrap supersedes any open consent, opens the consent sheet behind the room generation + consent ticket guard, re-reads the room list and open room record on success or unknown, and shows bootstrap_error_text (e.g. "Join the room before adding an agent."). Web and extension hosts keep the plain participants POST and get no bootstrap control. No daemon change. Surface AGENTS consent section updated.
+
+Validation: in apps/ocean-surface/crates/ocean-tauri (placeholder dist/ for generate_context!, removed after), cargo fmt --check clean, cargo check clean, cargo test 75 passed (room_consent 22 incl. 7 new: bootstrap intent method/path/body and unprivileged /v1/me, owner taken from /v1/me and never page input with unusable /v1/me sending no bootstrap, 201 -> frozen authorizable preview, fixed-code refusals fetch no preview, 200 and 409 room_owner_conflict proceed only when the preview owner equals /v1/me, lost ack / bad reply -> outcome_unknown with no retry, refused credential / unreachable / untrusted URL / invalid ids unsent, main-window gate; owner_mutation 6; daemon_transport 14), cargo clippy --all-targets -- -D warnings clean. In apps/ocean-surface, cargo fmt --check clean, WASM clippy -D warnings clean, WASM check passes, cargo test -p ocean-surface-ui 922 passed (892 unit + 30 integration; 2 new: native Local -> bootstrap / web Local -> participant / federated and revoked unchanged, bootstrap error text). No native-dialog, served-surface, live daemon or install run claimed.
+time: [20:33] [10-12-26]
+agent: [claude] [opus 5.5]
+worktree: [feat/room-own-run-cancel] [~/dev/oceanwork/wt-pre]
+type: [feature-request]
+area: [frontend] [testing] [docs]
+
+PR E of the room-consent follow-ups (item 2: own-agent request status and exact cancellation). The invoke menu now shows, for each acknowledged invocation, the live state label of the single run the new pure `rooms::run_for_invocation` attributes to it through `own_invocation_for_run`; no run yet, or a legacy double run on one session+seq, keeps the acknowledged "queued" label. Work cards get one Cancel icon (Stop glyph, aria-label "Cancel this run", `.room-card__cancel` styled only with tokens in rooms-cards.css) beside the disclosure head, shown only while `rooms::own_run_cancel_target` holds: the page's own acknowledged invocation in the current room generation, not ambiguous, run not terminal. The click re-derives the target and calls the new `rooms::cancel_room_request(base, request_id)` → `POST /v1/requests/{request_id}/cancel` with the invocation's exact acknowledged request id, no body and no operator key (daemon route `cancel_request` takes none; the proxy already forwards it since #49). A `RunCancels` latch on Rooms allows one request in flight per id, the reply settles only in its own room admission, success applies nothing (the card ends Cancelled only on the daemon's run frame), and a transport failure, non-2xx or `ok: false` shows one inline "Ocean could not cancel this run." with no automatic retry. `Daemon::cancel_request` and focused direct-chat state are never touched. Surface AGENTS consent section updated. No daemon, proxy or ocean-tauri change; create-room paths untouched.
+
+Validation: in apps/ocean-surface, cargo fmt --check clean; WASM clippy -D warnings clean; WASM check passes; proxy check passes; WASM test build passes; cargo test -p ocean-surface-ui 927 passed (897 unit + 30 integration; 7 new: exact request-id target and URL, hidden for foreign/terminal/ambiguous/unacknowledged/other-generation runs, single in-flight per id with no optimistic run change, failure error without retry plus stale-reply refusal, focused direct-chat state including request_cancellations unchanged, single matched run for the menu, menu label mapping); cargo test -p ocean-surface-proxy request_status 3 passed (cancel forwarding fixtures). No served-surface, live daemon or native run claimed.
+worktree: [feat/room-create-workspace] [~/dev/oceanwork/wt-prf]
+type: [feature-request]
+area: [frontend] [testing] [docs]
+
+PR F of the room-consent follow-ups (item 4): explicit workspace selection when creating a room. Surface `CreateRoomBody` gains `workspace_root: Option<&str>` (omitted from JSON when None) and `Rooms::create_room` takes it; the Surface `Room` struct decodes `workspace_root` as absent for unbound rooms and older daemons. The RoomListRail create area adds a native `<select>` defaulting to "No workspace", populated from the daemon project catalogue (`Daemon.projects`, passed down from RoomsWorkspace as a signal, so the rail gets no daemon handle) through the pure `workspace_options` helper (absolute roots only, trailing separators normalized, first wins on duplicates, colliding labels fall back to the full root), plus "Choose folder…" via `host::pick_folder` on Tauri only. The choice is never seeded from a session cwd, a focused chat's project or /tmp, resets after a successful create, blocks create while the picker is open, and a root that left the catalogue is not sent. A daemon 400 `invalid_workspace_root` maps to "create failed: workspace folder not found on this Ocean" with the draft kept (`create_failure_status`). The room header shows a bound room's folder name read-only with the full root as its title. Daemon contract verified against code, no daemon change: `canonical_submitted_workspace_root` requires an absolute existing directory else 400, `/v1/rooms/persistent/{key}` is GET-only, and a room turn's cwd is agent folder, room folder, then workspace_root, else `workspace_unavailable`. Styles reuse the left-input treatment and tokens in the canonical Layout & depth section. Surface AGENTS Rooms Contract updated. Work-card/cancel regions, InvokeMenu and ocean-tauri untouched.
+
+Validation: in apps/ocean-surface, cargo fmt --check clean; WASM clippy -D warnings clean; WASM check and proxy check pass; WASM test build passes; cargo test -p ocean-surface-ui 931 passed (901 unit + 30 integration), including 11 new tests (body with/without workspace_root, Room decode with/absent/null, failure mapping, options from projects with dedupe and absolute-only filtering, picked-folder append, label disambiguation, default-none selection, absolute-root forms, basename). No served-surface, native picker or live daemon run claimed.
+_________________________________________________________________________________
+time: [21:15] [10-12-26]
+agent: [claude] [opus 5.5]
+worktree: [feat/room-local-invocation] [~/dev/oceanwork/wt-prh]
+type: [feature-request]
+area: [frontend] [testing] [docs]
+
+PR H of the room-consent follow-ups (item 5: Local-room invocation). `rooms::invoke_caller` now takes the open room's access projection, roster and the daemon identity: Local rooms return `Rooms.identity_id` (the `GET /v1/me` owner participant_id) only when it is non-empty and names a Human participant on the open room's roster; Live/Recovering federated rooms keep the daemon-projected `caller_member_id` naming a User exactly as before; Connecting/Revoked or no open room have no invoker. Browser-supplied identity is never authority. Daemon contract verified in code before relying on it: Local invoke requires `invoked_by` to be a non-agent/non-system roster member who authored the message, not operator-gated (persistent_rooms.rs room_agent_invoke). `invoke_agent` and the InvokeMenu use the new caller; gating is otherwise unchanged (committed Human message by the caller, active binding, once per (agent, message)). New `rooms::invocation_error_text` maps daemon refusals to inline text set on the composer status line and as the invoke-menu badge title: workspace_unavailable, agent_binding_required/not_found, binding revoked/suspended/stale/inactive/package mismatch, room_owner_required, invoke_membership_required, invoke_author_mismatch, invoke_message_not_found, room_not_found (soft-closed rooms 404 on invoke), activation_policy_refused, credential_slot_missing, room_turn_capacity, agent_package_*, else "Ocean could not invoke the agent.". #96's matcher is unchanged: Local runs record the agent participant id as `run.agent_id`, so they match through `request_id` (verified: RunTracker::start receives the registered request id and `agent.id`); a legacy Local run without one fails closed. Stale "Local rooms have no invoker" comment and Surface AGENTS consent text updated; Remaining is now served native acceptance only. No daemon, proxy or ocean-tauri change.
+
+Validation: in apps/ocean-surface, cargo fmt --check clean; WASM clippy -D warnings clean; WASM check passes; proxy check passes; WASM test build passes (7 executables); cargo test -p ocean-surface-ui 944 passed (914 unit + 30 integration), including 4 new tests (Local invoker matrix: valid / empty / non-roster / agent / non-Human kinds / no roster, federated caller ignored in Local; Local invoke body uses the identity as invoked_by; refusal text mapping; Local invocation run recognized as own via request_id with run_is_own, Cancel control and menu run, legacy Local run not own) and the federated/other-state matrix extended (page identity ignored for Live/Recovering, valid Local identity never rescues Connecting/Revoked/no access). No served-surface, native or live daemon run claimed.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [23:32] [10-12-26]
+agent: [codex] [gpt-6]
+worktree: [codex/pr43-main255-reconcile] [macmini-ip factory-pr43-main255-reconcile]
+type: [refactor]: PR #43 current-main reconciliation
+area: [backend] [testing] [review]
+
+Reconciled profile PR #43 head 75e43022207750d061b87edf8dab691758b07247 with canonical main 25599f22410c8e164dd09f13ad0a9254fa97a39d. Manual resolutions retain two profile guide rows/current message authority and derive 131 identical registered/banner/documented routes. No manual runtime-body changes; daemon profile implementation equals prior PR #43, store profile/resources equal current PR #60 head56a4dcd8, and included prerequisite ancestor a0c66c48 remains. Other 1,178 non-ledger entries match AUTO_MERGE exactly.
+
+Five existing pure router/banner fixtures passed via standalone rustc extraction against merged source; existing direct-rustc docs-check passed 30 packages, 157 Markdown files, 175 links. Nonledger whitespace checks passed. These fixtures do not compile the full daemon or execute profile/runtime behavior; earlier behavioral results remain unchanged-source historical evidence. Both public parent ledger histories are retained line-for-line in original order, followed by this public-safe canonical receipt. Automatically merged contracts retain their scopes, with no further devlog/index change needed. Separate source review ACKed; final committed-head review, hosted builds, maintainer approval under #54/#90 and live acceptance remain gates. Release #60 before #43. No merge or deployment claimed.

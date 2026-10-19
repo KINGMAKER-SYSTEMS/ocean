@@ -12,6 +12,7 @@
 //! signals and Effects that must outlive rail re-renders, and the transcript.
 
 mod access;
+mod agents;
 mod banners;
 mod composer;
 mod format;
@@ -30,6 +31,7 @@ use crate::rooms::{author_display_name, local_speaker_id, RoomMessage, Rooms};
 
 pub(crate) use access::access_allows_sharing;
 use access::{access_allows_thread_writes, access_allows_writes};
+use agents::{ConsentSheet, InvokeMenu};
 use banners::{AccessStateBanner, InviteResult, OutboxPanel, PendingInviteBanner};
 use composer::{
     message_send_admitted, normalized_message_body, outbox_matches_failed_message,
@@ -142,6 +144,7 @@ pub fn RoomsWorkspace(
     #[prop(optional)]
     on_close: Option<Callback<()>>,
 ) -> impl IntoView {
+    let projects: Signal<Vec<crate::daemon::ProjectInfo>> = daemon.projects.into();
     let daemon_sv = StoredValue::new(daemon);
     // Toggle for narrow-screen left-rail visibility.
     let show_left_rail = RwSignal::new(false);
@@ -620,7 +623,12 @@ pub fn RoomsWorkspace(
                     ().into_any()
                 }
             }}
-            <RoomListRail rooms=rooms show_left_rail=show_left_rail on_close=on_close />
+            <RoomListRail
+                rooms=rooms
+                projects=projects
+                show_left_rail=show_left_rail
+                on_close=on_close
+            />
 
             // ═══ CENTER RAIL — header + transcript + composer ═══════════
             <div class="rooms-workspace__center">
@@ -635,6 +643,7 @@ pub fn RoomsWorkspace(
                         Some(ref room) => {
                             let joined = rooms.joined_open();
                             let room_name = room.name.clone();
+                            let workspace_root = room.workspace_root.clone();
 
                             view! {
                                 // Header
@@ -643,6 +652,14 @@ pub fn RoomsWorkspace(
                                     <h1 class="rooms-workspace__center-title">
                                         {room_name.clone()}
                                     </h1>
+                                    {workspace_root.map(|root| view! {
+                                        <span
+                                            class="rooms-workspace__center-workspace"
+                                            title=root.clone()
+                                        >
+                                            {room_list::root_basename(&root).to_string()}
+                                        </span>
+                                    })}
                                     <div class="rooms-workspace__center-actions">
                                         {(!joined).then(|| view! {
                                             <button
@@ -850,6 +867,7 @@ pub fn RoomsWorkspace(
                                                                     >
                                                                         {move || thread_label()}
                                                                     </button>
+                                                                    <InvokeMenu rooms=rooms message_seq=root_seq />
                                                                     </div>
                                                                 }.into_any()
                                                             } else {
@@ -980,6 +998,7 @@ pub fn RoomsWorkspace(
                     }}
                 </div>
 
+                <ConsentSheet rooms=rooms />
                 <div class="rooms-workspace__right-list">
                     {move || {
                         if let Some(root) = thread_root_for(&rooms.transcript.get(), selected_thread_root_seq.get()) {
