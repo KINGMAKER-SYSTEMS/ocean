@@ -2766,3 +2766,12 @@ type: [bug report]
 area: [testing] [workflow]
 
 PR #116 merged at dfaa85fe after fresh review, exact-head builds and native Windows proof: both release executables and all 39 credential/operator/guarded-file tests passed. Reconciled daemon discovery with that source and added actual-source boot-module execution to the opt-in Windows probe. Local TUI check/release and 28 host boot-module tests passed; native discovery execution remains pending. Updated the owning workflow contract; parent indexes unchanged. No Windows package, installation or team-readiness claim.
+
+_________________________________________________________________________________
+time: [17:54] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/windows-daemon-discovery]
+type: [workflow]
+area: [testing]
+
+Added an actual daemon startup smoke to the manual Windows probe: disposable state, explicit model, no inherited provider credentials, unique loopback listener, revision/member verification and owned-child cleanup. The same script passes against the downloaded Mac 0.2.1 binary; Windows execution remains pending. Windows ACL acceptance stays with native Rust fixtures rather than POSIX mode assertions. Updated workflow ownership; parent indexes unchanged. Release bootstrap PR #118 is pushed at 42f61896 with local regression proof; both hosted review services report exhausted quota, so fresh review and landing are blocked without a quota change or another qualified reviewer. No bypass, package promotion or live Surface replacement performed.
