@@ -580,6 +580,16 @@ impl AgentRuntime {
         AdmittedRoomHistory::from_admission(admission, source)
     }
 
+    /// Mint the two fixed room-voice tools from the same final admission.
+    /// Concrete tools must enforce that admission on every operation.
+    pub fn admit_room_turn_tools(
+        &self,
+        admission: &impl RoomHistoryAdmission,
+        tools: Vec<SharedTool>,
+    ) -> anyhow::Result<AdmittedRoomTurnTools> {
+        AdmittedRoomTurnTools::from_admission(admission, tools)
+    }
+
     /// Mint one opaque contributed-folder handle (Rooms Phase 2d) from final
     /// admission evidence, the daemon-owned resource authority, and the
     /// catalog of grants that admit this agent. The authority re-validates
@@ -808,6 +818,13 @@ impl AgentRuntime {
         let provider_config = resolve_provider_config(&env)
             .map_err(|e| anyhow::anyhow!("failed to resolve model `{model_spec}`: {e}"))?;
         state_from_provider_config(provider_config)
+    }
+
+    /// Whether the current turn resolver can construct this model's wire route.
+    /// This does not mutate selection, contact the provider, or prove readiness
+    /// or entitlement. Callers must leave actual turn resolution to `prompt`.
+    pub fn model_is_routable(&self, model_spec: &str) -> bool {
+        self.resolve_state_for_model(model_spec).is_ok()
     }
 
     /// One-shot, single-completion call against an arbitrary model alias on a
@@ -2544,6 +2561,7 @@ impl AgentRuntime {
             memory,
             room_history,
             room_resources,
+            room_turn_tools,
             tools_disabled,
             hashline_edits,
             artifact_spill,
@@ -2551,6 +2569,7 @@ impl AgentRuntime {
             // Already consumed above (session label at the first durable save);
             // named here so the destructure stays exhaustive.
             display_title: _,
+            extra_tools,
             requested_model: _,
             requested_provider: _,
             reroute_reason: _,
@@ -2613,6 +2632,15 @@ impl AgentRuntime {
                 }
             }
         }
+        if !tools_disabled && !extra_tools.is_empty() {
+            let mut seen: std::collections::HashSet<String> =
+                tools.iter().map(|t| t.name().to_string()).collect();
+            for tool in extra_tools {
+                if seen.insert(tool.name().to_string()) {
+                    tools.push(tool);
+                }
+            }
+        }
 
         // Room authority is evaluated after every provider is assembled. This
         // ordering is load-bearing: applying the snapshot before dynamic or
@@ -2627,6 +2655,7 @@ impl AgentRuntime {
             &memory,
             room_history.as_ref(),
             room_resources.as_ref(),
+            room_turn_tools.as_ref(),
             tools_disabled,
         );
 
@@ -3187,6 +3216,7 @@ pub struct PromptControl {
     /// room has no grant that admits this agent. Its two reserved tools are
     /// appended only after the ambient capability intersection.
     room_resources: Option<AdmittedRoomResources>,
+    room_turn_tools: Option<AdmittedRoomTurnTools>,
     /// Fail-closed per-turn control that suppresses every tool source, including
     /// dynamically registered and folder-agent subprocess capabilities.
     pub tools_disabled: bool,
@@ -3221,6 +3251,11 @@ pub struct PromptControl {
     /// don't set it; the read side then derives and cleans the label from the
     /// first user message. Set via [`PromptControl::with_display_title`].
     pub display_title: Option<String>,
+    /// Daemon-built tools bound to this turn's own context (team-platform P4:
+    /// a room turn's `room_post_update` / `room_ask`). Appended after allowlist
+    /// narrowing and folder-agent capabilities; never shadows an existing
+    /// tool, and suppressed by `tools_disabled`. Empty for every other turn.
+    pub extra_tools: Vec<SharedTool>,
     /// Model the operator originally requested when failover rerouted this turn
     /// to an alternate, plus the clamped reason. `None` for ordinary turns; set
     /// by `prompt_inner` (selection-time) or `run_turn_with_failover`
@@ -3296,6 +3331,7 @@ fn apply_admitted_room_tools(
     memory: &PromptMemory,
     room_history: Option<&AdmittedRoomHistory>,
     room_resources: Option<&AdmittedRoomResources>,
+    room_turn_tools: Option<&AdmittedRoomTurnTools>,
     tools_disabled: bool,
 ) -> Vec<SharedTool> {
     if tools_disabled {
@@ -3304,7 +3340,11 @@ fn apply_admitted_room_tools(
     tools.retain(|tool| {
         !matches!(
             tool.name(),
-            "room_history" | room_resources::ROOM_LIST_TOOL | room_resources::ROOM_READ_TOOL
+            "room_history"
+                | "room_post_update"
+                | "room_ask"
+                | room_resources::ROOM_LIST_TOOL
+                | room_resources::ROOM_READ_TOOL
         )
     });
     if !matches!(memory, PromptMemory::Operator) {
@@ -3322,10 +3362,63 @@ fn apply_admitted_room_tools(
     if let Some(resources) = room_resources {
         tools.extend(resources.tools());
     }
+    if let Some(voice) = room_turn_tools {
+        tools.extend(voice.tools.iter().cloned());
+    }
     tools
 }
 
+/// Daemon-admitted room voice tools. Names are reserved, while each concrete
+/// implementation owns generation/session/cancellation validation at its write.
+#[derive(Clone)]
+pub struct AdmittedRoomTurnTools {
+    tools: Vec<SharedTool>,
+}
+
+impl AdmittedRoomTurnTools {
+    fn from_admission(
+        admission: &impl RoomHistoryAdmission,
+        tools: Vec<SharedTool>,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            !admission.admitted_room_key().is_empty()
+                && !admission.admitted_agent_member_id().is_empty()
+                && admission.admitted_generation() > 0,
+            "room admission unavailable"
+        );
+        let mut names = std::collections::HashSet::new();
+        anyhow::ensure!(
+            !tools.is_empty()
+                && tools.len() <= 2
+                && tools.iter().all(
+                    |tool| matches!(tool.name(), "room_post_update" | "room_ask")
+                        && names.insert(tool.name())
+                ),
+            "invalid room turn tools"
+        );
+        Ok(Self { tools })
+    }
+}
+
 impl PromptControl {
+    pub fn with_room_turn_tools(mut self, tools: AdmittedRoomTurnTools) -> Self {
+        self.room_turn_tools = Some(tools);
+        self
+    }
+
+    pub fn room_turn_tool_names(&self) -> Vec<String> {
+        self.room_turn_tools
+            .as_ref()
+            .map(|voice| {
+                voice
+                    .tools
+                    .iter()
+                    .map(|tool| tool.name().to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub fn new(permission: Arc<dyn PermissionPolicy>) -> Self {
         Self {
             permission,
@@ -3340,6 +3433,7 @@ impl PromptControl {
             memory: PromptMemory::Operator,
             room_history: None,
             room_resources: None,
+            room_turn_tools: None,
             tools_disabled: false,
             hashline_edits: false,
             artifact_spill: false,
@@ -3347,10 +3441,17 @@ impl PromptControl {
             // the daemon's profile resolution turns it off (voice) — TASK-26.
             code_intelligence: true,
             display_title: None,
+            extra_tools: Vec::new(),
             requested_model: None,
             requested_provider: None,
             reroute_reason: None,
         }
+    }
+
+    /// Append turn-bound tools (see [`PromptControl::extra_tools`]).
+    pub fn with_extra_tools(mut self, tools: Vec<SharedTool>) -> Self {
+        self.extra_tools.extend(tools);
+        self
     }
 
     /// Disable every tool for this turn. This is the fail-closed control for
@@ -4719,6 +4820,7 @@ mod tests {
             &PromptMemory::Operator,
             None,
             None,
+            None,
             false,
         );
         assert_eq!(names(ordinary), vec!["read"]);
@@ -4727,6 +4829,7 @@ mod tests {
             vec![tool("read")],
             Some(&[]),
             &PromptMemory::Disabled,
+            None,
             None,
             None,
             false,
@@ -4738,6 +4841,7 @@ mod tests {
             Some(&[]),
             &PromptMemory::Disabled,
             Some(&history),
+            None,
             None,
             false,
         );
@@ -4758,9 +4862,52 @@ mod tests {
             &control.memory,
             control.room_history.as_ref(),
             control.room_resources.as_ref(),
+            control.room_turn_tools.as_ref(),
             control.tools_disabled,
         );
         assert!(disabled.is_empty());
+    }
+
+    #[test]
+    fn room_voice_tools_are_opaque_post_intersection_and_without_tools_wins() {
+        let voice = AdmittedRoomTurnTools::from_admission(
+            &TestRoomHistoryAdmission,
+            vec![tool("room_post_update"), tool("room_ask")],
+        )
+        .unwrap();
+        assert!(AdmittedRoomTurnTools::from_admission(
+            &TestRoomHistoryAdmission,
+            vec![tool("write")]
+        )
+        .is_err());
+        assert!(AdmittedRoomTurnTools::from_admission(
+            &TestRoomHistoryAdmission,
+            vec![tool("room_ask"), tool("room_ask")]
+        )
+        .is_err());
+        let tools = apply_admitted_room_tools(
+            vec![tool("write"), tool("room_ask")],
+            Some(&[]),
+            &PromptMemory::Disabled,
+            None,
+            None,
+            Some(&voice),
+            false,
+        );
+        assert_eq!(
+            tools.iter().map(|t| t.name()).collect::<Vec<_>>(),
+            vec!["room_post_update", "room_ask"]
+        );
+        assert!(apply_admitted_room_tools(
+            vec![tool("write")],
+            Some(&[]),
+            &PromptMemory::Disabled,
+            None,
+            None,
+            Some(&voice),
+            true
+        )
+        .is_empty());
     }
 
     #[test]
@@ -4838,6 +4985,7 @@ mod tests {
                 &control.memory,
                 control.room_history.as_ref(),
                 control.room_resources.as_ref(),
+                control.room_turn_tools.as_ref(),
                 control.tools_disabled,
             );
             assert!(
