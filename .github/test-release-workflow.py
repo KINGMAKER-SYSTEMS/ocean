@@ -8,6 +8,8 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -107,5 +109,59 @@ require("cargo build --locked --release -p ocean-daemon -p ocean-tui" in windows
 require("rustc --edition=2021 --test crates/ocean-tui/src/shell/daemon_boot.rs" in windows_job,
         "Windows probe executes actual-source daemon discovery tests")
 require("cancel-in-progress: true" in windows_job, "superseded Windows probes cancel by ref")
+
+# Exercise the actual registry-max function with npm, including its default-tag
+# resolution. The first publication has a version tag but no latest tag yet.
+registry_function = "registry_max() {" + publish_job.split("registry_max() {", 1)[1].split("\n          reconciled=", 1)[0]
+require('npm view "$package@$version" versions --json' in registry_function,
+        "registry enumeration does not depend on an existing latest tag")
+packument = {"name": "@kingmaker-systems/ocean", "dist-tags": {"version-0.2.1": "0.2.1"},
+             "versions": {"0.2.1": {"name": "@kingmaker-systems/ocean", "version": "0.2.1"}}}
+
+class RegistryFixture(BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = json.dumps(packument).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *_args):
+        pass
+
+server = ThreadingHTTPServer(("127.0.0.1", 0), RegistryFixture)
+worker = threading.Thread(target=server.serve_forever, daemon=True)
+worker.start()
+try:
+    with tempfile.TemporaryDirectory() as temp:
+        fixture = Path(temp)
+        registry = f"http://127.0.0.1:{server.server_port}"
+        (fixture / "npmrc").write_text(f"@kingmaker-systems:registry={registry}\n")
+        (fixture / "global-npmrc").write_text("")
+        env = {key: value for key, value in os.environ.items()
+               if key in {"PATH", "HOME", "SYSTEMROOT", "TMPDIR", "LANG"}}
+        env.update(NPM_CONFIG_USERCONFIG=str(fixture / "npmrc"),
+                   NPM_CONFIG_GLOBALCONFIG=str(fixture / "global-npmrc"),
+                   NPM_CONFIG_CACHE=str(fixture / "cache"),
+                   NPM_CONFIG_UPDATE_NOTIFIER="false", package=packument["name"], version="0.2.1")
+
+        def registry_max(script=registry_function):
+            return subprocess.run(["bash", "-c", "set -euo pipefail\n" + script + "\nregistry_max\n"],
+                                  cwd=fixture, env=env, text=True, capture_output=True, timeout=15)
+
+        result = registry_max()
+        require(result.returncode == 0 and result.stdout == "0.2.1",
+                f"first publication resolves without latest: {result.stderr}")
+        old = registry_max(registry_function.replace('"$package@$version"', '"$package"'))
+        require(old.returncode != 0, "fixture reproduces the original missing-latest failure")
+        packument["versions"]["0.2.2"] = {"name": packument["name"], "version": "0.2.2"}
+        result = registry_max()
+        require(result.returncode == 0 and result.stdout == "0.2.2",
+                "pinned lookup still enumerates newer published versions")
+finally:
+    server.shutdown()
+    worker.join()
+    server.server_close()
 
 print("Ocean release workflow root/path/security contract: PASS")

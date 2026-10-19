@@ -442,7 +442,9 @@ jobs:
           test "$published_integrity" = "$LOCAL_NPM_INTEGRITY"
 
           registry_max() {
-            npm view "$package" versions --json | node -e '
+            # A first publish has only version-X.Y.Z, not latest yet. Query
+            # through the verified version to read the complete version list.
+            npm view "$package@$version" versions --json | node -e '
               let input = "";
               process.stdin.setEncoding("utf8");
               process.stdin.on("data", chunk => input += chunk);

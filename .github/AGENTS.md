@@ -20,6 +20,8 @@ Root GitHub Actions builds for the public Ocean monorepo.
   The publish job has no source checkout: its first shell starts at the existing
   workspace root, verifies the artifact digest, then creates the component
   staging directory used by subsequent steps.
+  Registry convergence reads the complete version list through the verified
+  version, so a package without a `latest` tag can finish its first publication.
 - `build-scope.py` selects changed components; `test-build-scope.py` checks scope decisions, including NUL-terminated Git output. Unknown or unavailable diffs build both.
 - `test-daemon-startup.py` checks actual candidate startup, revision, isolated
   member identity and state-file creation; Unix also checks private file modes.
@@ -51,6 +53,8 @@ Root GitHub Actions builds for the public Ocean monorepo.
 - `actionlint .github/workflows/release.yml`
 - `PYTHONDONTWRITEBYTECODE=1 python3 .github/test-build-scope.py`
 - `PYTHONDONTWRITEBYTECODE=1 python3 .github/test-release-workflow.py`
+- The release contract fixtures use local Node/npm and a loopback-only npm
+  registry to exercise first publication without credentials or an existing tag.
 - Actual hosted builds establish build success. Syntax checking alone does not.
 
 ## Child devlog Index

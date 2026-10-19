@@ -2775,3 +2775,12 @@ type: [workflow]
 area: [testing]
 
 Added an actual daemon startup smoke to the manual Windows probe: disposable state, explicit model, no inherited provider credentials, unique loopback listener, revision/member verification and owned-child cleanup. The same script passes against the downloaded Mac 0.2.1 binary; Windows execution remains pending. Windows ACL acceptance stays with native Rust fixtures rather than POSIX mode assertions. Updated workflow ownership; parent indexes unchanged. Release bootstrap PR #118 is pushed at 42f61896 with local regression proof; both hosted review services report exhausted quota, so fresh review and landing are blocked without a quota change or another qualified reviewer. No bypass, package promotion or live Surface replacement performed.
+
+_________________________________________________________________________________
+time: [17:49] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/release-first-tag]
+type: [bug report]
+area: [workflow] [testing]
+
+Tag run 39328117964 published @kingmaker-systems/ocean 0.2.1 and verified its payload integrity on retry, but latest-tag convergence failed because npm's unversioned view resolves through latest before latest exists. Query the complete versions catalog through the verified version instead. A real npm loopback-registry fixture reproduces the old failure without latest, verifies first publication, and proves the pinned lookup still discovers newer versions. Actionlint, release workflow contracts and diff checks pass. Owning workflow contract updated; parent indexes unchanged. Downloaded draft asset checksum matched f0b4c4e69a6079cf2cbfe46230895cd3a71a92117bd0ec6ffc4f34c6acf16e09; the actual packaged daemon passed isolated-profile startup, health/revision, member identity and private state-file checks with an explicit model and no provider credentials. GitHub release remains draft and local registry readback is blocked by the current CLI token's missing read:packages scope; no public release or provider-reply claim.
