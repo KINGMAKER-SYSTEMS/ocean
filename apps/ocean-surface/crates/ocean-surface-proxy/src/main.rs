@@ -2425,7 +2425,7 @@ mod tests {
         // of their own; counting those would let a production route be deleted
         // while a fixture that happens to register the same path kept this
         // guard green.
-        let src = include_str!("main.rs");
+        let src = include_str!("main.rs").replace("\r\n", "\n");
         let production = src
             .split("#[cfg(test)]")
             .next()
@@ -3812,7 +3812,7 @@ mod tests {
     /// buffered forward on `state.http` fails here rather than shipping.
     #[test]
     fn untimed_client_is_used_only_by_streaming_handlers() {
-        let src = include_str!("main.rs");
+        let src = include_str!("main.rs").replace("\r\n", "\n");
         // Needle assembled at runtime so it cannot match this test's own text.
         let untimed = format!("state.{}{}", "http", ".");
         let streaming_handlers = [

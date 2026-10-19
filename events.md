@@ -2766,3 +2766,12 @@ type: [workflow]
 area: [testing]
 
 Keep Windows Surface validation separate from the daemon candidate: opt-in windows_surface_probe runs the full proxy suite and real release build without unrelated daemon/TUI builds or Mac packaging. It remains read-only, bounded and same-ref cancelling. Workflow contracts/actionlint pass; the committed Surface source at 0c61d800 also passed all 38 proxy tests from a clean detached checkout before push.
+
+_________________________________________________________________________________
+time: [18:40] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/windows-surface-proxy]
+type: [bug report]
+area: [testing]
+
+Native Windows run 39336237747 compiled the proxy and passed 38 of 39 tests, including protected credentials, owner forwarding and observer SSE. The route-inventory source scan failed on checkout CRLF before scanning build_app. Normalize source line endings in that test without changing route coverage; the targeted host test passes. Owner contracts remain unchanged because only the test parser changed. Fresh native validation is required; the failed run is not acceptance.
