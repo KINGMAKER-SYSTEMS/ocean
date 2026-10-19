@@ -3,7 +3,8 @@
    One card per room-convened agent turn (`room_work_card.rs`). Colors come
    ONLY from tokens.css. Material rule: border recipe OR elevation recipe,
    never both. State drives the dot via `data-state`; the only card icons are
-   the disclosure chevron and the approve/deny controls. */
+   the disclosure chevron, the approve/deny controls, and Cancel on the
+   page's own unfinished run. */
 
 .room-card {
   margin-top: 8px;
@@ -14,12 +15,19 @@
   overflow: hidden;
 }
 
+.room-card__bar {
+  display: flex;
+  align-items: center;
+}
+
 .room-card__head {
   appearance: none;
   display: flex;
+  flex: 1 1 auto;
   align-items: center;
   gap: 8px;
   width: 100%;
+  min-width: 0;
   min-height: var(--ctl-h);
   padding: 6px 10px;
   border: none;
@@ -57,6 +65,17 @@
   flex: 0 0 auto;
   color: var(--fg);
   font-weight: 600;
+}
+
+/* Own-invocation tag: the page's acknowledged invocation started this run.
+   Display-only; approvals stay on the operator route for every card. */
+.room-card__own {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  color: var(--fg-3);
+  font: 500 10px/1.4 var(--font);
 }
 
 .room-card__state {
@@ -272,6 +291,44 @@
   margin: 0 10px 8px 38px;
 }
 
+/* Cancel: only on the page's own acknowledged, unfinished run. A sibling of
+   the disclosure head (never nested in it); nothing optimistic. */
+.room-card__cancel {
+  appearance: none;
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: var(--ctl-h-sm);
+  height: var(--ctl-h-sm);
+  margin-right: 6px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-3);
+  font-size: 12px;
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease);
+}
+
+.room-card__cancel:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--err);
+}
+
+.room-card__cancel:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.room-card__cancel:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+.room-card__error--cancel {
+  margin: 0 10px 8px 38px;
+}
+
 /* ── P4: the room header's one overflow menu ──────────────────────────── */
 
 .room-overflow {
@@ -482,7 +539,8 @@
 
 @media (max-width: 650px) {
   .room-card__approval,
-  .room-card__error--decide {
+  .room-card__error--decide,
+  .room-card__error--cancel {
     margin-left: 10px;
   }
 }

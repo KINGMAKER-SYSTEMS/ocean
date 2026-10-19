@@ -136,12 +136,17 @@ pub(crate) struct RunTracker {
 }
 
 impl RunTracker {
-    /// Create the run in `Queued` and publish it.
+    /// Create the run in `Queued` and publish it. `request_id` is the
+    /// registered daemon request that executes this turn — the id the invoke
+    /// response returns and `POST /v1/requests/{id}/cancel` accepts — so a
+    /// client can tie the card to the request it may cancel.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn start(
         state: AppState,
         room: RoomKey,
         agent_id: &str,
         session_id: AgentSessionId,
+        request_id: Uuid,
         trigger_seq: u64,
         thread_root_seq: u64,
         cwd: String,
@@ -165,6 +170,7 @@ impl RunTracker {
                 reply_seq: None,
                 pending_permission: None,
                 answer_seq: None,
+                request_id: Some(request_id.to_string()),
             },
             cwd,
         };
