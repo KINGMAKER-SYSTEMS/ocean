@@ -1046,6 +1046,33 @@ Closed the leftovers from the review that acknowledged the thinking-binding reco
 Validation: ocean-protocol (187 plus 5) passes; clippy with warnings denied on ocean-protocol and ocean-agent tests, rustfmt check pass. The strip test covers the thinking-only assistant turn. No provider was called.
 _________________________________________________________________________________
 _________________________________________________________________________________
+time: [14:38] [06-10-26]
+agent: [zcode] [glm-5.3]
+worktree: [port/rooms-attachments]
+type: [feature-request]
+area: [backend] reconciliation: room attachments
+
+Eighth bounded Track B port: durable room attachments. Attachment BYTES live
+beside the DB that indexes them (per-room subdirectories under the resolved
+root, carried on AppState), so a moved OCEAN_DB_PATH carries a room's files
+with its metadata. Four route methods land: upload (typed attachment_too_large
+via sized cap + slack on the body-limit layer; uploader must be a roster
+human — a forged agent author is 403 and leaves no bytes), list, download
+(verified reads: bytes must match the recorded digest; served content type is
+proven by the bytes, never the declared one), and delete (row + bytes + a
+transcript marker in one store transaction). Traversal defence: one blob-path
+derivation with the id validator in one place; hostile room keys never become
+paths. Adaptations: room_not_open ported into persistent_rooms and
+invalid_request_response widened; AppState gained room_attachments_root with a
+unique-per-call test root after cross-test contamination showed up in the
+first run (17/17 after). Trimmed for sibling PRs: attachment_bytes and
+write_blob_for_test ride the room_context port (their consumer).
+Router-contract parity moved 119 → 123.
+
+Validation: room_attachments tests (17) pass; router-contract parity (123)
+green; cargo test -p ocean-daemon 925 passed / 2 deterministic issue-#42
+failures reproduced on clean main; rustfmt; denied-warning Clippy zero;
+cargo check --workspace --tests; cargo xtask docs-check PASS.
 time: [14:00] [06-10-26]
 agent: [zcode] [glm-5.3]
 worktree: [port/rooms-stage2c-resources]
@@ -1916,6 +1943,15 @@ Federated rooms on smaths-mini (northstar, ocean-team) sat in `recovering` with 
 _________________________________________________________________________________
 
 _________________________________________________________________________________
+time: [23:34] [09-10-26]
+agent: [codex] [factory release]
+worktree: [codex/pr46-attachment-reconcile]
+type: [bug report]
+area: [backend] [testing] [review]
+
+PR #46 / issue #83: reconciled durable attachments with canonical main f1b22bd8 and preserved both public ledger histories. Reads reject oversized/nonregular blobs before bounded allocation and verify bytes against recorded metadata. No-follow root/room/blob descriptor custody, private exclusive temporary files, non-overwriting publication and directory sync protect bytes before indexing; retained directory custody confines rollback and post-commit cleanup. HTTP upload/delete recheck human authors inside their store transaction while generic agent-capable APIs remain intact. Returning known committed metadata eliminates the fallible post-commit lookup that could trigger cleanup of committed bytes. Relative database-path configuration remains supported.
+
+Validation: daemon attachment tests 21/21, store attachment tests 9/9, locked daemon/store check, formatting and diff checks pass. Removing both transactional human guards makes the deterministic absent-to-Agent/System author regression fail; exact source restoration passes all 21 daemon attachment tests. Remote hashes match all five changed source/docs files. Independent source review ACKed 19c24c16; this receipt precedes final exact-head review and required hosted builds. Daemon/store contracts updated; parent ownership/indexes unchanged. Safe byte I/O is Unix-only; unsupported platforms fail closed. Existing caller-asserted room authority remains unchanged. PR #47 stays held under #84 pending maintenance custody/snapshot repair and stack reconciliation. Maintainer approval and existing live-migration acceptance remain separate. No deployment, installation or live data/provider access.
 time: [23:29] [09-10-26]
 agent: [codex] [factory release]
 worktree: [codex/pr45-resource-reconcile]
@@ -2061,6 +2097,12 @@ area: [infra]
 _________________________________________________________________________________
 
 _________________________________________________________________________________
+time: [14:59] [10-12-26]
+agent: [Codex]
+worktree: [PR46; factory-pr46-attachment-reconcile/ocean]
+type: [workflow]
+area: [review]
+Reconciled reviewed PR46 2c26a132e3a7e1e6f31b3918dd8a698f6f30bdef with canonical main1dfc6802bb74fecdcf83f6f17732b671c892b632 after external79/89 release. Only events.md conflicted; both ordered parent histories preserved. All non-ledger index entries exactly match automatic merge; existing PR-specific source remains unchanged, incoming release source retained. Installer14/14, shell syntax, formatting and diff-check pass; no heavy build/live action. Root takes exclusive release custody for this candidate; fresh independent final-head review and required hosted builds follow this entry. Approval-policy issue90, stack rollout and live acceptance remain separate gates. Applicable AGENTS contracts intentionally unchanged: source behavior and ownership contracts unchanged.
 time: [15:17] [10-12-26]
 agent: [Codex]
 worktree: [PR45; factory-pr45-resource-reconcile/ocean]
@@ -2241,6 +2283,15 @@ Validation: in apps/ocean-surface, cargo fmt --check clean; WASM clippy -D warni
 _________________________________________________________________________________
 
 _________________________________________________________________________________
+time: [23:21] [10-12-26]
+agent: [codex] [gpt-6]
+worktree: [codex/pr46-main255-reconcile] [macmini-ip factory-pr46-main255-reconcile]
+type: [refactor]: PR #46 current-main reconciliation
+area: [backend] [testing] [review]
+
+Reconciled attachment PR #46 head 1491c98172c6f771e0e33ccb59c386002673758a with canonical main 25599f22410c8e164dd09f13ad0a9254fa97a39d. Manual resolutions retain attachment/run modules, both daemon contract sections, all four attachment guide rows and current message-authority wording. Registered, banner and documented routes agree at 133. No manual runtime-body changes: attachment daemon source and all 14 attachment-named store functions retain prior bytes; incoming run/tool files match main. Other 1,174 non-ledger entries match AUTO_MERGE exactly.
+
+Five existing pure router/banner fixtures passed via standalone rustc extraction against merged source; existing direct-rustc docs-check passed 30 packages, 153 Markdown files, 170 links. Nonledger whitespace checks passed. No full Cargo build or fresh attachment runtime/provider test execution claimed; earlier attachment regressions remain unchanged-source historical evidence. Both public parent ledger histories survive line-for-line in original order, followed only by this public-safe canonical receipt. The devlog union retains both contracts and requires no child-index change. Independent final-head review, hosted builds, maintainer approval under #54/#90 and live acceptance remain separate. Preserve #46 before #47 before #87; no merge or deployment claimed.
 time: [23:16] [10-12-26]
 agent: [codex] [gpt-6]
 worktree: [codex/pr45-main255-reconcile] [macmini-ip factory-pr45-main255-reconcile]
@@ -2277,3 +2328,16 @@ area: [backend] [testing] [review]
 Reconciled profile PR #43 head 75e43022207750d061b87edf8dab691758b07247 with canonical main 25599f22410c8e164dd09f13ad0a9254fa97a39d. Manual resolutions retain two profile guide rows/current message authority and derive 131 identical registered/banner/documented routes. No manual runtime-body changes; daemon profile implementation equals prior PR #43, store profile/resources equal current PR #60 head56a4dcd8, and included prerequisite ancestor a0c66c48 remains. Other 1,178 non-ledger entries match AUTO_MERGE exactly.
 
 Five existing pure router/banner fixtures passed via standalone rustc extraction against merged source; existing direct-rustc docs-check passed 30 packages, 157 Markdown files, 175 links. Nonledger whitespace checks passed. These fixtures do not compile the full daemon or execute profile/runtime behavior; earlier behavioral results remain unchanged-source historical evidence. Both public parent ledger histories are retained line-for-line in original order, followed by this public-safe canonical receipt. Automatically merged contracts retain their scopes, with no further devlog/index change needed. Separate source review ACKed; final committed-head review, hosted builds, maintainer approval under #54/#90 and live acceptance remain gates. Release #60 before #43. No merge or deployment claimed.
+_________________________________________________________________________________
+time: [18:30] [13-10-26]
+agent: [Copilot]
+worktree: [port/rooms-attachments]
+type: [workflow] [merge]
+area: [source] [validation]
+
+Merged current public main f6e0b1a1 into PR #46, preserving both parent event
+histories, the attachment routes and contracts, and the incoming Room profile
+routes and documentation. Registered, banner and documented routes agree at 135.
+Validation: `cargo fmt --all -- --check`; focused locked daemon route-parity test
+(1 passed); `cargo xtask docs-check` (30 packages, 157 Markdown files, 175 links);
+`git diff --check`. No live or deployment action.
