@@ -29,7 +29,10 @@ team installation.
 3. Start Ocean outside a Git repository, authenticate the provider, and
    complete one real no-tools reply. A connected indicator is insufficient.
 4. Connect their own membership to one shared room using the existing
-   federation flow. Do not share another operator's proxy password or
+   federation flow. In Rooms, choose **Add room → Join room**, paste the
+   invitation link, then confirm. This works in the browser without an
+   installed `ocean://` handler, but still requires that coworker's own
+   connected daemon. Do not share another operator's proxy password or
    credential files as a substitute for coworker identity.
 5. Use a real task in that room. Confirm both humans see the same message,
    the intended agent replies from its own host, and the reply opens the
