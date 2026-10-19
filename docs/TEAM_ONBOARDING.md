@@ -8,7 +8,7 @@ released client and their own connected daemon.
 
 | Computer | Current setup path | Remaining acceptance |
 | --- | --- | --- |
-| Apple Silicon Mac | Published package plus `platform/ocean-os/ops/onboard-teammate.sh` | Verify an actual release, package access, provider login and shared-room reply on the coworker's machine. |
+| Apple Silicon Mac | macOS arm64 package plus `platform/ocean-os/ops/onboard-teammate.sh` | Verify an actual release, package access, provider login and shared-room reply on the coworker's machine. |
 | Intel Mac | No prebuilt package in the current release workflow | Build, package and test this architecture before giving out an installer. |
 | Windows | No native Windows package or onboarding script | Establish and test the Windows runtime/client installation path. WSL is not a verified substitute. |
 
@@ -22,7 +22,7 @@ team installation.
 1. Verify a release from canonical main and access to its package. The
    [package guide](../platform/ocean-os/packaging/npm/README.md) describes the
    existing distribution, including its separate supervised-daemon update.
-2. On a supported Mac, use the
+2. Follow the [host setup guide](../platform/ocean-os/docs/TEAM_ONBOARDING.md). On a supported Mac, use the
    [setup script](../platform/ocean-os/ops/onboard-teammate.sh) with that
    coworker's member id, display name and chosen model. Its `--dry-run`
    validates preparation; it does not prove an installed or connected daemon.

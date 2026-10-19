@@ -457,6 +457,13 @@ Web surface session UI:
   requested rail and restore its trigger focus (Room options for Members); nested
   Escape handlers take precedence. Room admission/origin changes retire open
   rail modes without moving focus or altering consent authority.
+- Unread attention and the new-message jump exclude the same routine audit rows
+  as the timeline. Local room-list summaries come from the daemon's conversation
+  frontier; the open-room summary uses the same filter. Visible failures, access
+  changes and human messages still count. Read cursor PATCH and SSE resume retain
+  the full durable sequence; never mark unseen conversation read to silence a dot.
+  Deploy the Surface and daemon attention changes together; older daemon summaries
+  can still count hidden audits in unopened rooms.
 - The timeline hides routine convene, bootstrap, admission and output audit
   rows (`room_messages::is_convene_audit`), including exact labels when the
   daemon omits an agent name; durable records stay untouched.

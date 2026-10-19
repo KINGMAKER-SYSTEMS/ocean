@@ -571,6 +571,12 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   both hosted build jobs. This source does not claim A3a acceptance, later
   stage authority, production activation or release of migration hold #22.
 
+- Persistent-room list `read_states.latest_seq` is the latest visible conversation
+  sequence for Local rooms (`room_latest_attention_seq`); routine System execution
+  audits do not relight unread attention. Live/federated summaries retain their
+  confirmed global frontier. Transcript pagination/SSE and read cursor PATCH still
+  use the full durable sequence. Deploy with Surface's matching attention filter.
+
 ## Verification
 
 - `cargo test -p ocean-daemon room_summary --locked -- --test-threads=1`

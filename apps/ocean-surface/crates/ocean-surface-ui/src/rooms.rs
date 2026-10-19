@@ -3047,7 +3047,11 @@ fn latest_summary_seq_for_open_room(
         Some(RoomAccessState::Live) => {
             access.and_then(|projection| projection.last_confirmed_global_sequence)
         }
-        _ => transcript.last().map(|message| message.seq),
+        _ => transcript
+            .iter()
+            .rev()
+            .find(|message| !crate::room_messages::is_convene_audit(message))
+            .map(|message| message.seq),
     }
 }
 
@@ -5046,6 +5050,42 @@ mod tests {
                 latest_seq: Some(7),
                 read_seq: Some(2),
             })
+        );
+    }
+
+    #[test]
+    fn local_summary_ignores_audits_without_marking_unread_conversation_read() {
+        let local = access_projection(RoomAccessState::Local);
+        let mut transcript = vec![message(4)];
+        let mut audit = message(5);
+        audit.kind = RoomMessageKind::System;
+        audit.body = "[room agent output audit] kobe".into();
+        transcript.push(audit.clone());
+        let latest = latest_summary_seq_for_open_room(&transcript, Some(&local));
+        assert_eq!(latest, Some(4));
+        assert!(!room_has_durable_unread(Some(&RoomReadSummary {
+            latest_seq: latest,
+            read_seq: Some(4)
+        })));
+        assert!(room_has_durable_unread(Some(&RoomReadSummary {
+            latest_seq: latest,
+            read_seq: Some(3)
+        })));
+        assert_eq!(
+            latest_summary_seq_for_open_room(&[audit.clone()], Some(&local)),
+            None
+        );
+        audit.body = "[room agent admission refused: suspended] kobe".into();
+        transcript.push(audit);
+        assert_eq!(
+            latest_summary_seq_for_open_room(&transcript, Some(&local)),
+            Some(5)
+        );
+        let mut live = access_projection(RoomAccessState::Live);
+        live.last_confirmed_global_sequence = Some(90);
+        assert_eq!(
+            latest_summary_seq_for_open_room(&transcript, Some(&live)),
+            Some(90)
         );
     }
 

@@ -1329,7 +1329,7 @@ pub(super) async fn rooms_list_persistent(
                     },
                 };
                 let latest_seq = match access.state {
-                    RoomAccessState::Local => reg.room_latest_durable_seq(&key)?,
+                    RoomAccessState::Local => reg.room_latest_attention_seq(&key)?,
                     RoomAccessState::Live => access.last_confirmed_global_sequence,
                     RoomAccessState::Connecting
                     | RoomAccessState::Recovering
@@ -5847,6 +5847,17 @@ mod tests {
                 local_room_read_cursor_principal(),
                 RoomReadCursorUpdateRequest { read_seq: 0 },
             )?;
+
+            // Hidden routine activity must not relight a read local room.
+            store.append_message(
+                &local,
+                "system",
+                RoomParticipantKind::System,
+                RoomMessageKind::System,
+                "[room agent output audit] kobe",
+                Utc::now(),
+            )?;
+            assert_eq!(store.room_latest_durable_seq(&local)?, Some(1));
 
             store.create(live.clone(), "Live", None, Utc::now())?;
             store.update_room_access_safe(

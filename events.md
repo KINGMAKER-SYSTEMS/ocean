@@ -2637,3 +2637,12 @@ type: [bug report]
 area: [frontend] [review] [testing]
 
 Repaired suffix-free authority/bootstrap projections from independent review. Both exact labels and space-delimited agent forms refresh daemon binding state; anonymous notices remain readable and unknown refusal codes retain their diagnostic text. Human messages are unchanged. All 952 UI tests (922 unit, 30 integration), WASM Clippy with denied warnings, formatting and diff checks pass. Owning Surface contract updated; parent indexes and runtime contracts unchanged because ownership and runtime behavior are unchanged. Fresh exact-head review and hosted build are still required; no merge or deployment claimed.
+
+_________________________________________________________________________________
+time: [16:30] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/rooms-daily-use]
+type: [bug report]
+area: [frontend] [backend] [review] [testing]
+
+Repaired phantom attention from filtered routine audits. Local room-list read summaries now use a read-only store conversation frontier; open-room summaries and jump accounting apply the same visible-message filter. Full transcript/SSE/read-cursor sequences and audit records are unchanged, as are federated global frontiers. SQL filters before LIMIT without loading transcript bodies into Rust. Regressions preserve chat messages, authority changes, failure notices, case/boundary distinctions and actual unseen conversation. All 954 UI tests, three store frontier tests, the daemon list/read-state route regression, WASM Clippy, formatting, diff checks and cargo check --workspace pass. Updated owning Surface/store/daemon contracts; parent indexes unchanged because no ownership boundary changed. Root team guide now links the component host setup guide. Surface and daemon changes must deploy together; older daemon summaries still count audits for unopened rooms. Fresh-head review, hosted build and installation remain pending.

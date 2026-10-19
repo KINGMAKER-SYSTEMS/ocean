@@ -280,7 +280,7 @@ pub fn RoomsWorkspace(
     let pending_read_advance = RwSignal::new(None::<ReadAdvanceRequest>);
     let refresh_handle = RwSignal::new(None::<IntervalHandle>);
     Effect::new(move |prev: Option<usize>| {
-        let len = transcript.with(|t| t.len());
+        let len = transcript.with(|t| room_messages::conversation_len(t));
         let open_key = rooms.open_key.get();
         // Track the access projection. For a `Live` room the durable candidate
         // is `last_confirmed_global_sequence`, which routinely lands *after*

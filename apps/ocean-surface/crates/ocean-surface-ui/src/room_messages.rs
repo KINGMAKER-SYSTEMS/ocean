@@ -91,6 +91,14 @@ pub(crate) fn is_convene_audit(msg: &RoomMessage) -> bool {
             .any(|label| audit_agent(&msg.body, label).is_some()))
 }
 
+/// Count rows that can add visible conversation content (including replies).
+pub(crate) fn conversation_len(messages: &[RoomMessage]) -> usize {
+    messages
+        .iter()
+        .filter(|message| !is_convene_audit(message))
+        .count()
+}
+
 /// Authority records are signals to re-read the daemon, never authority to
 /// manufacture a binding state in the browser. Refusals also repair a stale
 /// projection after a missed authority event or reconnect.
