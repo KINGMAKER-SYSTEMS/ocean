@@ -123,6 +123,8 @@ mod github;
 mod history_search;
 /// Daemon-wide Host allowlist against DNS rebinding.
 mod host_guard;
+/// Rooms S0 — `GET /v1/identity`: who this daemon says its human is.
+mod identity;
 /// Persisted-title and read-projection mutation HTTP adapters.
 mod longhouse_governance_control;
 /// State-free Longhouse prepare, inspect, and workflow HTTP adapters.
@@ -159,13 +161,19 @@ mod request_control;
 mod room_agent_authority;
 /// Room agent work cards: per-turn run projections over agent-session events.
 mod room_agent_runs;
+/// Room attachments: durable file bytes beside the DB that indexes them.
+mod room_attachments;
 /// Restart-safe outbound Bedrock room client and per-room supervisor (S2 P2-B).
 mod room_federation;
+/// Retention sweeps and orphan cleanup for closed rooms.
+mod room_maintenance;
 mod room_operator;
 mod room_profile;
 mod room_resources;
 /// Rooms S0 — retire a placeholder human into a real member (operator lane).
 mod room_retirement;
+/// Room summarize: one model turn folded into the room's summary artifact.
+mod room_summary;
 mod room_tools;
 /// Host fulfillment lifecycle retained for the external `ocean-slack` extension.
 mod slack_canvas_fulfillment;
@@ -312,6 +320,15 @@ struct AppState {
     /// In-memory record of provider OAuth login attempts for the
     /// `/v1/auth/providers*` routes; see [`provider_auth`].
     provider_logins: Arc<provider_auth::ProviderLogins>,
+    /// Attachment BYTES live beside `rooms.db` so a moved OCEAN_DB_PATH
+    /// carries a room's files with its metadata. Per-room subdirectories are
+    /// created lazily on first upload.
+    room_attachments_root: Arc<std::path::PathBuf>,
+    /// Retention/interval/orphan-grace resolved once from env at startup.
+    room_maintenance_config: room_maintenance::MaintenanceConfig,
+    /// The `room_maintenance` card `GET /health` serves: what the last sweep
+    /// did and the configuration it did it under.
+    room_maintenance: room_maintenance::MaintenanceHandle,
     /// Bounded room-scoped wake hints for persistent transcript SSE tails. The
     /// payload is only `(room, seq)`; SQLite remains authoritative for replay,
     /// live delivery, lag recovery, ordering, and deduplication.
@@ -714,6 +731,9 @@ fn app_router(origins: BrowserOrigins, hosts: AllowedHosts) -> Router<AppState> 
         .route("/ready", get(ready))
         // OCEAN-303: Prometheus-text turn metrics (latency histogram + counters).
         .route("/metrics", get(metrics))
+        // Rooms S0: who this daemon says its human is (member.toml, then
+        // OCEAN_MEMBER_ID, never the process user). Credential-free.
+        .route("/v1/identity", get(identity::identity))
         .route("/v1/agent/turns", post(agent_turn))
         .route("/v1/agent/voice", post(agent_voice))
         .route("/v1/agent/events", get(agent_events))
@@ -1093,6 +1113,21 @@ async fn main() -> anyhow::Result<()> {
         ));
     }
 
+    // Room attachment BYTES live beside the DB that indexes them, so a moved
+    // `OCEAN_DB_PATH` carries a room's files with its metadata instead of
+    // splitting the two. Resolved once here and carried on `AppState`; the
+    // per-room subdirectories are created lazily on first upload.
+    let room_attachments_root = room_attachments::room_attachments_root();
+    tracing::info!(path = %room_attachments_root.display(), "room attachment store ready");
+    let room_maintenance_config = room_maintenance::MaintenanceConfig::from_env();
+    let room_maintenance = room_maintenance::new_handle(&room_maintenance_config);
+    tracing::info!(
+        retention_days = room_maintenance_config.retention_days,
+        interval_secs = room_maintenance_config.interval.as_secs(),
+        orphan_grace_secs = room_maintenance_config.orphan_grace.as_secs(),
+        "room maintenance configured"
+    );
+
     let rooms = Arc::new(Mutex::new(room_store));
     let room_wakes = RoomWakeBus::default();
     let room_access_wakes = RoomAccessWakeBus::default();
@@ -1158,6 +1193,9 @@ async fn main() -> anyhow::Result<()> {
         longhouse,
         rooms,
         room_operator,
+        room_attachments_root: Arc::new(room_attachments_root),
+        room_maintenance_config,
+        room_maintenance,
         provider_logins: Arc::default(),
         room_wakes,
         room_access_wakes,
@@ -1185,6 +1223,10 @@ async fn main() -> anyhow::Result<()> {
         turn_limiter: Arc::new(tokio::sync::Semaphore::new(max_concurrent_turns())),
         advisor_limiter: Arc::new(tokio::sync::Semaphore::new(ADVISOR_CONCURRENCY_LIMIT)),
     };
+
+    // Retention/orphan sweeps run on their own cadence until shutdown; the
+    // health card reports what the last sweep did.
+    room_maintenance::spawn_maintenance_loop(&state);
 
     // The sovereign trigger receiver must exist before federation startup can
     // ingest and claim a confirmed mention. It only validates and spawns; agent
@@ -1569,6 +1611,7 @@ fn banner_routes() -> &'static [&'static str] {
         "GET /health",
         "GET /ready",
         "GET /metrics",
+        "GET /v1/identity",
         "POST /v1/agent/turns",
         "POST /v1/agent/voice",
         "GET /v1/agent/events",
@@ -1618,6 +1661,22 @@ fn banner_routes() -> &'static [&'static str] {
         "POST /v1/rooms/persistent/{key}/participants",
         "DELETE /v1/rooms/persistent/{key}/participants/{participant_id}",
         "POST /v1/rooms/persistent/{key}/participants/{participant_id}/retire",
+        "POST /v1/rooms/maintenance/run",
+        "POST /v1/rooms/persistent/{key}/attachments",
+        "GET /v1/rooms/persistent/{key}/attachments",
+        "GET /v1/rooms/persistent/{key}/attachments/{attachment_id}",
+        "DELETE /v1/rooms/persistent/{key}/attachments/{attachment_id}",
+        "GET /v1/rooms/persistent/{key}/resources",
+        "POST /v1/rooms/persistent/{key}/resources",
+        "GET /v1/rooms/persistent/{key}/resources/{resource_id}",
+        "DELETE /v1/rooms/persistent/{key}/resources/{resource_id}",
+        "POST /v1/rooms/persistent/{key}/resources/{resource_id}/suspend",
+        "POST /v1/rooms/persistent/{key}/resources/{resource_id}/resume",
+        "POST /v1/rooms/persistent/{key}/resources/{resource_id}/list",
+        "POST /v1/rooms/persistent/{key}/resources/{resource_id}/read",
+        "POST /v1/rooms/persistent/{key}/summarize",
+        "GET /v1/rooms/persistent/{key}/profile",
+        "PUT /v1/rooms/persistent/{key}/profile",
         "POST /v1/rooms/persistent/{key}/messages",
         "POST /v1/rooms/persistent/{key}/invites",
         "POST /v1/rooms/persistent/invites/redeem",
@@ -1721,6 +1780,12 @@ struct HealthEnvelope {
     #[serde(flatten)]
     health: HealthResponse,
     rev: String,
+    /// What the room maintenance loop last did, and the configuration it did
+    /// it under. It carries the CONFIGURATION and not only the counts because
+    /// the failure this card exists to catch is silent by construction: a
+    /// retention window that never got set looks exactly like a healthy
+    /// daemon with nothing to collect.
+    room_maintenance: room_maintenance::RoomMaintenanceReport,
 }
 
 async fn health(State(state): State<AppState>) -> Json<HealthEnvelope> {
@@ -1746,6 +1811,10 @@ async fn health(State(state): State<AppState>) -> Json<HealthEnvelope> {
         // build.rs (`-dirty` suffix on uncommitted worktrees; `unknown` when git
         // could not be run). Lets an operator confirm the supervised daemon is
         // actually running the main commit they expect.
+        // Read through the poison-recovering snapshot: a maintenance mutex
+        // poisoned by a panicked sweep must never be what takes `/health`
+        // down, since this card is how that panic becomes visible.
+        room_maintenance: room_maintenance::report_snapshot(&state.room_maintenance),
         rev: env!("OCEAN_BUILD_REV").into(),
     })
 }
@@ -2979,6 +3048,13 @@ fn room_routes() -> Router<AppState> {
             "/v1/rooms/persistent/{key}/agents/{agent_member_id}/invoke",
             post(persistent_rooms::room_agent_invoke),
         )
+        // Store-wide, so it hangs off `/v1/rooms/` rather than under a `{key}`
+        // that would have to be invented for it. Static second segment, so it
+        // cannot be shadowed by `/v1/rooms/{room_id}/livekit-token`.
+        .route(
+            "/v1/rooms/maintenance/run",
+            post(room_maintenance::room_maintenance_run),
+        )
         .route("/v1/rooms/persistent/{key}/participants", post(room_join))
         .route(
             "/v1/rooms/persistent/{key}/participants/{participant_id}",
@@ -2987,6 +3063,60 @@ fn room_routes() -> Router<AppState> {
         .route(
             "/v1/rooms/persistent/{key}/participants/{participant_id}/retire",
             post(room_retirement::room_participant_retire),
+        )
+        // Room attachments: durable file bytes beside the DB. The sized cap
+        // plus slack lets a just-over-cap body reach the handler for the typed
+        // attachment_too_large JSON while huge bodies are refused by the layer.
+        .route(
+            "/v1/rooms/persistent/{key}/attachments",
+            post(room_attachments::room_upload_attachment)
+                .get(room_attachments::room_list_attachments)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    room_attachments::MAX_ATTACHMENT_BYTES + room_attachments::BODY_LIMIT_SLACK,
+                )),
+        )
+        .route(
+            "/v1/rooms/persistent/{key}/attachments/{attachment_id}",
+            get(room_attachments::room_download_attachment)
+                .delete(room_attachments::room_delete_attachment),
+        )
+        // Rooms Phase 2 Stage 2c: contributed-folder grants and confined
+        // operator previews. Enforcement (§5 cwd rule, per-call authority)
+        // already lives in resolve_turn_cwd and DurableRoomResourceAuthority.
+        .route(
+            "/v1/rooms/persistent/{key}/resources",
+            get(room_resources::room_resources_list).post(room_resources::room_resource_grant),
+        )
+        .route(
+            "/v1/rooms/persistent/{key}/resources/{resource_id}",
+            get(room_resources::room_resource_get).delete(room_resources::room_resource_revoke),
+        )
+        .route(
+            "/v1/rooms/persistent/{key}/resources/{resource_id}/suspend",
+            post(room_resources::room_resource_suspend),
+        )
+        .route(
+            "/v1/rooms/persistent/{key}/resources/{resource_id}/resume",
+            post(room_resources::room_resource_resume),
+        )
+        .route(
+            "/v1/rooms/persistent/{key}/resources/{resource_id}/list",
+            post(room_resources::room_resource_preview_list),
+        )
+        .route(
+            "/v1/rooms/persistent/{key}/resources/{resource_id}/read",
+            post(room_resources::room_resource_preview_read),
+        )
+        // Room summarize: one bounded model turn folded into the room's
+        // single well-known summary artifact.
+        .route(
+            "/v1/rooms/persistent/{key}/summarize",
+            post(persistent_rooms::room_summarize),
+        )
+        // Rooms Phase 2 Stage 2b: the room profile and credential-slot status.
+        .route(
+            "/v1/rooms/persistent/{key}/profile",
+            get(room_profile::room_profile_get).put(room_profile::room_profile_put),
         )
         .route(
             "/v1/rooms/persistent/{key}/messages",
@@ -13222,6 +13352,8 @@ mod tests {
             &[
                 "access",
                 "agent_owners",
+                "aliases",
+                "aliases_truncated",
                 "ok",
                 "room",
                 "transcript",
@@ -13229,6 +13361,8 @@ mod tests {
                 "next_seq",
             ],
         );
+        assert_eq!(detail["aliases"], json!([]));
+        assert_eq!(detail["aliases_truncated"], false);
         assert_eq!(detail["ok"], true);
         assert_eq!(detail["has_more"], false);
         assert!(detail["next_seq"].is_null());
@@ -13309,6 +13443,8 @@ mod tests {
             &[
                 "access",
                 "agent_owners",
+                "aliases",
+                "aliases_truncated",
                 "ok",
                 "room",
                 "transcript",
@@ -13316,6 +13452,8 @@ mod tests {
                 "next_seq",
             ],
         );
+        assert_eq!(detail["aliases"], json!([]));
+        assert_eq!(detail["aliases_truncated"], false);
         assert_eq!(detail["ok"], true);
         assert_eq!(detail["has_more"], false);
         assert!(detail["next_seq"].is_null());
@@ -14381,6 +14519,11 @@ mod tests {
                 vec!["http://127.0.0.1:8790".into()],
             )),
             provider_logins: Arc::default(),
+            room_attachments_root: Arc::new(crate::room_attachments::test_root()),
+            room_maintenance_config: room_maintenance::MaintenanceConfig::from_env(),
+            room_maintenance: room_maintenance::new_handle(
+                &room_maintenance::MaintenanceConfig::from_env(),
+            ),
             room_wakes,
             room_access_wakes,
             room_read_cursor_wakes: RoomReadCursorWakeBus::default(),
@@ -16279,6 +16422,11 @@ mod tests {
                 vec!["http://127.0.0.1:8790".into()],
             )),
             provider_logins: Arc::default(),
+            room_attachments_root: Arc::new(crate::room_attachments::test_root()),
+            room_maintenance_config: room_maintenance::MaintenanceConfig::from_env(),
+            room_maintenance: room_maintenance::new_handle(
+                &room_maintenance::MaintenanceConfig::from_env(),
+            ),
             room_wakes,
             room_access_wakes,
             room_read_cursor_wakes: RoomReadCursorWakeBus::default(),
@@ -16790,6 +16938,11 @@ mod tests {
                 vec!["http://127.0.0.1:8790".into()],
             )),
             provider_logins: Arc::default(),
+            room_attachments_root: Arc::new(crate::room_attachments::test_root()),
+            room_maintenance_config: room_maintenance::MaintenanceConfig::from_env(),
+            room_maintenance: room_maintenance::new_handle(
+                &room_maintenance::MaintenanceConfig::from_env(),
+            ),
             room_wakes,
             room_access_wakes,
             room_read_cursor_wakes: RoomReadCursorWakeBus::default(),
@@ -18747,6 +18900,11 @@ mod tests {
                 vec!["http://127.0.0.1:8790".into()],
             )),
             provider_logins: Arc::default(),
+            room_attachments_root: Arc::new(crate::room_attachments::test_root()),
+            room_maintenance_config: room_maintenance::MaintenanceConfig::from_env(),
+            room_maintenance: room_maintenance::new_handle(
+                &room_maintenance::MaintenanceConfig::from_env(),
+            ),
             room_wakes,
             room_access_wakes,
             room_read_cursor_wakes: RoomReadCursorWakeBus::default(),
@@ -21482,6 +21640,8 @@ mod tests {
             &snapshot,
             &[
                 "access",
+                "aliases",
+                "aliases_truncated",
                 "closed",
                 "ok",
                 "room",
@@ -21492,6 +21652,8 @@ mod tests {
                 "has_more",
             ],
         );
+        assert_eq!(snapshot["aliases"], json!([]));
+        assert_eq!(snapshot["aliases_truncated"], false);
         assert_eq!(snapshot["ok"], true);
         assert_eq!(snapshot["closed"], true);
         assert_eq!(snapshot["room"]["id"], "closed-audit");
@@ -25927,7 +26089,7 @@ mod tests {
         assert_eq!(admission_routes, expected_admission_routes);
         assert_eq!(
             banner.len(),
-            129,
+            146,
             "route baseline changed; review the manifest"
         );
 
@@ -26138,6 +26300,114 @@ mod tests {
                 .is_none(),
             "untrusted origins must not receive CORS authorization"
         );
+    }
+
+    /// Every method the router serves must pass a real browser preflight from
+    /// each trusted first-party origin, or a cross-origin client (the Tauri
+    /// webview calls the daemon directly) can never send it. Foreign origins
+    /// receive no CORS authorization for any of them, and the real PUT still
+    /// meets its route's operator gate rather than a 405.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn router_contract_preflight_admits_every_served_method() {
+        use axum::{body::Body, http::Request};
+        use tower::ServiceExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let app = app_router(BrowserOrigins::default(), AllowedHosts::default())
+            .with_state(route_contract_state(&tmp).await);
+
+        let mut served: Vec<(&str, &str)> = Vec::new();
+        for route in banner_routes() {
+            let (method, path) = route.split_once(' ').expect("well-formed banner route");
+            if !served.iter().any(|(seen, _)| *seen == method) {
+                served.push((method, path));
+            }
+        }
+        assert!(
+            served.iter().any(|(method, _)| *method == "PUT"),
+            "this router serves PUT routes; the preflight must be exercised for them"
+        );
+
+        let preflight = |origin: &'static str, method: &str, path: &str| {
+            Request::builder()
+                .method(Method::OPTIONS)
+                .uri(materialize_route_path(path))
+                .header(header::ORIGIN, origin)
+                .header(header::ACCESS_CONTROL_REQUEST_METHOD, method)
+                .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "content-type")
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        for (method, path) in &served {
+            for origin in ["tauri://localhost", "http://localhost:8080"] {
+                let response = app
+                    .clone()
+                    .oneshot(preflight(origin, method, path))
+                    .await
+                    .unwrap();
+                assert!(
+                    response.status().is_success(),
+                    "{method} {path} preflight from {origin} failed: {}",
+                    response.status()
+                );
+                assert_eq!(
+                    response.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
+                    Some(&HeaderValue::from_static(origin)),
+                    "{method} preflight from {origin} was not authorized"
+                );
+                let methods = response
+                    .headers()
+                    .get(header::ACCESS_CONTROL_ALLOW_METHODS)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default();
+                assert!(
+                    methods.split(',').any(|m| m.trim() == *method),
+                    "preflight omitted served method {method}: {methods}"
+                );
+            }
+
+            let foreign = app
+                .clone()
+                .oneshot(preflight("https://evil.example", method, path))
+                .await
+                .unwrap();
+            assert!(
+                foreign
+                    .headers()
+                    .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                    .is_none(),
+                "{method} preflight from a foreign origin must not be authorized"
+            );
+        }
+
+        for path in [
+            "/v1/me",
+            "/v1/rooms/persistent/route-probe/agents/route-probe/settings",
+        ] {
+            let put = app
+                .clone()
+                .oneshot(
+                    Request::put(path)
+                        .header(header::ORIGIN, "tauri://localhost")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from("{}"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_ne!(put.status(), StatusCode::METHOD_NOT_ALLOWED, "PUT {path}");
+            assert!(
+                put.status().is_client_error(),
+                "PUT {path} without the operator credential must be refused: {}",
+                put.status()
+            );
+            assert_eq!(
+                put.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
+                Some(&HeaderValue::from_static("tauri://localhost")),
+                "the Tauri webview must be able to read the PUT {path} response"
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
