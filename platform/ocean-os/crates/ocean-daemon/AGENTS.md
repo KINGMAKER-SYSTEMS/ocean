@@ -278,11 +278,20 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   before grant-reference validation and profile writes. Exact retries remain
   no-ops after revocation; mismatched/cross-ledger retries return 409, and new
   missing/revoked references retain 400 `resource_not_found`. Slot projections
-  omit resolver strings and credential values. `room_resources.rs` owns only
+  omit resolver strings and credential values. `room_resources.rs` owns
   cwd/catalog selection plus scoped list/read authority and content-free audit
   callbacks. Return the stored canonical grant root unchanged to #24 descriptor
-  I/O; catalog/handle issuance alone is not an in-flight operation proof. No
-  grant mutation/preview routes are opened by Stage 2b.
+  I/O; catalog/handle issuance alone is not an in-flight operation proof. The
+  Stage 2c resource-management routes add header-authorized grant/status and
+  operator-preview routes; preserve the admitted-turn scope, digest,
+  cancellation, and current owner/access checks. Previews capture their own
+  current binding and request-lifetime token, reuse per-call checks, and never
+  cancel an executing turn. All outcomes use fixed error classifications.
+  Normalize grant request spelling without filesystem reads; consumed decisions
+  reach transactional exact/mismatch/cross-ledger replay before mutable
+  expiry/root validation. Fresh requests still reject dangerous, unavailable or
+  symlinked roots. Public projections omit local roots. This does not lift
+  architecture acceptance or live-migration holds.
 - Approved consumer fanout: Agent `memory_tools.rs` adds a private optional
   operation callback on the opaque admitted handle, with fixed typed refusal;
   Agent `lib.rs` only reexports that interface and Agent `AGENTS.md` records it.
@@ -330,7 +339,7 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   original coverage/timestamp; a no-op does not claim newly read coverage.
   `has_more` and the partial-window warning report omitted rows on either side.
   This repair does not lift independent acceptance or live-migration holds.
-- Deferred: Room metrics/sampler, attachments/context, resource writes,
+- Deferred: Room metrics/sampler, attachments/context,
   retirement/maintenance/workspace bridge, client onboarding/UI, extension
   scheduling, Unknown build execution and CI orchestration. Keep #22/#48 holds;
   automated CI remains only Build Ocean and Build Surface.
@@ -540,6 +549,7 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
 - `cargo test -p ocean-daemon persistent_room_http_ -- --nocapture`
 - `cargo test -p ocean-daemon room_read_cursor_ --locked -- --nocapture`
 - `cargo test -p ocean-daemon room_ -- --nocapture`
+- `cargo test -p ocean-daemon room_resources::tests --locked -- --nocapture`
 - `cargo test -p ocean-daemon room_reviewed_digest_ --locked -- --nocapture --test-threads=1`
 - `cargo test -p ocean-daemon room_sovereign_ --locked -- --nocapture --test-threads=1`
 - `cargo test -p ocean-daemon p2c_ --locked -- --nocapture --test-threads=1`

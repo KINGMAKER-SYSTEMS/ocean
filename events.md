@@ -1046,6 +1046,35 @@ Closed the leftovers from the review that acknowledged the thinking-binding reco
 Validation: ocean-protocol (187 plus 5) passes; clippy with warnings denied on ocean-protocol and ocean-agent tests, rustfmt check pass. The strip test covers the thinking-only assistant turn. No provider was called.
 _________________________________________________________________________________
 _________________________________________________________________________________
+time: [14:00] [06-10-26]
+agent: [zcode] [glm-5.3]
+worktree: [port/rooms-stage2c-resources]
+type: [feature-request]
+area: [backend] reconciliation: Rooms Phase 2 Stage 2c grant surface
+
+Seventh bounded Track B port: the Rooms Phase 2 Stage 2c contributed-folder
+grant surface. Scoping found the enforcement half was ALREADY on Kingmaker
+main from the publication snapshot — resolve_turn_cwd applies the §5 rule
+(agent default folder > admitted grant > room workspace root),
+DurableRoomResourceAuthority gates per-call confined list/read, and
+ocean-agent already exports confine/ConfineRefusal — so this unit is the
+management surface only and grants become effective the moment they are
+created: list/grant, get/revoke, suspend, resume, and the two operator
+preview endpoints (confined list/read through the same authority an admitted
+agent uses, audited as operator_preview). Grant roots must canonicalize (the
+manifest's dangerous-root list is refused by name); the §7.4 safe projection
+never carries local_root or digests. The one structural adaptation:
+DurableRoomResourceAuthority's fields moved to the personal shape (rooms
+handle + actor), with the base persistent_rooms call site updated to match;
+check_profile_resource_refs and TurnCwd::projection were trimmed from this
+branch because their consumers are #43's profile routes and the upcoming
+room_inspect port respectively — they ride those PRs so this one stays
+warning-free. Router-contract parity moved 119 → 127.
+
+Validation: room_resources tests (3) pass; router-contract parity (127)
+green; cargo test -p ocean-daemon 909 passed / 2 deterministic issue-#42
+failures reproduced on clean main; rustfmt; denied-warning Clippy zero;
+cargo check --workspace --tests; cargo xtask docs-check PASS.
 time: [13:22] [06-10-26]
 agent: [zcode] [glm-5.3]
 worktree: [port/rooms-identity-route]
@@ -1886,6 +1915,18 @@ area: [backend] [infra]
 Federated rooms on smaths-mini (northstar, ocean-team) sat in `recovering` with Pending outbox rows and no log output. Replaying the receiver's reads against production Bedrock with the room bearer showed a valid `hello` (high-water 0) and a 200 roster, but the roster carries `caller_member_ids` (Bedrock since ocean-bedrock #137, 2026-09-02) and `MembersEnvelope` is `deny_unknown_fields`, so every epoch silently returned Recover after hello. Fix: accept and ignore `caller_member_ids` on the strict envelope, warn with `outcome="roster_rejected"` on non-transport roster parse failures, and regression test `roster_with_caller_member_ids_reaches_live` (red without the field, green with it). The supervised launcher `deploy/ocean-daemon.sh` now sources owner-only `~/.config/ocean-rs/federation.env` and prints `federation=on|off`; previously only a hand-edited installed copy did, which the installer would overwrite. Operator guide documents the env file, contributor-side local redemption, and the receiver replay diagnosis. Independent review round: `WireMember` also accepts Bedrock's `operator_id` (same failure class, operator rooms); roster projection failures warn too; startup warns `federation_unconfigured` when credentialed rooms exist without a URL; the launcher parses federation.env as data (owner-only, not group/other-writable, `OCEAN_FEDERATION_*` keys only, CR/quote tolerant, plist values win) instead of sourcing it, verified under macOS bash 3.2 against command substitution, foreign keys, spaces, CRLF, group-writable and unreadable files. End-to-end: the fixed release binary, run unsupervised on an isolated HOME with a copied rooms.db (outbox cleared), brought northstar and ocean-team to `live` against production Bedrock. Follow-up folded in before merge: warn-only `credential_member_mismatch` when Bedrock's `caller_member_ids` omit the credential's local member (stale-credential diagnostic; never blocks Live). Launcher mode check fails closed on unparseable `stat` output. Validation: room_federation 92/92; ocean-daemon 910 passed / 2 failed at 99be7a9 (the known persistent_room envelope-key assertions, identical on unmodified main); clippy -p ocean-daemon --all-targets -D warnings clean; fmt clean; docs-check PASS; installer fixtures 12/12. Runtime ops the same evening (not code): Jay's laptop federation.env reduced to OCEAN_FEDERATION_URL (the direct-redeem contributor token was removed and its backup deleted) and his daemon restarted; a fresh invite minted by John's daemon was redeemed through Jay's local /v1/rooms/persistent/invites/redeem (credential f9757e6e in his rooms.db); the stale direct-path Bedrock member db0367cd was removed by the room owner (old token now 403 membership_revoked); the empty local test room ns-taskforce was soft-closed on smaths-mini. Both daemons stay `recovering` until this fix is merged and installed.
 _________________________________________________________________________________
 
+_________________________________________________________________________________
+time: [23:29] [09-10-26]
+agent: [codex] [factory release]
+worktree: [codex/pr45-resource-reconcile]
+type: [bug report]
+area: [backend] [testing] [review]
+
+PR #45 / issue #82: reconciled grant-management routes with canonical main f1b22bd8 while preserving both public ledger histories. Restored admitted-turn scope, digest, cancellation and current owner/access authority; operator previews capture separate request authority and reuse the same per-call checks. Consumed grant decisions reach transactional replay before mutable expiry/root-liveness checks, retaining exact replay after expiry or root removal and fixed mismatch/cross-ledger refusal. Fresh requests still validate their roots and expiry; stored absolute roots remain unchanged for confined descriptor I/O.
+
+Validation: missing-root replay failed before repair (400 instead of 200), then resource tests 7/7, router 5/5, locked daemon check, formatting, diff and docs checks passed (30 packages, 153 docs, 170 links). Synthetic fixtures cover cancellation, wrong scope/digest, owner/access loss, revoke/suspend, preview authority, expiry/root removal, normalized path replay, cross-ledger reuse and fresh invalid inputs. Independent source review ACKed 2c4b2ee6; this receipt precedes final exact-head review and hosted checks. Nearest daemon contract updated; parent ownership/indexes unchanged. Required maintainer approval and existing architecture/live-migration holds remain. No live credentials, provider calls, installation or deployment.
+_________________________________________________________________________________
+
 time: [23:12] [09-10-26]
 agent: [codex] [factory release]
 worktree: [codex/pr44-reviewed-summary]
@@ -2022,6 +2063,10 @@ ________________________________________________________________________________
 _________________________________________________________________________________
 time: [15:17] [10-12-26]
 agent: [Codex]
+worktree: [PR45; factory-pr45-resource-reconcile/ocean]
+type: [workflow]
+area: [review]
+Reconciled PR45 3c87ec61e5c7a5f1b0ea232c7d7f1d714ca8b170 with canonical main 1dfc6802bb74fecdcf83f6f17732b671c892b632. Only events.md conflicted; both complete parent histories remain verbatim and ordered. Every non-ledger blob/mode matches automatic merge, with existing candidate source unchanged and incoming release source preserved. Diff and parent-tree checks pass. Installer, fixture and launcher bytes equal previously validated main; no identical tests were repeated. Existing contracts merge cleanly without new ownership or index changes. Root owns the final head through separate adversarial review, fresh hosted builds and release. Issue90 and standing approval/live gates remain. No remote jobs, heavy builds, authentication, deployment or live actions.
 worktree: [PR44 port/rooms-summarize; factory-pr44-reviewed-summary/ocean]
 type: [workflow]
 area: [review]
@@ -2196,6 +2241,15 @@ Validation: in apps/ocean-surface, cargo fmt --check clean; WASM clippy -D warni
 _________________________________________________________________________________
 
 _________________________________________________________________________________
+time: [23:16] [10-12-26]
+agent: [codex] [gpt-6]
+worktree: [codex/pr45-main255-reconcile] [macmini-ip factory-pr45-main255-reconcile]
+type: [refactor]: PR #45 current-main reconciliation
+area: [backend] [testing] [review]
+
+Reconciled resource-route PR #45 head 7f5d47c3491fb9de7f5a71e5a7dbb69334b28a3f with canonical main 25599f22410c8e164dd09f13ad0a9254fa97a39d. Manual resolutions derive 137 routes (main's 129 plus eight resource endpoints), preserve both daemon verification checklists, and retain all resource guide rows alongside current message-authority wording. No manual runtime-body changes; room_resources.rs retains prior PR blob f535430e36099965f31c78688fadd72e2fdaa886. Other 1,173 non-ledger entries match AUTO_MERGE exactly.
+
+Five existing pure router/banner fixtures passed using standalone rustc extraction against the merged source; existing direct-rustc xtask docs-check passed 30 packages, 153 Markdown files, 170 links. Nonledger whitespace checks passed. No full Cargo compilation, Axum execution, provider calls or fresh resource behavioral regressions claimed; prior resource evidence remains unchanged-source history. Both public parent ledger histories survive line-for-line in original order, followed by this public-safe canonical receipt. The daemon devlog conflict resolution preserves both contracts; no child-index change is needed. Independent final-head review, hosted builds, maintainer approval under #54/#90, and architecture/live-migration acceptance remain gates. No merge or deployment claimed.
 time: [23:13] [10-12-26]
 agent: [codex] [gpt-6]
 worktree: [codex/pr44-main255-reconcile] [macmini-ip factory-pr44-main255-reconcile]
