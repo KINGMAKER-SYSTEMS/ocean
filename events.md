@@ -1289,6 +1289,28 @@ area: [ocean-agent] [sessions]
 Round 5: round-4 review follow-ups on model reroute fidelity. (F2) Selection-time reroute detection now compares the (provider, model) ROUTE pair instead of the model id alone, so a same-model cross-provider fallback (keyless claude-code/claude-opus-5-5 → anthropic/claude-opus-5-5 via an OCEAN_PROVIDER_FALLBACK `provider/model` entry) is recorded on the session and emitted; when a reroute's two routes carry the same model id, the ModelRerouted event strings are provider-qualified (fixed route identifiers only) so they never read as a no-op — applied at both the selection-time and pre-stream emission sites. (F3) Ordinary session creation in run_prompt/run_fake_prompt/create_session_with_model pins the selection ROUTE (`new_with_route(id, model.id, selection.provider)`), never the wire model's protocol provider, so a claude-code OAuth primary that fails pre-stream persists `provider = "claude-code"` at the accepted-user checkpoint; `Session::new_with_id` becomes cfg(test) scaffolding with a doc to that effect. Also fixed a resolution seam the new F3 turn-2 path exposed: the per-turn model override (`resolve_state_for_model`) read `ProviderEnv::from_process()` directly instead of `turn_env()`, so it could not see a test's injected env — now it uses `turn_env()`, the same env source as the failover decisions. Production-identical: outside tests `turn_env()` is still a fresh process-env read per call, not one cached snapshot per turn. Two failing-first tests (RED: requested_model None≠Some(claude-opus-5-5); pin anthropic≠claude-code), each re-verified by reverting ONLY its fix. Round-4b ledger corrected (F4): see the Round 5 correction paragraph above.
 
 Validation: ocean-agent 280 passed / 0 failed / 2 ignored; ocean-daemon 908 passed / 2 failed (only the two known pre-existing persistent_room envelope-key assertions); clippy -p ocean-agent --all-targets -D warnings clean; fmt --all --check clean; git diff --check clean.
+
+_________________________________________________________________________________
+time: [16:27] [06-10-26]
+agent: [codex] [gpt-6]
+worktree: [codex/issue52-public-doc-provenance-fix]
+type: [privacy fix] [issue #52] [PR #51]
+area: [docs] [release]
+
+Removed source-repository PR, reviewer, branch, and release history from the
+public extension manifests and ledger, along with the noncanonical source-side
+A5 evidence attachment. Preserved the Stage A sequencing and acceptance gates;
+clarified canonical status: A1–A2b accepted, A3a next, and later slices
+unaccepted absent public implementation, review, checks, and operator
+acceptance.
+
+Validation: canonical xtask docs-check source compiled directly with `rustc`
+and passed (30 packages, 153 active Markdown files, 170 local links);
+`git diff --check` passed. Fresh review is pending after this precision
+correction. Merge remains held pending the required-review enforcement audit
+in issue #54.
+_________________________________________________________________________________
+
 _________________________________________________________________________________
 time: [22:24] [08-10-26]
 agent: [claude] [claude code]
@@ -1624,6 +1646,15 @@ PR #65 reconciled own-agent consent with canonical main f1b22bd8 and preserved b
 
 Validation: focused reviewed-digest, sovereign-consent and federation p2c groups passed (3, 6 and 40 tests), plus locked daemon check, formatting, diff and docs checks (30 packages, 153 docs, 170 links). Synthetic absolute auth/config/XDG fixtures only; HOME unchanged. Independent source review ACKed 307a316f. This receipt precedes final exact-head review and required hosted checks. Nearest owning contract corrected; parent ownership/indexes unchanged. Maintainer approval, client adoption of the optional digest and actual two-human/live-migration acceptance remain separate. No installation, deployment or live provider calls.
 _________________________________________________________________________________
+time: [23:44] [09-10-26]
+agent: [codex]
+worktree: [codex/issue52-public-doc-provenance-fix]
+type: [workflow] [PR #51]
+area: [docs] [review]
+
+Reconciled the existing public Stage A clarification with canonical main, preserving both ledger histories. Issue #54 now resolves the historical review-policy hold; the effective required maintainer approval and exact-head checks still apply. The two manifest changes remain unchanged: implementation presence does not establish slice acceptance. No runtime behavior or acceptance gate changed.
+
+Validation: canonical xtask source compiled with rustc; docs-check passed (30 packages, 153 active Markdown files, 170 local links), and git diff --check passed. Owning devlog contracts/indexes remain unchanged because scope, authority and structure are unchanged. Independent final-head review and required checks remain release gates; no merge or deployment is claimed.
 time: [19:13] [10-10-26]
 agent: [claude] [claude-opus-5-5]
 worktree: [fix/room-consent-consumer] [~/dev/oceanwork/wt-consent-consumer]
@@ -1674,6 +1705,15 @@ worktree: [PR67 codex/pr67-auth-fixture-reconcile]
 type: [workflow]
 area: [review]
 Reconciled PR67 4f2fc5e449fa33a9a4858ce50c9bf24c66ac0471 with canonical main 1dfc6802bb74fecdcf83f6f17732b671c892b632. Only events.md conflicted; both complete74-record public parent histories remain verbatim and ordered. All1153 non-ledger entries match automatic merge. Complete Surface source and its prior32/32 proxy validation receipt are unchanged; Ocean OS matches main. Cached diff and shell syntax checks pass; identical tests were not repeated. Existing contracts remain accurate with no ownership/index changes. Root owns final commit, separate adversarial review, push and fresh hosted builds. Issue90 and live acceptance remain holds; live PWA smoke is separate from transport fixture proof. No live PWA outcome, authentication, installation or deployment claimed.
+
+_________________________________________________________________________________
+time: [17:47] [12-10-26]
+agent: [Codex] [factory release owner]
+worktree: [port/extension-stage-a-governance; PR51]
+type: [refactor]
+area: [writing] [review]
+
+Reconciled PR51 with canonical main34751752. Only additive events.md history conflicted; both complete parent histories are preserved verbatim and ordered. Original two public Stage A manifests remain byte-identical: A1 through A2b accepted, A3a implementation present with acceptance pending, later slices gated. All other non-ledger content equals canonical main. Direct-rustc canonical docs-check passed 30 packages, 153 active documents and 170 links. Diff check passed. Owning contracts and indexes intentionally unchanged because this integration changes no proposal or runtime contract. Final exact-head independent review and required hosted checks follow. Standing independent maintainer approval and policy90 holds remain; no operator ratification, slice acceptance, merge, deployment or live outcome claimed.
 _________________________________________________________________________________
 time: [17:48] [10-12-26]
 agent: [claude] [opus 5.5]
