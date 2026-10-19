@@ -536,6 +536,14 @@ jobs:
         run: cargo build --locked --release -p ocean-daemon -p ocean-tui
       - name: Test Windows file and operator security
         run: cargo test --locked --release -p ocean-daemon --test windows_file_security
+      - name: Test Windows daemon discovery
+        run: |
+          rustc --edition=2021 --test crates/ocean-tui/src/shell/daemon_boot.rs -o target/windows-daemon-boot-tests.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./target/windows-daemon-boot-tests.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Boot Windows daemon in an isolated profile
+        run: python ../../.github/test-daemon-startup.py target/release/ocean-daemon.exe $env:GITHUB_SHA
       - name: Verify both executable outputs
         run: |
           foreach ($binary in @('ocean-daemon.exe', 'ocean-tui.exe')) {

@@ -2748,3 +2748,30 @@ type: [bug report]
 area: [backend] [testing]
 
 Native Windows probe 39326283845 passed all 20 credential tests, then exposed the next compiler blocker: the skill reader treated every non-Linux host as Unix. Added a Windows reader for absolute local-drive paths, retaining directory handles and opening each child relative to its parent with reparse refusal; device, UNC, parent-traversal and alternate-stream paths stay refused. Added actual-source native integration fixtures for guarded reads, parent retargeting and operator-key/header behavior; existing Unix skill reads remain unchanged. Windows cross-target Clippy passes; fresh native execution and review remain pending. Updated daemon and workflow contracts; no new devlog boundary or changed parent index. Release repair PR #115 merged at 50985671 after review and exact-head CI; immutable v0.2.1 validation/publication is running as 39328117964. No release availability or Windows runtime acceptance claimed.
+
+_________________________________________________________________________________
+time: [17:37] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/windows-daemon-discovery]
+type: [bug report]
+area: [testing] [backend]
+
+Corrected TUI daemon discovery for Windows: native PATH parsing, .exe sibling/default lookup and suffix-free overrides, rejection of directory candidates, and absolute USERPROFILE/native temporary fallback for neutral cwd/log placement. Unix HOME and launchd ownership behavior are preserved. All 28 standalone boot-module tests pass under pinned Rust; actual-source Windows metadata compilation and cargo check -p ocean-tui pass. Release build and native Windows execution remain pending. Updated the owning TUI contract; no child index or ownership boundary changed. No installation or team-readiness claim.
+
+_________________________________________________________________________________
+time: [17:52] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/windows-daemon-discovery]
+type: [bug report]
+area: [testing] [workflow]
+
+PR #116 merged at dfaa85fe after fresh review, exact-head builds and native Windows proof: both release executables and all 39 credential/operator/guarded-file tests passed. Reconciled daemon discovery with that source and added actual-source boot-module execution to the opt-in Windows probe. Local TUI check/release and 28 host boot-module tests passed; native discovery execution remains pending. Updated the owning workflow contract; parent indexes unchanged. No Windows package, installation or team-readiness claim.
+
+_________________________________________________________________________________
+time: [17:54] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/windows-daemon-discovery]
+type: [workflow]
+area: [testing]
+
+Added an actual daemon startup smoke to the manual Windows probe: disposable state, explicit model, no inherited provider credentials, unique loopback listener, revision/member verification and owned-child cleanup. The same script passes against the downloaded Mac 0.2.1 binary; Windows execution remains pending. Windows ACL acceptance stays with native Rust fixtures rather than POSIX mode assertions. Updated workflow ownership; parent indexes unchanged. Release bootstrap PR #118 is pushed at 42f61896 with local regression proof; both hosted review services report exhausted quota, so fresh review and landing are blocked without a quota change or another qualified reviewer. No bypass, package promotion or live Surface replacement performed.
