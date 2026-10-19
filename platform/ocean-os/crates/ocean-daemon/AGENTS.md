@@ -16,7 +16,7 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   Serialize start, cancel, and logout under an independent per-provider
   operation lease through cancel/bind/register or removal. Retain each attempt's
   OAuth publication fence even when an HTTP future drops; revoke and settle it
-  before replacement/logout. Blocking removal retains its operation lease.
+  before replacement/logout. Logout retains its operation lease in an owned task through local credential removal and bounded remote revocation even if the HTTP waiter drops. The response exposes `remote_revocation` and a fixed message so local sign-out never implies confirmed remote revocation.
   Status runs custody/native reads off Tokio workers and projects the shared
   runtime resolver's token-free origin separately from stored OAuth facts.
   Login failure logs and responses contain only fixed classifications/provider
@@ -37,6 +37,13 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   selections. Session creation/config accept both legacy ids and qualified
   catalog routes, persist the wire model/provider pair, and reconstruct the
   qualified route for resumed turns through `SessionModelConfig::model_spec`.
+- ChatGPT-plan choices are account-specific: query public `/v1/models` with
+  the `openai-chatgpt` bearer token, preserve the response's listed order and
+  `display_name`, and expose only `models[]` entries with
+  `visibility:"list"` as provider-qualified routes. These routes may use
+  dynamically listed slugs that are absent from the bundled catalog. Failure
+  to fetch leaves bundled ChatGPT routes unready; a stored credential alone
+  never proves model entitlement.
 - Restart the daemon only by specific PID; do not use blind `pkill` sweeps.
 - HTTP turn routes must resolve effective cwd from client cwd/project metadata and must never fall back to daemon process cwd.
 - Do not bypass runtime permission gates from daemon route code.
@@ -260,12 +267,17 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   cancels it without rewriting the settled registry fact, so cached capability
   clones cannot schedule later I/O. An already-running memory operation is not
   atomically revoked. Preserve existing session leases and permission gates.
-- `room_profile.rs` is only a read-only required-slot status adapter against
-  runtime-captured config authority. `room_resources.rs` is only cwd/catalog
-  selection plus scoped list/read authority and content-free audit callbacks.
-  Return the stored canonical grant root unchanged to #24 descriptor I/O;
-  catalog/handle issuance alone is not an in-flight operation proof. No profile
-  or grant mutation/preview routes are opened.
+- `room_profile.rs` owns Stage 2b profile GET/PUT and required-slot status
+  against runtime-captured config authority. PUT retains the operator gate and
+  pure typed shape validation; the store transaction resolves consumed decisions
+  before grant-reference validation and profile writes. Exact retries remain
+  no-ops after revocation; mismatched/cross-ledger retries return 409, and new
+  missing/revoked references retain 400 `resource_not_found`. Slot projections
+  omit resolver strings and credential values. `room_resources.rs` owns only
+  cwd/catalog selection plus scoped list/read authority and content-free audit
+  callbacks. Return the stored canonical grant root unchanged to #24 descriptor
+  I/O; catalog/handle issuance alone is not an in-flight operation proof. No
+  grant mutation/preview routes are opened by Stage 2b.
 - Approved consumer fanout: Agent `memory_tools.rs` adds a private optional
   operation callback on the opaque admitted handle, with fixed typed refusal;
   Agent `lib.rs` only reexports that interface and Agent `AGENTS.md` records it.
@@ -296,7 +308,7 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   new synthetic capture-bound and per-call memory-revocation checks. Root runs
   locked focused/full daemon tests, denied-warning Clippy and workspace test
   compilation remotely; independent exact-source review is required.
-- Deferred: Room metrics/sampler, attachments/context, profile/resource writes,
+- Deferred: Room metrics/sampler, attachments/context, resource writes,
   retirement/summary/maintenance/workspace bridge, client onboarding/UI, extension
   scheduling, Unknown build execution and CI orchestration. Keep #22/#48 holds;
   automated CI remains only Build Ocean and Build Surface.
@@ -376,8 +388,8 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
 
 - Preserve the accepted store/core foundation and #14–19 repairs. The scoped
   admission stage above does not establish full production parity or lift the
-  live-daemon migration hold; profile/resource writes, attachments, retirement
-  and subsequent accepted stages remain separate.
+  live-daemon migration hold; Stage 2b profile routes do not establish resource
+  writes, attachments, retirement or subsequent accepted stages.
 - Create accepts the original `on_build_failure` marker hint path; its `Unknown`
   activation remains refused. Create refuses `on_ci_failure` before persistence
   because CI is marker-only. Legacy true flags round-trip, and omitted-policy
