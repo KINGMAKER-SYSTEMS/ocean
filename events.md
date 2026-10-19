@@ -2811,3 +2811,30 @@ type: [bug report]
 area: [backend] [testing]
 
 Provider credential publication on Windows now creates its temporary file with the existing protected current-user-only ACL primitive before writing any bytes, instead of inheriting folder permissions. The target-only Observatory dependency supplies file creation only; publication leases, merge behavior and provider routing remain unchanged. Added native checks for empty-file privacy and replacement ACLs, plus provider custody and OAuth store tests in the manual Windows probe. Host 9 custody, 6 store and 10 refresh tests pass; provider Clippy, docs-check, format, actionlint and workflow contracts pass. Native Windows execution of the new credential checks is pending. Updated Providers, Observatory, OAuth and workflow contracts; ownership indexes unchanged.
+
+_________________________________________________________________________________
+time: [18:36] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/windows-surface-proxy]
+type: [bug report]
+area: [backend] [testing]
+
+The browser proxy imported Unix file APIs unconditionally. Added Windows credential/session-secret reads and create-new writes through the daemon's existing protected-owner-ACL file primitive, plus absolute HOME/USERPROFILE defaults. Existing Unix file semantics, login gate, exact owner routes and browser credential boundary remain unchanged. Converted transport fixtures to platform-private file creation; added Windows persistence, unsafe-file/link refusal and profile fixtures. Full 38-test host proxy suite, all-target Clippy, actionlint, workflow contracts and docs-check pass. Native Windows proxy execution is added to the manual read-only probe and remains pending. Updated Surface, runtime file-owner and workflow contracts; parent boundary indexes unchanged. No Windows installer, native Tauri consent, real-provider or deployed-client acceptance claimed.
+
+_________________________________________________________________________________
+time: [18:37] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/windows-surface-proxy]
+type: [workflow]
+area: [testing]
+
+Keep Windows Surface validation separate from the daemon candidate: opt-in windows_surface_probe runs the full proxy suite and real release build without unrelated daemon/TUI builds or Mac packaging. It remains read-only, bounded and same-ref cancelling. Workflow contracts/actionlint pass; the committed Surface source at 0c61d800 also passed all 38 proxy tests from a clean detached checkout before push.
+
+_________________________________________________________________________________
+time: [18:40] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/windows-surface-proxy]
+type: [bug report]
+area: [testing]
+
+Native Windows run 39336237747 compiled the proxy and passed 38 of 39 tests, including protected credentials, owner forwarding and observer SSE. The route-inventory source scan failed on checkout CRLF before scanning build_app. Normalize source line endings in that test without changing route coverage; the targeted host test passes. Owner contracts remain unchanged because only the test parser changed. Fresh native validation is required; the failed run is not acceptance.

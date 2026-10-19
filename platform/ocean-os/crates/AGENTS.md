@@ -16,6 +16,9 @@ This child doc governs `crates/` and is the canonical ownership, entry-point, an
 - Treat each package as an ownership boundary.
 - Read the target package's local `AGENTS.md` when the index links one.
 - Do not introduce cross-crate coupling without documenting the contract in affected owner docs.
+- `ocean-observatory::auth::windows_file` supplies the checked owner-only Windows
+  file primitives for daemon credentials and the Surface proxy. Surface uses
+  only file creation/read validation, not Observatory storage or runtime policy.
 - When adding/removing/renaming a workspace package, update this index in the same change and verify it against `cargo metadata --no-deps --format-version=1`.
 - Every package manifest must inherit the root non-publication contract with `publish.workspace = true` / `publish = { workspace = true }`, or set `publish = false` explicitly. `cargo xtask docs-check` rejects a workspace member that omits this safeguard.
 - Keep entry points and narrow validation current; stale routing information is a correctness defect for agent work.

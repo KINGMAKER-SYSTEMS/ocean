@@ -121,9 +121,26 @@ static architecture; actor, tool, attention, status, room lighting, and
 topology treatments come only from real reducer state. Animation is truthful:
 typing/blink/wave and screen activity render recorded phases, the one-shot
 walk-in visualizes a live admission event, and reduced motion stops the loop.
-The web proxy reads the daemon-minted mode-0600 observer token immediately
+The web proxy reads the daemon-minted private observer token immediately
 before each upstream request and injects it server-side. Never expose that
 token to browser code, bundle it, or cache it in client storage.
+
+## Windows proxy files
+
+- The Windows proxy uses `ocean_observatory::auth::windows_file` from the public
+  runtime component for session-secret creation and observer/operator reads.
+  This target-only dependency shares file validation, not execution authority.
+  It requires a protected current-user-only ACL and refuses reparse points,
+  nonregular files and extra hard links without repairing existing files.
+  Unix mode-0600/no-follow behavior remains unchanged.
+- Default state and session-secret paths use absolute HOME or USERPROFILE on
+  Windows, preserving explicit config/key/secret overrides and Unix HOME rules.
+- The session gate and exact owner-mutation route allowlist apply on both
+  platforms. No operator credential is exposed to the browser or attached
+  when proxy login is disabled. Native Room consent remains Tauri-only.
+- Verify the full proxy suite on Windows with `cargo test --locked -p
+  ocean-surface-proxy`; the manual Windows probe owns this check. Compilation
+  and synthetic transport fixtures do not establish packaged/client acceptance.
 
 ## Empty Session Surface
 
