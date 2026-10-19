@@ -2564,6 +2564,13 @@ Removed the second, byte-identical copy of the `[17:55] [06-10-26]` model-rerout
 _________________________________________________________________________________
 
 _________________________________________________________________________________
+time: [13:55] [10-19-26]
+agent: [claude code] [claude-fable-5-1]
+worktree: [port/os-527-credential-resnapshot] [~/dev/oceanwork/wt-port]
+type: [fix] [port]
+area: [backend]
+
+Ported Risingtides-dev/ocean-os#527. `AgentRuntime::refreshed_global_snapshot` re-resolves the stored global selection's credential from the same `ProviderEnv` the failover decision uses, after the turn-top OAuth refresh has rewritten auth.json, and writes the refreshed state back so `/ready` and later turns agree. Only the credential may change: a failed resolution, a different selection or no credential keeps the stored snapshot. Three tests cover a credential that was expired at selection, a token rotated after selection, and a vanished auth file. The legacy diff applied cleanly (offsets only). Validation: `cargo test -p ocean-agent --lib` 287 passed.
 time: [13:40] [10-19-26]
 agent: [claude code] [claude-fable-5-1]
 worktree: [port/os-528-retire-codex-ids] [~/dev/oceanwork/wt-port]
