@@ -2730,3 +2730,12 @@ type: [bug report]
 area: [testing] [workflow]
 
 Stable-tag run 39324095372 validated the Mac package and npm/Bun installs, then publication failed before shell execution because its checkout-free job inherited a nonexistent component directory. Start artifact download at the existing workspace root, retain exact ZIP digest verification, and create component staging only after verification. The regression executes the actual workflow shell with a local artifact in an empty workspace, and proves a bad digest fails before staging. Actionlint, workflow contract tests and diff checks pass. Updated the owning workflow contract; parent indexes unchanged. Browser invitation PR #114 merged at 8723a1d1 after exact-head review and CI. No package publication or live Surface replacement claimed.
+
+_________________________________________________________________________________
+time: [17:49] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/release-first-tag]
+type: [bug report]
+area: [workflow] [testing]
+
+Tag run 39328117964 published @kingmaker-systems/ocean 0.2.1 and verified its payload integrity on retry, but latest-tag convergence failed because npm's unversioned view resolves through latest before latest exists. Query the complete versions catalog through the verified version instead. A real npm loopback-registry fixture reproduces the old failure without latest, verifies first publication, and proves the pinned lookup still discovers newer versions. Actionlint, release workflow contracts and diff checks pass. Owning workflow contract updated; parent indexes unchanged. Downloaded draft asset checksum matched f0b4c4e69a6079cf2cbfe46230895cd3a71a92117bd0ec6ffc4f34c6acf16e09; the actual packaged daemon passed isolated-profile startup, health/revision, member identity and private state-file checks with an explicit model and no provider credentials. GitHub release remains draft and local registry readback is blocked by the current CLI token's missing read:packages scope; no public release or provider-reply claim.
