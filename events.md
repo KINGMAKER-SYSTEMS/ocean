@@ -2748,3 +2748,12 @@ type: [bug report]
 area: [backend] [testing]
 
 Native Windows probe 39326283845 passed all 20 credential tests, then exposed the next compiler blocker: the skill reader treated every non-Linux host as Unix. Added a Windows reader for absolute local-drive paths, retaining directory handles and opening each child relative to its parent with reparse refusal; device, UNC, parent-traversal and alternate-stream paths stay refused. Added actual-source native integration fixtures for guarded reads, parent retargeting and operator-key/header behavior; existing Unix skill reads remain unchanged. Windows cross-target Clippy passes; fresh native execution and review remain pending. Updated daemon and workflow contracts; no new devlog boundary or changed parent index. Release repair PR #115 merged at 50985671 after review and exact-head CI; immutable v0.2.1 validation/publication is running as 39328117964. No release availability or Windows runtime acceptance claimed.
+
+_________________________________________________________________________________
+time: [18:30] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/windows-profile-paths]
+type: [bug report]
+area: [backend] [testing]
+
+Windows machines without HOME now select absolute USERPROFILE for shared Agent state and default Ocean/Codex/native Claude credential paths. Explicit config and account paths retain precedence; Unix behavior is unchanged. Added synthetic profile/account-isolation fixtures and native Windows workflow execution. Fixed the native Claude subprocess helper cfg so Windows test compilation does not include an unused Unix-only test helper. Local provider 74, OAuth store 6, and Agent refresh 10 tests pass; host and Windows cross-target provider Clippy, docs-check, actionlint, and workflow contracts pass. Native Windows execution and fresh independent review remain pending. Updated provider, Agent, crate-index and workflow contracts; no new boundaries. No installation or real provider login claimed.

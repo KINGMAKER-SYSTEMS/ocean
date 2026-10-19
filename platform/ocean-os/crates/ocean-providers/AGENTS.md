@@ -19,6 +19,14 @@ auth-file write custody. Provider wire encoding remains in `ocean-protocol`.
   credential blocks, file paths, and environment names out of this projection.
   Its synchronous file/native work belongs on a blocking worker at async callers.
 
+- `default_config_dir` is shared by Agent state and default Ocean credentials:
+  explicit `OCEAN_CONFIG_DIR`, then `XDG_CONFIG_HOME/ocean-rs`, then selected
+  home `.config/ocean-rs`. Windows selects absolute `HOME` or `USERPROFILE`;
+  Unix HOME behavior is unchanged. Codex and native Claude defaults use the
+  same home selection; explicit auth/CLI config overrides retain precedence.
+  Directory selection performs no I/O; only Agent retains its historical cwd
+  fallback. Native Claude uses its captured environment and never borrows a
+  different account after an explicit home/config selection.
 - Preserve forward model/catalog routes and feature credential isolation.
 - Public Codex routes include GPT-6.1 Sol, GPT-6 Sol, GPT-6 Luna and GPT-6
   Astra. Claude Opus aliases track 5.5 (1M/128K); explicit 5/4.x ids remain
@@ -81,6 +89,7 @@ auth-file write custody. Provider wire encoding remains in `ocean-protocol`.
 - `cargo test -p ocean-providers auth_file --locked -- --test-threads=1`
 - `cargo test -p ocean-providers --locked`
 - Credential consumer changes also require OAuth store and Agent refresh tests.
+- Native Windows profile fixtures: `cargo test -p ocean-providers profile --locked`.
 
 ## Child devlog Index
 
