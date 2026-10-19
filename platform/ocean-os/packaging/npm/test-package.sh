@@ -45,7 +45,11 @@ node -e '
     "TRADEMARKS.md",
     "THIRD-PARTY-LICENSES.txt",
   ];
-  if (pkg.name !== "@risingtides-dev/ocean") throw new Error(`unexpected package name: ${pkg.name}`);
+  if (pkg.name !== "@kingmaker-systems/ocean") throw new Error(`unexpected package name: ${pkg.name}`);
+  if (pkg.repository?.url !== "git+https://github.com/KINGMAKER-SYSTEMS/ocean.git" ||
+      pkg.repository?.directory !== "platform/ocean-os/packaging/npm") {
+    throw new Error("package must link to the canonical monorepo component");
+  }
   if (pkg.version !== expectedVersion) throw new Error(`expected version ${expectedVersion}, got ${pkg.version}`);
   if (pkg.license !== "MIT OR Apache-2.0") throw new Error(`unexpected package license: ${pkg.license}`);
   if (JSON.stringify(pkg.bin) !== JSON.stringify(expectedBins)) throw new Error("unexpected bin map");
@@ -94,7 +98,7 @@ FAKE
 chmod +x "$manager_dir/bun"
 OCEAN_UPDATE_ARGS="$tmp_dir/bun.args" PATH="$manager_dir:/usr/bin:/bin" \
   "$PKG_DIR/ocean-update.sh" > "$tmp_dir/bun.out"
-test "$(cat "$tmp_dir/bun.args")" = "$(printf 'add\n-g\n@risingtides-dev/ocean@latest')"
+test "$(cat "$tmp_dir/bun.args")" = "$(printf 'add\n-g\n@kingmaker-systems/ocean@latest')"
 grep -q "not hot-swapped" "$tmp_dir/bun.out"
 
 rm "$manager_dir/bun"
@@ -105,7 +109,7 @@ FAKE
 chmod +x "$manager_dir/npm"
 OCEAN_UPDATE_ARGS="$tmp_dir/npm.args" PATH="$manager_dir:/usr/bin:/bin" \
   "$PKG_DIR/ocean-update.sh" > "$tmp_dir/npm.out"
-test "$(cat "$tmp_dir/npm.args")" = "$(printf 'install\n-g\n@risingtides-dev/ocean@latest')"
+test "$(cat "$tmp_dir/npm.args")" = "$(printf 'install\n-g\n@kingmaker-systems/ocean@latest')"
 grep -q "not hot-swapped" "$tmp_dir/npm.out"
 
 pack_json="$({

@@ -7,12 +7,13 @@ import os
 from pathlib import Path
 import re
 import secrets
+import shutil
 import stat
 import sys
 import tomllib
 import unicodedata
 
-SCOPE = "@risingtides-dev:registry=https://npm.pkg.github.com"
+SCOPE = "@kingmaker-systems:registry=https://npm.pkg.github.com"
 TOKEN_KEY = "//npm.pkg.github.com/:_authToken="
 DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 
@@ -143,15 +144,62 @@ def atomic_write(directory, destination, text, private_directory=False):
             pass
 
 
+def package_commands(require_org=False, package_root=None, bin_dir=None):
+    """Inspect resolved package links without executing Ocean commands."""
+    roots = set()
+    if require_org and (bool(package_root) == bool(bin_dir)):
+        raise ValueError("one installation location is required")
+    expected_root = Path(package_root).resolve(strict=True) if package_root else None
+    for command in ("ocean", "ocean-daemon", "ocean-update"):
+        found = shutil.which(command)
+        package = None
+        if found:
+            executable = Path(found).resolve(strict=True)
+            for root in executable.parents:
+                manifest = root / "package.json"
+                if not manifest.is_file():
+                    continue
+                try:
+                    metadata = json.loads(manifest.read_text())
+                except (ValueError, UnicodeError):
+                    break
+                if not isinstance(metadata, dict):
+                    break
+                name = metadata.get("name")
+                if name == "@risingtides-dev/ocean":
+                    raise ValueError("personal package command shadows org install")
+                bins = metadata.get("bin", {})
+                target = bins.get(command) if isinstance(bins, dict) else None
+                if name == "@kingmaker-systems/ocean" and isinstance(target, str):
+                    if (root / target).resolve(strict=True) == executable:
+                        package = root
+                break
+        if require_org:
+            if package is None:
+                raise ValueError("command does not resolve to org package")
+            if expected_root is not None and package != expected_root:
+                raise ValueError("command shadows the updated package")
+            if bin_dir is not None and executable != (Path(bin_dir) / command).resolve(strict=True):
+                raise ValueError("command shadows the updated package manager bin")
+            roots.add(package)
+    if require_org and len(roots) != 1:
+        raise ValueError("commands resolve to different package installations")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["validate", "identity", "npmrc"])
+    parser.add_argument("action", choices=["validate", "identity", "npmrc", "check-commands", "verify-commands"])
     parser.add_argument("--config-dir")
     parser.add_argument("--member", default="")
     parser.add_argument("--display-name", default="")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--npmrc")
+    parser.add_argument("--package-root")
+    parser.add_argument("--bin-dir")
     args = parser.parse_args()
+    if args.action in {"check-commands", "verify-commands"}:
+        package_commands(require_org=args.action == "verify-commands", package_root=args.package_root, bin_dir=args.bin_dir)
+        return
     if args.action in {"validate", "identity"}:
         identity_file(args, write=args.action == "identity")
     if args.action in {"validate", "npmrc"}:
@@ -163,7 +211,7 @@ def main():
             with parent_directory(path, create=True) as directory:
                 with owned_file(directory, path.name) as fd:
                     lines = read_file(fd).splitlines() if fd is not None else []
-                lines = [line for line in lines if not line.strip().startswith(("@risingtides-dev:registry=", TOKEN_KEY))]
+                lines = [line for line in lines if not line.strip().startswith(("@kingmaker-systems:registry=", TOKEN_KEY))]
                 atomic_write(directory, path.name, "\n".join([*lines, SCOPE, TOKEN_KEY + token, ""]))
 
 

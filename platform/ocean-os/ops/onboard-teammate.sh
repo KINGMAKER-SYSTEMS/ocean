@@ -4,7 +4,7 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PKG="@risingtides-dev/ocean"
+PKG="@kingmaker-systems/ocean"
 CONFIG_DIR="${OCEAN_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/ocean-rs}"
 NPMRC="$HOME/.npmrc"
 MODEL=""; MEMBER_ID=""; DISPLAY_NAME=""; FORCE=0; DRY=0
@@ -15,7 +15,7 @@ Usage: ops/onboard-teammate.sh --model MODEL --member ID
                               [--display-name NAME] [--force] [--dry-run]
 
 Requires macOS arm64, Python 3.11+, gh authenticated with read:packages,
-and bun or npm. Installs @risingtides-dev/ocean and writes member.toml.
+and bun or npm. Installs @kingmaker-systems/ocean and writes member.toml.
 --force replaces an existing different or malformed identity; it never bypasses
 file custody checks. --dry-run validates and reports without authentication,
 network access, credential reads, package installation, or file changes.
@@ -52,10 +52,19 @@ if [[ $DRY -eq 1 ]]; then
   exit 0
 fi
 command -v gh >/dev/null 2>&1 || fail "install gh and run gh auth login, then gh auth refresh -s read:packages" 69
+if command -v npm >/dev/null 2>&1; then
+  npm_root="$(npm root --global)" || fail "could not inspect npm global packages" 69
+  if [[ -d "$npm_root/@risingtides-dev/ocean" ]]; then
+    fail "personal Ocean package is installed. Download the org package with 'npm pack @kingmaker-systems/ocean@latest', then remove the personal package with 'npm uninstall -g @risingtides-dev/ocean' and install the downloaded tarball with 'npm install -g ./<tarball>'. Rerun onboarding afterward. Nothing was changed." 78
+  fi
+fi
+python3 "$FILES" check-commands || fail "an existing Ocean command resolves to a personal or unreadable installation. Fix its PATH/package links before onboarding; no credentials or config were changed." 78
 if command -v bun >/dev/null 2>&1; then
   installer=(bun add -g)
+  manager=bun
 elif command -v npm >/dev/null 2>&1; then
   installer=(npm install -g)
+  manager=npm
 else
   fail "install bun or npm first" 69
 fi
@@ -68,9 +77,14 @@ fi
 printf '%s\n' "$package_token" | python3 "$FILES" npmrc --npmrc "$NPMRC"
 unset package_token
 "${installer[@]}" "$PKG@latest"
-for bin in ocean ocean-daemon ocean-update; do
-  command -v "$bin" >/dev/null 2>&1 || fail "$bin is missing after package install; check the package manager's global bin PATH" 70
-done
+if [[ "$manager" == bun ]]; then
+  installed_bin="$(bun pm bin -g)" || fail "could not inspect the updated Bun bin directory" 70
+  [[ -n "$installed_bin" ]] || fail "Bun returned no global bin directory" 70
+  installed_args=(--bin-dir "$installed_bin")
+else
+  installed_args=(--package-root "$npm_root/$PKG")
+fi
+python3 "$FILES" verify-commands "${installed_args[@]}" || fail "Ocean commands must resolve to the @kingmaker-systems/ocean installation just updated. Fix the package manager global bin PATH and rerun; member identity was not changed." 70
 python3 "$FILES" identity "${identity_args[@]}"
 cat <<CHECKLIST
 Package and host identity prepared. No daemon was installed or restarted.
