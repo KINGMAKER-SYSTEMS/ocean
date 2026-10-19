@@ -24,6 +24,13 @@ transcripts by session id.
   original provider block/token identity. Removed or changed blocks/files are
   never resurrected; unrelated latest provider edits survive. Blocking custody
   runs off the async worker and retains existing refresh singleflight/cooldowns.
+- Provider-owned catalog requests may call `ensure_oauth_provider_fresh` for
+  only the provider block they need; this uses the same expiry checks,
+  singleflight, cooldown and compare-before-publish refresh path as turns.
+- `openai-chatgpt` refresh uses the issued `client_id` in its OAuth block and a
+  form-encoded grant with `resource=https://api.openai.com/v1`; it preserves
+  account metadata and persists rotated access/refresh/id tokens under the
+  same compare-before-publish custody. It never uses the Codex CLI client id.
 - The shared create-new publisher sets Unix0600 before bytes and distinguishes
   pre-rename failure from published bytes whose directory durability is
   unconfirmed. Never roll back a stale credential snapshot, hold custody across
@@ -49,6 +56,7 @@ transcripts by session id.
   the turn itself succeeded. A turn stopped at its turn limit is marked too:
   it ends on a tool round whose results were saved after the measured request.
   The daemon must take the label from that mark, never from the turn's `ok`.
+- `AgentRuntime::model_is_routable` delegates to the turn resolver and wire-model construction without mutating selection or contacting a provider. Routability is not readiness, entitlement, or successful inference.
 - Preserve session compatibility unless a migration is documented.
 - Every advertised catalog model must construct a runtime wire model with the
   same id and limits. Current Opus/Sonnet 5.5 constructors use 1M/128K;
@@ -227,6 +235,8 @@ transcripts by session id.
   by the 300-second turn budget; every failure path (not-ready, provider
   error, timeout, empty summary) leaves the stored transcript untouched, and
   corrupt storage is an `Err`, never a wipe.
+
+- P4 Room voice tools use an opaque final-admission handle for only `room_post_update` and `room_ask`, appended after the unchanged ambient capability intersection. Reserve both names against ambient providers. The daemon implementations own exact generation/session/cancellation validation for every write; `without_tools()` suppresses the handle too.
 
 ## Work Guidance
 

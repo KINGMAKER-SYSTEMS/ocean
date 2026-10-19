@@ -211,6 +211,33 @@ once at startup, never accepted from a surface request, and after registration
 is retained only in owner-only `rooms.db`. Missing owner token disables Local
 bootstrap only; existing credentialed rooms and invite redemption still work.
 
+The supervised launcher (`deploy/ocean-daemon.sh`) reads
+`~/.config/ocean-rs/federation.env` as data (never executed): the file must be
+owned by the daemon user and not group/other-writable, only
+`OCEAN_FEDERATION_*=value` lines are used, and values already present in the
+LaunchAgent plist's `EnvironmentVariables` win. The startup banner prints
+`federation=on|off`. Shell-profile exports never reach a launchd job.
+Contributor daemons set only `OCEAN_FEDERATION_URL`. They join a room by
+redeeming the owner's invite through their own local
+`POST /v1/rooms/persistent/invites/redeem`, so the room bearer lands in their
+`rooms.db`; redeeming directly against Bedrock and pasting the result into
+`OCEAN_FEDERATION_OWNER_TOKEN` gives the daemon nothing it can use for that
+room. With credentialed rooms but no URL, startup warns
+`outcome="federation_unconfigured"`.
+
+If a credentialed room stays `recovering` while Bedrock answers, replay the
+receiver's two reads with the room bearer (`GET /api/v1/rooms/{key}/events`,
+expecting a `hello` frame, then `GET /api/v1/rooms/{key}/members`) and compare
+both against the daemon's strict wire structs. Read the bearer with a
+read-only query (`sqlite3 -readonly`) straight into a shell variable rather
+than typing it or copying `rooms.db`, so it stays out of shell history and off
+disk. A roster that fails to parse or project logs `outcome="roster_rejected"`
+at warn; a roster whose `caller_member_ids` omit the credential's local member
+warns `outcome="credential_member_mismatch"` (possible stale credential, once
+per connection epoch, still allowed Live); every failed epoch also logs
+`outcome="epoch_recover"` with attempt and backoff under
+`RUST_LOG=ocean_daemon::room_federation=debug`.
+
 At startup, the AppState-owned federation supervisor enumerates durable room
 credentials and starts one cancellable task tree per room. The receiver
 reconnects the Bedrock room SSE from the persisted cursor, commits the roster
@@ -496,6 +523,7 @@ Grouped by concern:
 # Liveness / observability
 GET    /                                  root banner (JSON route list)
 GET    /health                            liveness check
+GET    /v1/identity                      who this daemon says its human is (member.toml, then OCEAN_MEMBER_ID; null when unset)
 GET    /ready                             readiness (model/credentials wired)
 GET    /metrics                           Prometheus text (v0.0.4); Content-Type: text/plain; version=0.0.4
 
@@ -566,7 +594,9 @@ GET    /v1/permissions                    list pending permission requests
 POST   /v1/permissions/{id}/decision      allow/deny a mutating-tool request
 
 # Rooms — persistent lifecycle (SQLite-backed; survives restarts)
-GET    /v1/rooms/persistent               list persistent rooms
+GET    /v1/me                             daemon owner identity { participant_id, display_name }; id = member.toml / OCEAN_MEMBER_ID member id, else minted once from OCEAN_OWNER_NAME / USER
+PUT    /v1/me                             rename the owner { display_name } (1-64 chars); requires X-Ocean-Operator; id is stable; renames the owner's Human roster rows
+GET    /v1/rooms/persistent               list persistent rooms (each room carries additive owner-local "muted")
 POST   /v1/rooms/persistent               create a room { key, name, trigger_policy?, workspace_root? }
 GET    /v1/rooms/persistent/{key}         room + transcript
 POST   /v1/rooms/persistent/{key}/close  soft-close; flush final marker and cancel this Room’s active turns
@@ -580,10 +610,12 @@ POST   /v1/rooms/persistent/{key}/agents/{agent_member_id}/suspend  suspend and 
 POST   /v1/rooms/persistent/{key}/agents/{agent_member_id}/resume  resume with a new generation; operator header required
 POST   /v1/rooms/persistent/{key}/agents/{agent_member_id}/revoke  revoke and cancel prior-generation requests; operator header required
 POST   /v1/rooms/persistent/{key}/agents/{agent_member_id}/invoke  invoke from an existing same-Room message authored by invoked_by
-POST   /v1/rooms/persistent/{key}/participants            join { id, display_name, kind? }
+POST   /v1/rooms/persistent/{key}/participants            join { kind?, id?, display_name?, owner_id? }; a human join is always the daemon owner (id/display_name ignored)
 DELETE /v1/rooms/persistent/{key}/participants/{participant_id}  leave
 POST   /v1/rooms/persistent/{key}/participants/{participant_id}/retire  merge a placeholder human into a real member (operator lane, replay-safe)
-POST   /v1/rooms/persistent/{key}/messages                post message { author_id, author_kind?, body }
+GET    /v1/rooms/persistent/{key}/profile        room profile and credential-slot status (never a value)
+PUT    /v1/rooms/persistent/{key}/profile        replace the room profile (operator decision, replay-safe)
+POST   /v1/rooms/persistent/{key}/messages                post message { author_kind?, author_id?, body, thread_parent_seq? }; a human post is always authored by the daemon owner (author_id ignored)
 GET    /v1/rooms/persistent/{key}/transcript              read transcript (?after_seq=N&limit=M)
 POST   /v1/rooms/persistent/{key}/artifacts               record what the room produced { id, kind: task|decision|note, title, body?, author_id }; 201 { artifact }. Author must be on the roster (403). Every create writes a System transcript line in the SAME transaction, so an artifact can never exist that the room's history does not explain.
 GET    /v1/rooms/persistent/{key}/artifacts               list this room's artifacts, most recently changed first
@@ -591,6 +623,14 @@ GET    /v1/rooms/persistent/{key}/artifacts/{artifact_id}  read one artifact; th
 POST   /v1/rooms/persistent/{key}/artifacts/{artifact_id}/amend   rewrite in place under compare-and-swap { expected_version, title?, body?, state?, author_id }; 200 { artifact }, 409 { code: artifact_version_conflict, expected_version, actual_version } when the artifact moved on — re-read and retry, never a silent merge; 404 unknown artifact
 GET    /v1/rooms/persistent/{key}/snapshot                hydrate: room+participants+transcript+last_seq+next_seq+has_more (?after_seq=N&limit=M)
 GET    /v1/rooms/persistent/{key}/inspect                 bounded read-only room identity + local owner + aliases (no transcript/workspace data)
+GET    /v1/rooms/persistent/{key}/runs                    recent agent work cards (RoomAgentRun, oldest first, max 50); live updates arrive as room_agent_run SSE frames
+POST   /v1/rooms/persistent/{key}/runs/{run_id}/permission  owner approve/deny for the run's pending tool permission ({permission_id, tool?, decision: allow|allow_session|deny}); requires X-Ocean-Operator; 409 unless permission_id is the one pending now
+GET    /v1/rooms/persistent/{key}/agents/{agent_id}/settings  per-room agent overrides (instructions overlay, model); local only, never federated
+PUT    /v1/rooms/persistent/{key}/agents/{agent_id}/settings  replace per-room agent overrides; empty body fields clear them
+GET    /v1/rooms/persistent/{key}/search                  ?q=&limit= case-insensitive chat-message body search, newest first (q 2..200 chars, else 400 query_too_short / query_too_long; limit 1..50, default 20)
+GET    /v1/rooms/inbox                                    ?limit= mentions of and thread replies to the local owner across the 50 most recently active open rooms, newest first (limit 1..100, default 30)
+GET    /v1/rooms/persistent/{key}/prefs                   per-room owner prefs {muted}; local only, never federated
+PUT    /v1/rooms/persistent/{key}/prefs                   replace per-room owner prefs ({"muted":bool})
 GET    /v1/rooms/persistent/{key}/events                  SSE: initial full room_access projection (no id) + id-bearing room_message frames via ?after_seq=N / Last-Event-ID replay, then post-commit access-update + message tail; open non-call rooms only
 GET    /v1/rooms/persistent/{key}/read-cursor             fetch the daemon-owned read cursor projection for Local/Live rooms; closed/pending/revoked return typed unsupported
 PATCH  /v1/rooms/persistent/{key}/read-cursor             advance the daemon-owned read cursor { read_seq }; Local/Live only, monotonic, publishes room_read_cursor wake on success
