@@ -2303,6 +2303,35 @@ area: [review]
 Reconciled PR67 4f2fc5e449fa33a9a4858ce50c9bf24c66ac0471 with canonical main 1dfc6802bb74fecdcf83f6f17732b671c892b632. Only events.md conflicted; both complete74-record public parent histories remain verbatim and ordered. All1153 non-ledger entries match automatic merge. Complete Surface source and its prior32/32 proxy validation receipt are unchanged; Ocean OS matches main. Cached diff and shell syntax checks pass; identical tests were not repeated. Existing contracts remain accurate with no ownership/index changes. Root owns final commit, separate adversarial review, push and fresh hosted builds. Issue90 and live acceptance remain holds; live PWA smoke is separate from transport fixture proof. No live PWA outcome, authentication, installation or deployment claimed.
 
 _________________________________________________________________________________
+time: [17:26] [12-10-26]
+agent: [Codex] [factory issue91 repair]
+worktree: [codex/issue91-workspace-dismissal]
+type: [bug report]
+area: [frontend] [testing]
+
+Issue91: below900px the fixed workspace pane covered its only visibility toggle. Keep that existing toggle above the overlay in a safe-area-aware corner, reserving space outside the scrolling tabs. No new control, Rust/state change or desktop layout change. Nearest Surface devlog updated; parent ownership and child indexes unchanged.
+
+Validation: Chromium fixture uses the production stylesheet cascade with synthetic DOM/state. Baseline390px hit-test reproduced the covered toggle. Patched350/390/899px Files and Browser open/dismiss/reopen plus scrolled-tab hit tests passed6/6;900/1280/1600px desktop geometry matches baseline3/3. git diff --check passes. This is isolated rendered CSS evidence, not served-WASM/native or live acceptance. No heavy build launched on busy Mac mini. Independent final-head review and required Build Surface follow this receipt; root retains exclusive branch custody. Issue91 stays open for actual app acceptance; approval-policy90 and deployment gates remain.
+
+_________________________________________________________________________________
+time: [17:28] [12-10-26]
+agent: [Codex] [factory issue91 reconciliation]
+worktree: [codex/issue91-workspace-dismissal]
+type: [workflow]
+area: [review] [testing]
+
+PR92 reconciled automatically with fresh canonical main e6857f1c after external PR68 merge; no conflicts or manual source integration. The issue91 CSS bytes remain unchanged. Both parent ledgers preserved by the automatic merge. Production-CSS fixture rerun against incoming cascade passed6 narrow and3 desktop checks, with the explicit unfixed e6857f1c baseline reproducing covered dismissal. Initial rerun used already-fixed HEAD as baseline and correctly failed its expected-before assertion; only disposable fixture baseline selection was corrected. No source repair was needed. Served-WASM/native acceptance remains open. This entry precedes fresh final-head review/checks; root retains exclusive custody and standing approval-policy90 hold.
+
+_________________________________________________________________________________
+time: [17:35] [12-10-26]
+agent: [Codex] [factory PR92 review repair]
+worktree: [codex/issue91-workspace-dismissal]
+type: [bug report]
+area: [frontend] [review]
+
+Addressed PR92 inline finding4252488575: replace media-query range syntax with the established max-width899px form so the dismissal repair does not depend on Safari16.4 syntax while Tauri declares macOS10.15. Verified against the WebKit Safari16.4 release notes and existing island.css convention. Single CSS line changed; owning devlog intentionally unchanged because the layout/state contract is unchanged.
+
+Explicit unfixed e6857f1c baseline still reproduces covered dismissal; refreshed Chromium production-CSS fixture passes6 narrow Files/Browser interaction cases and3 desktop geometry comparisons. Diff check passes. This is neither legacy-WebKit runtime verification nor actual served-WASM/native acceptance. Fresh independent final-head review and required hosted verification follow; prior-head ACKs do not clear this correction. Root owns frozen-head custody through release; issue91 actual acceptance and approval-policy90 remain open.
 time: [17:47] [12-10-26]
 agent: [Codex] [factory release owner]
 worktree: [port/private-proposals; PR59]

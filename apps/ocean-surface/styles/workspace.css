@@ -411,7 +411,7 @@ html.is-resizing {
   white-space: nowrap;
 }
 
-/* ── Header collapse toggle (rendered in the app header, Tauri-only) ── */
+/* ── Header collapse toggle (rendered in the app header on every host) ── */
 
 .ocean-workspace-toggle {
   appearance: none;
@@ -436,6 +436,28 @@ html.is-resizing {
   color: var(--fg);
   background: var(--bg-hover);
   border-color: var(--border);
+}
+
+/* Reuse the header toggle above the overlay; its existing visibility state
+   still owns dismissal. Reserve a corner outside the scrolling tab strip. */
+@media (max-width: 899px) {
+  .ocean-surface.has-workspace-open .ocean-workspace-toggle {
+    position: fixed;
+    top: calc(8px + env(safe-area-inset-top));
+    right: calc(8px + env(safe-area-inset-right));
+    z-index: 51;
+    width: 40px;
+    height: 40px;
+    background: var(--bg-raised);
+  }
+
+  .workspace {
+    padding-top: env(safe-area-inset-top);
+  }
+
+  .workspace-tabs {
+    margin-right: calc(56px + env(safe-area-inset-right));
+  }
 }
 
 /* ── Reduced motion ────────────────────────────────────────────────── */
