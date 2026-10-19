@@ -2865,3 +2865,12 @@ type: [bug report]
 area: [frontend] [testing]
 
 Native desktop start now finds a daemon executable beside the app before PATH, preserves the operator environment override, uses the absolute home/profile or OS temporary directory for child cwd, and suppresses Windows console windows. No executable path is accepted from the webview; start/restart remains explicit. A real child-process test verifies cwd and discovery fixtures cover absent/directory/nonexecutable siblings and override precedence. All 21 filtered launch/transport tests and all-target Clippy pass on the pinned host toolchain. The earlier native Windows probe at f7154629 has passed its full shell suite and is building the release executable; these additional launch/document changes still need exact-head native validation. Updated the Surface contract; other ownership and child indexes remain unchanged.
+
+_________________________________________________________________________________
+time: [19:09] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/team-desktop-integration]
+type: [workflow]
+area: [testing] [review]
+
+Prepared one unreviewed integration candidate from current canonical main and PRs #117, #118, #119, #120, #121 and #122. Reconciled only overlapping workflow, contract and public ledger additions: preserve all three opt-in read-only Windows probes, skip Mac packaging for any Windows probe, retain real registry-bootstrap coverage and all native fixture commands. Source comparisons confirm native shell, proxy, provider/Agent changes, Room package reader and TUI discovery are byte-identical to their candidate branches. Actionlint and the combined release-workflow fixtures pass. Source compilation, independent review and installation remain separate gates; this branch does not authorize merging, releasing or replacing a live service. Parent ownership indexes remain unchanged; the shared Windows file-primitive contract now lists all consumers.
