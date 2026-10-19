@@ -58,6 +58,7 @@ if command -v npm >/dev/null 2>&1; then
     fail "personal Ocean package is installed. Download the org package with 'npm pack @kingmaker-systems/ocean@latest', then remove the personal package with 'npm uninstall -g @risingtides-dev/ocean' and install the downloaded tarball with 'npm install -g ./<tarball>'. Rerun onboarding afterward. Nothing was changed." 78
   fi
 fi
+python3 "$FILES" check-commands || fail "an existing Ocean command resolves to a personal or unreadable installation. Fix its PATH/package links before onboarding; no credentials or config were changed." 78
 if command -v bun >/dev/null 2>&1; then
   installer=(bun add -g)
 elif command -v npm >/dev/null 2>&1; then
@@ -74,9 +75,7 @@ fi
 printf '%s\n' "$package_token" | python3 "$FILES" npmrc --npmrc "$NPMRC"
 unset package_token
 "${installer[@]}" "$PKG@latest"
-for bin in ocean ocean-daemon ocean-update; do
-  command -v "$bin" >/dev/null 2>&1 || fail "$bin is missing after package install; check the package manager's global bin PATH" 70
-done
+python3 "$FILES" verify-commands || fail "Ocean commands must resolve to the same @kingmaker-systems/ocean installation. Fix the package manager global bin PATH and rerun; member identity was not changed." 70
 python3 "$FILES" identity "${identity_args[@]}"
 cat <<CHECKLIST
 Package and host identity prepared. No daemon was installed or restarted.

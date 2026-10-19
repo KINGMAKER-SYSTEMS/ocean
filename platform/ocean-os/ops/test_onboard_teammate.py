@@ -58,6 +58,16 @@ class Onboarding(unittest.TestCase):
             path = self.bin / name
             path.write_text(MOCK)
             path.chmod(0o755)
+        self.package = self.root / "org-package"
+        self.package.mkdir()
+        bins = {"ocean": "bin/ocean", "ocean-daemon": "bin/ocean-daemon", "ocean-update": "ocean-update.sh"}
+        (self.package / "package.json").write_text(json.dumps({"name": "@kingmaker-systems/ocean", "bin": bins}))
+        for name, target in bins.items():
+            source = self.bin / name
+            dest = self.package / target
+            dest.parent.mkdir(exist_ok=True)
+            source.rename(dest)
+            source.symlink_to(dest)
         self.env = os.environ.copy()
         self.env.update(OCEAN_ONBOARD_FIXTURE_HOME=str(self.root), PATH=f"{self.bin}:/usr/bin:/bin")
         for key in ["OCEAN_CONFIG_DIR", "XDG_CONFIG_HOME", "OCEAN_FIXTURE_PACKAGE_EXIT", "OCEAN_FIXTURE_TOKEN_EXIT"]:
@@ -144,6 +154,44 @@ class Onboarding(unittest.TestCase):
         self.assertFalse(self.member.exists())
         self.assertFalse(any(c[0] in {"bun", "gh"} for c in self.calls()))
         self.assertEqual([c for c in self.calls() if c[0] == "npm"], [["npm", "root", "--global"]])
+
+    def test_personal_command_from_inactive_npm_prefix_blocks_before_auth(self):
+        npm = self.bin / "npm"
+        npm.write_text(MOCK)
+        npm.chmod(0o755)
+        manifest = self.package / "package.json"
+        data = json.loads(manifest.read_text())
+        data["name"] = "@risingtides-dev/ocean"
+        manifest.write_text(json.dumps(data))
+        self.run_script(success=False)
+        self.assertFalse(self.npmrc.exists())
+        self.assertFalse(self.member.exists())
+        self.assertFalse(any(c[0] in {"bun", "gh"} for c in self.calls()))
+
+    def test_nonpackage_command_shadowing_install_does_not_write_identity(self):
+        command = self.bin / "ocean"
+        command.unlink()
+        command.write_text(MOCK)
+        command.chmod(0o755)
+        self.run_script(success=False)
+        self.assertFalse(self.member.exists())
+
+    def test_mixed_org_installations_do_not_write_identity(self):
+        other = self.root / "another-org-install"
+        shutil.copytree(self.package, other)
+        command = self.bin / "ocean-update"
+        command.unlink()
+        command.symlink_to(other / "ocean-update.sh")
+        self.run_script(success=False)
+        self.assertFalse(self.member.exists())
+
+    def test_wrong_package_bin_target_does_not_write_identity(self):
+        manifest = self.package / "package.json"
+        data = json.loads(manifest.read_text())
+        data["bin"]["ocean"] = "bin/ocean-daemon"
+        manifest.write_text(json.dumps(data))
+        self.run_script(success=False)
+        self.assertFalse(self.member.exists())
 
     def test_malformed_identity_fails_before_package_or_auth(self):
         self.member.parent.mkdir(parents=True)

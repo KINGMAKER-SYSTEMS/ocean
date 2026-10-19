@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import shutil
 import stat
 import sys
 import tomllib
@@ -143,15 +144,53 @@ def atomic_write(directory, destination, text, private_directory=False):
             pass
 
 
+def package_commands(require_org=False):
+    """Inspect resolved package links without executing Ocean commands."""
+    roots = set()
+    for command in ("ocean", "ocean-daemon", "ocean-update"):
+        found = shutil.which(command)
+        package = None
+        if found:
+            executable = Path(found).resolve(strict=True)
+            for root in executable.parents:
+                manifest = root / "package.json"
+                if not manifest.is_file():
+                    continue
+                try:
+                    metadata = json.loads(manifest.read_text())
+                except (ValueError, UnicodeError):
+                    break
+                if not isinstance(metadata, dict):
+                    break
+                name = metadata.get("name")
+                if name == "@risingtides-dev/ocean":
+                    raise ValueError("personal package command shadows org install")
+                bins = metadata.get("bin", {})
+                target = bins.get(command) if isinstance(bins, dict) else None
+                if name == "@kingmaker-systems/ocean" and isinstance(target, str):
+                    if (root / target).resolve(strict=True) == executable:
+                        package = root
+                break
+        if require_org:
+            if package is None:
+                raise ValueError("command does not resolve to org package")
+            roots.add(package)
+    if require_org and len(roots) != 1:
+        raise ValueError("commands resolve to different package installations")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["validate", "identity", "npmrc"])
+    parser.add_argument("action", choices=["validate", "identity", "npmrc", "check-commands", "verify-commands"])
     parser.add_argument("--config-dir")
     parser.add_argument("--member", default="")
     parser.add_argument("--display-name", default="")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--npmrc")
     args = parser.parse_args()
+    if args.action in {"check-commands", "verify-commands"}:
+        package_commands(require_org=args.action == "verify-commands")
+        return
     if args.action in {"validate", "identity"}:
         identity_file(args, write=args.action == "identity")
     if args.action in {"validate", "npmrc"}:

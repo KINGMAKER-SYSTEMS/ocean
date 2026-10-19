@@ -2627,3 +2627,12 @@ type: [bug report]
 area: [review] [testing]
 
 Completed the next PR #113 review delta: inspect the personal npm installation before choosing Bun or npm, preventing an earlier npm command path from masking a Bun org install. Added the mixed-manager regression and corrected the component's canonical onboarding prerequisite to the org package. Updated owning runtime/docs contracts; child indexes are unchanged. All 16 onboarding fixtures, shell syntax, diff check and cargo xtask docs-check pass (30 packages, 161 active Markdown files, 185 local links). Initial Mac release candidate run 39314057475 passed build, license inventory, packaging and isolated npm/Bun installation; current-head verification remains separate.
+
+_________________________________________________________________________________
+time: [16:13] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/org-team-distribution]
+type: [bug report]
+area: [review] [testing]
+
+Repaired the third independent onboarding finding: npm's active prefix does not describe every command on PATH. Before auth/config mutation, inspect resolved Ocean command package manifests and reject personal-package links from any prefix. After installation, require all three commands to resolve to matching bin entries in one org package before writing member identity. No Ocean commands are executed, overwritten or removed. Twenty fixture tests pass, including inactive npm prefixes, arbitrary shadow commands, mixed org installs and mismatched bin entries; shell syntax, ShellCheck and diff checks pass. Updated the component root contract; child indexes and packaging docs unchanged because ownership and documented migration commands are unchanged. Fresh exact-head review/CI remains required; no merge, package publication or deployment claimed.
