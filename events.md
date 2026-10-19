@@ -2748,3 +2748,12 @@ type: [bug report]
 area: [backend] [testing]
 
 Native Windows probe 39326283845 passed all 20 credential tests, then exposed the next compiler blocker: the skill reader treated every non-Linux host as Unix. Added a Windows reader for absolute local-drive paths, retaining directory handles and opening each child relative to its parent with reparse refusal; device, UNC, parent-traversal and alternate-stream paths stay refused. Added actual-source native integration fixtures for guarded reads, parent retargeting and operator-key/header behavior; existing Unix skill reads remain unchanged. Windows cross-target Clippy passes; fresh native execution and review remain pending. Updated daemon and workflow contracts; no new devlog boundary or changed parent index. Release repair PR #115 merged at 50985671 after review and exact-head CI; immutable v0.2.1 validation/publication is running as 39328117964. No release availability or Windows runtime acceptance claimed.
+
+_________________________________________________________________________________
+time: [18:36] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/windows-surface-proxy]
+type: [bug report]
+area: [backend] [testing]
+
+The browser proxy imported Unix file APIs unconditionally. Added Windows credential/session-secret reads and create-new writes through the daemon's existing protected-owner-ACL file primitive, plus absolute HOME/USERPROFILE defaults. Existing Unix file semantics, login gate, exact owner routes and browser credential boundary remain unchanged. Converted transport fixtures to platform-private file creation; added Windows persistence, unsafe-file/link refusal and profile fixtures. Full 38-test host proxy suite, all-target Clippy, actionlint, workflow contracts and docs-check pass. Native Windows proxy execution is added to the manual read-only probe and remains pending. Updated Surface, runtime file-owner and workflow contracts; parent boundary indexes unchanged. No Windows installer, native Tauri consent, real-provider or deployed-client acceptance claimed.
