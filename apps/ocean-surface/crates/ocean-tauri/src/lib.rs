@@ -859,10 +859,8 @@ fn windows_launch_target(target: &Path) -> bool {
     )
 }
 
-/// True when opening this target would EXECUTE it rather than view it —
-/// either because macOS treats the extension as runnable, or because the
-/// file carries an executable bit (a `#!` script `open(1)` will hand to a
-/// shell).
+/// Refuse known platform launch types and, on Unix, executable file modes
+/// before handing a document to its associated application.
 fn opens_as_executable(target: &Path) -> bool {
     #[cfg(windows)]
     if windows_launch_target(target) {
@@ -1623,15 +1621,6 @@ mod tests {
         assert!(parse_host_port("http://").is_none());
     }
 
-    /// TASK-78: the resolver takes ONLY the env value. There is no
-    /// caller-supplied override, because that argument was reachable from the
-    /// webview and ended in `ProcessCommand::spawn`. If someone re-adds an
-    /// `explicit` parameter here, this test stops compiling — which is the
-    /// point: the signature IS the security boundary.
-    /// TASK-85: `open_file`'s root containment is self-satisfiable (the
-    /// caller supplies both root and path), so the load-bearing gate is
-    /// refusing targets macOS would EXECUTE. These drive the real predicate
-    /// against real files on disk.
     #[test]
     fn windows_document_open_refuses_launchers_and_disguised_suffixes() {
         for name in [
@@ -1698,6 +1687,15 @@ mod tests {
         }
     }
 
+    /// TASK-78: the resolver takes ONLY the env value. There is no
+    /// caller-supplied override, because that argument was reachable from the
+    /// webview and ended in `ProcessCommand::spawn`. If someone re-adds an
+    /// `explicit` parameter here, this test stops compiling — which is the
+    /// point: the signature IS the security boundary.
+    /// TASK-85: `open_file`'s root containment is self-satisfiable (the
+    /// caller supplies both root and path), so the load-bearing gate is
+    /// refusing targets macOS would EXECUTE. These drive the real predicate
+    /// against real files on disk.
     #[test]
     fn open_file_refuses_targets_that_would_execute() {
         let dir = tempfile::tempdir().expect("tempdir");

@@ -2757,3 +2757,12 @@ type: [bug report]
 area: [frontend] [backend] [testing]
 
 Replace the desktop transport's unconditional non-Unix credential refusal with a Windows checked owner-only file read, bounded header-token validation and absolute HOME/USERPROFILE defaults. Preserve the fixed native intents, main-window gate, frozen consent preview/dialog, numeric-loopback restriction and no automatic retry. Port existing transport, owner-mutation and consent fixtures to Windows with protected/inherited ACL fixtures and link refusal. Add a separate opt-in read-only Windows native probe that builds the actual web bundle, runs the full shell suite and builds the native executable. Host Trunk build, 49 changed-domain tests, Clippy, docs-check and workflow checks pass. The full host suite passed 81 tests and timed out one unchanged macOS watcher test; that test passed alone on retry. Native Windows execution and fresh independent review remain pending. Updated Surface, runtime file-owner and workflow contracts; indexes unchanged. No installer, served desktop or coworker acceptance claimed.
+
+_________________________________________________________________________________
+time: [18:59] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/windows-native-room-consent]
+type: [bug report]
+area: [frontend] [testing]
+
+Include the Windows document-opener guard in the native desktop candidate: refuse known executable, script, installer, registry and shortcut suffixes before the OS opener while preserving normal documents and Unix behavior. Host policy and existing executable-refusal tests plus all-target Clippy pass. The added Windows command-level refusal test awaits native execution. Surface contract updated; parent indexes unchanged. No installer or live replacement.
