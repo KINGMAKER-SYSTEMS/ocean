@@ -2703,3 +2703,12 @@ type: [bug report]
 area: [frontend] [backend] [review] [testing]
 
 Repaired phantom attention from filtered routine audits. Local room-list read summaries now use a read-only store conversation frontier; open-room summaries and jump accounting apply the same visible-message filter. Full transcript/SSE/read-cursor sequences and audit records are unchanged, as are federated global frontiers. SQL filters before LIMIT without loading transcript bodies into Rust. Regressions preserve chat messages, authority changes, failure notices, case/boundary distinctions and actual unseen conversation. All 954 UI tests, three store frontier tests, the daemon list/read-state route regression, WASM Clippy, formatting, diff checks and cargo check --workspace pass. Updated owning Surface/store/daemon contracts; parent indexes unchanged because no ownership boundary changed. Root team guide now links the component host setup guide. Surface and daemon changes must deploy together; older daemon summaries still count audits for unopened rooms. Fresh-head review, hosted build and installation remain pending.
+
+_________________________________________________________________________________
+time: [16:38] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/rooms-daily-use]
+type: [bug report]
+area: [frontend] [testing]
+
+Restored missing persistent-room PATCH forwarding in the authenticated browser proxy. The read cursor could previously fail to save despite a successful room load. All 38 proxy tests and denied-warning Clippy pass, including an actual upstream fixture proving method/path/query/body preservation and refusal without a proxy session; browser cookies and forged operator headers stay stripped. Safari on the localhost candidate saved the room cursor from 24 to 40, cleared its unread dot, and retained that state after reload. Owning Surface contract updated; parent indexes unchanged. The paired Rooms changes at 015a3b1c passed independent review and hosted Ocean/Surface builds, but this proxy delta still requires fresh-head review and CI. Distribution PR #113 merged at 945c91cb; its release validation is running and no package is published. Live Surface remains unchanged because legacy recovery bytes are missing.

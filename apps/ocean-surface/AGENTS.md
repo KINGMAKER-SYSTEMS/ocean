@@ -352,7 +352,10 @@ Web surface session UI:
   in-flight request.
 - The browser PWA proxy must forward `/v1/agents` as JSON and stream room SSE
   unbuffered while preserving `Last-Event-ID`; Tauri reaches the same daemon
-  endpoints directly.
+  endpoints directly. Persistent-room PATCH routes (including `read-cursor`)
+  must forward the method, JSON body and query behind the existing session gate;
+  browser cookies and forged operator headers never pass upstream. Verify with
+  `cargo test -p ocean-surface-proxy room_read_cursor_patch`.
 - Canonical room keys use alphanumeric, `-`, `_`, and `.`; native invite
   parsing keeps that alphabet separate from the narrower session-id and
   invite-code alphabets.
