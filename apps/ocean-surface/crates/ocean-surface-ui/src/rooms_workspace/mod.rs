@@ -172,11 +172,16 @@ pub fn RoomsWorkspace(
     let right_close_ref: NodeRef<leptos::html::Button> = NodeRef::new();
     let right_return_focus =
         StoredValue::new(send_wrapper::SendWrapper::new(None::<web_sys::HtmlElement>));
-    let remember_right_focus = move || {
-        let focused = web_sys::window()
-            .and_then(|window| window.document())
-            .and_then(|document| document.active_element())
-            .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok());
+    let remember_right_focus = move |target: Option<web_sys::EventTarget>| {
+        let focused = target
+            .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok())
+            .or_else(|| {
+                web_sys::window()
+                    .and_then(|window| window.document())
+                    .and_then(|document| document.active_element())
+                    .filter(|element| !matches!(element.tag_name().as_str(), "BODY" | "HTML"))
+                    .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok())
+            });
         right_return_focus.set_value(send_wrapper::SendWrapper::new(focused));
     };
     let right_open =
@@ -233,7 +238,7 @@ pub fn RoomsWorkspace(
     // An inbox pick asks for a thread; open it once its root has loaded.
     Effect::new(move |_| {
         if let Some(root) = rooms.take_pending_thread_focus() {
-            remember_right_focus();
+            remember_right_focus(None);
             members_open.set(false);
             search_open.set(false);
             selected_thread_root_seq.set(Some(root));
@@ -755,11 +760,11 @@ pub fn RoomsWorkspace(
                                             type="button"
                                             aria-label="Search"
                                             aria-pressed=move || search_open.get().to_string()
-                                            on:click=move |_| {
+                                            on:click=move |ev| {
                                                 if search_open.get_untracked() {
                                                     close_right();
                                                 } else {
-                                                    remember_right_focus();
+                                                    remember_right_focus(ev.current_target());
                                                     members_open.set(false);
                                                     selected_thread_root_seq.set(None);
                                                     show_left_rail.set(false);
@@ -957,8 +962,8 @@ pub fn RoomsWorkspace(
                                                                             is_thread_open(selected_thread_root_seq.get(), root_seq)
                                                                                 .to_string()
                                                                         }
-                                                                        on:click=move |_| {
-                                                                            remember_right_focus();
+                                                                        on:click=move |ev| {
+                                                                            remember_right_focus(ev.current_target());
                                                                             members_open.set(false);
                                                                             search_open.set(false);
                                                                             selected_thread_root_seq.update(|selected| {
