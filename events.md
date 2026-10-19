@@ -1312,6 +1312,29 @@ in issue #54.
 _________________________________________________________________________________
 
 _________________________________________________________________________________
+time: [16:47] [07-10-26]
+agent: [claude] [claude code]
+worktree: [port/private-proposals] [/Users/risingtidesdev/dev/port-misc]
+type: [plan]
+area: [docs]
+
+Ported the public half of ocean-private #72, the PROPOSED A3b contract amendment, onto public main: the new spec at platform/ocean-os/docs/specs/2026-10-03-ocean-extension-a3b-contract-amendment.md proposes nullable committed/state_revision facts with a non-retry CLI exit 5 and an explicit choice between postcommit live-trust reconciliation under retained enablement and mandatory disable/reap before trust, while the accepted Stage A manifest stays byte-unchanged. The platform and docs AGENTS.md Stage A lines and the docs README index now point at it. The private text linked its PR 56 and issue 71 at the public repository, where those numbers belong to unrelated items; the port names ocean-private for both, states that the A3a registry writer is present here because ocean-private #56 merged before the publication snapshot with its slice acceptance left as a separate gate, and says complete A3b follows A3a rather than calling it next. Nothing from org/ was carried.
+
+Validation: cargo xtask docs-check PASS (30 packages, 154 active Markdown files, 172 local links); git diff --check clean. Documentation only, no Rust changes.
+_________________________________________________________________________________
+_________________________________________________________________________________
+time: [16:48] [07-10-26]
+agent: [claude] [claude code]
+worktree: [port/private-proposals] [/Users/risingtidesdev/dev/port-misc]
+type: [plan]
+area: [docs]
+
+Ported the public half of ocean-private #97 onto public main: the PROPOSED generic plugin process-ownership and quiescence manifest at platform/ocean-os/docs/specs/2026-10-04-generic-plugin-quiescence-manifest.md defines a lifecycle coordinator that every production subprocess-plugin launch must enroll in, an exclusive launch/invocation/write fence ahead of quiescence inventory, a monotonic Starting/Running/Stopping/ExitedAndReaped state machine with Unknown and Quarantined escapes, sanitized quiescence receipts, restart recovery that fails closed, and a two-epoch legacy retirement, ordered as D0-D4 with an acceptance matrix. It authorizes documentation review only. The docs README gains a proposals-awaiting-independent-review list pointing at it. The issue88/issue85/PR94 numbers it cites are ocean-private trackers, so the port says so once in the status paragraph and in the README line instead of leaving bare numbers that collide with this repository's own numbering, and the snapshot it analyzes is named as the frozen private main this monorepo was published from. The cited source anchors (discover_plugin_providers, build_agent_capability_providers, spawn_io_task, start_kill, kill_on_drop, plugins/ocean-subagents/install.sh) were verified present on current public main.
+
+Validation: cargo xtask docs-check PASS (30 packages, 155 active Markdown files, 173 local links); git diff --check clean. Documentation only, no Rust changes.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
 time: [22:24] [08-10-26]
 agent: [claude] [claude code]
 worktree: [port/rooms-shell] [/Users/risingtidesdev/dev/port-rooms]
@@ -1646,6 +1669,18 @@ PR #65 reconciled own-agent consent with canonical main f1b22bd8 and preserved b
 
 Validation: focused reviewed-digest, sovereign-consent and federation p2c groups passed (3, 6 and 40 tests), plus locked daemon check, formatting, diff and docs checks (30 packages, 153 docs, 170 links). Synthetic absolute auth/config/XDG fixtures only; HOME unchanged. Independent source review ACKed 307a316f. This receipt precedes final exact-head review and required hosted checks. Nearest owning contract corrected; parent ownership/indexes unchanged. Maintainer approval, client adoption of the optional digest and actual two-human/live-migration acceptance remain separate. No installation, deployment or live provider calls.
 _________________________________________________________________________________
+time: [23:50] [09-10-26]
+agent: [codex]
+worktree: [codex/pr59-public-proposals-reconcile]
+type: [workflow] [PR #59] [issue #86]
+area: [docs] [review]
+
+Reconciled the two existing extension/lifecycle proposals with canonical main and made their public authority self-contained. Active proposals and owning indexes now describe technical requirements and public source anchors directly, require explicit canonical public operator rulings, and remove private tracker/SHA dependencies and stale tracker-number/billing claims. Both proposals remain PROPOSED; implementation, lifecycle-state adoption, installation and acceptance stay gated. Existing ledger histories were preserved.
+
+Validation: docs-check passed (30 packages, 155 active Markdown files, 175 local links), git diff --check passed, public source anchors were checked, and the accepted Stage A manifest remains byte-identical to canonical main. Independent review acknowledged source e291fa0b; final receipt head and required checks remain release gates. Owning component/docs contracts and proposal indexes updated; root ownership/index unchanged. No runtime change, merge or deployment is claimed.
+
+_________________________________________________________________________________
+
 time: [23:44] [09-10-26]
 agent: [codex]
 worktree: [codex/issue52-public-doc-provenance-fix]
@@ -1709,6 +1744,11 @@ Reconciled PR67 4f2fc5e449fa33a9a4858ce50c9bf24c66ac0471 with canonical main 1df
 _________________________________________________________________________________
 time: [17:47] [12-10-26]
 agent: [Codex] [factory release owner]
+worktree: [port/private-proposals; PR59]
+type: [refactor]
+area: [writing] [review]
+
+Reconciled PR59 with canonical main34751752. Only additive events.md history conflicted; both complete parent histories are preserved verbatim and ordered. Original five proposal/index documents remain byte-identical; both proposals stay PROPOSED and require public operator decisions before implementation. Accepted Stage A manifest equals canonical main; all other non-ledger content equals main. Direct-rustc canonical docs-check passed 30 packages, 155 active documents and 175 links. Diff check passed. Owning contracts and indexes intentionally unchanged because this integration changes no proposal or runtime contract. Final exact-head independent review and required hosted checks follow. Standing independent maintainer approval and policy90 holds remain; no operator ratification, slice acceptance, merge, deployment or live outcome claimed.
 worktree: [port/extension-stage-a-governance; PR51]
 type: [refactor]
 area: [writing] [review]
