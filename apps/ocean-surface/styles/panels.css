@@ -1490,9 +1490,9 @@
    `props.placement: "pinned"` — absent entirely when nothing is pinned.
    Default shape (narrow/medium viewports): a fixed strip under the header,
    horizontally scrollable. Wide viewports (>=1480px, where the centered
-   shell leaves real margin): a left side rail riding the free gutter,
-   mirroring the right-side workspace pane. z 40 sits under workspace (50)
-   and deck (60): the rail is furniture, never an overlay winner. */
+   content rail leaves real margin): a left side rail riding the free gutter,
+   mirroring the right-side workspace pane. z 40 sits under workspace (50):
+   the rail is furniture, never an overlay winner. */
 
 .pinned-rail {
   position: fixed;
@@ -1551,18 +1551,18 @@
 }
 
 @media (min-width: 1480px) {
-  .pinned-rail {
+  .ocean-surface:not(.has-workspace-open) .pinned-rail {
     flex-direction: column;
     top: 68px;
     bottom: 12px;
     right: auto;
-    width: clamp(150px, calc((100vw - var(--shell-max)) / 2 - 24px), 300px);
+    width: clamp(150px, calc((100vw - var(--content-rail)) / 2 - 24px), 300px);
     max-height: none;
     overflow-x: hidden;
     overflow-y: auto;
   }
 
-  .pinned-card {
+  .ocean-surface:not(.has-workspace-open) .pinned-card {
     flex: 0 0 auto;
   }
 }
