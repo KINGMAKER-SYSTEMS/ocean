@@ -56,13 +56,17 @@ pub(crate) fn origin_of(raw: &str) -> String {
 /// HTTP methods advertised in the CORS preflight (`Access-Control-Allow-Methods`).
 /// Must cover EVERY method the router actually serves, or the browser's OPTIONS
 /// preflight fails and the real request never fires (OCEAN-87). The router serves
-/// GET/POST plus `PATCH /v1/projects/{id}`, `DELETE /v1/projects/{id}`, and
-/// `DELETE /v1/rooms/persistent/{key}/participants/{id}`; OPTIONS is the preflight
-/// method itself. Keep this in sync with the `Router::route()` method set.
-fn cors_allowed_methods() -> [Method; 5] {
+/// GET/POST plus `PATCH /v1/projects/{id}`, `DELETE /v1/projects/{id}`,
+/// `DELETE /v1/rooms/persistent/{key}/participants/{id}`, `PUT /v1/me`, and
+/// `PUT /v1/rooms/persistent/{key}/agents/{agent_id}/settings`; OPTIONS is the
+/// preflight method itself. The production-router preflight test derives the
+/// served set from `banner_routes()`, so a new method fails it until added here.
+/// Methods grant no authority: route guards and handlers still decide.
+fn cors_allowed_methods() -> [Method; 6] {
     [
         Method::GET,
         Method::POST,
+        Method::PUT,
         Method::PATCH,
         Method::DELETE,
         Method::OPTIONS,
@@ -241,15 +245,17 @@ mod tests {
         );
     }
 
-    /// The router serves PATCH (`/v1/projects/{id}`) and DELETE
-    /// (`/v1/projects/{id}`, room participants). Both MUST be in the preflight
-    /// allow-list or the browser's OPTIONS check fails and the call never fires.
+    /// The router serves PUT (`/v1/me`, room agent settings), PATCH
+    /// (`/v1/projects/{id}`) and DELETE (`/v1/projects/{id}`, room participants).
+    /// Each MUST be in the preflight allow-list or the browser's OPTIONS check
+    /// fails and the call never fires.
     #[test]
-    fn cors_allow_methods_include_patch_and_delete() {
+    fn cors_allow_methods_include_put_patch_and_delete() {
         let methods = cors_allowed_methods();
         for required in [
             Method::GET,
             Method::POST,
+            Method::PUT,
             Method::PATCH,
             Method::DELETE,
             Method::OPTIONS,

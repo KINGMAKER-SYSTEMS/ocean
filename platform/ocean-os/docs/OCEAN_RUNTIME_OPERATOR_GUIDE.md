@@ -523,6 +523,7 @@ Grouped by concern:
 # Liveness / observability
 GET    /                                  root banner (JSON route list)
 GET    /health                            liveness check
+GET    /v1/identity                      who this daemon says its human is (member.toml, then OCEAN_MEMBER_ID; null when unset)
 GET    /ready                             readiness (model/credentials wired)
 GET    /metrics                           Prometheus text (v0.0.4); Content-Type: text/plain; version=0.0.4
 
@@ -620,6 +621,9 @@ POST   /v1/rooms/persistent/{key}/resources/{resource_id}/suspend  suspend a gra
 POST   /v1/rooms/persistent/{key}/resources/{resource_id}/resume  resume a suspended grant
 POST   /v1/rooms/persistent/{key}/resources/{resource_id}/list  operator preview: confined listing
 POST   /v1/rooms/persistent/{key}/resources/{resource_id}/read  operator preview: confined file read
+POST   /v1/rooms/persistent/{key}/summarize      one bounded model turn folded into the room's summary artifact (amends in place)
+GET    /v1/rooms/persistent/{key}/profile        room profile and credential-slot status (never a value)
+PUT    /v1/rooms/persistent/{key}/profile        replace the room profile (operator decision, replay-safe)
 POST   /v1/rooms/persistent/{key}/messages                post message { author_kind?, author_id?, body, thread_parent_seq? }; a human post is always authored by the daemon owner (author_id ignored)
 GET    /v1/rooms/persistent/{key}/transcript              read transcript (?after_seq=N&limit=M)
 POST   /v1/rooms/persistent/{key}/artifacts               record what the room produced { id, kind: task|decision|note, title, body?, author_id }; 201 { artifact }. Author must be on the roster (403). Every create writes a System transcript line in the SAME transaction, so an artifact can never exist that the room's history does not explain.
