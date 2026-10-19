@@ -4,7 +4,7 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PKG="@risingtides-dev/ocean"
+PKG="@kingmaker-systems/ocean"
 CONFIG_DIR="${OCEAN_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/ocean-rs}"
 NPMRC="$HOME/.npmrc"
 MODEL=""; MEMBER_ID=""; DISPLAY_NAME=""; FORCE=0; DRY=0
@@ -15,7 +15,7 @@ Usage: ops/onboard-teammate.sh --model MODEL --member ID
                               [--display-name NAME] [--force] [--dry-run]
 
 Requires macOS arm64, Python 3.11+, gh authenticated with read:packages,
-and bun or npm. Installs @risingtides-dev/ocean and writes member.toml.
+and bun or npm. Installs @kingmaker-systems/ocean and writes member.toml.
 --force replaces an existing different or malformed identity; it never bypasses
 file custody checks. --dry-run validates and reports without authentication,
 network access, credential reads, package installation, or file changes.

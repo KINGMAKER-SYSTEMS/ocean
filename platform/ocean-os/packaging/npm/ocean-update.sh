@@ -2,7 +2,7 @@
 # ocean-update — pull the latest published Ocean build in one pass.
 set -eu
 
-PKG="@risingtides-dev/ocean"
+PKG="@kingmaker-systems/ocean"
 
 if command -v bun >/dev/null 2>&1; then
   echo "Updating $PKG via bun..."

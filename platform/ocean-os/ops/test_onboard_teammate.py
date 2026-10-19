@@ -86,16 +86,19 @@ class Onboarding(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(self.member.parent.stat().st_mode), 0o700)
         self.assertEqual(stat.S_IMODE(self.npmrc.stat().st_mode), 0o600)
         self.assertIn("save-exact=true", self.npmrc.read_text())
-        self.assertEqual([c for c in self.calls() if c[0] == "bun"], [["bun", "add", "-g", "@risingtides-dev/ocean@latest"]])
+        self.assertEqual([c for c in self.calls() if c[0] == "bun"], [["bun", "add", "-g", "@kingmaker-systems/ocean@latest"]])
 
     def test_rerun_preserves_unrelated_npm_lines_without_duplicates(self):
-        self.npmrc.write_text("other=keep\n@risingtides-dev:registry=https://old.invalid\n//npm.pkg.github.com/:_authToken=old_fixture\n")
+        self.npmrc.write_text("other=keep\n@risingtides-dev:registry=https://npm.pkg.github.com\n@kingmaker-systems:registry=https://old.invalid\n//npm.pkg.github.com/:_authToken=old_fixture\n")
         self.run_script()
         before = self.npmrc.read_text(), self.member.read_text()
         self.run_script()
         self.assertEqual(before, (self.npmrc.read_text(), self.member.read_text()))
         self.assertEqual(self.npmrc.read_text().count("_authToken="), 1)
         self.assertIn("other=keep", self.npmrc.read_text())
+        self.assertIn("@risingtides-dev:registry=https://npm.pkg.github.com", self.npmrc.read_text())
+        self.assertEqual(self.npmrc.read_text().count("@kingmaker-systems:registry="), 1)
+        self.assertIn("@kingmaker-systems:registry=https://npm.pkg.github.com", self.npmrc.read_text())
 
     def test_dry_run_has_no_auth_network_or_mutations(self):
         self.run_script("--dry-run")

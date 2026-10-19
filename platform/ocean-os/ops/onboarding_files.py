@@ -12,7 +12,7 @@ import sys
 import tomllib
 import unicodedata
 
-SCOPE = "@risingtides-dev:registry=https://npm.pkg.github.com"
+SCOPE = "@kingmaker-systems:registry=https://npm.pkg.github.com"
 TOKEN_KEY = "//npm.pkg.github.com/:_authToken="
 DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 
@@ -163,7 +163,7 @@ def main():
             with parent_directory(path, create=True) as directory:
                 with owned_file(directory, path.name) as fd:
                     lines = read_file(fd).splitlines() if fd is not None else []
-                lines = [line for line in lines if not line.strip().startswith(("@risingtides-dev:registry=", TOKEN_KEY))]
+                lines = [line for line in lines if not line.strip().startswith(("@kingmaker-systems:registry=", TOKEN_KEY))]
                 atomic_write(directory, path.name, "\n".join([*lines, SCOPE, TOKEN_KEY + token, ""]))
 
 

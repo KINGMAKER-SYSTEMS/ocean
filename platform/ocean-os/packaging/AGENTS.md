@@ -6,7 +6,7 @@ Distribution artifacts for shipping prebuilt Ocean binaries to teammates.
 
 ## Ownership
 
-- `npm/` — the `@risingtides-dev/ocean` npm wrapper package: prebuilt
+- `npm/` — the `@kingmaker-systems/ocean` npm wrapper package: prebuilt
   `ocean` (TUI) + `ocean-daemon` binaries for macOS arm64, published to
   GitHub Packages by the active monorepo workflow at
   `../../.github/workflows/release.yml` on `v*` tag push. The nested
@@ -24,7 +24,7 @@ Distribution artifacts for shipping prebuilt Ocean binaries to teammates.
   (`v0.2.0` → `0.2.0`); the committed `package.json` version stays a
   `0.0.0-dev` placeholder. Release tags must already be contained in
   `origin/main`; prerelease and branch-only tags fail closed.
-- Package scope must remain `@risingtides-dev` (GitHub Packages requires
+- Package scope must remain `@kingmaker-systems` (GitHub Packages requires
   the scope to match the repository owner).
 - The `bin` map must keep `ocean` and `ocean-daemon` in the same install
   directory: on machines without launchd supervision, the TUI discovers the
@@ -94,6 +94,6 @@ Distribution artifacts for shipping prebuilt Ocean binaries to teammates.
   `RUN_BUN_SMOKE=1 EXPECTED_VERSION=0.0.0-dev packaging/npm/test-package.sh /path/to/staged/npm`.
 - After a tag push: confirm the Release workflow is green, verify the release
   tarball checksum, and confirm
-  `bun add -g @risingtides-dev/ocean@latest` resolves the new version.
+  `bun add -g @kingmaker-systems/ocean@latest` resolves the new version.
 
 ## Child devlog Index

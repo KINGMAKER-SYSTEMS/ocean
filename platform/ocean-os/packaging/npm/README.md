@@ -1,4 +1,4 @@
-# @risingtides-dev/ocean
+# @kingmaker-systems/ocean
 
 Prebuilt Ocean binaries (`ocean` TUI + `ocean-daemon`) for macOS arm64,
 published to GitHub Packages by the tag-triggered release workflow.
@@ -13,22 +13,30 @@ published to GitHub Packages by the tag-triggered release workflow.
    gh auth refresh -s read:packages
    ```
 
-2. Point the `@risingtides-dev` scope at GitHub Packages:
+2. Point the `@kingmaker-systems` scope at GitHub Packages:
 
    ```sh
    printf '%s\n' \
-     "@risingtides-dev:registry=https://npm.pkg.github.com" \
+     "@kingmaker-systems:registry=https://npm.pkg.github.com" \
      "//npm.pkg.github.com/:_authToken=$(gh auth token)" >> ~/.npmrc
    ```
 
 3. Install:
 
    ```sh
-   bun add -g @risingtides-dev/ocean
+   bun add -g @kingmaker-systems/ocean
    ```
 
 This puts `ocean`, `ocean-daemon`, and `ocean-update` on PATH. The TUI
 discovers `ocean-daemon` as a sibling binary automatically.
+
+## Moving from the personal package
+
+Configure the `@kingmaker-systems` registry mapping and install the org package
+using the commands above. An older `ocean-update` still targets the personal
+package until the org package replaces it. This is a new package namespace;
+existing personal releases are not moved or republished. Verify org package
+access before removing an existing working installation.
 
 ## Updating
 
@@ -57,8 +65,8 @@ and directly starts the package's sibling `ocean-daemon`.
 
 Only stable `vMAJOR.MINOR.PATCH` tags are accepted, and the tagged commit must
 already be contained in `origin/main`. The repository must also keep the active,
-no-bypass **Ocean immutable release tags** tag ruleset (pinned repository
-ruleset id `19331797`) for `refs/tags/v*`, with updates, deletion, and
+no-bypass **Ocean immutable release tags** tag ruleset (selected by the repository
+variable `OCEAN_RELEASE_TAG_RULESET_ID`) for `refs/tags/v*`, with updates, deletion, and
 non-fast-forward changes blocked. The workflow verifies
 that policy before publishing and fails closed if it is absent or weakened:
 
@@ -69,8 +77,9 @@ git tag v0.2.0
 git push origin v0.2.0
 ```
 
-`.github/workflows/release.yml` also validates packaging changes on pull
-requests. It reads the exact Rust version from the repository's
+The monorepo-root `.github/workflows/release.yml` validates candidates through
+manual dispatch without publishing; stable tags validate and publish. It reads
+the exact Rust version from the component's
 `rust-toolchain.toml`, builds `ocean-tui` + `ocean-daemon` with `--locked` on a
 verified macOS arm64 runner, stages them into this package as `bin/ocean` and
 `bin/ocean-daemon`, and derives the package version from the tag. It downloads
