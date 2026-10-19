@@ -2515,6 +2515,14 @@ Reconciled profile PR #43 head 75e43022207750d061b87edf8dab691758b07247 with can
 Five existing pure router/banner fixtures passed via standalone rustc extraction against merged source; existing direct-rustc docs-check passed 30 packages, 157 Markdown files, 175 links. Nonledger whitespace checks passed. These fixtures do not compile the full daemon or execute profile/runtime behavior; earlier behavioral results remain unchanged-source historical evidence. Both public parent ledger histories are retained line-for-line in original order, followed by this public-safe canonical receipt. Automatically merged contracts retain their scopes, with no further devlog/index change needed. Separate source review ACKed; final committed-head review, hosted builds, maintainer approval under #54/#90 and live acceptance remain gates. Release #60 before #43. No merge or deployment claimed.
 
 _________________________________________________________________________________
+time: [11:50] [10-19-26]
+agent: [claude code] [claude-fable-5-1]
+worktree: [port/surface-227-observatory-resume-test] [~/dev/oceanwork/wt-port]
+type: [testing] [port]
+area: [testing] [backend]
+
+Ported Risingtides-dev/ocean-surface#227 into the monorepo as part of the 2026-10-18 PR triage sweep. Adds `observatory_tail_resume_forwards_last_event_id_to_the_daemon` to the ocean-surface-proxy tests: it drives the real router against a stub daemon and pins that a browser's `Last-Event-ID` reaches `/v1/observatory/events`, that the daemon sees only the server-side observer token (a forged browser Authorization is replaced), that the session cookie never crosses, and that event ids pass through for the next resume. The behaviour it pins already lives in `proxy_observatory`; this only adds the contract test. Validation: `cargo test -p ocean-surface-proxy` on this head.
+_________________________________________________________________________________
 time: [18:36] [10-13-26]
 agent: [copilot]
 worktree: [port/rooms-maintenance] [/home/runner/work/ocean/ocean]
