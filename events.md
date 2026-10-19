@@ -2618,3 +2618,12 @@ type: [bug report]
 area: [review] [testing]
 
 Addressed independent review of PR #113: an npm-only host with the personal package installed hits EEXIST because both scopes expose the same global commands. Onboarding now detects that installed personal package before credential reads/config writes and explains the explicit download/remove/local-install transition; it does not force-overwrite links or silently remove the working package. Updated the package guide and owning onboarding contract. All 15 onboarding fixtures pass. An isolated real-npm reproduction confirmed the collision, then the documented transition produced all three org command links. No real global package, identity or service was changed.
+
+_________________________________________________________________________________
+time: [16:05] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/org-team-distribution]
+type: [bug report]
+area: [review] [testing]
+
+Completed the next PR #113 review delta: inspect the personal npm installation before choosing Bun or npm, preventing an earlier npm command path from masking a Bun org install. Added the mixed-manager regression and corrected the component's canonical onboarding prerequisite to the org package. Updated owning runtime/docs contracts; child indexes are unchanged. All 16 onboarding fixtures, shell syntax, diff check and cargo xtask docs-check pass (30 packages, 161 active Markdown files, 185 local links). Initial Mac release candidate run 39314057475 passed build, license inventory, packaging and isolated npm/Bun installation; current-head verification remains separate.

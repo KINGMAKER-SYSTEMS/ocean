@@ -134,6 +134,17 @@ class Onboarding(unittest.TestCase):
             ["npm", "install", "-g", "@kingmaker-systems/ocean@latest"],
         ])
 
+    def test_personal_npm_package_also_blocks_when_bun_is_available(self):
+        npm = self.bin / "npm"
+        npm.write_text(MOCK)
+        npm.chmod(0o755)
+        (self.root / "npm-global/node_modules/@risingtides-dev/ocean").mkdir(parents=True)
+        self.run_script(success=False)
+        self.assertFalse(self.npmrc.exists())
+        self.assertFalse(self.member.exists())
+        self.assertFalse(any(c[0] in {"bun", "gh"} for c in self.calls()))
+        self.assertEqual([c for c in self.calls() if c[0] == "npm"], [["npm", "root", "--global"]])
+
     def test_malformed_identity_fails_before_package_or_auth(self):
         self.member.parent.mkdir(parents=True)
         for text in ['member_id = "fixture.member"\nunknown = "x"\n', 'member_id = "fixture.member"\nmember_id = "other"\n', 'member_id = "fixture.member"\ndisplay_name = "broken\\q"\n']:

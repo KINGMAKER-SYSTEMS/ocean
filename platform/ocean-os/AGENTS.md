@@ -78,7 +78,7 @@ Use `crates/AGENTS.md` for all current workspace packages, ownership exclusions,
   `@kingmaker-systems`; preserve unrelated mappings, including the old personal
   scope, when preparing the org install. Existing personal packages need an
   explicit org install before their updater follows org releases.
-  npm onboarding refuses a still-installed personal package before credential
+  Onboarding checks npm even when Bun is available and refuses a still-installed personal package before credential
   reads or config writes; download the org tarball, remove the personal package,
   then install that local archive before retrying. Never force-overwrite global
   command links or silently remove a working installation.
