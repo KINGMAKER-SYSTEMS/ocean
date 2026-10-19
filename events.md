@@ -1411,6 +1411,38 @@ Round 5: round-4 review follow-ups on model reroute fidelity. (F2) Selection-tim
 Validation: ocean-agent 280 passed / 0 failed / 2 ignored; ocean-daemon 908 passed / 2 failed (only the two known pre-existing persistent_room envelope-key assertions); clippy -p ocean-agent --all-targets -D warnings clean; fmt --all --check clean; git diff --check clean.
 
 _________________________________________________________________________________
+_________________________________________________________________________________
+time: [14:12] [06-10-26]
+agent: [zcode] [glm-5.3]
+worktree: [port/rooms-summarize]
+type: [feature-request]
+area: [backend] reconciliation: room summarize
+
+Sixth bounded Track B port: POST /v1/rooms/persistent/{key}/summarize — one
+bounded model turn over the room's transcript tail, folded into the room's
+single well-known room-summary artifact (compare-and-swap versioned, amended
+in place, announced on the SSE tail post-commit). The 1019-line room_summary.rs
+lands with its closure-injected model seam (testable without provider env;
+the route supplies AgentRuntime::complete_once, the same fresh-context
+no-session seam the advisor uses), role-based alias resolution (summarize >
+fast > the bound model, so the feature works with zero config), turn-permit
+backpressure shared with agent_turn/compact, and 10 tests. The route handler
+(request struct + handler + response mapping) was extracted verbatim from the
+personal persistent_rooms rework into the monorepo's unchanged file; the only
+adaptations were a sibling-module import and widening
+read_transcript_page to pub(super). Router-contract parity moved 119 → 120.
+The fixed 502 never carries provider text; artifact authorship demands a real
+roster participant.
+
+Issue #42 flakiness update (comment posted): the room-tail test is FLAKY
+(fails ~2/3, passes ~1/3 on an unchanged tree) while the HTTP lifecycle and
+audit-asymmetry pair is deterministic (3/3 failed) — two distinct problems,
+not one.
+
+Validation: room_summary tests (10) pass; router-contract parity (120) green;
+cargo test -p ocean-daemon 926 passed / 2 deterministic failures — the
+issue-#42 pair, reproduced on clean main before any of my changes; rustfmt;
+denied-warning Clippy zero; cargo xtask docs-check PASS.
 time: [22:26] [09-10-26]
 agent: [claude] [claude-opus-5-5]
 worktree: [fix/room-lifecycle-tests] [~/dev/oceanwork/wt-room-lifecycle-tests]
@@ -1854,6 +1886,18 @@ area: [backend] [infra]
 Federated rooms on smaths-mini (northstar, ocean-team) sat in `recovering` with Pending outbox rows and no log output. Replaying the receiver's reads against production Bedrock with the room bearer showed a valid `hello` (high-water 0) and a 200 roster, but the roster carries `caller_member_ids` (Bedrock since ocean-bedrock #137, 2026-09-02) and `MembersEnvelope` is `deny_unknown_fields`, so every epoch silently returned Recover after hello. Fix: accept and ignore `caller_member_ids` on the strict envelope, warn with `outcome="roster_rejected"` on non-transport roster parse failures, and regression test `roster_with_caller_member_ids_reaches_live` (red without the field, green with it). The supervised launcher `deploy/ocean-daemon.sh` now sources owner-only `~/.config/ocean-rs/federation.env` and prints `federation=on|off`; previously only a hand-edited installed copy did, which the installer would overwrite. Operator guide documents the env file, contributor-side local redemption, and the receiver replay diagnosis. Independent review round: `WireMember` also accepts Bedrock's `operator_id` (same failure class, operator rooms); roster projection failures warn too; startup warns `federation_unconfigured` when credentialed rooms exist without a URL; the launcher parses federation.env as data (owner-only, not group/other-writable, `OCEAN_FEDERATION_*` keys only, CR/quote tolerant, plist values win) instead of sourcing it, verified under macOS bash 3.2 against command substitution, foreign keys, spaces, CRLF, group-writable and unreadable files. End-to-end: the fixed release binary, run unsupervised on an isolated HOME with a copied rooms.db (outbox cleared), brought northstar and ocean-team to `live` against production Bedrock. Follow-up folded in before merge: warn-only `credential_member_mismatch` when Bedrock's `caller_member_ids` omit the credential's local member (stale-credential diagnostic; never blocks Live). Launcher mode check fails closed on unparseable `stat` output. Validation: room_federation 92/92; ocean-daemon 910 passed / 2 failed at 99be7a9 (the known persistent_room envelope-key assertions, identical on unmodified main); clippy -p ocean-daemon --all-targets -D warnings clean; fmt clean; docs-check PASS; installer fixtures 12/12. Runtime ops the same evening (not code): Jay's laptop federation.env reduced to OCEAN_FEDERATION_URL (the direct-redeem contributor token was removed and its backup deleted) and his daemon restarted; a fresh invite minted by John's daemon was redeemed through Jay's local /v1/rooms/persistent/invites/redeem (credential f9757e6e in his rooms.db); the stale direct-path Bedrock member db0367cd was removed by the room owner (old token now 403 membership_revoked); the empty local test room ns-taskforce was soft-closed on smaths-mini. Both daemons stay `recovering` until this fix is merged and installed.
 _________________________________________________________________________________
 
+time: [23:12] [09-10-26]
+agent: [codex] [factory release]
+worktree: [codex/pr44-reviewed-summary]
+type: [bug report]
+area: [backend] [testing] [review]
+
+PR #44 / issue #81: reconciled the existing summarize route with canonical main f1b22bd8, preserving both public ledger histories. Captured artifact absence/version now fences publication across provider latency against concurrent creation, summaries and human amendments, including identical-output races. Identical generated model/prose keeps the prior artifact and its original coverage/timestamp without claiming newer coverage; a real default-tail repeat appends no artifact audit. Partial-window reporting covers omitted rows on either side, and unknown authors are rejected before provider invocation. The default summary path preserves the selected provider/model pair while explicit summarize/fast roles retain precedence.
+
+Validation: four initial correctness cases reproduced before repair; a separate resolver regression demonstrated selected OpenAI incorrectly becoming Codex before the fallback repair. Final summary 24/24, router contracts 5/5, locked daemon check, formatting and diff checks pass with disposable auth/config/XDG fixtures and unchanged HOME. Docs-check passed on the initial summary repair; final fallback follow-up adds no documentation links. Independent source review ACKed c0f01eb1; this canonical receipt precedes final exact-head review and hosted checks. Nearest daemon contract updated; parent ownership/indexes unchanged. Maintainer approval and independent acceptance/live-migration holds remain. No live provider calls, installation or deployment.
+
+_________________________________________________________________________________
+
 time: [22:57] [09-10-26]
 agent: [codex] [factory release]
 worktree: [codex/pr41-reviewed-identity]
@@ -1978,6 +2022,18 @@ ________________________________________________________________________________
 _________________________________________________________________________________
 time: [15:17] [10-12-26]
 agent: [Codex]
+worktree: [PR44 port/rooms-summarize; factory-pr44-reviewed-summary/ocean]
+type: [workflow]
+area: [review]
+Reconciled reviewed PR44 c4863019e89977b4b61e50e3055be9649cd4220f with canonical main 1dfc6802bb74fecdcf83f6f17732b671c892b632. Only events.md conflicted; four divergent entries and both complete parent histories remain verbatim and ordered. All non-ledger blobs match automatic merge; three summary source files are unchanged. Diff and source-preservation checks pass. Incoming installer bytes match the already verified 14/14 fixture version; no identical tests were repeated. Root owns the final head through independent review, fresh hosted checks and release. Issue90, standing approvals and live acceptance remain separate gates. Existing contracts combined automatically; no new devlog or index changes. No heavy build, remote job or live action.
+
+_________________________________________________________________________________
+time: [15:28] [10-12-26]
+agent: [Codex]
+worktree: [port/rooms-summarize; factory-pr44-reviewed-summary/ocean]
+type: [bug report]
+area: [backend]
+Repaired issue81 / PR44 requester-kind race found during independent reconciliation review. Summary publication now reclassifies the requester through the shared client-artifact author gate under the same store lock as create, amend and unchanged-result handling, preserving the pre-provider artifact CAS. Agent/System leave-and-rejoin interleavings refuse without artifact or marker publication. The synthetic regression covers both replacement kinds across absent, changed and identical summary output. Targeted regression1/1 and full summary group25/25 passed in disposable auth/config/XDG fixtures with unchanged HOME; formatting and diff checks pass. Independent source reviewer ACKed the frozen three-file patch. Updated nearest daemon contract; parent ownership and indexes remain unchanged. Root owns final committed-head review, push and fresh Build Ocean/Build Surface checks. Standing approval policy issue90 and live acceptance remain separate holds. No merge, deployment or live provider action.
 worktree: [PR41; factory-pr41-reviewed-identity/ocean]
 type: [workflow]
 area: [review]
@@ -2140,6 +2196,15 @@ Validation: in apps/ocean-surface, cargo fmt --check clean; WASM clippy -D warni
 _________________________________________________________________________________
 
 _________________________________________________________________________________
+time: [23:13] [10-12-26]
+agent: [codex] [gpt-6]
+worktree: [codex/pr44-main255-reconcile] [macmini-ip factory-pr44-main255-reconcile]
+type: [refactor]: PR #44 current-main reconciliation
+area: [backend] [testing] [review]
+
+Reconciled summary PR #44 head c181d2c5d54513afe7a8cf7488788cc14e1742f9 with canonical main 25599f22410c8e164dd09f13ad0a9254fa97a39d. Manual source resolutions retain room_summary and room_tools module declarations, derive the 130-route count from identical registered/banner/documented sets, and preserve both the summary guide row and incoming message-authority/thread wording. No manual runtime-body changes: summary implementation and its authorization helper retain the prior PR blobs; other 1,175 non-ledger entries match AUTO_MERGE exactly.
+
+Five existing pure router/banner fixtures passed using standalone rustc extraction with include_str paths pointing to actual merged files. Existing xtask docs-check compiled directly with rustc passed 30 packages, 153 Markdown files, 170 links; nonledger whitespace checks passed. These checks do not execute Axum/provider behavior or compile the full daemon. Earlier summary/provider regressions remain unchanged-source historical evidence, not fresh executions. Both public parent ledger histories are retained line-for-line in original order; only this public-safe canonical receipt is appended. Automatically merged daemon guidance preserves existing contracts, with no further contract change needed for these resolutions. Independent final-head review, required hosted builds, maintainer approval under #54/#90, and live acceptance remain separate gates. No merge or deployment claimed.
 time: [23:04] [10-12-26]
 agent: [codex] [gpt-6]
 worktree: [codex/pr41-main255-reconcile] [macmini-ip factory-pr41-main255-reconcile]
