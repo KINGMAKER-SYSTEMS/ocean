@@ -2573,3 +2573,18 @@ area: [frontend] [backend] [testing]
 Prepared conversation-first Rooms presentation: details open on intent at every width, routine system audits stay out of the timeline, access changes refresh authoritative bindings, browser members show paused/revoked status, and room creation exposes its optional project choice after a name. Human messages, durable audit records and native-only consent authority remain unchanged. Added default-model refresh of stored provider credentials and a regression for rotation, source removal and malformed storage. Added the Mac/Windows team setup matrix and explicit multi-machine acceptance requirements. Updated owning devlogs and root documentation index.
 
 Live diagnostic on the existing daemon confirmed an admitted room turn failed with an expired cached provider token despite current credentials on disk. Reselecting the same model restored a real no-tools reply in the existing room session. This proves one host, not coworker federation. Initial UI tests (921 unit tests plus integration suites), Trunk build and credential regression pass; final source checks and rendered verification continue. The running Surface predates canonical source, and its legacy rollback executable is missing, so no live Surface promotion was attempted. Windows and Intel Mac packages are not supplied by the current release workflow.
+time: [13:55] [10-19-26]
+agent: [claude code] [claude-fable-5-1]
+worktree: [port/os-527-credential-resnapshot] [~/dev/oceanwork/wt-port]
+type: [fix] [port]
+area: [backend]
+
+Ported Risingtides-dev/ocean-os#527. `AgentRuntime::refreshed_global_snapshot` re-resolves the stored global selection's credential from the same `ProviderEnv` the failover decision uses, after the turn-top OAuth refresh has rewritten auth.json, and writes the refreshed state back so `/ready` and later turns agree. Only the credential may change: a failed resolution, a different selection or no credential keeps the stored snapshot. Three tests cover a credential that was expired at selection, a token rotated after selection, and a vanished auth file. The legacy diff applied cleanly (offsets only). Validation: `cargo test -p ocean-agent --lib` 287 passed.
+time: [13:40] [10-19-26]
+agent: [claude code] [claude-fable-5-1]
+worktree: [port/os-528-retire-codex-ids] [~/dev/oceanwork/wt-port]
+type: [fix] [port]
+area: [backend]
+
+Ported Risingtides-dev/ocean-os#528 (menu half). `gpt-5.4`, `gpt-5.4-mini` and `gpt-5.3-codex-spark` leave `known_models()` because the Codex backend refuses them for ChatGPT accounts (400, verified live 2026-10-02 in the legacy PR); they stay routable as legacy arms in `resolve_model_selection` so pinned sessions still resolve and then fail over at selection. The fallback half of the legacy PR already landed via #63 (`gpt-6-astra`). New test `retired_codex_ids_stay_routable_but_leave_the_menu_and_fallback`; the menu snapshot test drops the three ids. Validation: `cargo test -p ocean-providers --lib`.
+_________________________________________________________________________________
