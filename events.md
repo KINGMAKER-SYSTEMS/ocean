@@ -2562,3 +2562,13 @@ area: [docs]
 
 Removed the second, byte-identical copy of the `[17:55] [06-10-26]` model-reroute ledger entry. It was duplicated when PR #47 (port/rooms-maintenance), whose branch carried an older copy of the ledger, was brought current with main during the 2026-10-18 PR triage sweep and the two ledger histories were concatenated. No other entry changed; the sweep's results are recorded outside the repo in ~/dev/pr-triage-2026-10-18-results.md.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [13:40] [10-19-26]
+agent: [claude code] [claude-fable-5-1]
+worktree: [port/os-528-retire-codex-ids] [~/dev/oceanwork/wt-port]
+type: [fix] [port]
+area: [backend]
+
+Ported Risingtides-dev/ocean-os#528 (menu half). `gpt-5.4`, `gpt-5.4-mini` and `gpt-5.3-codex-spark` leave `known_models()` because the Codex backend refuses them for ChatGPT accounts (400, verified live 2026-10-02 in the legacy PR); they stay routable as legacy arms in `resolve_model_selection` so pinned sessions still resolve and then fail over at selection. The fallback half of the legacy PR already landed via #63 (`gpt-6-astra`). New test `retired_codex_ids_stay_routable_but_leave_the_menu_and_fallback`; the menu snapshot test drops the three ids. Validation: `cargo test -p ocean-providers --lib`.
+_________________________________________________________________________________
