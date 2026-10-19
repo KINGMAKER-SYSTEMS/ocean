@@ -536,6 +536,8 @@ jobs:
         run: cargo build --locked --release -p ocean-daemon -p ocean-tui
       - name: Test Windows file and operator security
         run: cargo test --locked --release -p ocean-daemon --test windows_file_security
+      - name: Test Windows Room package capture
+        run: python ../../.github/test-room-package.py target/release/ocean-daemon.exe $env:GITHUB_SHA
       - name: Verify both executable outputs
         run: |
           foreach ($binary in @('ocean-daemon.exe', 'ocean-tui.exe')) {

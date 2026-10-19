@@ -14,12 +14,19 @@ Root GitHub Actions builds for the public Ocean monorepo.
   Registry authentication, publication and latest-tag reconciliation target
   `@kingmaker-systems/ocean`, linked to this canonical repository.
   Manual `windows_probe` builds daemon/TUI executables and runs Observatory
-  credential, operator-key and guarded skill-file tests on Windows. The probe
+  credential, operator-key and guarded skill/package-file tests on Windows. It
+  also boots a disposable daemon to check real Room package preview, digest
+  changes, missing packages, symlink refusal and file limits without provider
+  credentials. The probe
   has read-only permissions and never publishes. This probe is separate from routine CI and Mac package validation.
   The publish job has no source checkout: its first shell starts at the existing
   workspace root, verifies the artifact digest, then creates the component
   staging directory used by subsequent steps.
 - `build-scope.py` selects changed components; `test-build-scope.py` checks scope decisions, including NUL-terminated Git output. Unknown or unavailable diffs build both.
+- `test-room-package.py` owns the disposable actual-daemon package-preview
+  fixture. It verifies child identity before creating fixture Rooms, uses only
+  fixture state/auth paths, and stops only its own process. It performs no
+  provider inference or live daemon mutation.
 - Root CI builds Ocean OS and the active Surface deliverables. Publishing and
   deployment remain owned by their component workflows and installers.
 

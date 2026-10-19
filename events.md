@@ -2748,3 +2748,12 @@ type: [bug report]
 area: [backend] [testing]
 
 Native Windows probe 39326283845 passed all 20 credential tests, then exposed the next compiler blocker: the skill reader treated every non-Linux host as Unix. Added a Windows reader for absolute local-drive paths, retaining directory handles and opening each child relative to its parent with reparse refusal; device, UNC, parent-traversal and alternate-stream paths stay refused. Added actual-source native integration fixtures for guarded reads, parent retargeting and operator-key/header behavior; existing Unix skill reads remain unchanged. Windows cross-target Clippy passes; fresh native execution and review remain pending. Updated daemon and workflow contracts; no new devlog boundary or changed parent index. Release repair PR #115 merged at 50985671 after review and exact-head CI; immutable v0.2.1 validation/publication is running as 39328117964. No release availability or Windows runtime acceptance claimed.
+
+_________________________________________________________________________________
+time: [18:20] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/windows-room-packages]
+type: [feature-request]
+area: [backend] [testing]
+
+Implemented the Windows Room-package capture path through retained local-drive directory handles. Reused checked no-reparse opens, added bounded synchronous handle enumeration with strict UTF-16 names, exact child lookup and fixed error mapping; common map hashing and count/depth/byte ceilings remain unchanged. Added native fixtures for directory limits, Unicode names, root retargeting, path/link refusal and malformed directory records. Windows cross-target denied-warning Clippy passes; all 22 existing package-authority tests, daemon check, docs-check, actionlint and release contracts pass locally. A disposable actual-daemon HTTP fixture passes on the existing Mac release, verifying identity, complete-map digest, nested byte changes, missing packages, symlink refusal and size bounds; it is now in the opt-in native Windows probe. Native Windows execution and fresh independent review remain pending. Updated daemon/workflow contracts; parent indexes unchanged because ownership is unchanged. No provider reply, Windows installer, resource/attachment support or deployment acceptance claimed.
