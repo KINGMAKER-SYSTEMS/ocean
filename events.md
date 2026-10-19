@@ -2600,3 +2600,12 @@ area: [automations] [testing]
 Corrected the active monorepo publisher, package repository metadata, onboarding registry mapping/install command, updater and staging checks to use @kingmaker-systems/ocean. The prior active workflow targeted the personal package despite running in KINGMAKER-SYSTEMS/ocean. Existing personal registry mappings remain untouched; the package guide describes an explicit org install rather than claiming an automatic namespace migration. Updated current release dispatch/ruleset documentation and owning workflow/runtime/packaging devlogs. Root child indexes and archived nested workflows remain unchanged.
 
 Validation: 13 onboarding fixtures pass, root release ownership/path/security contract passes, actionlint and shell syntax pass, and real updater scripts invoke the expected org package through mocked bun and npm. These are source and command-routing checks, not a published package or coworker install. A manual read-only release-candidate run is the next artifact validation gate. No release tag, package publication, service restart or credential change.
+
+_________________________________________________________________________________
+time: [15:48] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/org-team-distribution]
+type: [workflow]
+area: [testing]
+
+Correction to the preceding validation entry: the first lint invocation still reported a second pre-existing unused retry-loop variable. Repaired both unused indices without changing retry counts. A separate final actionlint invocation now exits zero, as do release ownership/path/security contract and diff checks.
