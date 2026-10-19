@@ -107,7 +107,7 @@ pub const COMMANDS: &[SlashCommand] = &[
     },
     SlashCommand {
         name: "/login",
-        desc: "provider logins (popup) or /login [claude|codex] browser flow",
+        desc: "provider logins (popup) or /login [claude|codex|chatgpt] browser flow",
         group: "session",
         soon: false,
     },

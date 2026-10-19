@@ -22,7 +22,11 @@ const LAUNCH_PATH: &str = "/launch";
 #[derive(Debug)]
 pub(crate) enum CallbackResult {
     /// A valid authorization code + echoed state.
-    Ok { code: String, state: String },
+    Ok {
+        code: String,
+        state: String,
+        client_id: Option<String>,
+    },
     /// A terminal error detected at the callback (provider `error`, missing
     /// code, or state mismatch).
     Err(String),
@@ -36,6 +40,8 @@ pub(crate) struct BindSpec {
     /// When set, this exact URI is advertised to the provider and no port
     /// fallback is permitted (Codex only allows its registered URI).
     pub fixed_redirect_uri: Option<&'static str>,
+    /// Host to advertise for dynamically allocated ports.
+    pub redirect_host: &'static str,
     pub label: &'static str,
 }
 
@@ -63,7 +69,9 @@ impl CallbackServer {
         let redirect_uri = spec
             .fixed_redirect_uri
             .map(str::to_string)
-            .unwrap_or_else(|| format!("http://localhost:{port}{}", spec.callback_path));
+            .unwrap_or_else(|| {
+                format!("http://{}:{port}{}", spec.redirect_host, spec.callback_path)
+            });
         let launch_url = format!("http://localhost:{port}{LAUNCH_PATH}");
 
         let (tx, rx) = oneshot::channel();
@@ -217,16 +225,26 @@ async fn handle_callback(stream: &mut TcpStream, query: &str, shared: &ServerSha
     let error = crate::util::query_get(query, "error");
     let error_description = crate::util::query_get(query, "error_description");
 
+    if state != shared.expected_state {
+        // Reject forged callbacks without consuming the one-shot sender. A
+        // local request that guesses the callback URL must not be able to
+        // cancel the real browser flow before its valid state arrives.
+        let body = error_html("state mismatch - possible CSRF attack");
+        write_response(stream, 500, "text/html; charset=utf-8", &body).await;
+        return;
+    }
+
     let result = if let Some(err) = error.as_deref() {
         let detail = error_description.unwrap_or_else(|| err.to_string());
         CallbackResult::Err(format!("authorization failed: {detail}"))
     } else {
         match code {
             None => CallbackResult::Err("missing authorization code".to_string()),
-            Some(_) if state != shared.expected_state => {
-                CallbackResult::Err("state mismatch - possible CSRF attack".to_string())
-            }
-            Some(code) => CallbackResult::Ok { code, state },
+            Some(code) => CallbackResult::Ok {
+                code,
+                state,
+                client_id: crate::util::query_get(query, "client_id"),
+            },
         }
     };
 
@@ -312,6 +330,7 @@ mod tests {
             preferred_port: 0,
             allow_fallback: true,
             fixed_redirect_uri: None,
+            redirect_host: "localhost",
             label: "test",
         }
     }
@@ -365,7 +384,7 @@ mod tests {
         // ...BEFORE the flow is resolved (we only await the resolution now),
         // proving the browser response is not gated on resolution/exchange.
         match server.next_result().await.expect("result") {
-            CallbackResult::Ok { code, state } => {
+            CallbackResult::Ok { code, state, .. } => {
                 assert_eq!(code, "THECODE");
                 assert_eq!(state, "STATE");
             }
@@ -374,7 +393,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wrong_state_is_http_500_and_csrf_error() {
+    async fn wrong_state_is_rejected_without_consuming_pending_flow() {
         let mut server = CallbackServer::bind(&ephemeral_spec(), "GOOD".to_string())
             .await
             .expect("bind");
@@ -383,9 +402,15 @@ mod tests {
         let (status, body) = status_and_body(&resp);
         assert_eq!(status, 500);
         assert!(body.contains("state mismatch"), "body: {body}");
+
+        let resp = get(port, "/callback?code=THECODE&state=GOOD").await;
+        assert_eq!(status_and_body(&resp).0, 200);
         match server.next_result().await.expect("result") {
-            CallbackResult::Err(msg) => assert!(msg.contains("state mismatch"), "msg: {msg}"),
-            other => panic!("expected Err, got {other:?}"),
+            CallbackResult::Ok { code, state, .. } => {
+                assert_eq!(code, "THECODE");
+                assert_eq!(state, "GOOD");
+            }
+            other => panic!("expected valid callback after wrong-state request, got {other:?}"),
         }
     }
 
@@ -397,7 +422,7 @@ mod tests {
         let port = port_of(&server);
         let resp = get(
             port,
-            "/callback?error=access_denied&error_description=user%20declined",
+            "/callback?error=access_denied&error_description=user%20declined&state=S",
         )
         .await;
         let (status, body) = status_and_body(&resp);
@@ -409,6 +434,28 @@ mod tests {
         match server.next_result().await.expect("result") {
             CallbackResult::Err(msg) => assert!(msg.contains("authorization failed"), "msg: {msg}"),
             other => panic!("expected Err, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn wrong_state_with_provider_error_does_not_consume_pending_flow() {
+        let mut server = CallbackServer::bind(&ephemeral_spec(), "GOOD".to_string())
+            .await
+            .expect("bind");
+        let port = port_of(&server);
+        let resp = get(port, "/callback?error=access_denied&state=BAD").await;
+        let (status, body) = status_and_body(&resp);
+        assert_eq!(status, 500);
+        assert!(body.contains("state mismatch"), "body: {body}");
+
+        let resp = get(port, "/callback?code=THECODE&state=GOOD").await;
+        assert_eq!(status_and_body(&resp).0, 200);
+        match server.next_result().await.expect("result") {
+            CallbackResult::Ok { code, state, .. } => {
+                assert_eq!(code, "THECODE");
+                assert_eq!(state, "GOOD");
+            }
+            other => panic!("expected valid callback after wrong-state request, got {other:?}"),
         }
     }
 
@@ -443,7 +490,7 @@ mod tests {
         let (status, _body) = status_and_body(&resp);
         assert_eq!(status, 200);
         match server.next_result().await.expect("result") {
-            CallbackResult::Ok { code, state } => {
+            CallbackResult::Ok { code, state, .. } => {
                 assert_eq!(code, "C");
                 assert_eq!(state, "S");
             }

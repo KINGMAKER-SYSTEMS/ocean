@@ -84,6 +84,10 @@ struct AppState {
     /// Mode-0600 boot-bound credential minted and rotated by ocean-daemon.
     /// Read immediately before each Observatory request; never sent to the browser.
     observer_token_path: PathBuf,
+    /// Mode-0600 Room operator key minted by ocean-daemon (`operator.key`).
+    /// Read immediately before each owner mutation the authenticated session
+    /// makes; never sent to the browser.
+    operator_key_path: PathBuf,
 }
 
 impl AppState {
@@ -199,30 +203,88 @@ fn derive_session_token(
 /// Read the daemon-minted observer token without following symlinks. The
 /// complete credential stays on the proxy side of the browser boundary.
 fn read_observer_token(path: &FsPath) -> Result<String, String> {
-    let link = std::fs::symlink_metadata(path)
-        .map_err(|error| format!("observer credential unavailable: {error}"))?;
+    read_local_credential(path, "observer credential")
+}
+
+/// Read a daemon-minted local credential file without following symlinks,
+/// requiring a non-empty mode-0600 regular file.
+fn read_local_credential(path: &FsPath, what: &str) -> Result<String, String> {
+    let link =
+        std::fs::symlink_metadata(path).map_err(|error| format!("{what} unavailable: {error}"))?;
     if link.file_type().is_symlink() || !link.is_file() {
-        return Err("observer credential must be a regular file".to_owned());
+        return Err(format!("{what} must be a regular file"));
     }
     let mut file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW)
         .open(path)
-        .map_err(|error| format!("observer credential unavailable: {error}"))?;
+        .map_err(|error| format!("{what} unavailable: {error}"))?;
     let metadata = file
         .metadata()
-        .map_err(|error| format!("observer credential unavailable: {error}"))?;
+        .map_err(|error| format!("{what} unavailable: {error}"))?;
     if !metadata.is_file() || metadata.mode() & 0o777 != 0o600 {
-        return Err("observer credential must be a mode-0600 regular file".to_owned());
+        return Err(format!("{what} must be a mode-0600 regular file"));
     }
     let mut token = String::new();
     file.read_to_string(&mut token)
-        .map_err(|error| format!("observer credential unavailable: {error}"))?;
+        .map_err(|error| format!("{what} unavailable: {error}"))?;
     let token = token.trim();
     if token.is_empty() {
-        return Err("observer credential is empty".to_owned());
+        return Err(format!("{what} is empty"));
     }
     Ok(token.to_owned())
+}
+
+/// Header the daemon reads the Room operator credential from.
+const OPERATOR_HEADER: &str = "x-ocean-operator";
+
+/// The daemon owner mutations the logged-in operator may make through this
+/// origin: rename the owner (`PUT /v1/me`), decide a room run's pending
+/// permission, and save a room agent's settings. Exact shapes only.
+fn is_owner_mutation(method: &axum::http::Method, path: &str) -> bool {
+    use axum::http::Method;
+    let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+    match segments.as_slice() {
+        ["v1", "me"] => method == Method::PUT,
+        ["v1", "rooms", "persistent", key, "runs", run, "permission"] => {
+            method == Method::POST && !key.is_empty() && !run.is_empty()
+        }
+        ["v1", "rooms", "persistent", key, "agents", agent, "settings"] => {
+            method == Method::PUT && !key.is_empty() && !agent.is_empty()
+        }
+        _ => false,
+    }
+}
+
+/// The Room operator credential to attach to an owner mutation. The session
+/// gate has already authenticated this request as the operator's login, so
+/// the proxy vouches for the owner exactly as it does for the Observatory.
+/// With login disabled (`OCEAN_SURFACE_AUTH=off`) it cannot tell the owner
+/// from any other client and attaches nothing: the daemon keeps refusing.
+fn owner_operator_key(state: &AppState) -> Result<Option<String>, OperatorKeyUnavailable> {
+    if state.basic_auth.is_none() {
+        return Ok(None);
+    }
+    read_local_credential(&state.operator_key_path, "operator credential")
+        .map(Some)
+        .map_err(|error| {
+            tracing::warn!(%error, path = %state.operator_key_path.display(), "operator credential unavailable");
+            OperatorKeyUnavailable
+        })
+}
+
+/// The operator key file could not be read; the owner mutation fails closed.
+struct OperatorKeyUnavailable;
+
+impl IntoResponse for OperatorKeyUnavailable {
+    fn into_response(self) -> Response {
+        // The read error carries the credential path; it is logged, never shipped.
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "operator credential unavailable",
+        )
+            .into_response()
+    }
 }
 
 #[tokio::main]
@@ -327,6 +389,9 @@ async fn main() -> anyhow::Result<()> {
     let observer_token_path = std::env::var_os("OCEAN_OBSERVER_TOKEN_FILE")
         .map(PathBuf::from)
         .unwrap_or_else(|| ocean_config_dir().join("observatory-token"));
+    let operator_key_path = std::env::var_os("OCEAN_OPERATOR_KEY_FILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| ocean_config_dir().join("operator.key"));
 
     let state = Arc::new(AppState {
         // TASK-71: never follow upstream redirects. A redirect-following
@@ -352,6 +417,7 @@ async fn main() -> anyhow::Result<()> {
         maps_key,
         maps_map_id,
         observer_token_path,
+        operator_key_path,
     });
 
     let app = build_app(state, &dist);
@@ -417,6 +483,9 @@ fn build_app(state: Arc<AppState>, dist: &std::path::Path) -> Router {
         // Agent identity picker (TASK-9/TASK-11): surfaces call GET /v1/agents
         // same-origin; the proxy forwards to the daemon and returns the JSON list.
         .route("/v1/agents", get(proxy_agents))
+        // Daemon owner identity (team-platform P2): every room author derives
+        // from it; the browser never mints an identity.
+        .route("/v1/me", get(proxy_me_get).put(proxy_me_put))
         .route("/v1/fs/dirs", get(proxy_fs_dirs))
         .route(
             "/v1/projects",
@@ -450,14 +519,25 @@ fn build_app(state: Arc<AppState>, dist: &std::path::Path) -> Router {
             "/v1/rooms/persistent/{*rest}",
             get(proxy_rooms_persistent)
                 .post(proxy_rooms_persistent)
+                .put(proxy_rooms_persistent)
                 .delete(proxy_rooms_persistent),
         )
+        // The owner's cross-room mentions inbox (team-platform P6) sits
+        // outside `/v1/rooms/persistent/{key}` so it never shadows a room
+        // keyed `inbox`; same buffered forwarder.
+        .route("/v1/rooms/inbox", get(proxy_rooms_persistent))
         .route(
             "/v1/rooms/{room_id}/livekit-token",
             post(proxy_livekit_token),
         )
         .route("/v1/requests", get(proxy_requests))
         .route("/v1/requests/{id}/cancel", post(proxy_cancel))
+        // The browser pane is same-origin on the PWA: relay its long-lived
+        // daemon screencast and bounded input through the existing session
+        // auth boundary. Keep these as exact routes; this is not a wildcard
+        // daemon forwarder.
+        .route("/v1/browser/screencast", get(proxy_browser_screencast))
+        .route("/v1/browser/input", post(proxy_browser_input))
         // Component interaction events (kanban click / form submit) flow from a
         // remote surface back to the daemon through this origin too, so a phone
         // via the tunnel can drive interactive components (OCEAN-62c).
@@ -1075,15 +1155,38 @@ async fn proxy_get_json(state: &AppState, path: &str) -> Response {
 
 /// JSON POST passthrough helper for small daemon endpoints.
 async fn proxy_post_json(state: &AppState, path: &str, body: Bytes) -> Response {
+    proxy_send_json(state, reqwest::Method::POST, path, body).await
+}
+
+/// JSON body passthrough helper for small daemon endpoints (POST/PUT).
+async fn proxy_send_json(
+    state: &AppState,
+    method: reqwest::Method,
+    path: &str,
+    body: Bytes,
+) -> Response {
+    proxy_send_json_as(state, method, path, body, None).await
+}
+
+/// [`proxy_send_json`], attaching the Room operator credential when the
+/// caller resolved one for an owner mutation.
+async fn proxy_send_json_as(
+    state: &AppState,
+    method: reqwest::Method,
+    path: &str,
+    body: Bytes,
+    operator_key: Option<String>,
+) -> Response {
     let url = format!("{}{path}", state.daemon_url.trim_end_matches('/'));
-    match state
+    let mut request = state
         .http_json
-        .post(&url)
+        .request(method, &url)
         .header(header::CONTENT_TYPE, "application/json")
-        .body(body.to_vec())
-        .send()
-        .await
-    {
+        .body(body.to_vec());
+    if let Some(key) = operator_key {
+        request = request.header(OPERATOR_HEADER, key);
+    }
+    match request.send().await {
         Ok(resp) => {
             let status = resp.status();
             let bytes = resp.bytes().await.unwrap_or_default();
@@ -1101,6 +1204,20 @@ async fn proxy_post_json(state: &AppState, path: &str, body: Bytes) -> Response 
 /// Reverse-proxy GET /v1/models (model picker catalogue).
 async fn proxy_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     proxy_get_json(&state, "/v1/models").await
+}
+
+/// Reverse-proxy GET /v1/me (the daemon owner identity rooms author as).
+async fn proxy_me_get(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    proxy_get_json(&state, "/v1/me").await
+}
+
+/// Reverse-proxy PUT /v1/me (rename the daemon owner).
+async fn proxy_me_put(State(state): State<Arc<AppState>>, body: Bytes) -> impl IntoResponse {
+    let operator_key = match owner_operator_key(&state) {
+        Ok(key) => key,
+        Err(unavailable) => return unavailable.into_response(),
+    };
+    proxy_send_json_as(&state, reqwest::Method::PUT, "/v1/me", body, operator_key).await
 }
 
 /// Reverse-proxy GET /v1/agents (named agent identity picker, TASK-9/TASK-11).
@@ -1270,6 +1387,23 @@ async fn proxy_requests(State(state): State<Arc<AppState>>, req: Request) -> imp
         path.push_str(query);
     }
     proxy_get_json(&state, &path).await
+}
+
+/// Stream the daemon browser screencast through the authenticated PWA origin.
+async fn proxy_browser_screencast(State(state): State<Arc<AppState>>, _req: Request) -> Response {
+    let url = format!(
+        "{}/v1/browser/screencast",
+        state.daemon_url.trim_end_matches('/')
+    );
+    match state.http.get(&url).send().await {
+        Ok(resp) => sse_stream_response(resp),
+        Err(err) => (StatusCode::BAD_GATEWAY, daemon_unreachable_body(&err)).into_response(),
+    }
+}
+
+/// Forward one browser input event through the authenticated PWA origin.
+async fn proxy_browser_input(State(state): State<Arc<AppState>>, body: Bytes) -> Response {
+    proxy_post_json(&state, "/v1/browser/input", body).await
 }
 
 /// Reverse-proxy POST /v1/requests/{id}/cancel (halt a running turn).
@@ -1568,8 +1702,8 @@ async fn proxy_rooms_persistent(
         };
     }
 
-    // The path is always under /v1/rooms/persistent (the only routes wired to
-    // this handler); forward it unchanged, with the query string preserved so
+    // The path is always under /v1/rooms/persistent or exactly /v1/rooms/inbox
+    // (the only routes wired to this handler); forward it unchanged, with the query string preserved so
     // the transcript tail's ?after_seq= reaches the daemon.
     let url = format!("{}{path}{q}", state.daemon_url.trim_end_matches('/'));
     // buffer the (small) body so we can forward it on POST/DELETE
@@ -1582,6 +1716,14 @@ async fn proxy_rooms_persistent(
             return (StatusCode::PAYLOAD_TOO_LARGE, "request body too large").into_response();
         }
     };
+    let operator_key = if is_owner_mutation(&method, &path) {
+        match owner_operator_key(&state) {
+            Ok(key) => key,
+            Err(unavailable) => return unavailable.into_response(),
+        }
+    } else {
+        None
+    };
     let builder = if method == axum::http::Method::GET {
         state.http_json.get(&url)
     } else {
@@ -1590,6 +1732,10 @@ async fn proxy_rooms_persistent(
             .request(method, &url)
             .header(header::CONTENT_TYPE, "application/json")
             .body(body.to_vec())
+    };
+    let builder = match operator_key {
+        Some(key) => builder.header(OPERATOR_HEADER, key),
+        None => builder,
     };
     match builder.send().await {
         Ok(resp) => {
@@ -1941,6 +2087,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use axum::{
         body::{to_bytes, Body, Bytes},
@@ -1981,6 +2128,7 @@ mod tests {
             session_token: "test-session".to_string(),
             secure_cookie: true,
             observer_token_path: PathBuf::from("/not-used-in-auth-tests"),
+            operator_key_path: PathBuf::from("/not-used-operator-key"),
         })
     }
 
@@ -1993,6 +2141,7 @@ mod tests {
 
     struct RequestStatusFixture {
         app: Router,
+        address: std::net::SocketAddr,
         received: Arc<Mutex<Vec<ForwardedRequest>>>,
         upstream: tokio::task::JoinHandle<()>,
         _dist: tempfile::TempDir,
@@ -2047,10 +2196,123 @@ mod tests {
         fixture_state.observer_token_path = dist.path().join("absent-fixture-observer-token");
         RequestStatusFixture {
             app: build_app(state, dist.path()),
+            address,
             received,
             upstream,
             _dist: dist,
         }
+    }
+
+    /// Owner mutations through the authenticated proxy carry the daemon's Room
+    /// operator key from its mode-0600 file; nothing else does, a browser
+    /// cannot supply its own, and a proxy without login attaches nothing.
+    #[tokio::test]
+    async fn owner_mutations_carry_the_operator_key_only_for_the_logged_in_session() {
+        for login in [true, false] {
+            let fixture = request_status_fixture(StatusCode::OK, "{}").await;
+            let mut state = auth_test_state();
+            let fixture_state = Arc::get_mut(&mut state).unwrap();
+            let key_path = fixture._dist.path().join("operator.key");
+            std::fs::write(&key_path, "fixture-operator-key\n").unwrap();
+            std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            fixture_state.operator_key_path = key_path;
+            fixture_state.daemon_url = format!("http://{}/", fixture.address);
+            fixture_state.http_json = reqwest::Client::builder()
+                .no_proxy()
+                .timeout(std::time::Duration::from_secs(2))
+                .build()
+                .unwrap();
+            if !login {
+                fixture_state.basic_auth = None;
+            }
+            let app = build_app(state, fixture._dist.path());
+            let cases = [
+                (Method::PUT, "/v1/me", true),
+                (
+                    Method::POST,
+                    "/v1/rooms/persistent/r1/runs/run-1/permission",
+                    true,
+                ),
+                (
+                    Method::PUT,
+                    "/v1/rooms/persistent/r1/agents/helper/settings",
+                    true,
+                ),
+                (Method::POST, "/v1/rooms/persistent/r1/messages", false),
+                (
+                    Method::POST,
+                    "/v1/rooms/persistent/r1/runs/run-1/cancel",
+                    false,
+                ),
+                (
+                    Method::GET,
+                    "/v1/rooms/persistent/r1/agents/helper/settings",
+                    false,
+                ),
+            ];
+            for (method, uri, owner) in cases {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method(method.clone())
+                            .uri(uri)
+                            .header(header::COOKIE, "ocean_session=test-session")
+                            .header("x-ocean-operator", "browser-forged-key")
+                            .header(header::CONTENT_TYPE, "application/json")
+                            .body(Body::from("{}"))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK, "{method} {uri}");
+                let received = fixture.received.lock().unwrap().pop().expect("forwarded");
+                assert_eq!(received.uri.path(), uri);
+                let forwarded = received
+                    .headers
+                    .get("x-ocean-operator")
+                    .map(|v| v.to_str().unwrap().to_owned());
+                let expected = (owner && login).then(|| "fixture-operator-key".to_owned());
+                assert_eq!(forwarded, expected, "login={login} {method} {uri}");
+                assert!(!received.headers.contains_key("cookie"));
+            }
+        }
+
+        // Without a valid session nothing reaches the daemon.
+        let fixture = request_status_fixture(StatusCode::OK, "{}").await;
+        let response = fixture
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/v1/me")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(fixture.received.lock().unwrap().is_empty());
+
+        // An unreadable key fails closed before forwarding.
+        let response = fixture
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/v1/me")
+                    .header(header::COOKIE, "ocean_session=test-session")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(fixture.received.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -2187,16 +2449,23 @@ mod tests {
         for (method, uri) in [
             (Method::GET, "/v1/requests"),
             (Method::POST, "/v1/requests/fixture-request/cancel"),
+            (Method::GET, "/v1/browser/screencast"),
+            (Method::POST, "/v1/browser/input"),
         ] {
             for cookie in [None, Some("ocean_session=wrong-session")] {
                 let mut request = Request::builder().method(method.clone()).uri(uri);
                 if let Some(cookie) = cookie {
                     request = request.header(header::COOKIE, cookie);
                 }
+                let body = if uri == "/v1/browser/input" {
+                    Body::from(r#"{"kind":"click","x":10,"y":20}"#)
+                } else {
+                    Body::empty()
+                };
                 let response = fixture
                     .app
                     .clone()
-                    .oneshot(request.body(Body::empty()).unwrap())
+                    .oneshot(request.body(body).unwrap())
                     .await
                     .unwrap();
                 assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -2223,6 +2492,176 @@ mod tests {
         assert_eq!(response.headers()[header::LOCATION], "/login");
         assert!(!super::is_public_boot_asset("/v1/requests"));
         assert!(fixture.received.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn browser_input_is_forwarded_through_the_authenticated_production_route() {
+        let body = r#"{"kind":"click","x":10,"y":20}"#;
+        let upstream_body = "{\"ok\":true}\n";
+        let fixture = request_status_fixture(StatusCode::ACCEPTED, upstream_body).await;
+        let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_address = proxy_listener.local_addr().unwrap();
+        let app = fixture.app.clone();
+        let proxy_server = tokio::spawn(async move {
+            axum::serve(proxy_listener, app).await.unwrap();
+        });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let response = client
+            .post(format!("http://{proxy_address}/v1/browser/input"))
+            .header(reqwest::header::COOKIE, "ocean_session=test-session")
+            .header(
+                reqwest::header::AUTHORIZATION,
+                "Bearer synthetic-client-token",
+            )
+            .header(reqwest::header::ORIGIN, "https://surface.example")
+            .header("x-ocean-operator-key", "synthetic-unused-key")
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert_eq!(
+            response.bytes().await.unwrap().as_ref(),
+            upstream_body.as_bytes()
+        );
+        proxy_server.abort();
+        let _ = proxy_server.await;
+
+        let received = fixture.received.lock().unwrap();
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].method, Method::POST);
+        assert_eq!(received[0].uri.to_string(), "/v1/browser/input");
+        assert_eq!(received[0].body.as_ref(), body.as_bytes());
+        assert_eq!(
+            received[0].headers[header::CONTENT_TYPE],
+            "application/json"
+        );
+        for name in ["cookie", "authorization", "origin", "x-ocean-operator-key"] {
+            assert!(
+                !received[0].headers.contains_key(name),
+                "{name} must not be forwarded"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn browser_screencast_returns_before_the_upstream_stream_finishes() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let upstream = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0u8; 1];
+            while !request.ends_with(b"\r\n\r\n") {
+                let n = socket.read(&mut byte).await.unwrap();
+                assert_ne!(n, 0, "upstream request ended before headers completed");
+                request.push(byte[0]);
+            }
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            let frame = b"event: status\ndata: {\"state\":\"no-browser\"}\n\n";
+            socket
+                .write_all(format!("{:x}\r\n", frame.len()).as_bytes())
+                .await
+                .unwrap();
+            socket.write_all(frame).await.unwrap();
+            socket.write_all(b"\r\n").await.unwrap();
+            socket.flush().await.unwrap();
+            let _ = started_tx.send(request);
+            let _ = release_rx.await;
+            socket.write_all(b"0\r\n\r\n").await.unwrap();
+            socket.shutdown().await.unwrap();
+        });
+
+        let dist = tempfile::tempdir().unwrap();
+        let mut state = auth_test_state();
+        let state_mut = Arc::get_mut(&mut state).unwrap();
+        state_mut.daemon_url = format!("http://{address}");
+        state_mut.http = reqwest::Client::builder().no_proxy().build().unwrap();
+        state_mut.observer_token_path = dist.path().join("absent-fixture-observer-token");
+        let app = build_app(state, dist.path());
+        let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_address = proxy_listener.local_addr().unwrap();
+        let proxy_server = tokio::spawn(async move {
+            axum::serve(proxy_listener, app).await.unwrap();
+        });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let mut response_task = tokio::spawn(async move {
+            client
+                .get(format!("http://{proxy_address}/v1/browser/screencast"))
+                .header(reqwest::header::COOKIE, "ocean_session=test-session")
+                .header(
+                    reqwest::header::AUTHORIZATION,
+                    "Bearer synthetic-client-token",
+                )
+                .send()
+                .await
+                .unwrap()
+        });
+
+        let upstream_request = tokio::time::timeout(std::time::Duration::from_secs(2), started_rx)
+            .await
+            .expect("daemon receives the request")
+            .expect("upstream request capture remains available");
+        let upstream_request = String::from_utf8_lossy(&upstream_request).to_ascii_lowercase();
+        assert!(upstream_request.starts_with("get /v1/browser/screencast http/1.1"));
+        assert!(!upstream_request.contains("cookie:"));
+        assert!(!upstream_request.contains("authorization:"));
+
+        let early_response =
+            tokio::time::timeout(std::time::Duration::from_secs(2), &mut response_task).await;
+        if early_response.is_err() {
+            let _ = release_tx.send(());
+            let _ = response_task.await;
+            proxy_server.abort();
+            let _ = proxy_server.await;
+            let _ = upstream.await;
+            panic!("the screencast proxy buffered until the daemon stream ended");
+        }
+        let mut response = early_response
+            .unwrap()
+            .expect("proxy request task succeeds");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "text/event-stream"
+        );
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            "no-cache, no-transform"
+        );
+        assert_eq!(response.headers()["x-accel-buffering"], "no");
+
+        let first_frame =
+            tokio::time::timeout(std::time::Duration::from_secs(2), response.chunk()).await;
+        if first_frame.is_err() {
+            let _ = release_tx.send(());
+            proxy_server.abort();
+            let _ = proxy_server.await;
+            let _ = upstream.await;
+            panic!("the screencast proxy did not stream a frame before upstream EOF");
+        }
+        let first_frame = first_frame
+            .unwrap()
+            .expect("proxy response body remains readable")
+            .expect("upstream frame arrives before EOF");
+        assert_eq!(
+            first_frame.as_ref(),
+            b"event: status\ndata: {\"state\":\"no-browser\"}\n\n"
+        );
+
+        release_tx.send(()).unwrap();
+        assert_eq!(response.bytes().await.unwrap().as_ref(), b"");
+        proxy_server.abort();
+        let _ = proxy_server.await;
+        upstream.await.unwrap();
     }
 
     #[test]
@@ -2527,6 +2966,7 @@ mod tests {
             session_token: "test-session".to_string(),
             secure_cookie: false,
             observer_token_path: PathBuf::from("/not-used-in-config-tests"),
+            operator_key_path: PathBuf::from("/not-used-operator-key"),
         };
 
         let payload = config_payload(&state);
@@ -2606,6 +3046,7 @@ mod tests {
             session_token: "test-session".to_string(),
             secure_cookie: false,
             observer_token_path: PathBuf::from("/not-used"),
+            operator_key_path: PathBuf::from("/not-used-operator-key"),
         });
         let app = build_app(state, dist.path());
 
@@ -2686,6 +3127,7 @@ mod tests {
             session_token: "test-session".to_string(),
             secure_cookie: false,
             observer_token_path: PathBuf::from("/not-used"),
+            operator_key_path: PathBuf::from("/not-used-operator-key"),
         });
         let app = build_app(state, dist.path());
 
@@ -2730,6 +3172,7 @@ mod tests {
         let untimed = format!("state.{}{}", "http", ".");
         let streaming_handlers = [
             "async fn proxy_rooms_persistent",
+            "async fn proxy_browser_screencast",
             "async fn proxy_control_events",
             "async fn proxy_events",
             "async fn proxy_observatory",
@@ -2823,6 +3266,7 @@ mod tests {
             session_token: "test-session".to_string(),
             secure_cookie: false,
             observer_token_path: PathBuf::from("/not-used"),
+            operator_key_path: PathBuf::from("/not-used-operator-key"),
         });
         let app = build_app(state, dist.path());
 
@@ -2915,6 +3359,7 @@ mod tests {
             session_token: "test-session".to_string(),
             secure_cookie: false,
             observer_token_path: PathBuf::from("/not-used"),
+            operator_key_path: PathBuf::from("/not-used-operator-key"),
         });
         let app = build_app(state, dist.path());
 
@@ -2979,6 +3424,64 @@ mod tests {
         );
     }
 
+    /// GET /v1/rooms/inbox reaches the rooms forwarder (502 at the closed
+    /// daemon port) instead of the ServeDir fallback's 404, and the inbox
+    /// route does not swallow the LiveKit route of a call room id `inbox`.
+    #[tokio::test]
+    async fn rooms_inbox_routes_through_production_router() {
+        let dist = tempfile::tempdir().expect("tempdir");
+        let state = Arc::new(AppState {
+            http: reqwest::Client::new(),
+            http_json: reqwest::Client::new(),
+            voice_profile: "leo".to_string(),
+            daemon_url: "http://127.0.0.1:9".to_string(),
+            default_livekit_room_id: "project:surface-test".to_string(),
+            tldraw_sync_uri: None,
+            maps_key: None,
+            maps_map_id: "DEMO_MAP_ID".to_string(),
+            basic_auth: None,
+            session_token: "test-session".to_string(),
+            secure_cookie: false,
+            observer_token_path: PathBuf::from("/not-used"),
+            operator_key_path: PathBuf::from("/not-used-operator-key"),
+        });
+        let app = build_app(state, dist.path());
+
+        for (method, uri) in [
+            ("GET", "/v1/rooms/inbox?limit=50"),
+            ("GET", "/v1/rooms/persistent/inbox"),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_GATEWAY, "{method} {uri}");
+        }
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/rooms/inbox/livekit-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_GATEWAY,
+            "a call room id `inbox` must still reach the LiveKit forwarder"
+        );
+    }
+
     /// GET /v1/permissions must NOT fall through to ServeDir → 404 — proven
     /// against the PRODUCTION router (`build_app`), not a synthetic one:
     /// deleting the real route flips this test's 502 into the fallback 404.
@@ -3002,6 +3505,7 @@ mod tests {
             session_token: "test-session".to_string(),
             secure_cookie: false,
             observer_token_path: PathBuf::from("/not-used"),
+            operator_key_path: PathBuf::from("/not-used-operator-key"),
         });
         let app = build_app(state, dist.path());
 
