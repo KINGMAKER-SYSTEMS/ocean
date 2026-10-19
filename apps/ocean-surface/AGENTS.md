@@ -569,6 +569,7 @@ Web surface session UI:
   retried (the page re-reads the roster). Text lives in
   `rooms::bootstrap_error_text`. Web/extension hosts keep the plain
   participant add and get no bootstrap control.
+- Binding GETs publish only for the newest request in the current Room generation; reset retires pending reads, and failed refreshes keep the last projection without reviving older responses.
 - Surface: `host.rs` wrappers are absent off-Tauri, so browser/extension hosts
   render bindings but never emulate consent. `rooms.rs` owns the bindings
   client (`GET .../agents`), the consent draft (room generation + ticket
