@@ -57,3 +57,7 @@ tempfile = "3"
 [[bin]]
 name = "ocean-tauri"
 path = "src/main.rs"
+
+[target.'cfg(windows)'.dependencies]
+# Reuse the daemon's owner-only Windows credential-file contract.
+ocean-observatory = { path = "../../../../platform/ocean-os/crates/ocean-observatory" }

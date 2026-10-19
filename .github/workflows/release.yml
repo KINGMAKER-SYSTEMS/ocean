@@ -13,6 +13,10 @@ on:
         description: Test and build the Windows browser proxy without publishing
         type: boolean
         default: false
+      windows_native_probe:
+        description: Test and build the Windows native shell without publishing
+        type: boolean
+        default: false
   push:
     tags: ["v*"]
 
@@ -26,7 +30,7 @@ env:
 jobs:
   validate:
     name: validate package (macos-arm64)
-    if: github.event_name == 'push' || (!inputs.windows_probe && !inputs.windows_surface_probe)
+    if: github.event_name == 'push' || (!inputs.windows_probe && !inputs.windows_surface_probe && !inputs.windows_native_probe)
     runs-on: macos-latest
     timeout-minutes: 60
     defaults:
@@ -603,3 +607,51 @@ jobs:
         run: cargo test --locked -p ocean-surface-proxy
       - name: Build Windows Surface proxy
         run: cargo build --locked --release -p ocean-surface-proxy
+
+  windows-native-probe:
+    name: test native Rooms (windows-x64)
+    if: github.event_name == 'workflow_dispatch' && inputs.windows_native_probe
+    runs-on: windows-2025
+    timeout-minutes: 45
+    concurrency:
+      group: windows-native-${{ github.ref }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: apps/ocean-surface
+        shell: pwsh
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Install repository-pinned Rust toolchain
+        run: |
+          $match = Select-String -Path rust-toolchain.toml -Pattern '^channel = "([^"]+)"'
+          $toolchain = $match.Matches.Groups[1].Value
+          if (!$toolchain) { throw 'Missing Rust toolchain pin' }
+          rustup toolchain install "$toolchain" --profile minimal --target wasm32-unknown-unknown
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "RUSTUP_TOOLCHAIN=$toolchain" >> $env:GITHUB_ENV
+      - name: Cache cargo and target
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: |
+            apps/ocean-surface -> target
+            apps/ocean-surface/crates/ocean-tauri -> target
+      - name: Install Trunk
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
+        with:
+          tool: trunk@0.21.14
+      - name: Build the actual web bundle
+        run: |
+          Remove-Item Env:NO_COLOR -ErrorAction SilentlyContinue
+          trunk build --locked
+      - name: Test native shell and Room consent
+        working-directory: apps/ocean-surface/crates/ocean-tauri
+        run: cargo test --locked --release --lib
+      - name: Build native executable
+        working-directory: apps/ocean-surface/crates/ocean-tauri
+        run: cargo build --locked --release

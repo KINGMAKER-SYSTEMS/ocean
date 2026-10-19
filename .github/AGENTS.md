@@ -28,6 +28,9 @@ Root GitHub Actions builds for the public Ocean monorepo.
 - Manual `windows_surface_probe` runs the full Surface proxy suite with
   synthetic local credentials/upstreams and builds its release executable.
   It has read-only permissions and does not start Mac packaging or publish.
+- The release workflow's manual `windows_native_probe` is a read-only Windows
+  Tauri candidate check. It builds the real web bundle, runs native shell/Room-consent tests and
+  builds the executable. It does not package, publish or install the app.
 - `build-scope.py` selects changed components; `test-build-scope.py` checks scope decisions, including NUL-terminated Git output. Unknown or unavailable diffs build both.
 - `test-daemon-startup.py` checks actual candidate startup, revision, isolated
   member identity and state-file creation; Unix also checks private file modes.

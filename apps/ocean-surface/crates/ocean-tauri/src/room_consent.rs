@@ -1129,14 +1129,13 @@ pub(crate) async fn room_agent_revoke(
 
 // ── tests ───────────────────────────────────────────────────────────────
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 mod tests {
     use super::*;
     use crate::daemon_transport::test_support::*;
     use crate::daemon_transport::{
         loopback_endpoint, parse_reply, read_operator_key, CREDENTIAL_UNAVAILABLE, MAX_REPLY_BYTES,
     };
-    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
 
     const DIGEST: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -1227,7 +1226,7 @@ mod tests {
         );
         let private = key_file(dir.path(), 0o600);
         let link = dir.path().join("link.key");
-        std::os::unix::fs::symlink(&private, &link).unwrap();
+        credential_symlink(&private, &link);
         assert_eq!(
             read_operator_key(&link).unwrap_err(),
             "operator_credential_not_regular"
@@ -1237,8 +1236,7 @@ mod tests {
             "operator_credential_not_regular"
         );
         let injected = dir.path().join("inject.key");
-        std::fs::write(&injected, "abcdefghijklmnopqrstuvwx\r\nOrigin: x").unwrap();
-        std::fs::set_permissions(&injected, std::fs::Permissions::from_mode(0o600)).unwrap();
+        private_bytes(&injected, b"abcdefghijklmnopqrstuvwx\r\nOrigin: x");
         assert_eq!(
             read_operator_key(&injected).unwrap_err(),
             CREDENTIAL_UNAVAILABLE
