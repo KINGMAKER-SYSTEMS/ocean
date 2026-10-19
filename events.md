@@ -1523,17 +1523,6 @@ Round 5: round-4 review follow-ups on model reroute fidelity. (F2) Selection-tim
 Validation: ocean-agent 280 passed / 0 failed / 2 ignored; ocean-daemon 908 passed / 2 failed (only the two known pre-existing persistent_room envelope-key assertions); clippy -p ocean-agent --all-targets -D warnings clean; fmt --all --check clean; git diff --check clean.
 
 _________________________________________________________________________________
-
-time: [17:55] [06-10-26]
-agent: [ocean] [glm-5.3]
-worktree: [fix/report-model-reroute-in-session] [/Users/seenorising/dev/ocean-org-sub]
-type: [fix] [backend] [sessions] [testing]
-area: [ocean-agent] [sessions]
-
-Round 5: round-4 review follow-ups on model reroute fidelity. (F2) Selection-time reroute detection now compares the (provider, model) ROUTE pair instead of the model id alone, so a same-model cross-provider fallback (keyless claude-code/claude-opus-5-5 → anthropic/claude-opus-5-5 via an OCEAN_PROVIDER_FALLBACK `provider/model` entry) is recorded on the session and emitted; when a reroute's two routes carry the same model id, the ModelRerouted event strings are provider-qualified (fixed route identifiers only) so they never read as a no-op — applied at both the selection-time and pre-stream emission sites. (F3) Ordinary session creation in run_prompt/run_fake_prompt/create_session_with_model pins the selection ROUTE (`new_with_route(id, model.id, selection.provider)`), never the wire model's protocol provider, so a claude-code OAuth primary that fails pre-stream persists `provider = "claude-code"` at the accepted-user checkpoint; `Session::new_with_id` becomes cfg(test) scaffolding with a doc to that effect. Also fixed a resolution seam the new F3 turn-2 path exposed: the per-turn model override (`resolve_state_for_model`) read `ProviderEnv::from_process()` directly instead of `turn_env()`, so it could not see a test's injected env — now it uses `turn_env()`, the same env source as the failover decisions. Production-identical: outside tests `turn_env()` is still a fresh process-env read per call, not one cached snapshot per turn. Two failing-first tests (RED: requested_model None≠Some(claude-opus-5-5); pin anthropic≠claude-code), each re-verified by reverting ONLY its fix. Round-4b ledger corrected (F4): see the Round 5 correction paragraph above.
-
-Validation: ocean-agent 280 passed / 0 failed / 2 ignored; ocean-daemon 908 passed / 2 failed (only the two known pre-existing persistent_room envelope-key assertions); clippy -p ocean-agent --all-targets -D warnings clean; fmt --all --check clean; git diff --check clean.
-_________________________________________________________________________________
 _________________________________________________________________________________
 time: [14:12] [06-10-26]
 agent: [zcode] [glm-5.3]
@@ -2563,3 +2552,13 @@ routes and documentation. Registered, banner and documented routes agree at 135.
 Validation: `cargo fmt --all -- --check`; focused locked daemon route-parity test
 (1 passed); `cargo xtask docs-check` (30 packages, 157 Markdown files, 175 links);
 `git diff --check`. No live or deployment action.
+
+_________________________________________________________________________________
+time: [13:20] [10-19-26]
+agent: [claude code] [claude-fable-5-1]
+worktree: [fix/ledger-dedupe-20261019] [~/dev/oceanwork/wt-fix]
+type: [docs] [merge]
+area: [docs]
+
+Removed the second, byte-identical copy of the `[17:55] [06-10-26]` model-reroute ledger entry. It was duplicated when PR #47 (port/rooms-maintenance), whose branch carried an older copy of the ledger, was brought current with main during the 2026-10-18 PR triage sweep and the two ledger histories were concatenated. No other entry changed; the sweep's results are recorded outside the repo in ~/dev/pr-triage-2026-10-18-results.md.
+_________________________________________________________________________________
