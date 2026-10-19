@@ -617,6 +617,7 @@ POST   /v1/rooms/persistent/{key}/attachments   upload a room attachment (bytes 
 GET    /v1/rooms/persistent/{key}/attachments   list a room's attachments
 GET    /v1/rooms/persistent/{key}/attachments/{attachment_id}  download attachment bytes
 DELETE /v1/rooms/persistent/{key}/attachments/{attachment_id}  remove an attachment
+POST   /v1/rooms/maintenance/run             run a retention/orphan sweep now (operator lane)
 GET    /v1/rooms/persistent/{key}/resources   list contributed-folder grants (safe projection)
 POST   /v1/rooms/persistent/{key}/resources   grant a canonical local folder to room agents (operator decision)
 GET    /v1/rooms/persistent/{key}/resources/{resource_id}  one grant (safe projection, no local_root)
