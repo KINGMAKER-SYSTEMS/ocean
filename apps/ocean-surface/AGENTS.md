@@ -448,6 +448,15 @@ Web surface session UI:
   composers), `format.rs`, and `access.rs`, each with its own tests. Drafts,
   send latches, and mention state stay owned by `RoomsWorkspace` because the
   center and right rails re-render on room state.
+- The existing Room options overflow always offers Members, including an empty
+  agent roster. It reveals the same MembersPanel and ConsentSheet; native consent
+  and browser/extension authority gates remain in those components. Through
+  1080px Members, Search, and Thread use one dismissible right-rail overlay; at
+  650px and below it is full width, while above 1080px the rail stays docked.
+  Explicit picks select one rail mode. Close and unhandled Escape dismiss the
+  overlay and restore its trigger focus (Room options for Members); nested
+  Escape handlers take precedence. Room admission/origin changes retire open
+  rail modes without moving focus or altering consent authority.
 - The timeline hides the daemon's `auto-convene: …` audit rows
   (`room_messages::is_convene_audit`) because the work card shows the
   convene; `auto-convene failed …` rows stay. System rows render as one quiet

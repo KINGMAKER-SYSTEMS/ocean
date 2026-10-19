@@ -25,6 +25,7 @@ mod test_support;
 mod threads;
 
 use leptos::prelude::*;
+use wasm_bindgen::JsCast;
 
 use crate::room_messages;
 use crate::rooms::{author_display_name, local_speaker_id, RoomMessage, Rooms};
@@ -97,6 +98,23 @@ fn rooms_layout_is_compact() -> bool {
         .is_some_and(|width| width <= 650.0)
 }
 
+/// The right rail is an overlay through 1080px, independently of the
+/// room-list drawer's 650px breakpoint.
+fn right_rail_is_overlay(width: f64) -> bool {
+    width <= 1080.0
+}
+
+fn rooms_right_rail_is_overlay() -> bool {
+    web_sys::window()
+        .and_then(|window| window.inner_width().ok())
+        .and_then(|width| width.as_f64())
+        .is_some_and(right_rail_is_overlay)
+}
+
+fn right_rail_escape(overlay: bool, open: bool, default_prevented: bool) -> bool {
+    overlay && open && !default_prevented
+}
+
 /// Display name for an author/member id in the open room (tracked, so a late
 /// roster load or an owner rename re-renders names in place).
 fn author_name(rooms: Rooms, id: &str) -> String {
@@ -162,9 +180,72 @@ pub fn RoomsWorkspace(
     let selected_thread_root_seq = RwSignal::new(None::<u64>);
     // Team-platform P6: the right rail shows search when no thread is open.
     let search_open = RwSignal::new(false);
+    let members_open = RwSignal::new(false);
+    let overflow_ref: NodeRef<leptos::html::Button> = NodeRef::new();
+    let right_close_ref: NodeRef<leptos::html::Button> = NodeRef::new();
+    let right_return_focus =
+        StoredValue::new(send_wrapper::SendWrapper::new(None::<web_sys::HtmlElement>));
+    let remember_right_focus = move || {
+        let focused = web_sys::window()
+            .and_then(|window| window.document())
+            .and_then(|document| document.active_element())
+            .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok());
+        right_return_focus.set_value(send_wrapper::SendWrapper::new(focused));
+    };
+    let right_open =
+        move || members_open.get() || search_open.get() || selected_thread_root_seq.get().is_some();
+    let close_right = move || {
+        members_open.set(false);
+        search_open.set(false);
+        selected_thread_root_seq.set(None);
+        let restored = right_return_focus.with_value(|element| {
+            element
+                .as_ref()
+                .is_some_and(|element| element.is_connected() && element.focus().is_ok())
+        });
+        if !restored {
+            if let Some(trigger) = overflow_ref.get() {
+                let _ = trigger.focus();
+            }
+        }
+    };
+    // Stamp presentation state with the room admission, including a same-key
+    // close/reopen batched before this Effect runs. Never carry an overlay to
+    // another room or daemon origin.
+    Effect::new(move |previous: Option<(String, Option<String>, u64)>| {
+        let admission = (
+            rooms.url.get(),
+            rooms.open_key.get(),
+            rooms.generation_snapshot(),
+        );
+        if previous
+            .as_ref()
+            .is_some_and(|previous| previous != &admission)
+        {
+            members_open.set(false);
+            search_open.set(false);
+            selected_thread_root_seq.set(None);
+            right_return_focus.set_value(send_wrapper::SendWrapper::new(None));
+        }
+        admission
+    });
+    Effect::new(move |_| {
+        if right_open() && rooms_right_rail_is_overlay() {
+            request_animation_frame(move || {
+                if right_open() {
+                    if let Some(close) = right_close_ref.get() {
+                        let _ = close.focus();
+                    }
+                }
+            });
+        }
+    });
     // An inbox pick asks for a thread; open it once its root has loaded.
     Effect::new(move |_| {
         if let Some(root) = rooms.take_pending_thread_focus() {
+            remember_right_focus();
+            members_open.set(false);
+            search_open.set(false);
             selected_thread_root_seq.set(Some(root));
         }
     });
@@ -560,6 +641,15 @@ pub fn RoomsWorkspace(
                 if ev.key() != "Escape" {
                     return;
                 }
+                if right_rail_escape(
+                    rooms_right_rail_is_overlay(),
+                    right_open(),
+                    ev.default_prevented(),
+                ) {
+                    ev.prevent_default();
+                    close_right();
+                    return;
+                }
                 let action = compact_escape_action(
                     rooms_layout_is_compact(),
                     show_left_rail.get_untracked(),
@@ -676,11 +766,34 @@ pub fn RoomsWorkspace(
                                             type="button"
                                             aria-label="Search"
                                             aria-pressed=move || search_open.get().to_string()
-                                            on:click=move |_| search_open.update(|o| *o = !*o)
+                                            on:click=move |_| {
+                                                if search_open.get_untracked() {
+                                                    close_right();
+                                                } else {
+                                                    remember_right_focus();
+                                                    members_open.set(false);
+                                                    selected_thread_root_seq.set(None);
+                                                    show_left_rail.set(false);
+                                                    search_open.set(true);
+                                                }
+                                            }
                                         >
                                             <crate::icons::Search />
                                         </button>
-                                        <crate::room_overflow::RoomOverflow rooms=rooms joined=joined />
+                                        <crate::room_overflow::RoomOverflow
+                                            rooms=rooms
+                                            joined=joined
+                                            trigger_ref=overflow_ref
+                                            on_members=Callback::new(move |()| {
+                                                // The menu item is removed on selection; return
+                                                // to the persistent Room options trigger instead.
+                                                right_return_focus.set_value(send_wrapper::SendWrapper::new(None));
+                                                selected_thread_root_seq.set(None);
+                                                search_open.set(false);
+                                                show_left_rail.set(false);
+                                                members_open.set(true);
+                                            })
+                                        />
                                         <button
                                             class="rooms-workspace__center-back"
                                             type="button"
@@ -856,6 +969,9 @@ pub fn RoomsWorkspace(
                                                                                 .to_string()
                                                                         }
                                                                         on:click=move |_| {
+                                                                            remember_right_focus();
+                                                                            members_open.set(false);
+                                                                            search_open.set(false);
                                                                             selected_thread_root_seq.update(|selected| {
                                                                                 *selected = if *selected == Some(root_seq) {
                                                                                     None
@@ -949,7 +1065,7 @@ pub fn RoomsWorkspace(
             // ═══ RIGHT RAIL — members / details ═════════════════════════
             <div
                 class="rooms-workspace__right"
-                class:rooms-workspace__right--thread=move || selected_thread_root_seq.get().is_some()
+                class:rooms-workspace__right--open=right_open
             >
                 <div class="rooms-workspace__right-head">
                     <h3 class="rooms-workspace__right-title">
@@ -961,41 +1077,27 @@ pub fn RoomsWorkspace(
                             "Members"
                         }}
                     </h3>
-                    {move || {
-                        if selected_thread_root_seq.get().is_none() && search_open.get() {
-                            view! {
-                                <button
-                                    class="rooms-workspace__right-close"
-                                    type="button"
-                                    aria-label="Close search"
-                                    on:click=move |_| search_open.set(false)
-                                >
-                                    <svg viewBox="0 0 16 16" width="14" height="14"
-                                        fill="none" stroke="currentColor" stroke-width="1.6"
-                                        stroke-linecap="round">
-                                        <path d="M3 3l10 10M13 3L3 13"/>
-                                    </svg>
-                                </button>
-                            }.into_any()
-                        } else if selected_thread_root_seq.get().is_some() {
-                            view! {
-                                <button
-                                    class="rooms-workspace__right-close"
-                                    type="button"
-                                    aria-label="Close thread"
-                                    on:click=move |_| selected_thread_root_seq.set(None)
-                                >
-                                    <svg viewBox="0 0 16 16" width="14" height="14"
-                                        fill="none" stroke="currentColor" stroke-width="1.6"
-                                        stroke-linecap="round">
-                                        <path d="M3 3l10 10M13 3L3 13"/>
-                                    </svg>
-                                </button>
-                            }.into_any()
-                        } else {
-                            ().into_any()
-                        }
-                    }}
+                    <Show when=right_open>
+                        <button
+                            class="rooms-workspace__right-close"
+                            node_ref=right_close_ref
+                            type="button"
+                            aria-label=move || if selected_thread_root_seq.get().is_some() {
+                                "Close thread"
+                            } else if search_open.get() {
+                                "Close search"
+                            } else {
+                                "Close members"
+                            }
+                            on:click=move |_| close_right()
+                        >
+                            <svg viewBox="0 0 16 16" width="14" height="14"
+                                fill="none" stroke="currentColor" stroke-width="1.6"
+                                stroke-linecap="round">
+                                <path d="M3 3l10 10M13 3L3 13"/>
+                            </svg>
+                        </button>
+                    </Show>
                 </div>
 
                 <ConsentSheet rooms=rooms />
@@ -1058,6 +1160,22 @@ mod tests {
         rooms.close_room();
         assert_eq!(rooms.take_pending_thread_focus(), None);
         assert_eq!(rooms.focus_thread.get_untracked(), None);
+    }
+
+    #[test]
+    fn right_rail_overlay_covers_all_collapsed_widths() {
+        for width in [390.0, 650.0, 900.0, 901.0, 1080.0] {
+            assert!(right_rail_is_overlay(width), "{width}");
+        }
+        assert!(!right_rail_is_overlay(1081.0));
+    }
+
+    #[test]
+    fn right_rail_escape_respects_nested_handlers_and_desktop_docking() {
+        assert!(right_rail_escape(true, true, false));
+        assert!(!right_rail_escape(true, true, true));
+        assert!(!right_rail_escape(true, false, false));
+        assert!(!right_rail_escape(false, true, false));
     }
 
     #[test]
@@ -1154,6 +1272,25 @@ mod tests {
 
     fn css_without_whitespace(css: &str) -> String {
         css.chars().filter(|char| !char.is_whitespace()).collect()
+    }
+
+    #[test]
+    fn shared_right_rail_overlay_css_matches_visibility_breakpoints() {
+        let css = include_str!("../../../../styles/rooms-workspace.css");
+        let overlays = css_media_blocks(css, "@media (max-width: 1080px)");
+        assert!(overlays.iter().any(|body| {
+            let body = css_without_whitespace(body);
+            body.contains(".rooms-workspace__right{display:none;}")
+                && body.contains(".rooms-workspace__right--open{display:flex;position:absolute;")
+        }));
+        let compact = css_media_blocks(css, "@media (max-width: 650px)");
+        assert!(compact.iter().any(|body| {
+            css_without_whitespace(body).contains(
+                ".rooms-workspace__right--open{position:fixed;inset:0;width:100vw;z-index:410;}",
+            )
+        }));
+        assert!(!css.contains("rooms-workspace__right--thread"));
+        assert!(!css.contains("(min-width: 901px)"));
     }
 
     #[test]
