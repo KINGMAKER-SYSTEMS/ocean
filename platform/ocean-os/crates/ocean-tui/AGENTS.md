@@ -301,6 +301,9 @@ This crate owns the full-screen terminal steering cockpit (`ocean` binary) for i
   change the selected agent model. Do not advertise Embedding models until a
   live typed embedding capability and consumer exist; shared semantic search is
   currently owned by ocean-bedrock.
+- `/login chatgpt` and the ChatGPT plan row use the separate public Responses
+  OAuth provider; `/login codex` remains the existing Codex OAuth flow. Keep
+  their credentials and model-route labels distinct.
 - `/permissions` is a daemon-backed three-state picker, not a client-side
   approval bypass: manual prompts for every known tool, automatic prompts only
   for runtime-classified unsafe tools, and skip-all suppresses prompts. Render
