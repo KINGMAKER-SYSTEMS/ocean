@@ -41,9 +41,9 @@ parking_lot = "0.12"
 # `macros` powers the `tokio::select!` debounce loop; `sync`+`time` the channel
 # and the 200ms quiet window.
 tokio = { version = "1", features = ["sync", "time", "macros"] }
-# Local git repository inspection (repo_state command).  `vendored-libgit2`
-# bundles libgit2 so we don't depend on the system package.
-git2 = { version = "0.20", features = ["vendored-libgit2"] }
+# Local repository inspection needs no network transports. Disabling them also
+# avoids linking desktop installers to a developer's Homebrew OpenSSL.
+git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2"] }
 # Open a file with the OS default application (B0: Open Externally).
 opener = "0.7"
 # Room agent consent (room_consent.rs): no-follow descriptor open + owner uid

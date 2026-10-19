@@ -2901,3 +2901,12 @@ type: [bug report]
 area: [testing]
 
 Native installer candidate run 39342381378 exposed cargo-about 0.9.1's opt-in cli feature on Intel Mac. Enable that feature when building the pinned license tool from source. Four artifact-integrity tests pass; actual Intel packaging remains pending. Existing packaging contracts remain unchanged because target, provenance, license and publication boundaries are unchanged.
+
+_________________________________________________________________________________
+time: [19:42] [19-10-26]
+agent: [Codex] [GPT-6]
+worktree: [codex/desktop-installer-repairs]
+type: [bug report]
+area: [testing]
+
+Actual Mac candidate inspection found Homebrew OpenSSL imports in the desktop executable. Disable unused native Git network transports; local repository checks still pass (2 tests), and native cargo check passes. Packaging now rejects non-system Mac dependencies, inventories Tauri's release feature, builds the Windows daemon with static CRT and checks extracted app/daemon imports for redistributable DLL dependencies. Seven artifact tests pass. The first Mac candidate's bundled daemon boot passed, then its read-only image was briefly busy at detach; retry only the owned mount before a bounded force detach. Its stale mount was detached normally. Docs-check passes; final native installers and first-run setup remain unaccepted.

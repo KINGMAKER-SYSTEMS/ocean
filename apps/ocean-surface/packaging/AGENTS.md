@@ -22,6 +22,12 @@ Build native Ocean desktop candidates with their matching daemon and legal paylo
 - `ASSET-NOTICES.txt` and the font-adjacent OFL file retain bundled asset notices.
 - Include full dependency licenses for the native shell, WASM UI and daemon,
   plus applicable upstream NOTICE files and project legal files.
+- Inventory the native shell with Tauri's release `custom-protocol` feature.
+  Mac app and daemon imports must resolve only to macOS system libraries;
+  Homebrew, local-development and unresolved rpath dependencies fail packaging.
+- Build the Windows daemon with static CRT linkage as well as the Tauri app;
+  inspect both extracted executables and refuse Visual C++ redistributable DLL
+  imports. This does not establish clean-machine WebView or installer acceptance.
 - Candidate builds are unsigned and do not publish, install, start live services,
   change credentials, or establish update/recovery or coworker acceptance.
 - Generated tools, staging and outputs stay under ignored component `target/`.

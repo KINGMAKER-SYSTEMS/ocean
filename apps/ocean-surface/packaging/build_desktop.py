@@ -16,6 +16,7 @@ import struct
 import subprocess
 import tarfile
 import tempfile
+import time
 import urllib.request
 import zipfile
 
@@ -44,16 +45,19 @@ LEGAL_FILES = ("LICENSE", "LICENSE-APACHE", "LICENSE-MIT", "NOTICE.md", "CREDITS
 
 def build_env():
     env = {k: v for k, v in os.environ.items() if not k.startswith(("OCEAN_", "TAURI_", "TRUNK_", "APPLE_"))}
-    for key in ("RUSTUP_TOOLCHAIN", "CARGO_TARGET_DIR", "NO_COLOR"):
+    for key in ("RUSTUP_TOOLCHAIN", "CARGO_TARGET_DIR", "NO_COLOR", "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS"):
         env.pop(key, None)
+    # The separately built daemon must be portable too; Tauri's own static CRT
+    # default only applies to the app it compiles, not its external binaries.
+    env["CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS"] = "-C target-feature=+crt-static"
     env["CARGO_TERM_COLOR"] = "never"
     return env
 
 
-def run(args, cwd=ROOT, capture=False):
+def run(args, cwd=ROOT, capture=False, timeout=None):
     print("+", " ".join(map(str, args)), flush=True)
     result = subprocess.run(list(map(str, args)), cwd=cwd, env=build_env(), check=True,
-                            stdout=subprocess.PIPE if capture else None, text=True, encoding="utf-8")
+                            stdout=subprocess.PIPE if capture else None, text=True, encoding="utf-8", timeout=timeout)
     return result.stdout.strip() if capture else None
 
 
@@ -145,6 +149,8 @@ def license_inventory(about, target, stage):
         text_output = legal / f"{name}-DEPENDENCIES.txt"
         json_output = stage / f"{name}-licenses.json"
         base = [about, "generate", "--frozen", "--fail", "--manifest-path", package / "Cargo.toml", "--config", config]
+        if name == "desktop":
+            base += ["--features", "tauri/custom-protocol"]
         run(base + ["--output-file", text_output, RUNTIME / "packaging/about.hbs"], cwd=package)
         run(base + ["--format", "json", "--output-file", json_output], cwd=package)
         report = json.loads(json_output.read_text(encoding="utf-8"))
@@ -199,15 +205,51 @@ def verify_web_bundle(directory):
                 raise RuntimeError("Invalid or truncated WASM bundle")
 
 
+def verify_macos_libraries(report):
+    """Our bundle has no external frameworks: every load must be an OS library."""
+    libraries = [line.strip().split(" (compatibility version", 1)[0]
+                 for line in report.splitlines()[1:] if line.strip()]
+    if not libraries or any(not name.startswith(("/System/Library/", "/usr/lib/")) for name in libraries):
+        raise RuntimeError("Mac desktop depends on a library outside macOS")
+
+
+def verify_windows_runtime(report):
+    libraries = re.findall(r'^\s+([A-Za-z0-9_.-]+\.dll)\s*$', report, re.M | re.I)
+    if not libraries or any(re.match(r'^(vcruntime|msvcp|msvcr|concrt)\d', name, re.I) for name in libraries):
+        raise RuntimeError("Windows desktop requires an unbundled Visual C++ runtime")
+
+
+def windows_dependency_tool():
+    vswhere = Path(os.environ.get("ProgramFiles(x86)", "C:/Program Files (x86)")) / "Microsoft Visual Studio/Installer/vswhere.exe"
+    candidates = run([vswhere, "-latest", "-products", "*", "-requires",
+                      "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-find",
+                      "VC/Tools/MSVC/**/bin/Hostx64/x64/dumpbin.exe"], capture=True).splitlines()
+    if not candidates or not Path(candidates[-1]).is_file():
+        raise RuntimeError("Windows dependency inspection requires the native build tools")
+    return Path(candidates[-1])
+
+
 @contextmanager
 def mount_image(image, temporary):
     mount = temporary / "mounted"
     mount.mkdir()
-    run(["hdiutil", "attach", image, "-readonly", "-nobrowse", "-mountpoint", mount])
+    run(["hdiutil", "attach", image, "-readonly", "-nobrowse", "-mountpoint", mount], timeout=60)
     try:
         yield mount / "Ocean.app"
     finally:
-        run(["hdiutil", "detach", mount])
+        detach_image(mount)
+
+
+def detach_image(mount):
+    # The fixture has reaped its daemon, but macOS may briefly retain the image.
+    # Only this build's newly created read-only mount can reach the force path.
+    for _ in range(3):
+        try:
+            run(["hdiutil", "detach", mount], timeout=15)
+            return
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            time.sleep(1)
+    run(["hdiutil", "detach", "-force", mount], timeout=15)
 
 
 def verify_payload(app_root, daemon, legal, target):
@@ -264,12 +306,17 @@ def build(target):
             extractor = shutil.which("7z") or str(Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "7-Zip/7z.exe")
             run([extractor, "x", installers[0], f"-o{temporary / 'unpacked'}", "-y"])
             bundled_daemon = verify_payload(temporary / "unpacked", daemon, legal, target)
+            dumpbin = windows_dependency_tool()
+            for binary in (temporary / "unpacked/ocean-tauri.exe", bundled_daemon):
+                verify_windows_runtime(run([dumpbin, "/DEPENDENTS", binary], capture=True))
         else:
             installers = list((bundles / "dmg").glob("*.dmg"))
             if len(installers) != 1:
                 raise RuntimeError("Expected one Mac disk image")
             with mount_image(installers[0], temporary) as app:
                 bundled_daemon = verify_payload(app, daemon, legal, target)
+                for binary in (app / "Contents/MacOS/ocean-tauri", bundled_daemon):
+                    verify_macos_libraries(run(["otool", "-L", binary], capture=True))
                 run([os.sys.executable, ROOT / ".github/test-daemon-startup.py", bundled_daemon, revision])
         # The fixture strips provider credentials, uses disposable state, checks
         # source revision/member identity and stops only the child it creates.

@@ -84,6 +84,9 @@ Native surface direction:
 - Native LiveKit Rust client is a later phase behind a feature flag, not part
   of this batch.
 - Ocean daemon stays the session/runtime authority.
+- Native Git inspection uses vendored libgit2 without SSH/HTTPS transports.
+  It reads local repository state; desktop startup must not require Homebrew
+  OpenSSL or other developer-installed libraries.
 - Native daemon start resolves the operator's `OCEAN_DAEMON_BIN`, then the
   installed executable sibling, then the platform binary on PATH. No IPC
   argument may select an executable. Explicit start/restart remains unchanged.
