@@ -4,7 +4,8 @@
 //! unchanged in the browser PWA and the Chrome extension.
 //!
 //! Contract (frozen — see docs/OCEAN_DESKTOP_NORTH_STAR.md "Host bridge"):
-//! signatures do not change. Nothing outside this module may reference
+//! signatures do not change. Nothing outside this module and its private JS
+//! adapter may reference
 //! `__TAURI_INTERNALS__` or `@tauri-apps` APIs.
 //!
 //! ## Interop mechanism
@@ -20,14 +21,17 @@
 //!   Args are a JS object whose keys match the Rust `#[tauri::command]`
 //!   parameter names. The returned promise resolves to the command's `Ok`
 //!   value (already deserialised by Tauri's IPC layer).
-//! * `__TAURI_INTERNALS__.event.listen(event, handler)` — subscribes to
-//!   shell-emitted events. Each call creates an independent listener
-//!   (multiple subscribers are supported natively).
+//! * `__TAURI_INTERNALS__.transformCallback(handler)` plus
+//!   `plugin:event|listen` — subscribes to shell-emitted events by IPC callback
+//!   id. Scoped listeners unregister the callback and invoke plugin unlisten;
+//!   existing app-lifetime subscribers retain their subscription.
 //!
 //! Serialisation between the JS values Tauri hands us and the Rust structs
 //! (`PathEvent`, `RepoState`, `CommitInfo`) uses a `JSON.stringify` →
 //! `serde_json::from_str` round-trip. That is slightly wasteful but
 //! self-contained — no extra crate dependency like `serde-wasm-bindgen`.
+
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use js_sys::{Array, Function, Object, Promise, Reflect};
 use serde::Deserialize;
@@ -44,6 +48,8 @@ use web_sys::{Notification, NotificationOptions, NotificationPermission};
 pub struct PathEvent {
     pub path: String,
     pub kind: String,
+    #[serde(default)]
+    pub owner: Option<String>,
 }
 
 /// A recent commit in the session repo, read natively by the shell.
@@ -206,15 +212,167 @@ pub fn open_external_link_click(event: web_sys::MouseEvent) {
     }
 }
 
-/// Open the native folder picker. `None` on non-Tauri hosts or user cancel.
+/// Native folder picker; cancellation and unavailable capability return None.
 pub async fn pick_folder() -> Option<String> {
     if !running_in_tauri() {
         return None;
     }
-    match tauri_invoke("pick_folder", &JsValue::NULL).await {
-        Ok(val) if val.is_null() || val.is_undefined() => None,
-        Ok(val) => val.as_string(),
-        Err(_) => None,
+    tauri_invoke("pick_folder", &JsValue::NULL)
+        .await
+        .ok()?
+        .as_string()
+}
+
+/// A Files watch owns a distinct native lease, scoped there by window identity.
+/// Dropping a late admission only releases that lease, never a newer root's
+/// lease, a canonical alias in another window, or the legacy Repo watcher.
+pub struct PathWatch {
+    owner: String,
+    paths: Vec<String>,
+    root: String,
+}
+
+impl PathWatch {
+    /// Translate canonical native events back to the pane's requested alias.
+    pub fn event_path(&self, event: &PathEvent) -> Option<String> {
+        translate_watch_event(&self.root, self.paths.first()?, &self.owner, event)
+    }
+}
+
+fn translate_watch_event(
+    root: &str,
+    canonical: &str,
+    owner: &str,
+    event: &PathEvent,
+) -> Option<String> {
+    if event.owner.as_deref() != Some(owner) {
+        return None;
+    }
+    let relative = event.path.strip_prefix(canonical.trim_end_matches('/'))?;
+    if !relative.is_empty() && !relative.starts_with('/') {
+        return None;
+    }
+    Some(format!("{}{relative}", root.trim_end_matches('/')))
+}
+
+#[cfg(test)]
+mod workspace_watch_tests {
+    use super::*;
+    #[test]
+    fn workspace_watch_event_requires_owner_and_maps_canonical_alias() {
+        let mut event = PathEvent {
+            path: "/canonical/root/file".into(),
+            kind: "modified".into(),
+            owner: Some("new-a".into()),
+        };
+        assert_eq!(
+            translate_watch_event("/alias/", "/canonical/root", "new-a", &event).as_deref(),
+            Some("/alias/file")
+        );
+        assert_eq!(
+            translate_watch_event("/alias", "/canonical/root", "old-a", &event),
+            None
+        );
+        event.path = "/canonical/root-other/file".into();
+        assert_eq!(
+            translate_watch_event("/alias", "/canonical/root", "new-a", &event),
+            None
+        );
+        event.owner = None; // legacy Repo notifications never impersonate Files
+        assert_eq!(
+            translate_watch_event("/alias", "/canonical/root", "new-a", &event),
+            None
+        );
+    }
+}
+
+impl Drop for PathWatch {
+    fn drop(&mut self) {
+        let args = watch_args(&self.paths, Some(&self.owner));
+        wasm_bindgen_futures::spawn_local(async move {
+            if tauri_invoke("unwatch_paths", &args).await.is_err() {
+                log::warn!("native watcher: lease release rejected");
+            }
+        });
+    }
+}
+
+fn watch_args(paths: &[String], owner: Option<&str>) -> Object {
+    let args = Object::new();
+    let arr = Array::new();
+    for path in paths {
+        arr.push(&JsValue::from_str(path));
+    }
+    let _ = Reflect::set(&args, &JsValue::from_str("paths"), &arr);
+    if let Some(owner) = owner {
+        let _ = Reflect::set(
+            &args,
+            &JsValue::from_str("owner"),
+            &JsValue::from_str(owner),
+        );
+    }
+    args
+}
+
+pub async fn watch_workspace_root(path: &str) -> Option<PathWatch> {
+    if !running_in_tauri() {
+        return None;
+    }
+    static NEXT_WATCH: AtomicU64 = AtomicU64::new(0);
+    // Random prefix survives a webview reload, whose monotonic counter restarts.
+    let owner = format!(
+        "files-{}-{}",
+        js_sys::Math::random(),
+        NEXT_WATCH.fetch_add(1, Ordering::Relaxed)
+    );
+    // Capture the native page epoch before admission. A queued old-page call
+    // cannot re-create its watcher after native reload cleanup.
+    let generation = tauri_invoke("workspace_watch_generation", &JsValue::NULL)
+        .await
+        .ok()?;
+    let args = watch_args(&[path.to_owned()], Some(&owner));
+    let _ = Reflect::set(&args, &JsValue::from_str("generation"), &generation);
+    let report = jsval_to::<WatchReport>(&tauri_invoke("watch_paths", &args).await.ok()?);
+    if report.watched.is_empty() {
+        return None;
+    }
+    Some(PathWatch {
+        owner,
+        paths: report.watched,
+        root: path.to_owned(),
+    })
+}
+
+/// Component-owned path listener. Late registration after cleanup immediately
+/// unregisters itself; its callback cannot reach disposed reactive signals.
+pub fn subscribe_path_changed(cb: impl Fn(PathEvent) + 'static) -> impl FnOnce() + Send + Sync {
+    use std::{
+        cell::RefCell,
+        rc::Rc,
+        sync::{atomic::AtomicBool, Arc},
+    };
+    let alive = Arc::new(AtomicBool::new(true));
+    let listener = Rc::new(RefCell::new(None));
+    if running_in_tauri() {
+        let alive = alive.clone();
+        let listener = listener.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let callback_alive = alive.clone();
+            let registered = tauri_listen_scoped("path-changed", move |payload| {
+                if callback_alive.load(Ordering::Relaxed) {
+                    cb(jsval_to::<PathEvent>(&payload));
+                }
+            })
+            .await;
+            if alive.load(Ordering::Relaxed) {
+                *listener.borrow_mut() = registered;
+            }
+        });
+    }
+    let listener = send_wrapper::SendWrapper::new(listener);
+    move || {
+        alive.store(false, Ordering::Relaxed);
+        listener.borrow_mut().take();
     }
 }
 
@@ -305,20 +463,6 @@ pub async fn watch_paths(paths: &[String]) -> WatchAdmission {
         );
     }
     admission
-}
-
-/// Stop watching `paths`. Returns false on non-Tauri hosts.
-pub async fn unwatch_paths(paths: &[String]) -> bool {
-    if !running_in_tauri() {
-        return false;
-    }
-    let args = Object::new();
-    let arr = Array::new();
-    for p in paths {
-        arr.push(&JsValue::from_str(p));
-    }
-    let _ = Reflect::set(&args, &JsValue::from_str("paths"), &arr);
-    tauri_invoke("unwatch_paths", &args).await.is_ok()
 }
 
 /// Subscribe to shell `path-changed` events. No-op on non-Tauri hosts.
@@ -548,6 +692,202 @@ pub async fn open_externally(root: &str, path: &str) -> bool {
     tauri_invoke("open_file", &args).await.is_ok()
 }
 
+// ── Room owner mutations (Tauri shell only) ─────────────────────────────
+
+/// The daemon's reply to an owner mutation the native shell sent.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct OwnerMutationReply {
+    pub status: u16,
+    #[serde(default)]
+    pub body: String,
+}
+
+/// Send one of the three Room owner mutations (`kind`: `rename_owner`,
+/// `run_permission`, `agent_settings`) through the native shell, which reads
+/// the daemon's operator key on the Rust side and attaches it (operator
+/// decision 2026-10-08). The page never sees the key and never picks the
+/// method, path or headers. `None` off Tauri; `Some(Err)` when the shell
+/// refused the request or could not reach the daemon.
+pub async fn room_owner_mutation(
+    kind: &str,
+    room: Option<&str>,
+    target: Option<&str>,
+    body: &str,
+) -> Option<Result<OwnerMutationReply, String>> {
+    if !running_in_tauri() {
+        return None;
+    }
+    let opt = |v: Option<&str>| v.map_or(JsValue::NULL, JsValue::from_str);
+    let args = Object::new();
+    for (name, value) in [
+        ("kind", JsValue::from_str(kind)),
+        ("room", opt(room)),
+        ("target", opt(target)),
+        ("body", JsValue::from_str(body)),
+    ] {
+        if Reflect::set(&args, &JsValue::from_str(name), &value).is_err() {
+            return Some(Err("owner mutation arguments".into()));
+        }
+    }
+    Some(match tauri_invoke("room_owner_mutation", &args).await {
+        Ok(val) => Ok(jsval_to::<OwnerMutationReply>(&val)),
+        Err(err) => Err(err
+            .as_string()
+            .unwrap_or_else(|| "owner mutation failed".into())),
+    })
+}
+
+// ── Room agent consent (native broker, ocean-private #65) ───────────────
+
+/// Native-frozen Room agent consent preview. The shell fetched it from the
+/// daemon itself; `consent_id` is an opaque handle to that frozen state, and
+/// the page can never supply the digest it authorizes.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct RoomConsentPreview {
+    pub consent_id: String,
+    pub room: String,
+    pub package_id: String,
+    pub agent_member_id: String,
+    pub owner_member_id: String,
+    pub display_name: String,
+    pub definition_digest: String,
+    #[serde(default)]
+    pub definition_revision: Option<String>,
+    #[serde(default)]
+    pub requested_capabilities: Vec<String>,
+    /// `authorize` | `reauthorize`.
+    pub mode: String,
+    #[serde(default)]
+    pub binding_status: Option<String>,
+    #[serde(default)]
+    pub expires_in_ms: u64,
+}
+
+/// Outcome of one native consent decision. `state` is `applied` |
+/// `declined` | `refused` | `unknown`; `unknown` means the acknowledgement
+/// was lost and is never retried automatically.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct RoomConsentOutcome {
+    pub state: String,
+    #[serde(default)]
+    pub status: Option<u16>,
+    #[serde(default)]
+    pub code: Option<String>,
+}
+
+/// True when this host can broker native Room agent consent. Browser and
+/// extension hosts have no operator credential custody, so consent controls
+/// stay absent there rather than emulated.
+pub fn room_consent_supported() -> bool {
+    running_in_tauri()
+}
+
+fn consent_args(pairs: &[(&str, &str)]) -> Object {
+    let args = Object::new();
+    for (key, value) in pairs {
+        let _ = Reflect::set(&args, &JsValue::from_str(key), &JsValue::from_str(value));
+    }
+    args
+}
+
+fn consent_decode<T: serde::de::DeserializeOwned>(val: &JsValue) -> Result<T, String> {
+    let json = js_sys::JSON::stringify(val)
+        .ok()
+        .and_then(|s| s.as_string())
+        .ok_or_else(|| "invalid_reply".to_string())?;
+    serde_json::from_str(&json).map_err(|_| "invalid_reply".to_string())
+}
+
+fn consent_error(err: JsValue) -> String {
+    err.as_string()
+        .filter(|code| code.len() <= 64)
+        .unwrap_or_else(|| "consent_unavailable".to_string())
+}
+
+/// Ask the shell to fetch and freeze the authoritative preview for
+/// `package_id` in `room`. `None` off-Tauri.
+pub async fn room_consent_preview(
+    room: &str,
+    package_id: &str,
+) -> Option<Result<RoomConsentPreview, String>> {
+    if !room_consent_supported() {
+        return None;
+    }
+    let args = consent_args(&[("room", room), ("packageId", package_id)]);
+    Some(match tauri_invoke("room_consent_preview", &args).await {
+        Ok(val) => consent_decode(&val),
+        Err(err) => Err(consent_error(err)),
+    })
+}
+
+/// Run the native confirmation for a frozen consent and, only if confirmed,
+/// send the digest-guarded authorize/reauthorize. `None` off-Tauri.
+pub async fn room_consent_authorize(
+    consent_id: &str,
+) -> Option<Result<RoomConsentOutcome, String>> {
+    if !room_consent_supported() {
+        return None;
+    }
+    let args = consent_args(&[("consentId", consent_id)]);
+    Some(match tauri_invoke("room_consent_authorize", &args).await {
+        Ok(val) => consent_decode(&val),
+        Err(err) => Err(consent_error(err)),
+    })
+}
+
+/// Drop one frozen consent, or all of them (`None`) on navigation.
+pub fn room_consent_cancel(consent_id: Option<&str>) {
+    if !room_consent_supported() {
+        return;
+    }
+    let args = Object::new();
+    let value = consent_id.map_or(JsValue::NULL, JsValue::from_str);
+    let _ = Reflect::set(&args, &JsValue::from_str("consentId"), &value);
+    wasm_bindgen_futures::spawn_local(async move {
+        let _ = tauri_invoke("room_consent_cancel", &args).await;
+    });
+}
+
+/// Bootstrap `package_id` into the Local `room` as this daemon's owner's
+/// agent and return the frozen consent preview (same projection as
+/// [`room_consent_preview`]). The shell reads the owner from `GET /v1/me`
+/// itself; the page never names it. Creates no binding. `None` off-Tauri,
+/// where the page keeps the plain participant add.
+pub async fn room_agent_bootstrap(
+    room: &str,
+    package_id: &str,
+) -> Option<Result<RoomConsentPreview, String>> {
+    if !room_consent_supported() {
+        return None;
+    }
+    let args = consent_args(&[("room", room), ("packageId", package_id)]);
+    Some(match tauri_invoke("room_agent_bootstrap", &args).await {
+        Ok(val) => consent_decode(&val),
+        Err(err) => Err(consent_error(err)),
+    })
+}
+
+/// Natively confirm, then revoke an own agent's Room binding. `None`
+/// off-Tauri.
+pub async fn room_agent_revoke(
+    room: &str,
+    agent_member_id: &str,
+    display_name: &str,
+) -> Option<Result<RoomConsentOutcome, String>> {
+    if !room_consent_supported() {
+        return None;
+    }
+    let args = consent_args(&[
+        ("room", room),
+        ("agentMemberId", agent_member_id),
+        ("displayName", display_name),
+    ]);
+    Some(match tauri_invoke("room_agent_revoke", &args).await {
+        Ok(val) => consent_decode(&val),
+        Err(err) => Err(consent_error(err)),
+    })
+}
+
 // ── internals ───────────────────────────────────────────────────────────
 
 /// Low-level: call `__TAURI_INTERNALS__.invoke(cmd, args)` and await the
@@ -570,51 +910,46 @@ async fn tauri_invoke(cmd: &str, args: &JsValue) -> Result<JsValue, JsValue> {
     JsFuture::from(Promise::from(result)).await
 }
 
-/// Low-level: subscribe to a Tauri shell event via
-/// `__TAURI_INTERNALS__.event.listen(event_name, handler)`.  `handler`
-/// receives the **payload** field of the Tauri event object (the
-/// `{ event, id, payload }` wrapper is stripped).  The returned `UnlistenFn`
-/// is leaked so the subscription lives for the lifetime of the app.
+/// Preserve the existing app-lifetime subscription contract on the same Tauri
+/// event plugin primitive used by component-owned subscriptions.
 async fn tauri_listen<F>(event_name: &str, handler: F)
 where
     F: Fn(JsValue) + 'static,
 {
-    let window = match web_sys::window() {
-        Some(w) => w,
-        None => return,
-    };
-    let internals = match Reflect::get(&window, &JsValue::from_str("__TAURI_INTERNALS__")) {
-        Ok(i) => i,
-        Err(_) => return,
-    };
-    let event_obj = match Reflect::get(&internals, &JsValue::from_str("event")) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    let listen: Function = match Reflect::get(&event_obj, &JsValue::from_str("listen")) {
-        Ok(f) => match f.dyn_into() {
-            Ok(f) => f,
-            Err(_) => return,
-        },
-        Err(_) => return,
-    };
-
-    let closure = Closure::wrap(Box::new(move |raw: JsValue| {
-        // Tauri's event object: { event, id, payload }.  Unwrap payload.
-        if let Ok(payload) = Reflect::get(&raw, &JsValue::from_str("payload")) {
-            handler(payload);
-        }
-    }) as Box<dyn Fn(JsValue)>);
-
-    let call_args = Array::new();
-    call_args.push(&JsValue::from_str(event_name));
-    call_args.push(closure.as_ref().unchecked_ref());
-
-    if let Ok(promise) = Reflect::apply(&listen, &event_obj, &call_args) {
-        if JsFuture::from(Promise::from(promise)).await.is_ok() {
-            closure.forget(); // subscription lives forever
-        }
+    if let Some(listener) = tauri_listen_scoped(event_name, handler).await {
+        std::mem::forget(listener); // preserve existing app-lifetime subscribers
     }
+}
+
+#[wasm_bindgen::prelude::wasm_bindgen(module = "/src/host/native_events.mjs")]
+extern "C" {
+    #[wasm_bindgen::prelude::wasm_bindgen(catch, js_name = listenNativeEvent)]
+    fn listen_native_event(event: &str, handler: &Function) -> Result<Function, JsValue>;
+}
+
+struct NativeSubscription {
+    dispose: Function,
+    _callback: Closure<dyn Fn(JsValue)>,
+}
+
+impl Drop for NativeSubscription {
+    fn drop(&mut self) {
+        // Cancel synchronously before dropping the Rust callback. The bridge
+        // also retires a native listener whose admission resolves after this.
+        let _ = self.dispose.call0(&JsValue::NULL);
+    }
+}
+
+async fn tauri_listen_scoped<F>(event_name: &str, handler: F) -> Option<NativeSubscription>
+where
+    F: Fn(JsValue) + 'static,
+{
+    let callback = Closure::wrap(Box::new(handler) as Box<dyn Fn(JsValue)>);
+    let dispose = listen_native_event(event_name, callback.as_ref().unchecked_ref()).ok()?;
+    Some(NativeSubscription {
+        dispose,
+        _callback: callback,
+    })
 }
 
 /// Round-trip a JsValue through JSON to a Rust `Deserialize` type.
