@@ -183,6 +183,8 @@ mod voice_realtime;
 /// xAI STT + TTS endpoints (voice phase 4) — the daemon holds the xAI key
 /// so the surface proxy never needs it.
 mod voice_speech;
+#[cfg(windows)]
+mod windows_skill_file;
 /// Pure ordinary agent-turn and session-read cwd/workspace policy.
 mod workspace_policy;
 /// Operator YOLO preference, effective permission posture, and settings adapters.
@@ -3655,10 +3657,12 @@ fn read_skill_body_guarded(
 /// from the resulting handle (no reopen). Sound on both deploy and CI targets:
 /// * macOS (deploy): `O_NOFOLLOW_ANY`.
 /// * Linux (CI): `openat2` with `RESOLVE_NO_SYMLINKS`.
+/// * Windows: absolute local-drive paths, component-by-component retained
+///   directory handles and native no-reparse opens. UNC/device paths are refused.
 ///
-/// Both fail the open if any component is a symlink, checked atomically, so a
-/// swapped final component, ancestor directory, or root is rejected rather than
-/// followed. `path` is `canonical_prefix.join(remainder)` — the prefix is
+/// Unix performs the no-follow check atomically for the whole path; Windows
+/// checks each relative open against its retained parent. A swapped final
+/// component, ancestor directory, or root is never followed through a link. `path` is `canonical_prefix.join(remainder)` — the prefix is
 /// already symlink-free, so only a symlink in the untrusted remainder trips it.
 fn open_nofollow_read(path: &std::path::Path) -> Result<String, String> {
     use std::io::Read;
@@ -3666,7 +3670,7 @@ fn open_nofollow_read(path: &std::path::Path) -> Result<String, String> {
     #[cfg(target_os = "linux")]
     let mut file = open_nofollow_linux(path)?;
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(unix, not(target_os = "linux")))]
     let mut file = {
         use std::os::unix::fs::OpenOptionsExt;
         // macOS: O_NOFOLLOW_ANY rejects a symlink in ANY component. Other Unix
@@ -3686,6 +3690,9 @@ fn open_nofollow_read(path: &std::path::Path) -> Result<String, String> {
                 "skill path could not be opened without following a symlink".to_string()
             })?
     };
+
+    #[cfg(windows)]
+    let mut file = windows_skill_file::open(path).map_err(|error| error.to_string())?;
 
     let mut body = String::new();
     file.read_to_string(&mut body)

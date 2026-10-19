@@ -42,7 +42,7 @@
 //!    gating for an already-authorized agent. Conflating the two would let the
 //!    operator default silently disable the authority model.
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::io::{Read, Write};
 use std::path::Path;
 #[cfg(test)]
@@ -57,7 +57,7 @@ pub const OPERATOR_HEADER: &str = "x-ocean-operator";
 const KEY_FILE: &str = "operator.key";
 
 /// 32 bytes of entropy, base64url-encoded.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 const KEY_BYTES: usize = 32;
 
 /// Why an authorization attempt was refused.
@@ -296,7 +296,7 @@ fn default_allowed_origins() -> Vec<String> {
 }
 
 /// Read the key, or create it with owner-only permissions on first run.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn read_or_create_key(path: &Path) -> std::io::Result<String> {
     match std::fs::symlink_metadata(path) {
         Ok(_) => return read_existing_private_key(path),
@@ -315,7 +315,7 @@ fn read_or_create_key(path: &Path) -> std::io::Result<String> {
 /// module cannot prove descriptor ownership, link count, and owner-only ACLs.
 /// Supporting such a platform requires an equivalent native verifier; a plain
 /// regular-file check is not an authorization boundary.
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn read_or_create_key(_path: &Path) -> std::io::Result<String> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
@@ -364,7 +364,7 @@ fn validate_private_key_file(file: &std::fs::File) -> std::io::Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn generate_key() -> std::io::Result<String> {
     let mut bytes = [0u8; KEY_BYTES];
     getrandom::fill(&mut bytes)
@@ -388,6 +388,29 @@ fn write_owner_only(path: &Path, key: &str) -> std::io::Result<()> {
     f.write_all(b"\n")?;
     f.sync_all()?;
     Ok(())
+}
+
+#[cfg(windows)]
+fn read_existing_private_key(path: &Path) -> std::io::Result<String> {
+    let mut file = ocean_observatory::auth::windows_file::open(path)?;
+    let mut existing = String::new();
+    file.read_to_string(&mut existing)?;
+    let key = existing.trim();
+    if key.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "operator key is empty",
+        ));
+    }
+    Ok(key.to_owned())
+}
+
+#[cfg(windows)]
+fn write_owner_only(path: &Path, key: &str) -> std::io::Result<()> {
+    let mut file = ocean_observatory::auth::windows_file::create(path)?;
+    file.write_all(key.as_bytes())?;
+    file.write_all(b"\n")?;
+    file.sync_all()
 }
 
 /// Short non-reversible fingerprint, used as the operator id.
@@ -540,7 +563,7 @@ mod tests {
         assert_eq!(err, OperatorAuthError::Missing);
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn key_file_is_created_owner_only_and_is_stable_across_loads() {
         let dir = tempfile::tempdir().unwrap();
@@ -568,13 +591,32 @@ mod tests {
         assert_eq!(p.id(), first.id);
     }
 
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     #[test]
     fn unsupported_platform_leaves_operator_authority_unavailable() {
         let dir = tempfile::tempdir().unwrap();
         let identity = OperatorIdentity::load(dir.path());
         assert!(!identity.is_configured());
         assert!(!operator_key_path(dir.path()).exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_inherited_key_fails_closed_without_being_rewritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = operator_key_path(dir.path());
+        // Ordinary creation inherits the directory ACL rather than installing
+        // the credential's protected owner-only descriptor.
+        std::fs::write(&path, "exposed-key\n").unwrap();
+        let identity = OperatorIdentity::load(dir.path());
+        assert!(!identity.is_configured());
+        assert_eq!(
+            identity
+                .authorize(&headers(&[(OPERATOR_HEADER, "exposed-key")]))
+                .unwrap_err(),
+            OperatorAuthError::Unavailable
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "exposed-key\n");
     }
 
     #[cfg(unix)]
