@@ -144,9 +144,12 @@ def atomic_write(directory, destination, text, private_directory=False):
             pass
 
 
-def package_commands(require_org=False):
+def package_commands(require_org=False, package_root=None, bin_dir=None):
     """Inspect resolved package links without executing Ocean commands."""
     roots = set()
+    if require_org and (bool(package_root) == bool(bin_dir)):
+        raise ValueError("one installation location is required")
+    expected_root = Path(package_root).resolve(strict=True) if package_root else None
     for command in ("ocean", "ocean-daemon", "ocean-update"):
         found = shutil.which(command)
         package = None
@@ -174,6 +177,10 @@ def package_commands(require_org=False):
         if require_org:
             if package is None:
                 raise ValueError("command does not resolve to org package")
+            if expected_root is not None and package != expected_root:
+                raise ValueError("command shadows the updated package")
+            if bin_dir is not None and executable != (Path(bin_dir) / command).resolve(strict=True):
+                raise ValueError("command shadows the updated package manager bin")
             roots.add(package)
     if require_org and len(roots) != 1:
         raise ValueError("commands resolve to different package installations")
@@ -187,9 +194,11 @@ def main():
     parser.add_argument("--display-name", default="")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--npmrc")
+    parser.add_argument("--package-root")
+    parser.add_argument("--bin-dir")
     args = parser.parse_args()
     if args.action in {"check-commands", "verify-commands"}:
-        package_commands(require_org=args.action == "verify-commands")
+        package_commands(require_org=args.action == "verify-commands", package_root=args.package_root, bin_dir=args.bin_dir)
         return
     if args.action in {"validate", "identity"}:
         identity_file(args, write=args.action == "identity")

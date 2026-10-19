@@ -61,8 +61,10 @@ fi
 python3 "$FILES" check-commands || fail "an existing Ocean command resolves to a personal or unreadable installation. Fix its PATH/package links before onboarding; no credentials or config were changed." 78
 if command -v bun >/dev/null 2>&1; then
   installer=(bun add -g)
+  manager=bun
 elif command -v npm >/dev/null 2>&1; then
   installer=(npm install -g)
+  manager=npm
 else
   fail "install bun or npm first" 69
 fi
@@ -75,7 +77,14 @@ fi
 printf '%s\n' "$package_token" | python3 "$FILES" npmrc --npmrc "$NPMRC"
 unset package_token
 "${installer[@]}" "$PKG@latest"
-python3 "$FILES" verify-commands || fail "Ocean commands must resolve to the same @kingmaker-systems/ocean installation. Fix the package manager global bin PATH and rerun; member identity was not changed." 70
+if [[ "$manager" == bun ]]; then
+  installed_bin="$(bun pm bin -g)" || fail "could not inspect the updated Bun bin directory" 70
+  [[ -n "$installed_bin" ]] || fail "Bun returned no global bin directory" 70
+  installed_args=(--bin-dir "$installed_bin")
+else
+  installed_args=(--package-root "$npm_root/$PKG")
+fi
+python3 "$FILES" verify-commands "${installed_args[@]}" || fail "Ocean commands must resolve to the @kingmaker-systems/ocean installation just updated. Fix the package manager global bin PATH and rerun; member identity was not changed." 70
 python3 "$FILES" identity "${identity_args[@]}"
 cat <<CHECKLIST
 Package and host identity prepared. No daemon was installed or restarted.

@@ -33,6 +33,9 @@ elif name in {"bun", "npm"}:
     if name == "npm" and sys.argv[1:] == ["root", "--global"]:
         print(root / "npm-global/node_modules")
         sys.exit(0)
+    if name == "bun" and sys.argv[1:] == ["pm", "bin", "-g"]:
+        print(os.environ.get("OCEAN_FIXTURE_BUN_BIN", root / "bin"))
+        sys.exit(0)
     sys.exit(int(os.environ.get("OCEAN_FIXTURE_PACKAGE_EXIT", "0")))
 elif name in {"ocean", "ocean-daemon", "ocean-update"}:
     sys.exit(92) # Binaries may be located, never executed by preparation.
@@ -58,8 +61,8 @@ class Onboarding(unittest.TestCase):
             path = self.bin / name
             path.write_text(MOCK)
             path.chmod(0o755)
-        self.package = self.root / "org-package"
-        self.package.mkdir()
+        self.package = self.root / "npm-global/node_modules/@kingmaker-systems/ocean"
+        self.package.mkdir(parents=True)
         bins = {"ocean": "bin/ocean", "ocean-daemon": "bin/ocean-daemon", "ocean-update": "ocean-update.sh"}
         (self.package / "package.json").write_text(json.dumps({"name": "@kingmaker-systems/ocean", "bin": bins}))
         for name, target in bins.items():
@@ -70,7 +73,7 @@ class Onboarding(unittest.TestCase):
             source.symlink_to(dest)
         self.env = os.environ.copy()
         self.env.update(OCEAN_ONBOARD_FIXTURE_HOME=str(self.root), PATH=f"{self.bin}:/usr/bin:/bin")
-        for key in ["OCEAN_CONFIG_DIR", "XDG_CONFIG_HOME", "OCEAN_FIXTURE_PACKAGE_EXIT", "OCEAN_FIXTURE_TOKEN_EXIT"]:
+        for key in ["OCEAN_CONFIG_DIR", "XDG_CONFIG_HOME", "OCEAN_FIXTURE_PACKAGE_EXIT", "OCEAN_FIXTURE_TOKEN_EXIT", "OCEAN_FIXTURE_BUN_BIN"]:
             self.env.pop(key, None)
         self.member = self.root / ".config/ocean-rs/member.toml"
         self.npmrc = self.root / ".npmrc"
@@ -99,7 +102,7 @@ class Onboarding(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(self.member.parent.stat().st_mode), 0o700)
         self.assertEqual(stat.S_IMODE(self.npmrc.stat().st_mode), 0o600)
         self.assertIn("save-exact=true", self.npmrc.read_text())
-        self.assertEqual([c for c in self.calls() if c[0] == "bun"], [["bun", "add", "-g", "@kingmaker-systems/ocean@latest"]])
+        self.assertEqual([c for c in self.calls() if c[0] == "bun"], [["bun", "add", "-g", "@kingmaker-systems/ocean@latest"], ["bun", "pm", "bin", "-g"]])
 
     def test_rerun_preserves_unrelated_npm_lines_without_duplicates(self):
         self.npmrc.write_text("other=keep\n@risingtides-dev:registry=https://npm.pkg.github.com\n@kingmaker-systems:registry=https://old.invalid\n//npm.pkg.github.com/:_authToken=old_fixture\n")
@@ -182,6 +185,34 @@ class Onboarding(unittest.TestCase):
         command = self.bin / "ocean-update"
         command.unlink()
         command.symlink_to(other / "ocean-update.sh")
+        self.run_script(success=False)
+        self.assertFalse(self.member.exists())
+
+    def test_older_org_install_shadowing_updated_bun_does_not_write_identity(self):
+        other = self.root / "updated-bun-package"
+        shutil.copytree(self.package, other)
+        updated_bin = self.root / "updated-bun-bin"
+        updated_bin.mkdir()
+        for name, target in json.loads((other / "package.json").read_text())["bin"].items():
+            (updated_bin / name).symlink_to(other / target)
+        self.env["OCEAN_FIXTURE_BUN_BIN"] = str(updated_bin)
+        self.run_script(success=False)
+        self.assertFalse(self.member.exists())
+        self.env["PATH"] = f"{updated_bin}:{self.env['PATH']}"
+        self.run_script()
+        self.assertTrue(self.member.exists())
+
+    def test_older_org_install_shadowing_updated_npm_does_not_write_identity(self):
+        (self.bin / "bun").unlink()
+        npm = self.bin / "npm"
+        npm.write_text(MOCK)
+        npm.chmod(0o755)
+        other = self.root / "old-npm-package"
+        shutil.copytree(self.package, other)
+        for name, target in json.loads((other / "package.json").read_text())["bin"].items():
+            command = self.bin / name
+            command.unlink()
+            command.symlink_to(other / target)
         self.run_script(success=False)
         self.assertFalse(self.member.exists())
 

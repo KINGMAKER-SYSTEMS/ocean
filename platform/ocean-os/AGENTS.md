@@ -83,8 +83,8 @@ Use `crates/AGENTS.md` for all current workspace packages, ownership exclusions,
   then install that local archive before retrying. Never force-overwrite global
   command links or silently remove a working installation. Resolved PATH commands
   are inspected before auth for personal packages from any prefix; after install,
-  all three commands must match the bin entries of one org package before identity
-  is written. Never execute those commands to infer provenance.
+  all three commands must match the bin entries of the installation just updated
+  before identity is written (npm package root or Bun global bin links). Never execute those commands to infer provenance.
 - For docs-only changes, run `cargo xtask docs-check`; it validates active repo-local Markdown file targets (not heading fragments), archive boundaries, canonical workspace-index parity, and non-default-member rationale.
 
 ### Targeted completion checks

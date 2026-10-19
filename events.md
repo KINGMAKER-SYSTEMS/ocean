@@ -2636,3 +2636,12 @@ type: [bug report]
 area: [review] [testing]
 
 Repaired the third independent onboarding finding: npm's active prefix does not describe every command on PATH. Before auth/config mutation, inspect resolved Ocean command package manifests and reject personal-package links from any prefix. After installation, require all three commands to resolve to matching bin entries in one org package before writing member identity. No Ocean commands are executed, overwritten or removed. Twenty fixture tests pass, including inactive npm prefixes, arbitrary shadow commands, mixed org installs and mismatched bin entries; shell syntax, ShellCheck and diff checks pass. Updated the component root contract; child indexes and packaging docs unchanged because ownership and documented migration commands are unchanged. Fresh exact-head review/CI remains required; no merge, package publication or deployment claimed.
+
+_________________________________________________________________________________
+time: [16:21] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/org-team-distribution]
+type: [bug report]
+area: [review] [testing]
+
+Independent review identified a stale org installation shadowing the package manager just updated. Post-install verification now compares every resolved command to the selected npm package root or Bun global bin links, rather than accepting any consistent org installation. No command execution or automatic removal. Twenty-two onboarding fixtures pass, including stale npm/Bun org copies and successful retry after PATH correction; shell syntax, ShellCheck and diff checks pass. Owning component contract updated; indexes unchanged. Hosted routine builds passed preceding 24ca448a. Fresh-head review/build and candidate artifact validation remain pending; no merge or publication claimed.
