@@ -488,7 +488,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          release_id="$(gh release view "$GITHUB_REF_NAME" --json databaseId --jq '.databaseId')"
+          release_id="$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json databaseId --jq '.databaseId')"
           [[ "$release_id" =~ ^[0-9]+$ ]]
           gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$release_id" \
             -F draft=false --jq '.draft' | grep -qx false

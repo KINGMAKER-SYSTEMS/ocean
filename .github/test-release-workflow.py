@@ -57,6 +57,8 @@ publish_job = source[source.index("  publish:") :]
 require("contents: read" in validate_job, "validation job remains read-only")
 require("packages: write" not in validate_job, "validation has no package-write authority")
 require("packages: write" in publish_job, "package write scope is confined to publishing")
+require('gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY"' in publish_job,
+        "checkout-free release lookup names its repository explicitly")
 download_step = publish_job.split("      - name: Download and verify exact validated artifact\n", 1)[1].split("\n      - name:", 1)[0]
 require("working-directory: ${{ github.workspace }}" in download_step,
         "checkout-free artifact download starts in the existing workspace")
