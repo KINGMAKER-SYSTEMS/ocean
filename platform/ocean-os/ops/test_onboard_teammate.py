@@ -30,6 +30,9 @@ elif name == "gh":
         sys.exit(int(os.environ.get("OCEAN_FIXTURE_TOKEN_EXIT", "0")))
     else: sys.exit(91)
 elif name in {"bun", "npm"}:
+    if name == "npm" and sys.argv[1:] == ["root", "--global"]:
+        print(root / "npm-global/node_modules")
+        sys.exit(0)
     sys.exit(int(os.environ.get("OCEAN_FIXTURE_PACKAGE_EXIT", "0")))
 elif name in {"ocean", "ocean-daemon", "ocean-update"}:
     sys.exit(92) # Binaries may be located, never executed by preparation.
@@ -105,6 +108,31 @@ class Onboarding(unittest.TestCase):
         self.assertFalse(self.npmrc.exists())
         self.assertFalse(self.member.parent.exists())
         self.assertTrue(all(c[0] == "uname" for c in self.calls()))
+
+    def test_npm_personal_package_blocks_before_credentials_or_mutations(self):
+        (self.bin / "bun").unlink()
+        npm = self.bin / "npm"
+        npm.write_text(MOCK)
+        npm.chmod(0o755)
+        (self.root / "npm-global/node_modules/@risingtides-dev/ocean").mkdir(parents=True)
+        result = self.run_script(success=False)
+        self.assertIn("npm pack @kingmaker-systems/ocean@latest", result.stderr)
+        self.assertIn("npm uninstall -g @risingtides-dev/ocean", result.stderr)
+        self.assertFalse(self.npmrc.exists())
+        self.assertFalse(self.member.exists())
+        self.assertFalse(any(c[0] == "gh" for c in self.calls()))
+        self.assertEqual([c for c in self.calls() if c[0] == "npm"], [["npm", "root", "--global"]])
+
+    def test_npm_org_install_after_personal_package_removal(self):
+        (self.bin / "bun").unlink()
+        npm = self.bin / "npm"
+        npm.write_text(MOCK)
+        npm.chmod(0o755)
+        self.run_script()
+        self.assertEqual([c for c in self.calls() if c[0] == "npm"], [
+            ["npm", "root", "--global"],
+            ["npm", "install", "-g", "@kingmaker-systems/ocean@latest"],
+        ])
 
     def test_malformed_identity_fails_before_package_or_auth(self):
         self.member.parent.mkdir(parents=True)

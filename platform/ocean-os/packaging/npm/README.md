@@ -33,7 +33,21 @@ discovers `ocean-daemon` as a sibling binary automatically.
 ## Moving from the personal package
 
 Configure the `@kingmaker-systems` registry mapping and install the org package
-using the commands above. An older `ocean-update` still targets the personal
+using the commands above. For an existing **npm** install, the two packages
+claim the same command names and cannot be installed together. Finish active
+turns, then download the org package before removing the old one:
+
+```sh
+npm pack @kingmaker-systems/ocean@latest
+npm uninstall -g @risingtides-dev/ocean
+npm install -g ./kingmaker-systems-ocean-VERSION.tgz
+```
+
+Use the actual tarball name printed by `npm pack` in the last command. Stop if
+the download fails; leave the personal install intact. The final install uses
+the downloaded archive rather than relying on another registry download.
+Onboarding refuses this collision before reading credentials or changing
+configuration; rerun it after the transition. An older `ocean-update` still targets the personal
 package until the org package replaces it. This is a new package namespace;
 existing personal releases are not moved or republished. Verify org package
 access before removing an existing working installation.

@@ -56,6 +56,10 @@ if command -v bun >/dev/null 2>&1; then
   installer=(bun add -g)
 elif command -v npm >/dev/null 2>&1; then
   installer=(npm install -g)
+  npm_root="$(npm root --global)" || fail "could not inspect npm global packages" 69
+  if [[ -d "$npm_root/@risingtides-dev/ocean" ]]; then
+    fail "personal Ocean package is installed. Download the org package with 'npm pack @kingmaker-systems/ocean@latest', then remove the personal package with 'npm uninstall -g @risingtides-dev/ocean' and install the downloaded tarball with 'npm install -g ./<tarball>'. Rerun onboarding afterward. Nothing was changed." 78
+  fi
 else
   fail "install bun or npm first" 69
 fi
