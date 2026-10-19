@@ -2590,6 +2590,15 @@ Ported Risingtides-dev/ocean-os#528 (menu half). `gpt-5.4`, `gpt-5.4-mini` and `
 _________________________________________________________________________________
 
 _________________________________________________________________________________
+time: [14:40] [10-19-26]
+agent: [claude code] [claude-fable-5-1]
+worktree: [port/surface-222-proxy-route-families] [~/dev/oceanwork/wt-port]
+type: [fix] [port]
+area: [backend] [testing]
+
+Ported Risingtides-dev/ocean-surface#222. The Surface proxy allow-list now carries the three `/v1` route families the Surface calls and the daemon serves but the table never listed: `GET /v1/fs/file`, `GET /v1/agent/history/search`, and the five read-only `GET /v1/repo/github/{project_id}/...` projections. In the shipped PWA every one of these was same-origin, fell through to ServeDir and answered 404 with an empty body, which the callers render as blank rather than as an error. The GitHub family rebuilds its upstream path from the matched route template and refuses dot-segment captures so `%2e%2e` cannot collapse upstream. The other three families from the legacy PR (`/v1/requests`, `/v1/browser/screencast`, `/v1/browser/input`) were already routed here. New guard test `every_surface_v1_path_is_routed` scans the UI crate's URL builders against `build_app` and fails naming any unrouted path (mutation-checked by dropping `/v1/fs/file`); `github_routes_refuse_dot_segments_before_they_collapse_upstream` runs the router against a recording stub daemon. Validation: `cargo test -p ocean-surface-proxy` 37 passed, clippy `-D warnings` and rustfmt clean.
+_________________________________________________________________________________
+
 time: [15:19] [19-10-26] EDT UTC-04:00
 agent: [Codex] [GPT-6]
 worktree: [codex/rooms-daily-use]
