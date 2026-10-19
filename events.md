@@ -2784,3 +2784,12 @@ type: [bug report]
 area: [workflow] [testing]
 
 Tag run 39328117964 published @kingmaker-systems/ocean 0.2.1 and verified its payload integrity on retry, but latest-tag convergence failed because npm's unversioned view resolves through latest before latest exists. Query the complete versions catalog through the verified version instead. A real npm loopback-registry fixture reproduces the old failure without latest, verifies first publication, and proves the pinned lookup still discovers newer versions. Actionlint, release workflow contracts and diff checks pass. Owning workflow contract updated; parent indexes unchanged. Downloaded draft asset checksum matched f0b4c4e69a6079cf2cbfe46230895cd3a71a92117bd0ec6ffc4f34c6acf16e09; the actual packaged daemon passed isolated-profile startup, health/revision, member identity and private state-file checks with an explicit model and no provider credentials. GitHub release remains draft and local registry readback is blocked by the current CLI token's missing read:packages scope; no public release or provider-reply claim.
+
+_________________________________________________________________________________
+time: [18:20] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/windows-room-packages]
+type: [feature-request]
+area: [backend] [testing]
+
+Implemented the Windows Room-package capture path through retained local-drive directory handles. Reused checked no-reparse opens, added bounded synchronous handle enumeration with strict UTF-16 names, exact child lookup and fixed error mapping; common map hashing and count/depth/byte ceilings remain unchanged. Added native fixtures for directory limits, Unicode names, root retargeting, path/link refusal and malformed directory records. Windows cross-target denied-warning Clippy passes; all 22 existing package-authority tests, daemon check, docs-check, actionlint and release contracts pass locally. A disposable actual-daemon HTTP fixture passes on the existing Mac release, verifying identity, complete-map digest, nested byte changes, missing packages, symlink refusal and size bounds; it is now in the opt-in native Windows probe. Native Windows execution and fresh independent review remain pending. Updated daemon/workflow contracts; parent indexes unchanged because ownership is unchanged. No provider reply, Windows installer, resource/attachment support or deployment acceptance claimed.
