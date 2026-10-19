@@ -458,7 +458,8 @@ Web surface session UI:
   Escape handlers take precedence. Room admission/origin changes retire open
   rail modes without moving focus or altering consent authority.
 - The timeline hides routine convene, bootstrap, admission and output audit
-  rows (`room_messages::is_convene_audit`); durable records stay untouched.
+  rows (`room_messages::is_convene_audit`), including exact labels when the
+  daemon omits an agent name; durable records stay untouched.
   Refusals and access changes remain visible as plain language. Never hide
   unknown failures or rewrite human messages. System rows wrap legibly; grouped
   messages keep the avatar gutter with time revealed on intent.

@@ -2608,3 +2608,14 @@ area: [frontend] [review] [testing]
 Reconciled with canonical main 69e2c83b after PRs #108 and #109 landed. Removed this branch's duplicate credential implementation and regression; PR #111 now changes Surface and documentation only. The superseded local agent implementation passed 285 tests with 2 opt-in live probes skipped; that result does not validate the distinct upstream implementation. UI checks passed 951 tests and Trunk; hosted Build Surface passed at 5ede8209. Rendered wide/compact Safari checks found a desktop focus defect, now repaired by focusing every explicitly opened details pane and retaining the actual clicked trigger for return focus. Removed the repeated Thread heading. Final checks for these last UI changes continue.
 
 No merge or deployment claimed. Independent reviewer acknowledgement is still needed. Legacy Surface recovery bytes remain missing, and the existing daemon has active intake. A separate merged-main daemon release build was stopped before installation as free disk fell below 7 GiB; only this task's runtime scratch outputs were removed. The current live daemon and Surface were preserved. Owning Surface, product and onboarding contracts were updated; runtime devlogs were restored unchanged because the runtime delta was superseded upstream.
+
+_________________________________________________________________________________
+time: [15:42] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/rooms-daily-use]
+type: [bug report]
+area: [frontend] [review] [testing]
+
+PR #111 at f49ad1ce passed 950 UI tests, WASM Clippy with denied warnings, formatting, Trunk and hosted Surface build. Final Safari wide and compact checks confirmed the close control receives focus and Escape closes only the requested thread, restoring its exact trigger. Screenshots retained locally. Independent Codex review then identified valid routine audit projections without agent names. Repaired exact-label matching while retaining space-delimited agent suffixes; a regression preserves human messages and unrecognized suffixes. The repaired source passes 951 UI tests and formatting; delta WASM Clippy and hosted build remain pending at this entry. Updated the owning Surface contract; other indexes and runtime docs remain unchanged because their contracts are unaffected.
+
+No merge or deployment. Fresh acknowledgement of the review repair is still required. Legacy Surface rollback bytes remain missing; live daemon intake and limited disk prevented its separate release rebuild/install. Windows and Intel Mac distribution remains unverified, and current package release metadata still points to the personal repository. A recovered one-host reply is not team acceptance.

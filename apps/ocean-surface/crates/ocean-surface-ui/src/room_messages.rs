@@ -73,12 +73,16 @@ pub(crate) fn is_convene_audit(msg: &RoomMessage) -> bool {
     matches!(msg.kind, RoomMessageKind::System)
         && (msg.body.starts_with("auto-convene: ")
             || [
-                "[room agent bootstrap audit] ",
-                "[room agent admission audit] ",
-                "[room agent output audit] ",
+                "[room agent bootstrap audit]",
+                "[room agent admission audit]",
+                "[room agent output audit]",
             ]
             .iter()
-            .any(|prefix| msg.body.starts_with(prefix)))
+            .any(|label| {
+                msg.body
+                    .strip_prefix(label)
+                    .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with(' '))
+            }))
 }
 
 /// Authority records are signals to re-read the daemon, never authority to
@@ -223,6 +227,25 @@ mod tests {
         let mut chat = m(2, "ada", "2026-07-29T12:00:00Z");
         chat.body = "auto-convene: quoted".into();
         assert!(!is_convene_audit(&chat));
+    }
+
+    #[test]
+    fn routine_audits_without_agent_names_hide_only_exact_system_labels() {
+        let mut audit = msg(1, "system", RoomMessageKind::System, "2026-10-19T18:32:00Z");
+        for label in [
+            "[room agent bootstrap audit]",
+            "[room agent admission audit]",
+            "[room agent output audit]",
+        ] {
+            audit.kind = RoomMessageKind::System;
+            audit.body = label.into();
+            assert!(is_convene_audit(&audit));
+            audit.body = format!("{label}unexpected");
+            assert!(!is_convene_audit(&audit));
+            audit.kind = RoomMessageKind::Message;
+            audit.body = label.into();
+            assert!(!is_convene_audit(&audit));
+        }
     }
 
     #[test]
