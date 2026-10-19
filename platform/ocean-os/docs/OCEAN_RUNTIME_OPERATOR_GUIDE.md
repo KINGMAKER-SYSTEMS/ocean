@@ -523,6 +523,7 @@ Grouped by concern:
 # Liveness / observability
 GET    /                                  root banner (JSON route list)
 GET    /health                            liveness check
+GET    /v1/identity                      who this daemon says its human is (member.toml, then OCEAN_MEMBER_ID; null when unset)
 GET    /ready                             readiness (model/credentials wired)
 GET    /metrics                           Prometheus text (v0.0.4); Content-Type: text/plain; version=0.0.4
 
@@ -612,6 +613,20 @@ POST   /v1/rooms/persistent/{key}/agents/{agent_member_id}/invoke  invoke from a
 POST   /v1/rooms/persistent/{key}/participants            join { kind?, id?, display_name?, owner_id? }; a human join is always the daemon owner (id/display_name ignored)
 DELETE /v1/rooms/persistent/{key}/participants/{participant_id}  leave
 POST   /v1/rooms/persistent/{key}/participants/{participant_id}/retire  merge a placeholder human into a real member (operator lane, replay-safe)
+POST   /v1/rooms/persistent/{key}/attachments   upload a room attachment (bytes stored beside the DB)
+GET    /v1/rooms/persistent/{key}/attachments   list a room's attachments
+GET    /v1/rooms/persistent/{key}/attachments/{attachment_id}  download attachment bytes
+DELETE /v1/rooms/persistent/{key}/attachments/{attachment_id}  remove an attachment
+POST   /v1/rooms/maintenance/run             run a retention/orphan sweep now (operator lane)
+GET    /v1/rooms/persistent/{key}/resources   list contributed-folder grants (safe projection)
+POST   /v1/rooms/persistent/{key}/resources   grant a canonical local folder to room agents (operator decision)
+GET    /v1/rooms/persistent/{key}/resources/{resource_id}  one grant (safe projection, no local_root)
+DELETE /v1/rooms/persistent/{key}/resources/{resource_id}  revoke a grant
+POST   /v1/rooms/persistent/{key}/resources/{resource_id}/suspend  suspend a grant
+POST   /v1/rooms/persistent/{key}/resources/{resource_id}/resume  resume a suspended grant
+POST   /v1/rooms/persistent/{key}/resources/{resource_id}/list  operator preview: confined listing
+POST   /v1/rooms/persistent/{key}/resources/{resource_id}/read  operator preview: confined file read
+POST   /v1/rooms/persistent/{key}/summarize      one bounded model turn folded into the room's summary artifact (amends in place)
 GET    /v1/rooms/persistent/{key}/profile        room profile and credential-slot status (never a value)
 PUT    /v1/rooms/persistent/{key}/profile        replace the room profile (operator decision, replay-safe)
 POST   /v1/rooms/persistent/{key}/messages                post message { author_kind?, author_id?, body, thread_parent_seq? }; a human post is always authored by the daemon owner (author_id ignored)

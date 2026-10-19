@@ -31,7 +31,11 @@ participant retirement. One database file (`rooms.db`), one owning crate.
   digests, capabilities, activation/status, canonical-TEXT generations and
   immutable authorization decisions.
 - `room_attachments` stores immutable metadata only. Blob custody, server id
-  validation and filesystem ordering belong to the daemon.
+  validation and filesystem ordering belong to the daemon. Generic attachment
+  mutations retain agent attribution; `add_human_attachment` and
+  `remove_human_attachment` require a human in the same IMMEDIATE transaction as
+  metadata and marker writes. Return the committed upload record without a
+  fallible postcommit lookup; callers may clean bytes only on precommit failure.
 - `federated_event_mentions` stores validated member ids separately from trigger
   claims; `federated_event_mentions_known` distinguishes authoritative empty sets
   from legacy unknown metadata.

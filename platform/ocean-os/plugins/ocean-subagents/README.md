@@ -32,19 +32,22 @@ Approve the subagent plugin calls when Ocean asks. Child mutating tools remain s
 
 ## Runtime behavior
 
-- Maximum four active children per plugin instance; `send` counts against the same cap.
+- Maximum four active children per plugin instance; `send` counts against the same cap. Spawns and follow-ups are admitted one at a time from the capacity check until the accepted turn is recorded, so two cannot both take the last slot and one run cannot get two follow-ups. A refused admission starts no turn and leaves the finished run as it was; a turn reply the plugin cannot read is reported as an error and never retried.
 - Default elapsed-time ceiling: 600 seconds; configurable per spawn from 30–1800 seconds.
 - `model` is passed to the daemon as given; omit it to use the daemon's current model. A name the daemon cannot route fails the child turn, and the failure lists the ready catalog ids. `send` reuses the run's model, so recover with a new `spawn`.
 - `thinking_level` (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`) sets the child's reasoning effort and is reused by `send`; omit it for the model's default.
-- State: `$OCEAN_SUBAGENT_STATE_DIR/runs.json`, `$XDG_STATE_HOME/ocean/subagents/runs.json`, or `~/.local/state/ocean/subagents/runs.json`. The 200 most recently finished runs are kept; active runs are never pruned.
+- State: `$OCEAN_SUBAGENT_STATE_DIR/runs.json`, `$XDG_STATE_HOME/ocean/subagents/runs.json`, or `~/.local/state/ocean/subagents/runs.json`. Inserting a run prunes finished history to the 200 most recently finished runs; terminal updates can temporarily exceed that count until the next insertion. Active runs are never pruned.
 - Daemon URL: `$OCEAN_DAEMON_URL`, default `http://127.0.0.1:4780`.
 - Child default cwd: `$OCEAN_SUBAGENT_DEFAULT_CWD`, otherwise `$HOME`; callers should normally pass their workspace path.
 - The daemon launches plugins with a cleared environment (only `PATH` and the plugin directory as cwd), so the three variables above apply when the plugin is started by hand or by a host that sets them. A daemon-launched plugin uses the defaults, including the default daemon URL.
 - Completed output is projected from the child's daemon-owned transcript and capped at 24,000 bytes.
-- The daemon's request registry is in memory. A run whose request is gone (daemon restart, or a finished turn evicted after an hour) settles as `lost`; its output is whatever the child wrote in that turn, never an earlier turn's answer, and `send` continues it. A cancel the daemon refuses settles the run the same way instead of leaving it `cancelling`. A run settles even when its session cannot be read at that moment; a later `status` collects the output.
+- The daemon's request registry is in memory. A run whose request is gone (daemon restart, or a finished turn evicted after an hour) settles as `lost`; its output is whatever the child wrote in that turn, never an earlier turn's answer, and `send` continues it. A cancel the daemon refuses settles the run the same way instead of leaving it `cancelling`. A run is reported `cancelling` only when the daemon acknowledges that exact turn as cancelling; any other answer is an error that leaves the run as it was, and a failed cancel call never repeats the daemon's response body. A run settles even when its session cannot be read at that moment; a later `status` collects the output.
+- A late daemon answer about an earlier turn (its completion, failure, or a cancel acknowledgement) never changes a follow-up's status, output, error, or timestamps, and a watchdog never cancels a turn other than the one it was armed for.
 - `wait` returns at once for a permission prompt it has not reported yet, including one raised between two waits, and keeps its full budget for a prompt already reported.
 
 This is at-least-once local lifecycle metadata around daemon-owned turns. The daemon remains authoritative for execution and session state.
+
+Admission, request fencing and state writes are per plugin process. Two plugin processes sharing one state root can overwrite each other's runs, and a turn the daemon accepted whose reply was lost is not tracked. [`CUSTODY.md`](CUSTODY.md) proposes single-owner custody and durable holds for unknown dispatches; it is a proposal only and changes nothing above.
 
 ## Verify
 
