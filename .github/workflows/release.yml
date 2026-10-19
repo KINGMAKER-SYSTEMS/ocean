@@ -530,6 +530,8 @@ jobs:
         run: cargo test --locked -p ocean-observatory auth
       - name: Build Windows daemon and TUI
         run: cargo build --locked --release -p ocean-daemon -p ocean-tui
+      - name: Test Windows file and operator security
+        run: cargo test --locked --release -p ocean-daemon --test windows_file_security
       - name: Verify both executable outputs
         run: |
           foreach ($binary in @('ocean-daemon.exe', 'ocean-tui.exe')) {
