@@ -1708,6 +1708,7 @@ separate from this unmerged issue #56 change, which is not deployed.
 _________________________________________________________________________________
 
 _________________________________________________________________________________
+
 time: [22:04] [10-09-26]
 agent: [claude] [opus 5.5]
 worktree: [fix/federation-roster-caller-member-ids] [~/dev/oceanwork/wt-fed-roster-envelope]
@@ -1766,6 +1767,8 @@ type: [workflow]
 area: [backend] [testing] [review]
 
 Reconciled PR #60 store grant serialization with canonical main f1b22bd8. Only conflict was additive public ledger history; both sides retained. Store implementation and owning contract remain byte-identical to original head 72f089c4: exact/cross-ledger decision replay precedes reference validation inside the same IMMEDIATE transaction as a new profile write. Current-main store suite passes 279/279 with disposable auth/config/XDG paths and unchanged HOME. Final exact-head review and hosted checks follow this receipt. Issue #54 audit hold is resolved, but independent maintainer approval remains required. Issue #56 stays open for the separate PR #43 daemon retry path; this store PR alone does not finish its acceptance. No deployment or live database access. Parent ownership and indexes unchanged.
+_________________________________________________________________________________
+
 
 _________________________________________________________________________________
 time: [22:52] [09-10-26]
@@ -1828,6 +1831,12 @@ area: [infra]
 _________________________________________________________________________________
 
 _________________________________________________________________________________
+time: [14:59] [10-12-26]
+agent: [Codex]
+worktree: [PR60; factory-pr60-reviewed-reconcile/ocean]
+type: [workflow]
+area: [review]
+Reconciled reviewed PR60 a0c66c48fcd764a4bf6f469a4d9f9e3df40c354d with canonical main1dfc6802bb74fecdcf83f6f17732b671c892b632 after external79/89 release. Only events.md conflicted; both ordered parent histories preserved. All non-ledger index entries exactly match automatic merge; existing PR-specific source remains unchanged, incoming release source retained. Installer14/14, shell syntax, formatting and diff-check pass; no heavy build/live action. Root takes exclusive release custody for this candidate; fresh independent final-head review and required hosted builds follow this entry. Approval-policy issue90, stack rollout and live acceptance remain separate gates. Applicable AGENTS contracts intentionally unchanged: source behavior and ownership contracts unchanged.
 time: [15:07] [10-12-26]
 agent: [Codex]
 worktree: [PR62; factory-pr62-reviewed-lifecycle/ocean]
