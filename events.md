@@ -2757,3 +2757,12 @@ type: [bug report]
 area: [testing] [backend]
 
 Corrected TUI daemon discovery for Windows: native PATH parsing, .exe sibling/default lookup and suffix-free overrides, rejection of directory candidates, and absolute USERPROFILE/native temporary fallback for neutral cwd/log placement. Unix HOME and launchd ownership behavior are preserved. All 28 standalone boot-module tests pass under pinned Rust; actual-source Windows metadata compilation and cargo check -p ocean-tui pass. Release build and native Windows execution remain pending. Updated the owning TUI contract; no child index or ownership boundary changed. No installation or team-readiness claim.
+
+_________________________________________________________________________________
+time: [17:52] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/windows-daemon-discovery]
+type: [bug report]
+area: [testing] [workflow]
+
+PR #116 merged at dfaa85fe after fresh review, exact-head builds and native Windows proof: both release executables and all 39 credential/operator/guarded-file tests passed. Reconciled daemon discovery with that source and added actual-source boot-module execution to the opt-in Windows probe. Local TUI check/release and 28 host boot-module tests passed; native discovery execution remains pending. Updated the owning workflow contract; parent indexes unchanged. No Windows package, installation or team-readiness claim.

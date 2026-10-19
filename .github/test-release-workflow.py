@@ -104,6 +104,8 @@ windows_job = source[source.index("  windows-probe:") :]
 require("if: github.event_name == 'workflow_dispatch' && inputs.windows_probe" in windows_job, "Windows probe is manual and opt-in")
 require("contents: read" in windows_job and ": write" not in windows_job, "Windows probe has no write authority")
 require("cargo build --locked --release -p ocean-daemon -p ocean-tui" in windows_job, "Windows probe compiles the actual release binaries")
+require("rustc --edition=2021 --test crates/ocean-tui/src/shell/daemon_boot.rs" in windows_job,
+        "Windows probe executes actual-source daemon discovery tests")
 require("cancel-in-progress: true" in windows_job, "superseded Windows probes cancel by ref")
 
 print("Ocean release workflow root/path/security contract: PASS")
