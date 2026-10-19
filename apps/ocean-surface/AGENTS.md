@@ -352,7 +352,10 @@ Web surface session UI:
   in-flight request.
 - The browser PWA proxy must forward `/v1/agents` as JSON and stream room SSE
   unbuffered while preserving `Last-Event-ID`; Tauri reaches the same daemon
-  endpoints directly.
+  endpoints directly. Persistent-room PATCH routes (including `read-cursor`)
+  must forward the method, JSON body and query behind the existing session gate;
+  browser cookies and forged operator headers never pass upstream. Verify with
+  `cargo test -p ocean-surface-proxy room_read_cursor_patch`.
 - Canonical room keys use alphanumeric, `-`, `_`, and `.`; native invite
   parsing keeps that alphabet separate from the narrower session-id and
   invite-code alphabets.
@@ -450,17 +453,40 @@ Web surface session UI:
   center and right rails re-render on room state.
 - The existing Room options overflow always offers Members, including an empty
   agent roster. It reveals the same MembersPanel and ConsentSheet; native consent
-  and browser/extension authority gates remain in those components. Through
-  1080px Members, Search, and Thread use one dismissible right-rail overlay; at
-  650px and below it is full width, while above 1080px the rail stays docked.
+  and browser/extension authority gates remain in those components. Members, Search, and Thread stay closed until requested at every width. Through
+  1080px they use one dismissible right-rail overlay; at 650px and below it is
+  full width, while above 1080px the requested rail docks beside the conversation.
   Explicit picks select one rail mode. Close and unhandled Escape dismiss the
-  overlay and restore its trigger focus (Room options for Members); nested
+  requested rail and restore its trigger focus (Room options for Members); nested
   Escape handlers take precedence. Room admission/origin changes retire open
   rail modes without moving focus or altering consent authority.
-- The timeline hides the daemon's `auto-convene: …` audit rows
-  (`room_messages::is_convene_audit`) because the work card shows the
-  convene; `auto-convene failed …` rows stay. System rows render as one quiet
-  line; grouped rows keep the avatar gutter with the time revealed on intent.
+- Unread attention and the new-message jump exclude the same routine audit rows
+  as the timeline. Local room-list summaries come from the daemon's conversation
+  frontier; the open-room summary uses the same filter. Visible failures, access
+  changes and human messages still count. Read cursor PATCH and SSE resume retain
+  the full durable sequence; never mark unseen conversation read to silence a dot.
+  Deploy the Surface and daemon attention changes together; older daemon summaries
+  can still count hidden audits in unopened rooms.
+- The timeline hides routine convene, bootstrap, admission and output audit
+  rows (`room_messages::is_convene_audit`), including exact labels when the
+  daemon omits an agent name; durable records stay untouched.
+  Refusals and access changes remain visible as plain language. Never hide
+  unknown failures or rewrite human messages. System rows wrap legibly; grouped
+  messages keep the avatar gutter with time revealed on intent.
+- Agent binding status is visible on every host, including browser and extension.
+  Active bindings read "Authorized": room access alone does not establish
+  provider connectivity, workspace availability or successful inference.
+  Fresh authority/bootstrap/refusal SSE messages refresh bindings through the
+  existing room-generation and latest-request guards; duplicate replay rows do
+  not dispatch refreshes. Authority/bootstrap records without an agent suffix
+  still refresh bindings; known anonymous access/refusal notices remain readable,
+  while unknown refusal codes retain their original text. Native consent controls remain native-only.
+- Room creation reveals its optional project picker and Create action only after
+  a name is entered. Enter and Create share the same guarded operation.
+- Coworkers use both Macs and Windows. Installation, updates and acceptance
+  must account for both; a macOS-only package or local smoke test is not team
+  readiness. Keep Rooms conversation-first, with quiet sentence-case headings,
+  one secondary menu, and no raw filesystem setup instructions in the main flow.
 - Attention (P6, `room_attention.rs`, `styles/rooms-attention.css`): the
   left-rail @ icon swaps the room list for the mentions inbox
   (`GET /v1/rooms/inbox`, also forwarded by the proxy; render the daemon's

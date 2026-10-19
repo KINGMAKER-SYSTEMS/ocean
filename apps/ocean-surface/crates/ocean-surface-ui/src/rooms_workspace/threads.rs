@@ -98,12 +98,6 @@ pub(super) fn ThreadPanel(
     );
     view! {
         <div class="rooms-workspace__right-thread">
-            <div class="rooms-workspace__right-thread-head">
-                <p class="rooms-workspace__right-thread-title">"Thread"</p>
-                <div class="rooms-workspace__right-thread-subtitle">
-                    {format!("Replying to {}", root.author_id)}
-                </div>
-            </div>
             <div
                 class="rooms-workspace__right-thread-transcript"
                 role="log"

@@ -529,16 +529,17 @@ pub(super) fn RoomListRail(
                     }
                     disabled=move || pending_create.get()
                 />
+                <Show when=move || !new_room_name.get().trim().is_empty()>
                 <select
                     class="rooms-workspace__left-input rooms-workspace__left-workspace"
-                    aria-label="Workspace"
+                    aria-label="Project"
                     node_ref=workspace_select_ref
                     prop:value=move || workspace_choice.get().unwrap_or_default()
                     on:change=on_workspace_change
                     disabled=move || pending_create.get() || picker_pending.get()
                 >
                     <option value="" prop:selected=move || workspace_choice.get().is_none()>
-                        "No workspace"
+                        "Project (optional)"
                     </option>
                     <For
                         each=move || workspace_choices.get()
@@ -562,6 +563,15 @@ pub(super) fn RoomListRail(
                         <option value=CHOOSE_FOLDER_VALUE>"Choose folder…"</option>
                     })}
                 </select>
+                <button
+                    class="rooms-workspace__create-submit"
+                    type="button"
+                    disabled=move || pending_create.get() || picker_pending.get()
+                    on:click=move |_| create_room()
+                >
+                    {move || if pending_create.get() { "Creating…" } else { "Create" }}
+                </button>
+                </Show>
             </div>
         </div>
     }

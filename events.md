@@ -2564,6 +2564,15 @@ Removed the second, byte-identical copy of the `[17:55] [06-10-26]` model-rerout
 _________________________________________________________________________________
 
 _________________________________________________________________________________
+time: [14:59] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/rooms-daily-use]
+type: [bug report]
+area: [frontend] [backend] [testing]
+
+Prepared conversation-first Rooms presentation: details open on intent at every width, routine system audits stay out of the timeline, access changes refresh authoritative bindings, browser members show paused/revoked status, and room creation exposes its optional project choice after a name. Human messages, durable audit records and native-only consent authority remain unchanged. Added default-model refresh of stored provider credentials and a regression for rotation, source removal and malformed storage. Added the Mac/Windows team setup matrix and explicit multi-machine acceptance requirements. Updated owning devlogs and root documentation index.
+
+Live diagnostic on the existing daemon confirmed an admitted room turn failed with an expired cached provider token despite current credentials on disk. Reselecting the same model restored a real no-tools reply in the existing room session. This proves one host, not coworker federation. Initial UI tests (921 unit tests plus integration suites), Trunk build and credential regression pass; final source checks and rendered verification continue. The running Surface predates canonical source, and its legacy rollback executable is missing, so no live Surface promotion was attempted. Windows and Intel Mac packages are not supplied by the current release workflow.
 time: [13:55] [10-19-26]
 agent: [claude code] [claude-fable-5-1]
 worktree: [port/os-527-credential-resnapshot] [~/dev/oceanwork/wt-port]
@@ -2589,6 +2598,28 @@ area: [backend] [testing]
 
 Ported Risingtides-dev/ocean-surface#222. The Surface proxy allow-list now carries the three `/v1` route families the Surface calls and the daemon serves but the table never listed: `GET /v1/fs/file`, `GET /v1/agent/history/search`, and the five read-only `GET /v1/repo/github/{project_id}/...` projections. In the shipped PWA every one of these was same-origin, fell through to ServeDir and answered 404 with an empty body, which the callers render as blank rather than as an error. The GitHub family rebuilds its upstream path from the matched route template and refuses dot-segment captures so `%2e%2e` cannot collapse upstream. The other three families from the legacy PR (`/v1/requests`, `/v1/browser/screencast`, `/v1/browser/input`) were already routed here. New guard test `every_surface_v1_path_is_routed` scans the UI crate's URL builders against `build_app` and fails naming any unrouted path (mutation-checked by dropping `/v1/fs/file`); `github_routes_refuse_dot_segments_before_they_collapse_upstream` runs the router against a recording stub daemon. Validation: `cargo test -p ocean-surface-proxy` 37 passed, clippy `-D warnings` and rustfmt clean.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [15:19] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/rooms-daily-use]
+type: [workflow]
+area: [frontend] [review] [testing]
+
+Reconciled with canonical main 69e2c83b after PRs #108 and #109 landed. Removed this branch's duplicate credential implementation and regression; PR #111 now changes Surface and documentation only. The superseded local agent implementation passed 285 tests with 2 opt-in live probes skipped; that result does not validate the distinct upstream implementation. UI checks passed 951 tests and Trunk; hosted Build Surface passed at 5ede8209. Rendered wide/compact Safari checks found a desktop focus defect, now repaired by focusing every explicitly opened details pane and retaining the actual clicked trigger for return focus. Removed the repeated Thread heading. Final checks for these last UI changes continue.
+
+No merge or deployment claimed. Independent reviewer acknowledgement is still needed. Legacy Surface recovery bytes remain missing, and the existing daemon has active intake. A separate merged-main daemon release build was stopped before installation as free disk fell below 7 GiB; only this task's runtime scratch outputs were removed. The current live daemon and Surface were preserved. Owning Surface, product and onboarding contracts were updated; runtime devlogs were restored unchanged because the runtime delta was superseded upstream.
+
+_________________________________________________________________________________
+time: [15:42] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/rooms-daily-use]
+type: [bug report]
+area: [frontend] [review] [testing]
+
+PR #111 at f49ad1ce passed 950 UI tests, WASM Clippy with denied warnings, formatting, Trunk and hosted Surface build. Final Safari wide and compact checks confirmed the close control receives focus and Escape closes only the requested thread, restoring its exact trigger. Screenshots retained locally. Independent Codex review then identified valid routine audit projections without agent names. Repaired exact-label matching while retaining space-delimited agent suffixes; a regression preserves human messages and unrecognized suffixes. The repaired source passes 951 UI tests and formatting; delta WASM Clippy and hosted build remain pending at this entry. Updated the owning Surface contract; other indexes and runtime docs remain unchanged because their contracts are unaffected.
+
+No merge or deployment. Fresh acknowledgement of the review repair is still required. Legacy Surface rollback bytes remain missing; live daemon intake and limited disk prevented its separate release rebuild/install. Windows and Intel Mac distribution remains unverified, and current package release metadata still points to the personal repository. A recovered one-host reply is not team acceptance.
 
 _________________________________________________________________________________
 time: [15:47] [19-10-26] EDT UTC-04:00
@@ -2620,6 +2651,15 @@ area: [review] [testing]
 Addressed independent review of PR #113: an npm-only host with the personal package installed hits EEXIST because both scopes expose the same global commands. Onboarding now detects that installed personal package before credential reads/config writes and explains the explicit download/remove/local-install transition; it does not force-overwrite links or silently remove the working package. Updated the package guide and owning onboarding contract. All 15 onboarding fixtures pass. An isolated real-npm reproduction confirmed the collision, then the documented transition produced all three org command links. No real global package, identity or service was changed.
 
 _________________________________________________________________________________
+time: [16:01] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/rooms-daily-use]
+type: [bug report]
+area: [frontend] [review] [testing]
+
+Addressed the second independent PR #111 finding: active bindings previously rendered no status on browser/extension hosts. All bindings now expose the existing quiet status label independently of native consent controls. Active reads Authorized rather than Ready, since binding authority alone does not prove provider/workspace readiness. Updated the owning Surface contract. Six focused binding tests, formatting, Trunk and diff checks pass; delta WASM Clippy is running. Safari rendered the real active binding as Authorized, with no browser Review/Revoke controls; Escape restored Room options focus. A screenshot is retained locally. Prior full-suite evidence remains 951 passing tests at 199ab049; fresh-head review/build remains required.
+
+_________________________________________________________________________________
 time: [16:05] [19-10-26] EDT UTC-04:00
 agent: [Codex] [GPT-6]
 worktree: [codex/org-team-distribution]
@@ -2627,6 +2667,15 @@ type: [bug report]
 area: [review] [testing]
 
 Completed the next PR #113 review delta: inspect the personal npm installation before choosing Bun or npm, preventing an earlier npm command path from masking a Bun org install. Added the mixed-manager regression and corrected the component's canonical onboarding prerequisite to the org package. Updated owning runtime/docs contracts; child indexes are unchanged. All 16 onboarding fixtures, shell syntax, diff check and cargo xtask docs-check pass (30 packages, 161 active Markdown files, 185 local links). Initial Mac release candidate run 39314057475 passed build, license inventory, packaging and isolated npm/Bun installation; current-head verification remains separate.
+
+_________________________________________________________________________________
+time: [16:11] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/rooms-daily-use]
+type: [bug report]
+area: [frontend] [review] [testing]
+
+Repaired suffix-free authority/bootstrap projections from independent review. Both exact labels and space-delimited agent forms refresh daemon binding state; anonymous notices remain readable and unknown refusal codes retain their diagnostic text. Human messages are unchanged. All 952 UI tests (922 unit, 30 integration), WASM Clippy with denied warnings, formatting and diff checks pass. Owning Surface contract updated; parent indexes and runtime contracts unchanged because ownership and runtime behavior are unchanged. Fresh exact-head review and hosted build are still required; no merge or deployment claimed.
 
 _________________________________________________________________________________
 time: [16:13] [19-10-26] EDT UTC-04:00
@@ -2645,3 +2694,21 @@ type: [bug report]
 area: [review] [testing]
 
 Independent review identified a stale org installation shadowing the package manager just updated. Post-install verification now compares every resolved command to the selected npm package root or Bun global bin links, rather than accepting any consistent org installation. No command execution or automatic removal. Twenty-two onboarding fixtures pass, including stale npm/Bun org copies and successful retry after PATH correction; shell syntax, ShellCheck and diff checks pass. Owning component contract updated; indexes unchanged. Hosted routine builds passed preceding 24ca448a. Fresh-head review/build and candidate artifact validation remain pending; no merge or publication claimed.
+
+_________________________________________________________________________________
+time: [16:30] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/rooms-daily-use]
+type: [bug report]
+area: [frontend] [backend] [review] [testing]
+
+Repaired phantom attention from filtered routine audits. Local room-list read summaries now use a read-only store conversation frontier; open-room summaries and jump accounting apply the same visible-message filter. Full transcript/SSE/read-cursor sequences and audit records are unchanged, as are federated global frontiers. SQL filters before LIMIT without loading transcript bodies into Rust. Regressions preserve chat messages, authority changes, failure notices, case/boundary distinctions and actual unseen conversation. All 954 UI tests, three store frontier tests, the daemon list/read-state route regression, WASM Clippy, formatting, diff checks and cargo check --workspace pass. Updated owning Surface/store/daemon contracts; parent indexes unchanged because no ownership boundary changed. Root team guide now links the component host setup guide. Surface and daemon changes must deploy together; older daemon summaries still count audits for unopened rooms. Fresh-head review, hosted build and installation remain pending.
+
+_________________________________________________________________________________
+time: [16:38] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/rooms-daily-use]
+type: [bug report]
+area: [frontend] [testing]
+
+Restored missing persistent-room PATCH forwarding in the authenticated browser proxy. The read cursor could previously fail to save despite a successful room load. All 38 proxy tests and denied-warning Clippy pass, including an actual upstream fixture proving method/path/query/body preservation and refusal without a proxy session; browser cookies and forged operator headers stay stripped. Safari on the localhost candidate saved the room cursor from 24 to 40, cleared its unread dot, and retained that state after reload. Owning Surface contract updated; parent indexes unchanged. The paired Rooms changes at 015a3b1c passed independent review and hosted Ocean/Surface builds, but this proxy delta still requires fresh-head review and CI. Distribution PR #113 merged at 945c91cb; its release validation is running and no package is published. Live Surface remains unchanged because legacy recovery bytes are missing.

@@ -8,6 +8,10 @@ product
 
 Ocean Surface is for operators and developers supervising one or more local AI-agent executions across projects, workspaces, sessions, tools, and extension-owned subagents. They use it during active work to understand what needs attention, inspect truthful execution state, replay what happened, and move into the authoritative transcript when content or control is needed.
 
+Rooms also serves coworkers on Macs and Windows coordinating real project work.
+They must be able to join, speak, receive an agent reply and return to the same
+conversation without understanding daemon internals.
+
 ## Product Purpose
 
 Ocean Surface is the shared web, PWA, Chrome-extension, and Tauri interface over the Ocean daemon. It renders daemon-owned state and collects operator intent without becoming a second runtime. Ocean Floor is its observability mode: a legible 1990s-computer-game world driven by real, metadata-safe Observatory snapshot/live/replay events and backed by durable local history.

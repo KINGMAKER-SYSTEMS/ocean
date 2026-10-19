@@ -545,6 +545,7 @@ fn build_app(state: Arc<AppState>, dist: &std::path::Path) -> Router {
             "/v1/rooms/persistent/{*rest}",
             get(proxy_rooms_persistent)
                 .post(proxy_rooms_persistent)
+                .patch(proxy_rooms_persistent)
                 .put(proxy_rooms_persistent)
                 .delete(proxy_rooms_persistent),
         )
@@ -2486,6 +2487,60 @@ mod tests {
             missing.len(),
             missing.join("\n  ")
         );
+    }
+
+    #[tokio::test]
+    async fn room_read_cursor_patch_preserves_method_body_and_auth_boundary() {
+        use serde_json::Value;
+        async fn echo(req: Request<Body>) -> axum::Json<Value> {
+            let method = req.method().to_string();
+            let uri = req.uri().to_string();
+            let cookie = req.headers().contains_key(header::COOKIE);
+            let operator = req.headers().contains_key("x-ocean-operator");
+            let body = axum::body::to_bytes(req.into_body(), 1024).await.unwrap();
+            axum::Json(serde_json::json!({
+                "method": method, "uri": uri, "cookie": cookie, "operator": operator,
+                "body": serde_json::from_slice::<Value>(&body).unwrap(),
+            }))
+        }
+        let upstream = Router::new().route(
+            "/v1/rooms/persistent/r1/read-cursor",
+            axum::routing::patch(echo),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let mut state = auth_test_state();
+        Arc::get_mut(&mut state).unwrap().daemon_url = format!("http://{addr}");
+        let dist = tempfile::tempdir().unwrap();
+        let app = build_app(state, dist.path());
+        let request = |authenticated| {
+            let mut req = Request::builder()
+                .method("PATCH")
+                .uri("/v1/rooms/persistent/r1/read-cursor?test=1")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("x-ocean-operator", "browser-forged");
+            if authenticated {
+                req = req.header(header::COOKIE, "ocean_session=test-session");
+            }
+            req.body(Body::from(r#"{"read_seq":40}"#)).unwrap()
+        };
+        let unauthenticated = app.clone().oneshot(request(false)).await.unwrap();
+        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+        let response = app.oneshot(request(true)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let seen: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            seen,
+            serde_json::json!({
+                "method": "PATCH", "uri": "/v1/rooms/persistent/r1/read-cursor?test=1",
+                "body": {"read_seq": 40}, "cookie": false, "operator": false,
+            })
+        );
+        server.abort();
     }
 
     /// A stub daemon that records the path of every request it receives, so a
