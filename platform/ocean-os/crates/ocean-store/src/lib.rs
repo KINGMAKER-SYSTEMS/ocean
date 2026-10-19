@@ -90,9 +90,10 @@ use std::{path::Path, time::Duration};
 use chrono::{DateTime, Utc};
 use ocean_core::{
     bounded_prose, FederatedMessageMeta, FederatedRoomMemberProjection, OutboxItemState, Room,
-    RoomAccessProjection, RoomAccessState, RoomArtifact, RoomArtifactKind, RoomArtifactState,
-    RoomAttachment, RoomKey, RoomMessage, RoomMessageKind, RoomOutboxItem, RoomParticipant,
-    RoomParticipantKind, RoomReadCursorProjection, RoomReadCursorUpdateRequest, RoomTriggerPolicy,
+    RoomAccessProjection, RoomAccessState, RoomAgentRun, RoomAgentRunState, RoomAgentSettings,
+    RoomArtifact, RoomArtifactKind, RoomArtifactState, RoomAttachment, RoomKey, RoomMessage,
+    RoomMessageKind, RoomOutboxItem, RoomParticipant, RoomParticipantKind, RoomPrefs,
+    RoomReadCursorProjection, RoomReadCursorUpdateRequest, RoomTriggerPolicy,
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
@@ -867,6 +868,75 @@ impl From<ThreadAppendError> for RoomStoreError {
 }
 
 type Result<T> = std::result::Result<T, RoomStoreError>;
+
+/// The one human this daemon belongs to (team-platform P2). Display data, not
+/// an authentication principal: it names who local human rows are authored by.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnerIdentity {
+    /// Stable participant id in the canonical alphabet (alphanumeric, `.`,
+    /// `_`, `-`): the configured team member id, else derived from a name.
+    pub participant_id: String,
+    /// Operator-chosen display name.
+    pub display_name: String,
+}
+
+fn decode_agent_run(body: &str) -> Result<RoomAgentRun> {
+    serde_json::from_str(body).map_err(|e| RoomStoreError::Encode(format!("bad agent run: {e}")))
+}
+
+/// Trim a candidate owner display name; `None` when empty or over 64 chars.
+fn normalize_owner_display_name(name: &str) -> Option<String> {
+    let trimmed = name.trim();
+    (!trimmed.is_empty() && trimmed.chars().count() <= 64).then(|| trimmed.to_string())
+}
+
+/// The owner participant id seeded from a configured team member id.
+///
+/// Exact mapping: the trimmed member id exactly as `GET /v1/identity` (#41)
+/// reports it, case kept and no length cap, except that every `@` becomes
+/// `-`. `@` is in the member-id alphabet (`[A-Za-z0-9._@-]`) but it starts a
+/// room mention, so an owner id containing it could never be mentioned. Any
+/// other character outside the participant alphabet (never present in a
+/// member id the daemon accepts) also becomes `-`; an empty id falls back to
+/// [`owner_participant_id`]. So `smaths` → `smaths`, `Jay.V` → `Jay.V`,
+/// `ec@kingmaker` → `ec-kingmaker`, `EC@Kingmaker` → `EC-Kingmaker`.
+pub fn owner_participant_id_for_member(member_id: &str) -> String {
+    let member_id = member_id.trim();
+    if member_id.is_empty() {
+        return owner_participant_id(member_id);
+    }
+    member_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+/// Derive the stable owner participant id from a display name: lowercase,
+/// canonical mention alphabet, runs of other characters collapse to `-`.
+/// Falls back to `operator` when nothing usable remains.
+pub fn owner_participant_id(display_name: &str) -> String {
+    let mut id = String::new();
+    for c in display_name.trim().chars().flat_map(char::to_lowercase) {
+        if c.is_ascii_alphanumeric() || c == '_' || c == '.' {
+            id.push(c);
+        } else if !id.ends_with('-') {
+            id.push('-');
+        }
+    }
+    let id: String = id.trim_matches('-').chars().take(32).collect();
+    let id = id.trim_end_matches('-');
+    if id.is_empty() {
+        "operator".to_string()
+    } else {
+        id.to_string()
+    }
+}
 
 // ── Rooms Phase 1: room-agent authorization ───────────────────────────
 //
@@ -2056,6 +2126,42 @@ impl SqliteRoomStore {
             CREATE TABLE IF NOT EXISTS federation_instance (
                 singleton   INTEGER PRIMARY KEY CHECK (singleton = 1),
                 instance_id TEXT NOT NULL         -- one stable daemon UUID
+            );
+
+            -- The ONE human this daemon belongs to (team-platform P2). Every
+            -- coworker runs their own daemon, so every local human post and
+            -- join is authored as this identity; client-claimed human ids are
+            -- never authority. Display data only — it authorizes nothing.
+            -- One row per room-convened agent turn (team-platform P3): the
+            -- mutable work-card projection over that turn's agent session. It
+            -- is NOT a transcript; transcript rows stay append-only.
+            CREATE TABLE IF NOT EXISTS room_agent_runs (
+                run_id     TEXT PRIMARY KEY,
+                room_id    TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+                started_at TEXT NOT NULL,      -- RFC3339, ordering key
+                body       TEXT NOT NULL       -- JSON RoomAgentRun
+            );
+            CREATE INDEX IF NOT EXISTS room_agent_runs_room_started
+                ON room_agent_runs (room_id, started_at);
+
+            -- Per-room overrides for one agent (team-platform P4). Local only.
+            CREATE TABLE IF NOT EXISTS room_agent_settings (
+                room_id  TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+                agent_id TEXT NOT NULL,
+                body     TEXT NOT NULL,        -- JSON RoomAgentSettings
+                PRIMARY KEY (room_id, agent_id)
+            );
+
+            -- Per-room owner preferences (team-platform P6). Local only.
+            CREATE TABLE IF NOT EXISTS room_prefs (
+                room_id TEXT PRIMARY KEY REFERENCES rooms(id) ON DELETE CASCADE,
+                body    TEXT NOT NULL          -- JSON RoomPrefs
+            );
+
+            CREATE TABLE IF NOT EXISTS daemon_owner (
+                singleton      INTEGER PRIMARY KEY CHECK (singleton = 1),
+                participant_id TEXT NOT NULL,     -- stable; canonical id alphabet
+                display_name   TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS room_federation (
@@ -4074,6 +4180,14 @@ impl SqliteRoomStore {
         Ok(out)
     }
 
+    /// Open-room roster only, without loading or decoding transcript rows.
+    pub fn room_participants(&self, key: &RoomKey) -> Result<Vec<RoomParticipant>> {
+        if !self.room_is_open(key)? {
+            return Err(RoomStoreError::UnknownRoom(key.clone()));
+        }
+        self.load_participants(key)
+    }
+
     fn load_participants(&self, key: &RoomKey) -> Result<Vec<RoomParticipant>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, kind, display_name FROM participants WHERE room_id = ?1 ORDER BY position",
@@ -5260,6 +5374,7 @@ impl SqliteRoomStore {
         let Some((state_str, seq_text, member_json, caller_member_id)) = row else {
             // Room exists but no access row → exact Local projection.
             return Ok(RoomAccessProjection {
+                local_member_id: None,
                 state: RoomAccessState::Local,
                 caller_member_id: None,
                 last_confirmed_global_sequence: None,
@@ -5277,13 +5392,16 @@ impl SqliteRoomStore {
         let members: Vec<FederatedRoomMemberProjection> = serde_json::from_str(&member_json)
             .map_err(|e| RoomStoreError::Encode(format!("bad member projection: {e}")))?;
         let outbox = self.load_outbox_for_room(key)?;
+        let caller_member_id = if state == RoomAccessState::Local {
+            None
+        } else {
+            caller_member_id
+        };
         Ok(RoomAccessProjection {
+            // Both surfaces describe the same captured credential identity.
+            local_member_id: caller_member_id.clone(),
             state,
-            caller_member_id: if state == RoomAccessState::Local {
-                None
-            } else {
-                caller_member_id
-            },
+            caller_member_id,
             last_confirmed_global_sequence: confirmed_sequence,
             members,
             outbox,
@@ -5813,6 +5931,591 @@ impl SqliteRoomStore {
             params![id],
         )?;
         Ok(id)
+    }
+
+    /// Read the daemon owner, minting it on first use (team-platform P2).
+    ///
+    /// `default_display_name` is used only when no owner exists yet. The
+    /// participant id is derived ONCE from that name ([`owner_participant_id`])
+    /// and never changes afterwards, so mentions and roster rows stay valid
+    /// across renames. Equivalent to [`Self::owner_identity_as`] with no
+    /// configured member id.
+    pub fn owner_identity(&mut self, default_display_name: &str) -> Result<OwnerIdentity> {
+        self.owner_identity_as(None, default_display_name)
+    }
+
+    /// Read the daemon owner for the configured team member id, if any.
+    ///
+    /// The member id (the daemon's `member.toml` / `OCEAN_MEMBER_ID`
+    /// identity) only SEEDS a fresh install: when no owner exists yet, the
+    /// owner is minted with participant id
+    /// [`owner_participant_id_for_member`]`(member_id)` and
+    /// `default_display_name`. An owner already persisted in `rooms.db` is
+    /// never re-keyed, whatever the member id says now or later: its roster
+    /// rows, mentions and authored history stay valid. Without a member id a
+    /// fresh owner is minted from `default_display_name`
+    /// ([`owner_participant_id`]). Moving an existing owner onto a member id
+    /// would be a separate, explicit migration.
+    pub fn owner_identity_as(
+        &mut self,
+        member_id: Option<&str>,
+        default_display_name: &str,
+    ) -> Result<OwnerIdentity> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing: Option<OwnerIdentity> = tx
+            .query_row(
+                "SELECT participant_id, display_name FROM daemon_owner WHERE singleton = 1",
+                [],
+                |r| {
+                    Ok(OwnerIdentity {
+                        participant_id: r.get(0)?,
+                        display_name: r.get(1)?,
+                    })
+                },
+            )
+            .optional()?;
+        let owner = match existing {
+            // Persisted owners are never re-keyed.
+            Some(owner) => owner,
+            None => {
+                let member_participant = member_id.map(owner_participant_id_for_member);
+                let display_name = normalize_owner_display_name(default_display_name)
+                    .unwrap_or_else(|| "Operator".to_string());
+                let owner = OwnerIdentity {
+                    participant_id: member_participant
+                        .unwrap_or_else(|| owner_participant_id(&display_name)),
+                    display_name,
+                };
+                tx.execute(
+                    "INSERT INTO daemon_owner (singleton, participant_id, display_name)
+                     VALUES (1, ?1, ?2)",
+                    params![owner.participant_id, owner.display_name],
+                )?;
+                owner
+            }
+        };
+        tx.commit()?;
+        Ok(owner)
+    }
+
+    /// Insert or replace one agent-run projection (team-platform P3). The room
+    /// must exist; the row cascades away with it.
+    pub fn put_room_agent_run(&mut self, run: &RoomAgentRun) -> Result<()> {
+        if !self.room_exists(&run.room_id)? {
+            return Err(RoomStoreError::UnknownRoom(run.room_id.clone()));
+        }
+        let body = serde_json::to_string(run)
+            .map_err(|e| RoomStoreError::Encode(format!("agent run: {e}")))?;
+        self.conn.execute(
+            "INSERT INTO room_agent_runs (run_id, room_id, started_at, body)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (run_id) DO UPDATE SET body = excluded.body",
+            params![
+                run.run_id,
+                run.room_id.as_str(),
+                run.started_at.to_rfc3339(),
+                body
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Write the running turn's own projection of its run (team-platform P3)
+    /// without regressing what other writers own. Under one immediate
+    /// transaction: a missing row is inserted; a stored terminal run (closed
+    /// `Done` by an answer settle, or failed by restart recovery) is never
+    /// rewritten; otherwise the turn's fields replace the row but the answer
+    /// claim (`answer_seq`) is kept from the stored row, because only
+    /// [`Self::claim_parked_room_agent_run`] and
+    /// [`Self::settle_room_agent_run_answer`] own it. Returns the stored row
+    /// after the call and whether this write landed.
+    pub fn put_room_agent_run_from_turn(
+        &mut self,
+        run: &RoomAgentRun,
+    ) -> Result<(RoomAgentRun, bool)> {
+        if !self.room_exists(&run.room_id)? {
+            return Err(RoomStoreError::UnknownRoom(run.room_id.clone()));
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let stored: Option<String> = tx
+            .query_row(
+                "SELECT body FROM room_agent_runs WHERE run_id = ?1",
+                params![run.run_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let mut merged = run.clone();
+        if let Some(stored) = stored {
+            let stored = decode_agent_run(&stored)?;
+            if stored.state.is_terminal() {
+                return Ok((stored, false));
+            }
+            merged.answer_seq = stored.answer_seq;
+        }
+        let body = serde_json::to_string(&merged)
+            .map_err(|e| RoomStoreError::Encode(format!("agent run: {e}")))?;
+        tx.execute(
+            "INSERT INTO room_agent_runs (run_id, room_id, started_at, body)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (run_id) DO UPDATE SET body = excluded.body",
+            params![
+                merged.run_id,
+                merged.room_id.as_str(),
+                merged.started_at.to_rfc3339(),
+                body
+            ],
+        )?;
+        tx.commit()?;
+        Ok((merged, true))
+    }
+
+    /// One agent run by id, if it exists.
+    pub fn room_agent_run(&self, run_id: &str) -> Result<Option<RoomAgentRun>> {
+        let body: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT body FROM room_agent_runs WHERE run_id = ?1",
+                params![run_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        body.map(|b| decode_agent_run(&b)).transpose()
+    }
+
+    /// The room's most recent agent runs, oldest first, at most `limit`.
+    pub fn room_agent_runs(&self, key: &RoomKey, limit: usize) -> Result<Vec<RoomAgentRun>> {
+        if !self.room_exists(key)? {
+            return Err(RoomStoreError::UnknownRoom(key.clone()));
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT body FROM room_agent_runs WHERE room_id = ?1
+             ORDER BY started_at DESC, run_id DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![key.as_str(), limit as i64], |r| {
+            r.get::<_, String>(0)
+        })?;
+        let mut runs = rows
+            .map(|row| decode_agent_run(&row?))
+            .collect::<Result<Vec<_>>>()?;
+        runs.reverse();
+        Ok(runs)
+    }
+
+    /// Parked `room_ask` runs in `key` whose thread root is `thread_root_seq`
+    /// (team-platform P4). A human thread reply resumes each one.
+    pub fn parked_room_agent_runs(
+        &self,
+        key: &RoomKey,
+        thread_root_seq: u64,
+    ) -> Result<Vec<RoomAgentRun>> {
+        Ok(self
+            .room_agent_runs(key, usize::MAX >> 1)?
+            .into_iter()
+            .filter(|run| run.state.is_parked() && run.thread_root_seq == thread_root_seq)
+            .collect())
+    }
+
+    /// Rewrite one run inside an immediate transaction when `update` accepts
+    /// the current row (returns `true` after changing it). The row is read and
+    /// written under the same write lock, so concurrent callers compare and
+    /// swap rather than overwrite each other.
+    fn update_room_agent_run_if(
+        &mut self,
+        run_id: &str,
+        update: impl FnOnce(&mut RoomAgentRun) -> bool,
+    ) -> Result<Option<RoomAgentRun>> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let body: Option<String> = tx
+            .query_row(
+                "SELECT body FROM room_agent_runs WHERE run_id = ?1",
+                params![run_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(body) = body else {
+            return Ok(None);
+        };
+        let mut run = decode_agent_run(&body)?;
+        if !update(&mut run) {
+            return Ok(None);
+        }
+        let body = serde_json::to_string(&run)
+            .map_err(|e| RoomStoreError::Encode(format!("agent run: {e}")))?;
+        tx.execute(
+            "UPDATE room_agent_runs SET body = ?1 WHERE run_id = ?2",
+            params![body, run_id],
+        )?;
+        tx.commit()?;
+        Ok(Some(run))
+    }
+
+    /// Claim a parked `room_ask` run for the thread answer at `answer_seq`
+    /// (team-platform P4). Compare-and-swap: only a run that is still
+    /// `AwaitingReply` with no outstanding claim takes the answer, so of two
+    /// concurrent replies exactly one gets `Some`. The run stays parked, with
+    /// the answer recorded, until [`Self::settle_room_agent_run_answer`].
+    pub fn claim_parked_room_agent_run(
+        &mut self,
+        run_id: &str,
+        answer_seq: u64,
+        now: DateTime<Utc>,
+    ) -> Result<Option<RoomAgentRun>> {
+        self.update_room_agent_run_if(run_id, |run| {
+            if !run.state.is_parked() || run.answer_seq.is_some() {
+                return false;
+            }
+            run.answer_seq = Some(answer_seq);
+            run.updated_at = now;
+            true
+        })
+    }
+
+    /// Settle the claim `answer_seq` holds on a parked run. `resumed` (the
+    /// successor turn was admitted) closes the run `Done`; otherwise the claim
+    /// is released and the run stays parked, so the answer is still in the
+    /// thread and the next reply can resume it. Any other claim or state is
+    /// left untouched (`None`).
+    pub fn settle_room_agent_run_answer(
+        &mut self,
+        run_id: &str,
+        answer_seq: u64,
+        resumed: bool,
+        now: DateTime<Utc>,
+    ) -> Result<Option<RoomAgentRun>> {
+        self.update_room_agent_run_if(run_id, |run| {
+            if !run.state.is_parked() || run.answer_seq != Some(answer_seq) {
+                return false;
+            }
+            if resumed {
+                run.state = RoomAgentRunState::Done;
+            } else {
+                run.answer_seq = None;
+            }
+            run.updated_at = now;
+            true
+        })
+    }
+
+    /// Settle an answer claim whose holder can no longer report the outcome
+    /// (its request future was dropped, or the daemon restarted), from durable
+    /// evidence only: a run of the same room and agent triggered by that answer
+    /// is its successor and closes the claimed run `Done`; with none, the claim
+    /// is released and the run stays parked for the next reply. Nothing is
+    /// replayed. Same compare-and-swap as [`Self::settle_room_agent_run_answer`].
+    pub fn settle_room_agent_run_answer_from_evidence(
+        &mut self,
+        run_id: &str,
+        answer_seq: u64,
+        now: DateTime<Utc>,
+    ) -> Result<Option<RoomAgentRun>> {
+        let Some(run) = self.room_agent_run(run_id)? else {
+            return Ok(None);
+        };
+        let resumed = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT body FROM room_agent_runs WHERE room_id = ?1 AND run_id <> ?2")?;
+            let rows = stmt.query_map(params![run.room_id.as_str(), run_id], |r| {
+                r.get::<_, String>(0)
+            })?;
+            let mut resumed = false;
+            for row in rows {
+                let other = decode_agent_run(&row?)?;
+                if other.agent_id == run.agent_id && other.trigger_seq == answer_seq {
+                    resumed = true;
+                    break;
+                }
+            }
+            resumed
+        };
+        self.settle_room_agent_run_answer(run_id, answer_seq, resumed, now)
+    }
+
+    /// One agent's per-room settings; default (empty) when never set.
+    pub fn room_agent_settings(&self, key: &RoomKey, agent_id: &str) -> Result<RoomAgentSettings> {
+        if !self.room_exists(key)? {
+            return Err(RoomStoreError::UnknownRoom(key.clone()));
+        }
+        let body: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT body FROM room_agent_settings WHERE room_id = ?1 AND agent_id = ?2",
+                params![key.as_str(), agent_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match body {
+            Some(b) => serde_json::from_str(&b)
+                .map_err(|e| RoomStoreError::Encode(format!("agent settings: {e}"))),
+            None => Ok(RoomAgentSettings::default()),
+        }
+    }
+
+    /// Replace one agent's per-room settings. Empty settings delete the row.
+    pub fn put_room_agent_settings(
+        &mut self,
+        key: &RoomKey,
+        agent_id: &str,
+        settings: &RoomAgentSettings,
+    ) -> Result<()> {
+        if !self.room_exists(key)? {
+            return Err(RoomStoreError::UnknownRoom(key.clone()));
+        }
+        if *settings == RoomAgentSettings::default() {
+            self.conn.execute(
+                "DELETE FROM room_agent_settings WHERE room_id = ?1 AND agent_id = ?2",
+                params![key.as_str(), agent_id],
+            )?;
+            return Ok(());
+        }
+        let body = serde_json::to_string(settings)
+            .map_err(|e| RoomStoreError::Encode(format!("agent settings: {e}")))?;
+        self.conn.execute(
+            "INSERT INTO room_agent_settings (room_id, agent_id, body) VALUES (?1, ?2, ?3)
+             ON CONFLICT (room_id, agent_id) DO UPDATE SET body = excluded.body",
+            params![key.as_str(), agent_id, body],
+        )?;
+        Ok(())
+    }
+
+    /// The room's owner preferences; default when never set (team-platform
+    /// P6). Open rooms only.
+    pub fn room_prefs(&self, key: &RoomKey) -> Result<RoomPrefs> {
+        if !self.room_is_open(key)? {
+            return Err(RoomStoreError::UnknownRoom(key.clone()));
+        }
+        let body: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT body FROM room_prefs WHERE room_id = ?1",
+                params![key.as_str()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match body {
+            Some(b) => serde_json::from_str(&b)
+                .map_err(|e| RoomStoreError::Encode(format!("room prefs: {e}"))),
+            None => Ok(RoomPrefs::default()),
+        }
+    }
+
+    /// Replace the room's owner preferences. Default prefs delete the row.
+    pub fn put_room_prefs(&mut self, key: &RoomKey, prefs: &RoomPrefs) -> Result<()> {
+        if !self.room_is_open(key)? {
+            return Err(RoomStoreError::UnknownRoom(key.clone()));
+        }
+        if *prefs == RoomPrefs::default() {
+            self.conn.execute(
+                "DELETE FROM room_prefs WHERE room_id = ?1",
+                params![key.as_str()],
+            )?;
+            return Ok(());
+        }
+        let body = serde_json::to_string(prefs)
+            .map_err(|e| RoomStoreError::Encode(format!("room prefs: {e}")))?;
+        self.conn.execute(
+            "INSERT INTO room_prefs (room_id, body) VALUES (?1, ?2)
+             ON CONFLICT (room_id) DO UPDATE SET body = excluded.body",
+            params![key.as_str(), body],
+        )?;
+        Ok(())
+    }
+
+    /// Chat messages in an open room whose body contains `query` (ASCII
+    /// case-insensitive substring; `%`, `_`, and `\` match literally), newest
+    /// first, at most `limit` (team-platform P6). Join/leave/system rows never
+    /// match.
+    pub fn search_room_messages(
+        &self,
+        key: &RoomKey,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<RoomMessage>> {
+        if !self.room_is_open(key)? {
+            return Err(RoomStoreError::UnknownRoom(key.clone()));
+        }
+        let mut pattern = String::with_capacity(query.len() + 2);
+        pattern.push('%');
+        for c in query.chars() {
+            if matches!(c, '%' | '_' | '\\') {
+                pattern.push('\\');
+            }
+            pattern.push(c);
+        }
+        pattern.push('%');
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {MESSAGE_ROW_COLUMNS} FROM messages
+             WHERE room_id = ?1 AND kind = 'message'
+               AND body LIKE ?2 ESCAPE '\\' COLLATE NOCASE
+             ORDER BY seq DESC LIMIT ?3"
+        ))?;
+        let rows = stmt.query_map(
+            params![
+                key.as_str(),
+                pattern,
+                i64::try_from(limit).unwrap_or(i64::MAX)
+            ],
+            RawMessageRow::read,
+        )?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?.decode()?);
+        }
+        Ok(out)
+    }
+
+    /// At most `limit` open room keys/names, most-recently-updated first.
+    /// SQL bounds materialization; it does not guarantee an indexed scan.
+    pub fn open_room_names(&self, limit: usize) -> Result<Vec<(RoomKey, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name FROM rooms WHERE closed_at IS NULL
+             ORDER BY updated_at DESC, id ASC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map([i64::try_from(limit).unwrap_or(i64::MAX)], |r| {
+            Ok((RoomKey::new(r.get::<_, String>(0)?), r.get::<_, String>(1)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// The newest `scan` rows of an open room (any kind), newest first, each
+    /// paired with its thread parent's author when it is a reply whose parent
+    /// still exists (team-platform P6 inbox window).
+    pub fn recent_room_messages_with_parent_author(
+        &self,
+        key: &RoomKey,
+        scan: usize,
+    ) -> Result<Vec<(RoomMessage, Option<String>)>> {
+        if !self.room_is_open(key)? {
+            return Err(RoomStoreError::UnknownRoom(key.clone()));
+        }
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {MESSAGE_ROW_COLUMNS},
+                    (SELECT p.author_id FROM messages p
+                      WHERE p.room_id = messages.room_id
+                        AND p.seq = messages.thread_parent_seq) AS parent_author
+             FROM messages WHERE room_id = ?1 ORDER BY seq DESC LIMIT ?2"
+        ))?;
+        let rows = stmt.query_map(
+            params![key.as_str(), i64::try_from(scan).unwrap_or(i64::MAX)],
+            |row| {
+                Ok((
+                    RawMessageRow::read(row)?,
+                    row.get::<_, Option<String>>("parent_author")?,
+                ))
+            },
+        )?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (raw, parent_author) = r?;
+            out.push((raw.decode()?, parent_author));
+        }
+        Ok(out)
+    }
+
+    /// Restart recovery: every non-terminal run belonged to a turn that died
+    /// with the previous daemon. Mark each `Failed` so no card spins forever.
+    /// A parked run whose answer claim was still outstanding settles from
+    /// durable evidence: a successor run convened by that answer closes it
+    /// `Done`; otherwise the claim is released and the run stays parked for
+    /// the next reply (the ambiguous dispatch is never replayed). Returns the
+    /// rewritten runs.
+    pub fn interrupt_open_room_agent_runs(
+        &mut self,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<RoomAgentRun>> {
+        let all: Vec<RoomAgentRun> = {
+            let mut stmt = self.conn.prepare("SELECT body FROM room_agent_runs")?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            rows.map(|row| decode_agent_run(&row?))
+                .collect::<Result<Vec<_>>>()?
+        };
+        let mut out = Vec::new();
+        for run in &all {
+            let Some(answer_seq) = run.answer_seq.filter(|_| run.state.is_parked()) else {
+                continue;
+            };
+            if let Some(settled) =
+                self.settle_room_agent_run_answer_from_evidence(&run.run_id, answer_seq, now)?
+            {
+                out.push(settled);
+            }
+        }
+        for mut run in all
+            .into_iter()
+            .filter(|run| !run.state.is_terminal() && !run.state.is_parked())
+        {
+            run.state = RoomAgentRunState::Failed {
+                reason: "interrupted by daemon restart".into(),
+            };
+            run.updated_at = now;
+            self.put_room_agent_run(&run)?;
+            out.push(run);
+        }
+        Ok(out)
+    }
+
+    /// Destructive test seeding only: replace the owner row outright (like
+    /// [`Self::replace_room_access`]). Production code mints through
+    /// [`Self::owner_identity`] and renames through
+    /// [`Self::set_owner_display_name`].
+    pub fn replace_owner_identity(&mut self, owner: &OwnerIdentity) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO daemon_owner (singleton, participant_id, display_name)
+             VALUES (1, ?1, ?2)
+             ON CONFLICT (singleton) DO UPDATE
+               SET participant_id = excluded.participant_id,
+                   display_name = excluded.display_name",
+            params![owner.participant_id, owner.display_name],
+        )?;
+        Ok(())
+    }
+
+    /// Rename the daemon owner. The participant id is stable; the new display
+    /// name is written to the owner row AND every Human roster row carrying the
+    /// owner's id in the same transaction, so rosters never show a stale name.
+    /// Returns `None` when the trimmed name is empty or over 64 characters.
+    pub fn set_owner_display_name(
+        &mut self,
+        default_display_name: &str,
+        display_name: &str,
+    ) -> Result<Option<OwnerIdentity>> {
+        self.set_owner_display_name_as(None, default_display_name, display_name)
+    }
+
+    /// [`Self::set_owner_display_name`] for the configured team member id
+    /// (see [`Self::owner_identity_as`]).
+    pub fn set_owner_display_name_as(
+        &mut self,
+        member_id: Option<&str>,
+        default_display_name: &str,
+        display_name: &str,
+    ) -> Result<Option<OwnerIdentity>> {
+        let Some(display_name) = normalize_owner_display_name(display_name) else {
+            return Ok(None);
+        };
+        let owner = self.owner_identity_as(member_id, default_display_name)?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "UPDATE daemon_owner SET display_name = ?1 WHERE singleton = 1",
+            params![display_name],
+        )?;
+        tx.execute(
+            "UPDATE participants SET display_name = ?1 WHERE id = ?2 AND kind = 'human'",
+            params![display_name, owner.participant_id],
+        )?;
+        tx.commit()?;
+        Ok(Some(OwnerIdentity {
+            participant_id: owner.participant_id,
+            display_name,
+        }))
     }
 
     /// Install (or replace) the room's one federation credential (P2-A). The
@@ -13528,6 +14231,7 @@ mod tests {
         s.create(key.clone(), "Persist", None, now()).unwrap();
 
         let proj = RoomAccessProjection {
+            local_member_id: None,
             state: RoomAccessState::Live,
             last_confirmed_global_sequence: Some(u64::MAX),
             members: vec![member_proj("m1", "Alice")],
@@ -14206,6 +14910,7 @@ mod tests {
         s.create(key.clone(), "Reorder", None, now()).unwrap();
 
         let orig = RoomAccessProjection {
+            local_member_id: None,
             state: RoomAccessState::Live,
             last_confirmed_global_sequence: None,
             members: vec![],
@@ -14219,6 +14924,7 @@ mod tests {
         s.replace_room_access(&key, &orig).unwrap();
 
         let reordered = RoomAccessProjection {
+            local_member_id: None,
             state: RoomAccessState::Live,
             last_confirmed_global_sequence: None,
             members: vec![],
@@ -14253,6 +14959,7 @@ mod tests {
         s.create(key.clone(), "MultiRetry", None, now()).unwrap();
 
         let proj = RoomAccessProjection {
+            local_member_id: None,
             state: RoomAccessState::Live,
             last_confirmed_global_sequence: Some(7),
             members: vec![member_proj("m-a", "A"), member_proj("m-b", "B")],
@@ -14448,6 +15155,7 @@ mod tests {
         let mut s = store();
         let key = RoomKey::new("r-nonexistent");
         let proj = RoomAccessProjection {
+            local_member_id: None,
             state: RoomAccessState::Local,
             last_confirmed_global_sequence: None,
             members: vec![],
@@ -14531,6 +15239,7 @@ mod tests {
         let key = RoomKey::new("r-not-failed");
         s.create(key.clone(), "NotFailed", None, now()).unwrap();
         let proj = RoomAccessProjection {
+            local_member_id: None,
             state: RoomAccessState::Live,
             last_confirmed_global_sequence: None,
             members: vec![],
@@ -14561,6 +15270,7 @@ mod tests {
         .unwrap();
 
         let proj = RoomAccessProjection {
+            local_member_id: None,
             state: RoomAccessState::Live,
             last_confirmed_global_sequence: None,
             members: vec![],
@@ -14722,6 +15432,652 @@ mod tests {
         let _s = SqliteRoomStore::open(&path).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "reopen must repair a loosened mode");
+    }
+
+    /// A run row written before `request_id` existed has no such key in its
+    /// JSON body. It must still load through every read path, and a turn's
+    /// later write adds the id without disturbing the row.
+    /// Mutation: drop `#[serde(default)]` on `RoomAgentRun::request_id` -> RED.
+    #[test]
+    fn legacy_agent_run_rows_without_request_id_still_load() {
+        let mut s = store();
+        let key = RoomKey::new("legacy-runs");
+        s.create(key.clone(), "legacy-runs", None, now()).unwrap();
+        let started = now();
+        let legacy_body = serde_json::json!({
+            "run_id": "old",
+            "room_id": key.as_str(),
+            "agent_id": "helper",
+            "session_id": "s-old",
+            "trigger_seq": 1,
+            "thread_root_seq": 1,
+            "state": "awaiting_reply",
+            "started_at": started,
+            "updated_at": started,
+            "summary": "which branch?"
+        })
+        .to_string();
+        assert!(!legacy_body.contains("request_id"));
+        s.conn
+            .execute(
+                "INSERT INTO room_agent_runs (run_id, room_id, started_at, body)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params!["old", key.as_str(), started.to_rfc3339(), legacy_body],
+            )
+            .unwrap();
+
+        let loaded = s.room_agent_run("old").unwrap().unwrap();
+        assert_eq!(loaded.request_id, None);
+        assert_eq!(loaded.state, RoomAgentRunState::AwaitingReply);
+        assert_eq!(loaded.summary.as_deref(), Some("which branch?"));
+        assert_eq!(s.room_agent_runs(&key, 10).unwrap(), vec![loaded.clone()]);
+        assert_eq!(s.parked_room_agent_runs(&key, 1).unwrap().len(), 1);
+
+        let mut turn = loaded;
+        turn.request_id = Some("req-1".into());
+        let (stored, landed) = s.put_room_agent_run_from_turn(&turn).unwrap();
+        assert!(landed);
+        assert_eq!(stored.request_id.as_deref(), Some("req-1"));
+        assert_eq!(
+            s.room_agent_run("old")
+                .unwrap()
+                .unwrap()
+                .request_id
+                .as_deref(),
+            Some("req-1")
+        );
+    }
+
+    fn agent_run(room: &RoomKey, id: &str, started: DateTime<Utc>) -> RoomAgentRun {
+        RoomAgentRun {
+            run_id: id.into(),
+            room_id: room.clone(),
+            agent_id: "helper".into(),
+            session_id: format!("s-{id}"),
+            trigger_seq: 1,
+            thread_root_seq: 1,
+            state: RoomAgentRunState::Queued,
+            started_at: started,
+            updated_at: started,
+            summary: None,
+            files_changed: Vec::new(),
+            tool_count: 0,
+            reply_seq: None,
+            pending_permission: None,
+            answer_seq: None,
+            request_id: None,
+        }
+    }
+
+    #[test]
+    fn turn_writes_keep_the_answer_claim_and_never_reopen_a_closed_run() {
+        let mut s = store();
+        let key = RoomKey::new("turn-writes");
+        s.create(key.clone(), "turn-writes", None, now()).unwrap();
+        // The asking turn's in-memory copy: parked, and it never sees claims.
+        let mut turn = agent_run(&key, "ask", now());
+        turn.state = RoomAgentRunState::AwaitingReply;
+        let (_, landed) = s.put_room_agent_run_from_turn(&turn).unwrap();
+        assert!(landed, "a missing row is inserted");
+        s.claim_parked_room_agent_run("ask", 10, now())
+            .unwrap()
+            .unwrap();
+
+        // A late progress line from the asking turn keeps the claim.
+        turn.summary = Some("still working".into());
+        let (stored, landed) = s.put_room_agent_run_from_turn(&turn).unwrap();
+        assert!(landed);
+        assert_eq!(stored.answer_seq, Some(10));
+        assert_eq!(stored.summary.as_deref(), Some("still working"));
+        assert!(
+            s.claim_parked_room_agent_run("ask", 11, now())
+                .unwrap()
+                .is_none(),
+            "a second answer cannot claim the run"
+        );
+
+        // Once settled Done, a late turn write cannot rewrite or reopen it.
+        s.settle_room_agent_run_answer("ask", 10, true, now())
+            .unwrap()
+            .unwrap();
+        turn.state = RoomAgentRunState::Failed {
+            reason: "turn_failed".into(),
+        };
+        let (stored, landed) = s.put_room_agent_run_from_turn(&turn).unwrap();
+        assert!(!landed);
+        assert_eq!(stored.state, RoomAgentRunState::Done);
+        turn.state = RoomAgentRunState::AwaitingReply;
+        assert!(!s.put_room_agent_run_from_turn(&turn).unwrap().1);
+        assert!(s.parked_room_agent_runs(&key, 1).unwrap().is_empty());
+        assert!(s
+            .claim_parked_room_agent_run("ask", 12, now())
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn parked_answer_claim_is_single_and_settles_only_its_own_claim() {
+        let mut s = store();
+        let key = RoomKey::new("claims");
+        s.create(key.clone(), "claims", None, now()).unwrap();
+        let mut asked = agent_run(&key, "ask", now());
+        asked.state = RoomAgentRunState::AwaitingReply;
+        s.put_room_agent_run(&asked).unwrap();
+
+        // Two replies race for one parked run: exactly one claim wins.
+        let won = s.claim_parked_room_agent_run("ask", 10, now()).unwrap();
+        assert_eq!(won.as_ref().and_then(|r| r.answer_seq), Some(10));
+        assert!(s
+            .claim_parked_room_agent_run("ask", 11, now())
+            .unwrap()
+            .is_none());
+        // The loser cannot settle the winner's claim.
+        assert!(s
+            .settle_room_agent_run_answer("ask", 11, true, now())
+            .unwrap()
+            .is_none());
+        let claimed = s.room_agent_run("ask").unwrap().unwrap();
+        assert!(claimed.state.is_parked(), "claimed, not yet closed");
+        assert_eq!(claimed.answer_seq, Some(10));
+
+        // A refused admission releases the claim: still parked, answerable.
+        let released = s
+            .settle_room_agent_run_answer("ask", 10, false, now())
+            .unwrap()
+            .unwrap();
+        assert!(released.state.is_parked());
+        assert_eq!(released.answer_seq, None);
+        assert_eq!(s.parked_room_agent_runs(&key, 1).unwrap().len(), 1);
+
+        // The next answer claims it and an admitted successor closes it.
+        assert!(s
+            .claim_parked_room_agent_run("ask", 12, now())
+            .unwrap()
+            .is_some());
+        let closed = s
+            .settle_room_agent_run_answer("ask", 12, true, now())
+            .unwrap()
+            .unwrap();
+        assert_eq!(closed.state, RoomAgentRunState::Done);
+        assert!(s
+            .claim_parked_room_agent_run("ask", 13, now())
+            .unwrap()
+            .is_none());
+        assert!(s.parked_room_agent_runs(&key, 1).unwrap().is_empty());
+        assert!(s
+            .claim_parked_room_agent_run("missing", 1, now())
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn restart_settles_outstanding_answer_claims_from_durable_successors() {
+        let mut s = store();
+        let key = RoomKey::new("claim-restart");
+        s.create(key.clone(), "claim-restart", None, now()).unwrap();
+        // Died after admission: the successor convened by answer 20 exists.
+        let mut resumed = agent_run(&key, "resumed", now());
+        resumed.state = RoomAgentRunState::AwaitingReply;
+        resumed.answer_seq = Some(20);
+        s.put_room_agent_run(&resumed).unwrap();
+        let mut successor = agent_run(&key, "successor", now());
+        successor.trigger_seq = 20;
+        successor.state = RoomAgentRunState::Thinking;
+        s.put_room_agent_run(&successor).unwrap();
+        // Died between the claim and admission: no successor for answer 30.
+        let mut orphaned = agent_run(&key, "orphaned", now());
+        orphaned.state = RoomAgentRunState::AwaitingReply;
+        orphaned.answer_seq = Some(30);
+        s.put_room_agent_run(&orphaned).unwrap();
+
+        let rewritten = s.interrupt_open_room_agent_runs(now()).unwrap();
+        assert_eq!(rewritten.len(), 3);
+        assert_eq!(
+            s.room_agent_run("resumed").unwrap().unwrap().state,
+            RoomAgentRunState::Done
+        );
+        assert!(matches!(
+            s.room_agent_run("successor").unwrap().unwrap().state,
+            RoomAgentRunState::Failed { .. }
+        ));
+        let orphaned = s.room_agent_run("orphaned").unwrap().unwrap();
+        assert!(orphaned.state.is_parked(), "the obligation is not lost");
+        assert_eq!(orphaned.answer_seq, None, "and the next reply can claim it");
+        assert!(s.interrupt_open_room_agent_runs(now()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn room_agent_runs_upsert_order_and_restart_recovery() {
+        let mut s = store();
+        let key = RoomKey::new("runs");
+        s.create(key.clone(), "runs", None, now()).unwrap();
+        let t0 = now();
+        let mut first = agent_run(&key, "a", t0);
+        s.put_room_agent_run(&first).unwrap();
+        let mut second = agent_run(&key, "b", t0 + chrono::Duration::seconds(5));
+        second.state = RoomAgentRunState::Done;
+        s.put_room_agent_run(&second).unwrap();
+
+        first.state = RoomAgentRunState::RunningTool {
+            label: "bash".into(),
+        };
+        first.tool_count = 1;
+        s.put_room_agent_run(&first).unwrap();
+        assert_eq!(s.room_agent_run("a").unwrap(), Some(first.clone()));
+
+        let runs = s.room_agent_runs(&key, 10).unwrap();
+        assert_eq!(
+            runs.iter().map(|r| r.run_id.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b"],
+            "oldest first"
+        );
+        assert_eq!(
+            s.room_agent_runs(&key, 1).unwrap()[0].run_id,
+            "b",
+            "limit keeps newest"
+        );
+
+        let interrupted = s.interrupt_open_room_agent_runs(now()).unwrap();
+        assert_eq!(interrupted.len(), 1, "only the non-terminal run");
+        assert!(matches!(
+            s.room_agent_run("a").unwrap().unwrap().state,
+            RoomAgentRunState::Failed { .. }
+        ));
+        assert_eq!(
+            s.room_agent_run("b").unwrap().unwrap().state,
+            RoomAgentRunState::Done
+        );
+
+        let missing = RoomKey::new("nope");
+        assert!(s.put_room_agent_run(&agent_run(&missing, "c", t0)).is_err());
+    }
+
+    #[test]
+    fn parked_runs_survive_restart_and_match_their_thread() {
+        let mut s = store();
+        let key = RoomKey::new("parked");
+        s.create(key.clone(), "parked", None, now()).unwrap();
+        let mut asked = agent_run(&key, "ask", now());
+        asked.thread_root_seq = 7;
+        asked.state = RoomAgentRunState::AwaitingReply;
+        s.put_room_agent_run(&asked).unwrap();
+        let mut other = agent_run(&key, "other", now());
+        other.thread_root_seq = 9;
+        other.state = RoomAgentRunState::AwaitingReply;
+        s.put_room_agent_run(&other).unwrap();
+
+        assert!(s.interrupt_open_room_agent_runs(now()).unwrap().is_empty());
+        let parked = s.parked_room_agent_runs(&key, 7).unwrap();
+        assert_eq!(parked.len(), 1);
+        assert_eq!(parked[0].run_id, "ask");
+        assert!(s.parked_room_agent_runs(&key, 8).unwrap().is_empty());
+    }
+
+    #[test]
+    fn room_agent_settings_roundtrip_and_clear() {
+        let mut s = store();
+        let key = RoomKey::new("settings");
+        s.create(key.clone(), "settings", None, now()).unwrap();
+        assert_eq!(
+            s.room_agent_settings(&key, "helper").unwrap(),
+            RoomAgentSettings::default()
+        );
+        let set = RoomAgentSettings {
+            instructions: Some("Prefer small PRs.".into()),
+            model: Some("glm-5.3".into()),
+        };
+        s.put_room_agent_settings(&key, "helper", &set).unwrap();
+        assert_eq!(s.room_agent_settings(&key, "helper").unwrap(), set);
+        assert_eq!(
+            s.room_agent_settings(&key, "other").unwrap(),
+            RoomAgentSettings::default()
+        );
+        s.put_room_agent_settings(&key, "helper", &RoomAgentSettings::default())
+            .unwrap();
+        assert_eq!(
+            s.room_agent_settings(&key, "helper").unwrap(),
+            RoomAgentSettings::default()
+        );
+        assert!(s
+            .room_agent_settings(&RoomKey::new("nope"), "helper")
+            .is_err());
+    }
+
+    fn post(s: &mut SqliteRoomStore, key: &RoomKey, author: &str, body: &str) -> u64 {
+        s.append_message(
+            key,
+            author,
+            RoomParticipantKind::Human,
+            RoomMessageKind::Message,
+            body,
+            now(),
+        )
+        .unwrap()
+        .seq
+    }
+
+    #[test]
+    fn search_room_messages_is_case_insensitive_newest_first_and_bounded() {
+        let mut s = store();
+        let key = RoomKey::new("search");
+        s.create(key.clone(), "search", None, now()).unwrap();
+        let a = post(&mut s, &key, "ada", "Deploy the Daemon");
+        post(&mut s, &key, "ada", "unrelated");
+        let b = post(&mut s, &key, "bob", "daemon restart done");
+        s.append_message(
+            &key,
+            "system",
+            RoomParticipantKind::System,
+            RoomMessageKind::System,
+            "daemon notice",
+            now(),
+        )
+        .unwrap();
+        let hits = s.search_room_messages(&key, "DAEMON", 20).unwrap();
+        assert_eq!(hits.iter().map(|m| m.seq).collect::<Vec<_>>(), vec![b, a]);
+        let one = s.search_room_messages(&key, "daemon", 1).unwrap();
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].seq, b);
+        assert!(s
+            .search_room_messages(&RoomKey::new("nope"), "daemon", 5)
+            .is_err());
+    }
+
+    #[test]
+    fn search_room_messages_escapes_like_wildcards() {
+        let mut s = store();
+        let key = RoomKey::new("escape");
+        s.create(key.clone(), "escape", None, now()).unwrap();
+        let pct = post(&mut s, &key, "ada", "100% done");
+        let under = post(&mut s, &key, "ada", "snake_case name");
+        let slash = post(&mut s, &key, "ada", r"C:\path");
+        post(&mut s, &key, "ada", "100 percent; snakeXcase; C:path");
+        let seqs = |q: &str| {
+            s.search_room_messages(&key, q, 20)
+                .unwrap()
+                .into_iter()
+                .map(|m| m.seq)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(seqs("0%"), vec![pct]);
+        assert_eq!(seqs("e_c"), vec![under]);
+        assert_eq!(seqs(r":\p"), vec![slash]);
+    }
+
+    #[test]
+    fn room_participants_does_not_decode_transcript_rows() {
+        let mut s = store();
+        let key = RoomKey::new("roster-only");
+        s.create(key.clone(), "Roster", None, now()).unwrap();
+        s.add_participant(&key, human("ada", "Ada"), now()).unwrap();
+        let seq = post(&mut s, &key, "ada", "old message");
+        s.conn.execute(
+            "UPDATE messages SET author_kind = 'invalid-fixture-kind' WHERE room_id = ?1 AND seq = ?2",
+            params![key.as_str(), seq as i64],
+        ).unwrap();
+        assert!(
+            s.get(&key).is_err(),
+            "full hydration reaches the invalid transcript row"
+        );
+        assert_eq!(
+            s.room_participants(&key).unwrap(),
+            vec![human("ada", "Ada")]
+        );
+        assert!(s.room_participants(&RoomKey::new("missing")).is_err());
+        s.conn
+            .execute(
+                "UPDATE messages SET author_kind = 'human' WHERE room_id = ?1 AND seq = ?2",
+                params![key.as_str(), seq as i64],
+            )
+            .unwrap();
+        s.close(&key).unwrap();
+        assert!(s.room_participants(&key).is_err());
+    }
+
+    #[test]
+    fn open_room_names_limits_materialization_and_preserves_order() {
+        let mut s = store();
+        let stamp = now();
+        for name in ["b", "a", "c", "closed"] {
+            let updated = if name == "c" || name == "closed" {
+                stamp + chrono::Duration::seconds(1)
+            } else {
+                stamp
+            };
+            s.create(RoomKey::new(name), name, None, updated).unwrap();
+        }
+        s.close(&RoomKey::new("closed")).unwrap();
+        assert!(s.open_room_names(0).unwrap().is_empty());
+        // If rows beyond LIMIT are materialized, their invalid SQL type fails
+        // String decoding. A Rust-side take/truncate after query cannot pass.
+        s.conn
+            .execute("UPDATE rooms SET name = x'ff' WHERE id = 'b'", [])
+            .unwrap();
+        assert_eq!(
+            s.open_room_names(2).unwrap(),
+            vec![
+                (RoomKey::new("c"), "c".into()),
+                (RoomKey::new("a"), "a".into()),
+            ]
+        );
+        assert!(s.open_room_names(3).is_err());
+        s.conn
+            .execute("UPDATE rooms SET name = 'b' WHERE id = 'b'", [])
+            .unwrap();
+        assert_eq!(s.open_room_names(usize::MAX).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn recent_room_messages_pair_replies_with_parent_author() {
+        let mut s = store();
+        let key = RoomKey::new("window");
+        s.create(key.clone(), "window", None, now()).unwrap();
+        let root = post(&mut s, &key, "ada", "root");
+        s.append_message_threaded(
+            &key,
+            "bob",
+            RoomParticipantKind::Human,
+            RoomMessageKind::Message,
+            "reply",
+            now(),
+            Some(root),
+            None,
+        )
+        .unwrap();
+        post(&mut s, &key, "bob", "top");
+        let window = s.recent_room_messages_with_parent_author(&key, 2).unwrap();
+        assert_eq!(window.len(), 2);
+        assert_eq!(window[0].0.body, "top");
+        assert_eq!(window[0].1, None);
+        assert_eq!(window[1].0.body, "reply");
+        assert_eq!(window[1].1.as_deref(), Some("ada"));
+        let names = s.open_room_names(50).unwrap();
+        assert_eq!(names, vec![(key.clone(), "window".to_string())]);
+        s.close(&key).unwrap();
+        assert!(s.open_room_names(50).unwrap().is_empty());
+    }
+
+    #[test]
+    fn room_prefs_roundtrip_default_and_cascade() {
+        let mut s = store();
+        let key = RoomKey::new("prefs");
+        s.create(key.clone(), "prefs", None, now()).unwrap();
+        assert_eq!(s.room_prefs(&key).unwrap(), RoomPrefs::default());
+        let muted = RoomPrefs { muted: true };
+        s.put_room_prefs(&key, &muted).unwrap();
+        assert_eq!(s.room_prefs(&key).unwrap(), muted);
+        s.put_room_prefs(&key, &RoomPrefs::default()).unwrap();
+        assert_eq!(s.room_prefs(&key).unwrap(), RoomPrefs::default());
+        assert!(s.room_prefs(&RoomKey::new("nope")).is_err());
+        assert!(s.put_room_prefs(&RoomKey::new("nope"), &muted).is_err());
+
+        s.put_room_prefs(&key, &muted).unwrap();
+        s.conn
+            .execute("DELETE FROM rooms WHERE id = ?1", params![key.as_str()])
+            .unwrap();
+        let left: i64 = s
+            .conn
+            .query_row("SELECT COUNT(*) FROM room_prefs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 0, "prefs cascade with the room");
+    }
+
+    #[test]
+    fn room_access_projects_local_member_id_without_the_bearer() {
+        let (mut s, key) = fed_store_with_room("fed-me");
+        seed_access_row(&s, &key, "live");
+        let access = s.room_access(&key).unwrap();
+        assert_eq!(access.local_member_id, None);
+        assert_eq!(access.caller_member_id, None);
+        s.install_room_credential(&key, "secret-bearer", "member-ada")
+            .unwrap();
+        let access = s.room_access(&key).unwrap();
+        assert_eq!(access.local_member_id.as_deref(), Some("member-ada"));
+        assert_eq!(access.caller_member_id, access.local_member_id);
+        let wire = serde_json::to_string(&access).unwrap();
+        assert!(wire.contains("\"local_member_id\":\"member-ada\""));
+        assert!(!wire.contains("secret-bearer"), "bearer never projected");
+        s.conn
+            .execute(
+                "UPDATE room_access SET state = 'local' WHERE room_id = ?1",
+                params![key.as_str()],
+            )
+            .unwrap();
+        let local = s.room_access(&key).unwrap();
+        assert_eq!(local.local_member_id, None);
+        assert_eq!(local.caller_member_id, None);
+    }
+
+    #[test]
+    fn owner_identity_mints_once_and_survives_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rooms.db");
+        let first = {
+            let mut s = SqliteRoomStore::open(&path).unwrap();
+            let a = s.owner_identity("John Smathers").unwrap();
+            let b = s.owner_identity("Someone Else").unwrap();
+            assert_eq!(a, b, "the default applies only when no owner exists");
+            a
+        };
+        assert_eq!(first.participant_id, "john-smathers");
+        assert_eq!(first.display_name, "John Smathers");
+        let mut s = SqliteRoomStore::open(&path).unwrap();
+        assert_eq!(s.owner_identity("ignored").unwrap(), first);
+    }
+
+    #[test]
+    fn member_id_seeds_only_a_fresh_owner_and_never_rekeys_a_persisted_one() {
+        let mut s = store();
+        // Minted earlier from the login name, before member.toml existed.
+        let login = s.owner_identity("jsmathers").unwrap();
+        assert_eq!(login.participant_id, "jsmathers");
+        // member.toml appears: the persisted owner keeps its id and name.
+        let owner = s.owner_identity_as(Some("smaths"), "John").unwrap();
+        assert_eq!(owner, login, "a persisted owner is never re-keyed");
+        // And every later member.toml change leaves it alone too.
+        assert_eq!(s.owner_identity_as(Some("other"), "x").unwrap(), login);
+        assert_eq!(s.owner_identity("ignored").unwrap(), login);
+        let renamed = s
+            .set_owner_display_name_as(Some("smaths"), "x", "John")
+            .unwrap()
+            .unwrap();
+        assert_eq!(renamed.participant_id, "jsmathers");
+        assert_eq!(renamed.display_name, "John");
+
+        // A fresh install is seeded from the member id.
+        let mut fresh = store();
+        let minted = fresh.owner_identity_as(Some("Jay.V"), "Jay").unwrap();
+        assert_eq!(minted.participant_id, "Jay.V");
+        assert_eq!(minted.display_name, "Jay");
+        assert_eq!(
+            fresh.owner_identity_as(Some("someone-else"), "x").unwrap(),
+            minted
+        );
+    }
+
+    #[test]
+    fn owner_participant_id_uses_canonical_alphabet() {
+        assert_eq!(owner_participant_id("  Ada  Lovelace "), "ada-lovelace");
+        assert_eq!(owner_participant_id("o'brien.dev_1"), "o-brien.dev_1");
+        assert_eq!(owner_participant_id("!!!"), "operator");
+        assert_eq!(owner_participant_id(""), "operator");
+        let long = owner_participant_id(&"a".repeat(40));
+        assert_eq!(long.len(), 32);
+    }
+
+    #[test]
+    fn owner_id_is_the_identity_member_id_with_at_signs_mapped() {
+        // Ids already in the participant alphabet are used exactly as the
+        // identity route reports them, case included.
+        for id in ["smaths", "Jay.V", "ec_from-the.DC", "A1"] {
+            assert_eq!(owner_participant_id_for_member(id), id);
+        }
+        // `@` (legal in a member id, but a mention boundary) maps to `-`;
+        // nothing else changes.
+        assert_eq!(
+            owner_participant_id_for_member("ec@kingmaker"),
+            "ec-kingmaker"
+        );
+        assert_eq!(
+            owner_participant_id_for_member("EC@Kingmaker.io"),
+            "EC-Kingmaker.io"
+        );
+        let long = format!("{}@x", "a".repeat(70));
+        assert_eq!(
+            owner_participant_id_for_member(&long),
+            format!("{}-x", "a".repeat(70))
+        );
+        assert_eq!(owner_participant_id_for_member("  smaths "), "smaths");
+        assert_eq!(owner_participant_id_for_member(""), "operator");
+    }
+
+    #[test]
+    fn owner_rename_keeps_id_and_updates_only_owner_human_rows() {
+        let mut s = store();
+        let owner = s.owner_identity("Ada").unwrap();
+        let key = RoomKey::new("r");
+        s.create(key.clone(), "r", None, now()).unwrap();
+        for (id, kind, name) in [
+            (
+                owner.participant_id.as_str(),
+                RoomParticipantKind::Human,
+                "Ada",
+            ),
+            ("other", RoomParticipantKind::Human, "Other"),
+        ] {
+            s.add_participant_with_message(
+                &key,
+                RoomParticipant {
+                    id: id.into(),
+                    kind,
+                    display_name: name.into(),
+                },
+                now(),
+            )
+            .unwrap();
+        }
+        let renamed = s
+            .set_owner_display_name("Ada", "  Ada King ")
+            .unwrap()
+            .expect("valid name");
+        assert_eq!(renamed.participant_id, owner.participant_id, "id is stable");
+        assert_eq!(renamed.display_name, "Ada King");
+        let roster = s.get(&key).unwrap().unwrap().room.participants;
+        let name_of = |id: &str| {
+            roster
+                .iter()
+                .find(|p| p.id == id)
+                .map(|p| p.display_name.clone())
+                .unwrap()
+        };
+        assert_eq!(name_of(&owner.participant_id), "Ada King");
+        assert_eq!(name_of("other"), "Other", "other humans are untouched");
+        assert_eq!(s.owner_identity("x").unwrap(), renamed);
+        assert_eq!(s.set_owner_display_name("Ada", "   ").unwrap(), None);
+        assert_eq!(
+            s.set_owner_display_name("Ada", &"x".repeat(65)).unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -17242,6 +18598,7 @@ mod tests {
                 last_confirmed_global_sequence: None,
                 members: vec![],
                 caller_member_id: None,
+                local_member_id: None,
                 outbox: vec![],
             },
         )
@@ -17412,6 +18769,7 @@ mod tests {
         );
         let mut expected = first;
         expected.caller_member_id = Some("member-b".into());
+        expected.local_member_id = Some("member-b".into());
         assert_eq!(current, expected);
 
         drop(s);
@@ -17424,6 +18782,7 @@ mod tests {
             .update_room_access_safe(&key, Some(RoomAccessState::Local), None, None)
             .unwrap();
         assert_eq!(local.caller_member_id, None);
+        assert_eq!(local.local_member_id, None);
         reopened
             .update_room_access_safe(&key, Some(RoomAccessState::Live), None, None)
             .unwrap();
@@ -17433,6 +18792,7 @@ mod tests {
         let replaced = reopened.replace_room_access(&key, &forged).unwrap();
         assert_eq!(replaced.state, RoomAccessState::Live);
         assert_eq!(replaced.caller_member_id, None);
+        assert_eq!(replaced.local_member_id, None);
         assert_eq!(reopened.room_access(&key).unwrap(), replaced);
         assert!(reopened.room_credential(&key).unwrap().is_none());
     }
