@@ -16,6 +16,20 @@
 //! authorizer identity is unavailable**. This module is that stop. It
 //! establishes an identity rather than inferring one.
 //!
+//! # The first-party surface exception (operator decision, 2026-10-08)
+//!
+//! The operator decided that any first-party Ocean surface they are signed
+//! into may act as this principal for exactly three owner routes: `PUT /v1/me`,
+//! `POST /v1/rooms/persistent/{key}/runs/{run_id}/permission` and
+//! `PUT /v1/rooms/persistent/{key}/agents/{agent_id}/settings`. The surface's
+//! trusted host presents the key on its behalf: the Surface web proxy only for
+//! a request its password session gate admitted (never with
+//! `OCEAN_SURFACE_AUTH=off`), and the Tauri shell natively on this machine
+//! (loopback only, key kept on the Rust side). Client-supplied operator
+//! headers are never forwarded. Nothing here changes: the header is still the
+//! only credential, and every other operator-gated route still requires the
+//! operator's own key.
+//!
 //! # The three rules
 //!
 //! 1. **Header-only.** The credential is read from `X-Ocean-Operator` and from

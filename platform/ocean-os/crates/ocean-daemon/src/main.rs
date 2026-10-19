@@ -157,6 +157,8 @@ mod recall_registry;
 /// In-memory request and permission control records plus bounded lifecycle mutations.
 mod request_control;
 mod room_agent_authority;
+/// Room agent work cards: per-turn run projections over agent-session events.
+mod room_agent_runs;
 /// Restart-safe outbound Bedrock room client and per-room supervisor (S2 P2-B).
 mod room_federation;
 mod room_operator;
@@ -164,6 +166,7 @@ mod room_profile;
 mod room_resources;
 /// Rooms S0 — retire a placeholder human into a real member (operator lane).
 mod room_retirement;
+mod room_tools;
 /// Host fulfillment lifecycle retained for the external `ocean-slack` extension.
 mod slack_canvas_fulfillment;
 /// Ephemeral OpenAI Realtime client-secret mint (voice phases 2/3) — the
@@ -209,11 +212,12 @@ use model_catalog::{model_get, model_set, models_list};
 use model_roles::resolve_effective_model_id;
 use model_roles::{load_model_roles, resolve_advisor_alias, resolve_turn_model};
 use persistent_rooms::{
-    resolve_named_agent, room_create, room_create_invite, room_db_path, room_events, room_get,
-    room_get_read_cursor, room_inspect, room_join, room_leave, room_patch_read_cursor,
-    room_post_message, room_redeem_invite, room_register_agents, room_retry_outbox, room_snapshot,
-    room_transcript, rooms_list_persistent, run_federated_trigger_dispatcher, with_rooms,
-    with_rooms_handle, RoomAccessWakeBus, RoomReadCursorWakeBus, RoomStoreHandle, RoomWakeBus,
+    me_get, me_put, resolve_named_agent, room_create, room_create_invite, room_db_path,
+    room_events, room_get, room_get_read_cursor, room_inspect, room_join, room_leave,
+    room_patch_read_cursor, room_post_message, room_redeem_invite, room_register_agents,
+    room_retry_outbox, room_snapshot, room_transcript, rooms_list_persistent,
+    run_federated_trigger_dispatcher, with_rooms, with_rooms_handle, RoomAccessWakeBus,
+    RoomReadCursorWakeBus, RoomStoreHandle, RoomWakeBus,
 };
 use project_registry::{
     canonical_git_common_dir, discover_project_worktrees, project_create, project_delete,
@@ -664,7 +668,14 @@ struct DaemonPermissionPolicy {
     /// turn was submitted without binding (legacy client). Never emitted on SSE.
     decision_token: Option<String>,
     lifecycle: Option<LifecyclePermissionContext>,
+    /// Observer for this turn's permission waits (team-platform P4 room work
+    /// cards): called with the request when a waiter is registered and with
+    /// `None` once it is decided or cancelled. Never decides anything.
+    wait_hook: Option<PermissionWaitHook>,
 }
+
+/// See [`DaemonPermissionPolicy::wait_hook`].
+type PermissionWaitHook = Arc<dyn Fn(Option<(PermissionId, &str, &Value)>) + Send + Sync>;
 
 /// Parse a `Last-Event-ID` SSE reconnect header (RFC: EventSource sets it to the
 /// last `id:` it saw) into a `Uuid`. Returns `None` when absent or unparseable.
@@ -979,8 +990,17 @@ async fn main() -> anyhow::Result<()> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating rooms DB directory {}", parent.display()))?;
     }
-    let room_store = ocean_store::SqliteRoomStore::open(&rooms_db_path)
+    let mut room_store = ocean_store::SqliteRoomStore::open(&rooms_db_path)
         .with_context(|| format!("opening rooms DB at {}", rooms_db_path.display()))?;
+    // Team-platform P3: agent-run cards whose turn died with the previous
+    // daemon end as Failed instead of spinning forever.
+    match room_store.interrupt_open_room_agent_runs(chrono::Utc::now()) {
+        Ok(runs) if !runs.is_empty() => {
+            tracing::info!(count = runs.len(), "interrupted open room agent runs");
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!(%e, "room agent run recovery failed"),
+    }
     tracing::info!(path = %rooms_db_path.display(), "persistent rooms store ready");
 
     // Persisted Longhouse title registry (OCEAN-246/272): open the durable escrow
@@ -1578,6 +1598,8 @@ fn banner_routes() -> &'static [&'static str] {
         "GET /v1/permissions",
         "POST /v1/permissions/{id}/decision",
         "POST /v1/rooms/{room_id}/livekit-token",
+        "GET /v1/me",
+        "PUT /v1/me",
         "GET /v1/rooms/persistent",
         "POST /v1/rooms/persistent",
         "GET /v1/rooms/persistent/{key}",
@@ -1596,6 +1618,8 @@ fn banner_routes() -> &'static [&'static str] {
         "POST /v1/rooms/persistent/{key}/participants",
         "DELETE /v1/rooms/persistent/{key}/participants/{participant_id}",
         "POST /v1/rooms/persistent/{key}/participants/{participant_id}/retire",
+        "GET /v1/rooms/persistent/{key}/profile",
+        "PUT /v1/rooms/persistent/{key}/profile",
         "POST /v1/rooms/persistent/{key}/messages",
         "POST /v1/rooms/persistent/{key}/invites",
         "POST /v1/rooms/persistent/invites/redeem",
@@ -1606,6 +1630,14 @@ fn banner_routes() -> &'static [&'static str] {
         "GET /v1/rooms/persistent/{key}/artifacts/{artifact_id}",
         "POST /v1/rooms/persistent/{key}/artifacts/{artifact_id}/amend",
         "GET /v1/rooms/persistent/{key}/snapshot",
+        "GET /v1/rooms/persistent/{key}/runs",
+        "POST /v1/rooms/persistent/{key}/runs/{run_id}/permission",
+        "GET /v1/rooms/persistent/{key}/agents/{agent_id}/settings",
+        "PUT /v1/rooms/persistent/{key}/agents/{agent_id}/settings",
+        "GET /v1/rooms/persistent/{key}/search",
+        "GET /v1/rooms/inbox",
+        "GET /v1/rooms/persistent/{key}/prefs",
+        "PUT /v1/rooms/persistent/{key}/prefs",
         "GET /v1/rooms/persistent/{key}/events",
         "GET /v1/rooms/persistent/{key}/read-cursor",
         "PATCH /v1/rooms/persistent/{key}/read-cursor",
@@ -2270,7 +2302,25 @@ async fn permission_decision(
             }),
         );
     }
+    let (status, body) = resolve_permission_waiter(
+        &state,
+        permission_id,
+        decision.decision,
+        decision.decision_token.as_deref(),
+    )
+    .await;
+    (status, Json(body))
+}
 
+/// Verify `decision_token` against the pending waiter, release it with
+/// `decision`, and record the result. Shared by the generic decision route and
+/// the room run route (team-platform P4), so both keep one authority.
+pub(crate) async fn resolve_permission_waiter(
+    state: &AppState,
+    permission_id: PermissionId,
+    decision: PermissionDecisionBody,
+    decision_token: Option<&str>,
+) -> (StatusCode, PermissionControlResponse) {
     // OCEAN-185 (P0): verify the per-turn secret BEFORE consuming the waiter, so
     // an attacker who sniffed the broadcast `permission_id` off /v1/events but
     // doesn't hold the token can neither approve the tool nor burn the pending
@@ -2286,19 +2336,16 @@ async fn permission_decision(
                 drop(permissions);
                 return (
                     StatusCode::NOT_FOUND,
-                    Json(PermissionControlResponse {
+                    PermissionControlResponse {
                         ok: false,
                         permission_id,
                         message: "permission request not found or already handled".into(),
-                    }),
+                    },
                 );
             }
             Some(waiter) => {
                 if let Some(expected) = waiter.decision_token.as_deref() {
-                    if !ocean_core::decision_token_matches(
-                        Some(expected),
-                        decision.decision_token.as_deref(),
-                    ) {
+                    if !ocean_core::decision_token_matches(Some(expected), decision_token) {
                         drop(permissions);
                         tracing::warn!(
                             %permission_id,
@@ -2306,13 +2353,13 @@ async fn permission_decision(
                         );
                         return (
                             StatusCode::FORBIDDEN,
-                            Json(PermissionControlResponse {
+                            PermissionControlResponse {
                                 ok: false,
                                 permission_id,
                                 message: "forbidden: missing or invalid decision token; this \
                                     decision was not authorized by the turn's submitter"
                                     .into(),
-                            }),
+                            },
                         );
                     }
                 }
@@ -2330,15 +2377,15 @@ async fn permission_decision(
         // our remove. Treat as already-handled.
         return (
             StatusCode::NOT_FOUND,
-            Json(PermissionControlResponse {
+            PermissionControlResponse {
                 ok: false,
                 permission_id,
                 message: "permission request not found or already handled".into(),
-            }),
+            },
         );
     };
 
-    let agent_decision = match decision.decision {
+    let agent_decision = match decision {
         PermissionDecisionBody::Allow => AgentPermissionDecision::Allow,
         // "Allow for this session": the runtime records the tool in the agent
         // loop's per-run `session_allowed` set, so identical follow-up calls of
@@ -2386,11 +2433,11 @@ async fn permission_decision(
 
     (
         StatusCode::OK,
-        Json(PermissionControlResponse {
+        PermissionControlResponse {
             ok: true,
             permission_id,
             message: "permission decision recorded and waiter released".into(),
-        }),
+        },
     )
 }
 
@@ -2423,6 +2470,52 @@ fn build_prompt_control_with_lifecycle(
     decision_token: Option<String>,
     lifecycle: Option<LifecyclePermissionContext>,
 ) -> PromptControl {
+    build_prompt_control_inner(
+        state,
+        request_id,
+        session_id,
+        mode,
+        cancel,
+        decision_token,
+        lifecycle,
+        None,
+    )
+}
+
+/// A room turn's control: its waiters are bound to the run's decision token
+/// and every wait is reported to the run's work card.
+fn build_room_prompt_control(
+    state: &AppState,
+    request_id: RequestId,
+    session_id: Option<SessionId>,
+    mode: PermissionMode,
+    cancel: CancellationToken,
+    decision_token: String,
+    wait_hook: PermissionWaitHook,
+) -> PromptControl {
+    build_prompt_control_inner(
+        state,
+        request_id,
+        session_id,
+        mode,
+        cancel,
+        Some(decision_token),
+        None,
+        Some(wait_hook),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_prompt_control_inner(
+    state: &AppState,
+    request_id: RequestId,
+    session_id: Option<SessionId>,
+    mode: PermissionMode,
+    cancel: CancellationToken,
+    decision_token: Option<String>,
+    lifecycle: Option<LifecyclePermissionContext>,
+    wait_hook: Option<PermissionWaitHook>,
+) -> PromptControl {
     let control: Arc<dyn PermissionPolicy> = Arc::new(DaemonPermissionPolicy {
         mode,
         request_id,
@@ -2434,6 +2527,7 @@ fn build_prompt_control_with_lifecycle(
         seen_permissions: Arc::new(Mutex::new(HashMap::new())),
         decision_token,
         lifecycle,
+        wait_hook,
     });
 
     PromptControl::new(control).with_cancel(cancel)
@@ -2544,6 +2638,9 @@ impl PermissionPolicy for DaemonPermissionPolicy {
                 args: status.args.clone(),
             },
         );
+        if let Some(hook) = &self.wait_hook {
+            hook(Some((permission_id, tool_name, args)));
+        }
 
         let cancelled = || {
             (
@@ -2607,6 +2704,9 @@ impl PermissionPolicy for DaemonPermissionPolicy {
         {
             let mut permissions = self.permissions.write().await;
             permissions.remove(&permission_id);
+        }
+        if let Some(hook) = &self.wait_hook {
+            hook(None);
         }
 
         if matches!(decision, AgentPermissionDecision::Deny { .. }) && self.cancel.is_cancelled() {
@@ -2832,6 +2932,8 @@ async fn agent_def(Path(name): Path<String>) -> Json<serde_json::Value> {
 /// projection paths stay unmounted without constructing the entire daemon.
 fn room_routes() -> Router<AppState> {
     Router::new()
+        // Team-platform P2: the daemon owner identity every room author derives from.
+        .route("/v1/me", get(me_get).put(me_put))
         .route(
             "/v1/rooms/persistent",
             get(rooms_list_persistent).post(room_create),
@@ -2888,6 +2990,11 @@ fn room_routes() -> Router<AppState> {
             "/v1/rooms/persistent/{key}/participants/{participant_id}/retire",
             post(room_retirement::room_participant_retire),
         )
+        // Rooms Phase 2 Stage 2b: the room profile and credential-slot status.
+        .route(
+            "/v1/rooms/persistent/{key}/profile",
+            get(room_profile::room_profile_get).put(room_profile::room_profile_put),
+        )
         .route(
             "/v1/rooms/persistent/{key}/messages",
             post(room_post_message),
@@ -2921,6 +3028,35 @@ fn room_routes() -> Router<AppState> {
             post(persistent_rooms::room_amend_artifact),
         )
         .route("/v1/rooms/persistent/{key}/snapshot", get(room_snapshot))
+        // Team-platform P3: the room's agent work cards.
+        .route(
+            "/v1/rooms/persistent/{key}/runs",
+            get(persistent_rooms::room_agent_runs_list),
+        )
+        // Team-platform P4: owner approve/deny from the room card, and
+        // per-room agent overrides (local only).
+        .route(
+            "/v1/rooms/persistent/{key}/runs/{run_id}/permission",
+            post(persistent_rooms::room_agent_run_permission),
+        )
+        .route(
+            "/v1/rooms/persistent/{key}/agents/{agent_id}/settings",
+            get(persistent_rooms::room_agent_settings_get)
+                .put(persistent_rooms::room_agent_settings_put),
+        )
+        // Team-platform P6 (owner-local): message search, the cross-room
+        // mentions/replies inbox, and per-room mute prefs. The inbox lives
+        // outside `/v1/rooms/persistent/{key}` so it never shadows a room
+        // keyed `inbox`.
+        .route(
+            "/v1/rooms/persistent/{key}/search",
+            get(persistent_rooms::room_search),
+        )
+        .route("/v1/rooms/inbox", get(persistent_rooms::room_inbox))
+        .route(
+            "/v1/rooms/persistent/{key}/prefs",
+            get(persistent_rooms::room_prefs_get).put(persistent_rooms::room_prefs_put),
+        )
         // Merged SSE: room_message + room_access frames, with durable replay
         // and access-projection tail (S2-P1).
         .route("/v1/rooms/persistent/{key}/events", get(room_events))
@@ -13008,7 +13144,16 @@ mod tests {
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _env = TestEnvRestore::capture(&["OCEAN_CONFIG_DIR", "OCEAN_MODEL", "OCEAN_YOLO"]);
         let tmp = tempfile::tempdir().unwrap();
-        let app = room_routes().with_state(fake_convene_state(&tmp));
+        let state = fake_convene_state(&tmp);
+        // Team-platform P2: the human join/post below is authored as the owner.
+        with_rooms(&state, |store| {
+            store.replace_owner_identity(&ocean_store::OwnerIdentity {
+                participant_id: "alice".into(),
+                display_name: "Alice".into(),
+            })
+        })
+        .unwrap();
+        let app = room_routes().with_state(state);
 
         let (status, content_type, raw) = persistent_room_http_request(
             app.clone(),
@@ -13973,6 +14118,7 @@ mod tests {
             seen_permissions: Arc::new(Mutex::new(HashMap::new())),
             decision_token,
             lifecycle: None,
+            wait_hook: None,
         }
     }
 
@@ -14205,7 +14351,15 @@ mod tests {
         let runtime = Arc::new(
             AgentRuntime::with_config_dir(tmp.path().to_path_buf()).expect("fake runtime"),
         );
-        let store = ocean_store::SqliteRoomStore::open_in_memory().expect("in-mem store");
+        let mut store = ocean_store::SqliteRoomStore::open_in_memory().expect("in-mem store");
+        // Team-platform P2: every local human join/post is authored as the
+        // daemon owner. Fixtures speak as "john" unless a test re-seeds it.
+        store
+            .replace_owner_identity(&ocean_store::OwnerIdentity {
+                participant_id: "john".into(),
+                display_name: "John".into(),
+            })
+            .expect("seed owner");
         let rooms = Arc::new(Mutex::new(store));
         let room_wakes = RoomWakeBus::default();
         let room_access_wakes = RoomAccessWakeBus::default();
@@ -16095,7 +16249,15 @@ mod tests {
         let runtime = Arc::new(
             AgentRuntime::with_config_dir(tmp.path().to_path_buf()).expect("fake runtime"),
         );
-        let store = ocean_store::SqliteRoomStore::open_in_memory().expect("in-mem store");
+        let mut store = ocean_store::SqliteRoomStore::open_in_memory().expect("in-mem store");
+        // Team-platform P2: every local human join/post is authored as the
+        // daemon owner. Fixtures speak as "john" unless a test re-seeds it.
+        store
+            .replace_owner_identity(&ocean_store::OwnerIdentity {
+                participant_id: "john".into(),
+                display_name: "John".into(),
+            })
+            .expect("seed owner");
         let rooms = Arc::new(Mutex::new(store));
         let room_wakes = RoomWakeBus::default();
         let room_access_wakes = RoomAccessWakeBus::default();
@@ -18553,7 +18715,15 @@ mod tests {
     fn escrow_state_with_titles_db(dir: &std::path::Path) -> AppState {
         std::env::set_var("OCEAN_MODEL", "fake-ok");
         let runtime = Arc::new(AgentRuntime::from_env().expect("fake runtime"));
-        let store = ocean_store::SqliteRoomStore::open_in_memory().expect("in-mem store");
+        let mut store = ocean_store::SqliteRoomStore::open_in_memory().expect("in-mem store");
+        // Team-platform P2: every local human join/post is authored as the
+        // daemon owner. Fixtures speak as "john" unless a test re-seeds it.
+        store
+            .replace_owner_identity(&ocean_store::OwnerIdentity {
+                participant_id: "john".into(),
+                display_name: "John".into(),
+            })
+            .expect("seed owner");
         let rooms = Arc::new(Mutex::new(store));
         let room_wakes = RoomWakeBus::default();
         let room_access_wakes = RoomAccessWakeBus::default();
@@ -25565,6 +25735,14 @@ mod tests {
             "GET /v1/rooms/persistent/{key}/artifacts/{artifact_id}",
             "POST /v1/rooms/persistent/{key}/artifacts/{artifact_id}/amend",
             "GET /v1/rooms/persistent/{key}/snapshot",
+            "GET /v1/rooms/persistent/{key}/runs",
+            "POST /v1/rooms/persistent/{key}/runs/{run_id}/permission",
+            "GET /v1/rooms/persistent/{key}/agents/{agent_id}/settings",
+            "PUT /v1/rooms/persistent/{key}/agents/{agent_id}/settings",
+            "GET /v1/rooms/persistent/{key}/search",
+            "GET /v1/rooms/inbox",
+            "GET /v1/rooms/persistent/{key}/prefs",
+            "PUT /v1/rooms/persistent/{key}/prefs",
             "POST /v1/rooms/{room_id}/livekit-token",
         ] {
             assert!(
@@ -25732,7 +25910,8 @@ mod tests {
             .filter(|route| {
                 let (_, path) = route.split_once(' ').unwrap();
                 path == "/v1/rooms/persistent/{key}/close"
-                    || path.starts_with("/v1/rooms/persistent/{key}/agents")
+                    || (path.starts_with("/v1/rooms/persistent/{key}/agents")
+                        && !path.ends_with("/settings"))
             })
             .cloned()
             .collect();
@@ -25755,7 +25934,7 @@ mod tests {
         assert_eq!(admission_routes, expected_admission_routes);
         assert_eq!(
             banner.len(),
-            119,
+            131,
             "route baseline changed; review the manifest"
         );
 
@@ -26127,6 +26306,83 @@ mod tests {
                 .get(header::ALLOW)
                 .and_then(|value| value.to_str().ok()),
             Some("GET,HEAD")
+        );
+
+        // Team-platform P6: the inbox lives at `/v1/rooms/inbox`, outside the
+        // `{key}` namespace, and answers with the inbox envelope.
+        let inbox = app
+            .clone()
+            .oneshot(Request::get("/v1/rooms/inbox").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(inbox.status(), StatusCode::OK, "the inbox route");
+        let inbox_body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(inbox.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(inbox_body, serde_json::json!({ "ok": true, "items": [] }));
+
+        // A room keyed `inbox` is an ordinary room: before it exists its detail
+        // path is an unknown-room 404, and once created it is reachable there.
+        let missing = app
+            .clone()
+            .oneshot(
+                Request::get("/v1/rooms/persistent/inbox")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        let created = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/rooms/persistent")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"key":"inbox","name":"Inbox"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let detail = app
+            .clone()
+            .oneshot(
+                Request::get("/v1/rooms/persistent/inbox")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            detail.status(),
+            StatusCode::OK,
+            "a room keyed `inbox` must reach the room detail route"
+        );
+        let detail_body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(detail.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(detail_body["room"]["id"], serde_json::json!("inbox"));
+        assert_eq!(detail_body["room"]["name"], serde_json::json!("Inbox"));
+        let inbox_livekit = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/rooms/inbox/livekit-token")
+                    .header(header::CONTENT_TYPE, "application/octet-stream")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            inbox_livekit.status(),
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "a call room id `inbox` must still reach the LiveKit JSON extractor"
         );
 
         let livekit_control = app
@@ -27329,6 +27585,1921 @@ prunable gitdir file points to non-existent location
         let status = response.status();
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[cfg(unix)]
+    const SOVEREIGN_OWNER: &str = "11111111-1111-4111-8111-111111111111";
+    #[cfg(unix)]
+    const SOVEREIGN_MEMBER: &str = "22222222-2222-4222-8222-222222222222";
+    #[cfg(unix)]
+    const SOVEREIGN_OWNER_AGENT: &str = "33333333-3333-4333-8333-333333333333";
+    #[cfg(unix)]
+    const SOVEREIGN_MEMBER_AGENT: &str = "44444444-4444-4444-8444-444444444444";
+
+    // Each fixture is one credential-owning daemon, with the same shared
+    // roster but only its own agent's private local binding. No Bedrock/auth I/O.
+    #[cfg(unix)]
+    fn sovereign_room_fixture(
+        tmp: &tempfile::TempDir,
+        local_human: &str,
+        operator_key: &str,
+    ) -> (AppState, Router, RoomKey) {
+        let agents = tmp.path().join("agents");
+        for package in ["creator-agent", "invited-agent"] {
+            write_agent_fixture(&agents, package, "model = 'fake-ok'\n", Some(package));
+        }
+        std::env::set_var("OCEAN_AGENTS_DIR", agents);
+        let mut state = isolated_room_fixture_state(tmp);
+        state.room_operator = Arc::new(room_operator::OperatorIdentity::for_test(
+            Some(operator_key),
+            vec!["http://127.0.0.1:8790".into()],
+        ));
+        let key = RoomKey::new("sovereign-consent");
+        let (own_agent, own_package) = if local_human == SOVEREIGN_OWNER {
+            (SOVEREIGN_OWNER_AGENT, "creator-agent")
+        } else {
+            (SOVEREIGN_MEMBER_AGENT, "invited-agent")
+        };
+        let members = [
+            (
+                SOVEREIGN_OWNER,
+                None,
+                ocean_core::FederatedActorType::User,
+                ocean_core::FederatedRoomRole::Owner,
+            ),
+            (
+                SOVEREIGN_MEMBER,
+                None,
+                ocean_core::FederatedActorType::User,
+                ocean_core::FederatedRoomRole::Member,
+            ),
+            (
+                SOVEREIGN_OWNER_AGENT,
+                Some(SOVEREIGN_OWNER),
+                ocean_core::FederatedActorType::Agent,
+                ocean_core::FederatedRoomRole::Member,
+            ),
+            (
+                SOVEREIGN_MEMBER_AGENT,
+                Some(SOVEREIGN_MEMBER),
+                ocean_core::FederatedActorType::Agent,
+                ocean_core::FederatedRoomRole::Member,
+            ),
+        ]
+        .into_iter()
+        .map(
+            |(id, owner, kind, role)| ocean_core::FederatedRoomMemberProjection {
+                member_id: id.into(),
+                owner_member_id: owner.map(str::to_owned),
+                actor_type: kind,
+                role_in_room: role,
+                display_name: id.into(),
+                public_agent_descriptor: None,
+                joined_at: "2026-08-13T00:00:00Z".into(),
+                derived_presence: Some(ocean_core::MemberPresence::Live),
+                local_binding_available: (kind == ocean_core::FederatedActorType::Agent)
+                    .then_some(id == own_agent),
+            },
+        )
+        .collect::<Vec<_>>();
+        with_rooms(&state, |store| {
+            store.create_in_workspace(
+                key.clone(),
+                "Sovereign consent",
+                Some(canonical_test_workspace(tmp.path())),
+                None,
+                Utc::now(),
+            )?;
+            store.install_room_credential(&key, "synthetic-private-bearer", local_human)?;
+            store.bind_room_agent(&key, own_agent, own_package, "synthetic-registration")?;
+            store.update_room_access_safe(
+                &key,
+                Some(ocean_core::RoomAccessState::Live),
+                Some(&members),
+                None,
+            )?;
+            Ok::<_, ocean_store::RoomStoreError>(())
+        })
+        .unwrap();
+        let app = app_router(BrowserOrigins::default(), AllowedHosts::default())
+            .with_state(state.clone());
+        (state, app, key)
+    }
+
+    #[cfg(unix)]
+    fn sovereign_consent_body(
+        agent: &str,
+        package: &str,
+        human: &str,
+        decision: &str,
+        digest: &str,
+    ) -> serde_json::Value {
+        json!({"agent_member_id": agent, "agent_package_id": package,
+            "owner_member_id": human, "decision_id": decision,
+            "expected_definition_digest": digest})
+    }
+
+    #[cfg(unix)]
+    async fn sovereign_preview(app: Router, package: &str) -> serde_json::Value {
+        let (status, body) = operator_room_http_request(
+            app,
+            axum::http::Method::GET,
+            &format!("/v1/rooms/persistent/sovereign-consent/agents/preview/{package}"),
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        body
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn room_sovereign_two_nodes_consent_only_to_their_own_agents() {
+        let _yolo = yolo_env_guard_async().await;
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _env = TestEnvRestore::capture(&[
+            "OCEAN_AUTH_FILE",
+            "OCEAN_CODEX_AUTH_FILE",
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+            "OCEAN_AGENTS_DIR",
+        ]);
+        let owner_node = tempfile::tempdir().unwrap();
+        let member_node = tempfile::tempdir().unwrap();
+        for (tmp, human, own, package, foreign, foreign_package, foreign_human, key, other_key) in [
+            (
+                &owner_node,
+                SOVEREIGN_OWNER,
+                SOVEREIGN_OWNER_AGENT,
+                "creator-agent",
+                SOVEREIGN_MEMBER_AGENT,
+                "invited-agent",
+                SOVEREIGN_MEMBER,
+                "owner-key",
+                "member-key",
+            ),
+            (
+                &member_node,
+                SOVEREIGN_MEMBER,
+                SOVEREIGN_MEMBER_AGENT,
+                "invited-agent",
+                SOVEREIGN_OWNER_AGENT,
+                "creator-agent",
+                SOVEREIGN_OWNER,
+                "member-key",
+                "owner-key",
+            ),
+        ] {
+            let (state, app, room) = sovereign_room_fixture(tmp, human, key);
+            let preview = sovereign_preview(app.clone(), package).await;
+            assert_eq!(preview["owner_eligible"], true);
+            assert_eq!(preview["owner_member_id"], human);
+            assert_eq!(preview["agent_member_id"], own);
+            assert_eq!(
+                sovereign_preview(app.clone(), foreign_package).await["owner_eligible"],
+                false
+            );
+            // Even an erroneously available local package/binding cannot grant
+            // custody over the other participant's roster Agent.
+            with_rooms(&state, |store| {
+                store.bind_room_agent(&room, foreign, foreign_package, "foreign-local-binding")?;
+                let mut members = store.room_access(&room)?.members;
+                members
+                    .iter_mut()
+                    .find(|m| m.member_id == foreign)
+                    .unwrap()
+                    .local_binding_available = Some(true);
+                store.update_room_access_safe(&room, None, Some(&members), None)
+            })
+            .unwrap();
+            let foreign_preview = sovereign_preview(app.clone(), foreign_package).await;
+            assert_eq!(foreign_preview["agent_member_id"], foreign);
+            assert_eq!(foreign_preview["owner_eligible"], false);
+            let transcript = with_rooms(&state, |store| store.transcript(&room, None)).unwrap();
+            let own_digest = preview["definition_digest"].as_str().unwrap();
+            for (agent, pkg, owner, digest, presented, expected_status, code) in [
+                (
+                    foreign,
+                    foreign_package,
+                    foreign_human,
+                    foreign_preview["definition_digest"].as_str().unwrap(),
+                    key,
+                    StatusCode::FORBIDDEN,
+                    "room_owner_required",
+                ),
+                (
+                    own,
+                    package,
+                    foreign_human,
+                    own_digest,
+                    key,
+                    StatusCode::FORBIDDEN,
+                    "room_owner_required",
+                ),
+                (
+                    own,
+                    foreign_package,
+                    human,
+                    foreign_preview["definition_digest"].as_str().unwrap(),
+                    key,
+                    StatusCode::FORBIDDEN,
+                    "room_owner_required",
+                ),
+                (
+                    own,
+                    package,
+                    human,
+                    own_digest,
+                    other_key,
+                    StatusCode::FORBIDDEN,
+                    "operator_credential_invalid",
+                ),
+                (
+                    own,
+                    package,
+                    human,
+                    "sha256:stale",
+                    key,
+                    StatusCode::CONFLICT,
+                    "definition_digest_mismatch",
+                ),
+            ] {
+                let decision = Uuid::new_v4().to_string();
+                let (status, body) = operator_room_http_request(
+                    app.clone(),
+                    axum::http::Method::POST,
+                    "/v1/rooms/persistent/sovereign-consent/agents",
+                    Some(sovereign_consent_body(agent, pkg, owner, &decision, digest)),
+                    &[("x-ocean-operator", presented)],
+                )
+                .await;
+                assert_eq!(status, expected_status, "{code}");
+                assert_eq!(body, json!({"ok":false,"error":code}));
+                assert!(
+                    with_rooms(&state, |s| s.room_agent_decision(&room, &decision))
+                        .unwrap()
+                        .is_none()
+                );
+                assert!(with_rooms(&state, |s| s.room_agent_bindings(&room))
+                    .unwrap()
+                    .is_empty());
+                assert_eq!(
+                    with_rooms(&state, |s| s.transcript(&room, None)).unwrap(),
+                    transcript
+                );
+                assert!(state.requests.read().await.is_empty());
+            }
+            let decision = Uuid::new_v4().to_string();
+            let request = sovereign_consent_body(own, package, human, &decision, own_digest);
+            let (status, authorized) = operator_room_http_request(
+                app.clone(),
+                axum::http::Method::POST,
+                "/v1/rooms/persistent/sovereign-consent/agents",
+                Some(request.clone()),
+                &[("x-ocean-operator", key)],
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED);
+            assert_eq!(authorized["binding"]["owner_member_id"], human);
+            assert_eq!(authorized["binding"]["agent_definition_digest"], own_digest);
+            let after = with_rooms(&state, |s| s.transcript(&room, None)).unwrap();
+            let (status, replay) = operator_room_http_request(
+                app.clone(),
+                axum::http::Method::POST,
+                "/v1/rooms/persistent/sovereign-consent/agents",
+                Some(request),
+                &[("x-ocean-operator", key)],
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(replay["created"], false);
+            assert_eq!(
+                with_rooms(&state, |s| s.transcript(&room, None)).unwrap(),
+                after
+            );
+            let (status, projection) = operator_room_http_request(
+                app.clone(),
+                axum::http::Method::GET,
+                "/v1/rooms/persistent/sovereign-consent/agents",
+                None,
+                &[],
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(projection["owner_member_id"], human);
+            assert_eq!(projection["owner_eligible"], true);
+            assert_eq!(projection["bindings"][0]["owner_eligible"], true);
+            let roster = with_rooms(&state, |s| s.room_access(&room))
+                .unwrap()
+                .members;
+            assert_eq!(
+                roster
+                    .iter()
+                    .filter(|m| m.role_in_room == ocean_core::FederatedRoomRole::Owner)
+                    .count(),
+                1
+            );
+            assert_eq!(
+                roster
+                    .iter()
+                    .find(|m| m.member_id == SOVEREIGN_MEMBER)
+                    .unwrap()
+                    .role_in_room,
+                ocean_core::FederatedRoomRole::Member
+            );
+            let package_snapshot = room_agent_authority::resolve_package(foreign_package).unwrap();
+            with_rooms(&state, |store| {
+                store.authorize_room_agent(
+                    &room,
+                    ocean_store::AuthorizeAgentInput {
+                        agent_member_id: foreign.into(),
+                        agent_package_id: foreign_package.into(),
+                        agent_definition_digest: package_snapshot.definition_digest.clone(),
+                        agent_definition_revision: None,
+                        display_name: foreign_package.into(),
+                        owner_member_id: foreign_human.into(),
+                        authorized_by: "other-node".into(),
+                        activation_policy: ocean_store::ActivationPolicy::ExplicitOnly,
+                        context_policy: ocean_store::ContextPolicy::InvocationOnly,
+                        memory_scope: ocean_store::MemoryScope::None,
+                        requested_capabilities: Vec::new(),
+                        room_capability_grants: Vec::new(),
+                        decision_id: Uuid::new_v4().to_string(),
+                        request_digest: "synthetic-foreign-consent".into(),
+                    },
+                    Utc::now(),
+                )
+            })
+            .unwrap();
+            let bindings = with_rooms(&state, |s| s.room_agent_bindings(&room)).unwrap();
+            let transcript = with_rooms(&state, |s| s.transcript(&room, None)).unwrap();
+            let foreign_binding = with_rooms(&state, |s| s.room_agent_binding(&room, foreign))
+                .unwrap()
+                .unwrap();
+            let (_, cancel) = sovereign_running_request(&state, &room, &foreign_binding).await;
+            let requests = requests_snapshot(&state.requests).await;
+            for action in ["reauthorize", "suspend", "resume", "revoke"] {
+                let decision = Uuid::new_v4().to_string();
+                let mut body = json!({"decision_id":decision});
+                if action == "reauthorize" {
+                    body["expected_definition_digest"] = json!(package_snapshot.definition_digest);
+                }
+                let (status, refused) = operator_room_http_request(
+                    app.clone(),
+                    axum::http::Method::POST,
+                    &format!("/v1/rooms/persistent/sovereign-consent/agents/{foreign}/{action}"),
+                    Some(body),
+                    &[("x-ocean-operator", key)],
+                )
+                .await;
+                assert_eq!(status, StatusCode::FORBIDDEN, "{action}");
+                assert_eq!(refused["error"], "room_owner_required");
+                assert!(
+                    with_rooms(&state, |s| s.room_agent_decision(&room, &decision))
+                        .unwrap()
+                        .is_none()
+                );
+                assert_eq!(
+                    with_rooms(&state, |s| s.room_agent_bindings(&room)).unwrap(),
+                    bindings
+                );
+                assert_eq!(
+                    with_rooms(&state, |s| s.transcript(&room, None)).unwrap(),
+                    transcript
+                );
+                assert_eq!(requests_snapshot(&state.requests).await, requests);
+                assert!(!cancel.is_cancelled());
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn room_sovereign_member_consent_requires_current_exact_federation_proofs() {
+        let _yolo = yolo_env_guard_async().await;
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _env = TestEnvRestore::capture(&[
+            "OCEAN_AUTH_FILE",
+            "OCEAN_CODEX_AUTH_FILE",
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+            "OCEAN_AGENTS_DIR",
+        ]);
+        for fault in [
+            "missing-credential",
+            "foreign-credential",
+            "missing-human",
+            "human-is-agent",
+            "missing-agent",
+            "agent-is-human",
+            "foreign-owner",
+            "no-local-binding",
+            "connecting",
+            "revoked",
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let (state, app, room) = sovereign_room_fixture(&tmp, SOVEREIGN_MEMBER, "member-key");
+            let digest = sovereign_preview(app.clone(), "invited-agent").await["definition_digest"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            with_rooms(&state, |store| {
+                let mut access = store.room_access(&room)?;
+                match fault {
+                    "missing-credential" => {
+                        store.revoke_room_credential(&room)?;
+                    }
+                    "foreign-credential" => {
+                        store.install_room_credential(&room, "other", SOVEREIGN_OWNER)?
+                    }
+                    "missing-human" => access.members.retain(|m| m.member_id != SOVEREIGN_MEMBER),
+                    "human-is-agent" => {
+                        access
+                            .members
+                            .iter_mut()
+                            .find(|m| m.member_id == SOVEREIGN_MEMBER)
+                            .unwrap()
+                            .actor_type = ocean_core::FederatedActorType::Agent
+                    }
+                    "missing-agent" => access
+                        .members
+                        .retain(|m| m.member_id != SOVEREIGN_MEMBER_AGENT),
+                    "agent-is-human" => {
+                        access
+                            .members
+                            .iter_mut()
+                            .find(|m| m.member_id == SOVEREIGN_MEMBER_AGENT)
+                            .unwrap()
+                            .actor_type = ocean_core::FederatedActorType::User
+                    }
+                    "foreign-owner" => {
+                        access
+                            .members
+                            .iter_mut()
+                            .find(|m| m.member_id == SOVEREIGN_MEMBER_AGENT)
+                            .unwrap()
+                            .owner_member_id = Some(SOVEREIGN_OWNER.into())
+                    }
+                    "no-local-binding" => {
+                        access
+                            .members
+                            .iter_mut()
+                            .find(|m| m.member_id == SOVEREIGN_MEMBER_AGENT)
+                            .unwrap()
+                            .local_binding_available = Some(false)
+                    }
+                    "connecting" => access.state = ocean_core::RoomAccessState::Connecting,
+                    "revoked" => access.state = ocean_core::RoomAccessState::Revoked,
+                    _ => unreachable!(),
+                }
+                store.update_room_access_safe(
+                    &room,
+                    Some(access.state),
+                    Some(&access.members),
+                    None,
+                )
+            })
+            .unwrap();
+            assert_eq!(
+                sovereign_preview(app.clone(), "invited-agent").await["owner_eligible"],
+                false,
+                "{fault}"
+            );
+            let transcript = with_rooms(&state, |s| s.transcript(&room, None)).unwrap();
+            let decision = Uuid::new_v4().to_string();
+            let (status, body) = operator_room_http_request(
+                app,
+                axum::http::Method::POST,
+                "/v1/rooms/persistent/sovereign-consent/agents",
+                Some(sovereign_consent_body(
+                    SOVEREIGN_MEMBER_AGENT,
+                    "invited-agent",
+                    SOVEREIGN_MEMBER,
+                    &decision,
+                    &digest,
+                )),
+                &[("x-ocean-operator", "member-key")],
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{fault}");
+            assert_eq!(
+                body,
+                json!({"ok":false,"error":"room_owner_required"}),
+                "{fault}"
+            );
+            assert!(with_rooms(&state, |s| s.room_agent_bindings(&room))
+                .unwrap()
+                .is_empty());
+            assert!(
+                with_rooms(&state, |s| s.room_agent_decision(&room, &decision))
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(
+                with_rooms(&state, |s| s.transcript(&room, None)).unwrap(),
+                transcript
+            );
+            assert!(state.requests.read().await.is_empty());
+        }
+    }
+
+    #[cfg(unix)]
+    async fn sovereign_authorize_member(app: Router) -> serde_json::Value {
+        let preview = sovereign_preview(app.clone(), "invited-agent").await;
+        let (status, body) = operator_room_http_request(
+            app,
+            axum::http::Method::POST,
+            "/v1/rooms/persistent/sovereign-consent/agents",
+            Some(sovereign_consent_body(
+                SOVEREIGN_MEMBER_AGENT,
+                "invited-agent",
+                SOVEREIGN_MEMBER,
+                &Uuid::new_v4().to_string(),
+                preview["definition_digest"].as_str().unwrap(),
+            )),
+            &[("x-ocean-operator", "member-key")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        body
+    }
+
+    #[cfg(unix)]
+    async fn sovereign_running_request(
+        state: &AppState,
+        room: &RoomKey,
+        binding: &ocean_store::RoomAgentBinding,
+    ) -> (RequestId, CancellationToken) {
+        let request_id = RequestId::new_v4();
+        let mut control = status(request_id, RequestState::Running);
+        control.room_agent_authority = Some(request_control::RoomAgentRequestAuthority {
+            room: room.clone(),
+            agent_member_id: binding.agent_member_id.clone(),
+            generation: binding.generation,
+            admission_id: Uuid::new_v4().to_string(),
+            decision_id: binding.decision_id.clone(),
+            approved_definition_digest: binding.agent_definition_digest.clone(),
+            session_id: core_sid(persistent_rooms::authorized_room_agent_session_id(
+                room,
+                &binding.agent_member_id,
+                binding.generation,
+            )),
+        });
+        let cancel = control.cancel.clone();
+        state.requests.write().await.insert(request_id, control);
+        (request_id, cancel)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn room_sovereign_member_reconsent_status_and_revoke_cancel_exact_generations() {
+        let _yolo = yolo_env_guard_async().await;
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _env = TestEnvRestore::capture(&[
+            "OCEAN_AUTH_FILE",
+            "OCEAN_CODEX_AUTH_FILE",
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+            "OCEAN_AGENTS_DIR",
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, app, room) = sovereign_room_fixture(&tmp, SOVEREIGN_MEMBER, "member-key");
+        with_rooms(&state, |s| {
+            s.update_room_access_safe(
+                &room,
+                Some(ocean_core::RoomAccessState::Recovering),
+                None,
+                None,
+            )
+        })
+        .unwrap();
+        assert_eq!(
+            sovereign_preview(app.clone(), "invited-agent").await["owner_eligible"],
+            true
+        );
+        sovereign_authorize_member(app.clone()).await;
+        let binding = with_rooms(&state, |s| {
+            s.room_agent_binding(&room, SOVEREIGN_MEMBER_AGENT)
+        })
+        .unwrap()
+        .unwrap();
+        let (admission, permit) = room_agent_authority::admit_room_agent(
+            &state,
+            &room,
+            SOVEREIGN_MEMBER_AGENT,
+            "invited-agent",
+            room_agent_authority::AdmissionTrigger::Explicit,
+        )
+        .await
+        .unwrap();
+        drop(permit);
+        assert!(room_agent_authority::admission_generation_is_current(
+            &state, &admission
+        ));
+        let mut foreign_room_admission = admission.clone();
+        foreign_room_admission.room = RoomKey::new("another-room");
+        assert!(!room_agent_authority::admission_generation_is_current(
+            &state,
+            &foreign_room_admission
+        ));
+        let (request, cancel) = sovereign_running_request(&state, &room, &binding).await;
+        let (foreign_request, foreign_cancel) =
+            sovereign_running_request(&state, &RoomKey::new("another-room"), &binding).await;
+        let before = with_rooms(&state, |s| s.transcript(&room, None)).unwrap();
+        std::fs::write(
+            tmp.path().join("agents/invited-agent/instructions.md"),
+            "changed instructions",
+        )
+        .unwrap();
+        let decision = Uuid::new_v4().to_string();
+        let path = format!(
+            "/v1/rooms/persistent/sovereign-consent/agents/{SOVEREIGN_MEMBER_AGENT}/reauthorize"
+        );
+        let (status, refused) = operator_room_http_request(
+            app.clone(),
+            axum::http::Method::POST,
+            &path,
+            Some(json!({"decision_id":decision,
+                "expected_definition_digest":binding.agent_definition_digest})),
+            &[("x-ocean-operator", "member-key")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(refused["error"], "definition_digest_mismatch");
+        assert_eq!(
+            with_rooms(&state, |s| s
+                .room_agent_binding(&room, SOVEREIGN_MEMBER_AGENT))
+            .unwrap(),
+            Some(binding.clone())
+        );
+        assert!(
+            with_rooms(&state, |s| s.room_agent_decision(&room, &decision))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            with_rooms(&state, |s| s.transcript(&room, None)).unwrap(),
+            before
+        );
+        assert!(!cancel.is_cancelled());
+        let fresh = sovereign_preview(app.clone(), "invited-agent").await;
+        let (status, refused) = operator_room_http_request(
+            app.clone(),
+            axum::http::Method::POST,
+            &path,
+            Some(json!({"decision_id":binding.decision_id,
+                "expected_definition_digest":fresh["definition_digest"]})),
+            &[("x-ocean-operator", "member-key")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(refused["error"], "decision_replay_mismatch");
+        assert!(!cancel.is_cancelled());
+        let (status, changed) = operator_room_http_request(
+            app.clone(),
+            axum::http::Method::POST,
+            &path,
+            Some(json!({"decision_id":decision,
+                "expected_definition_digest":fresh["definition_digest"]})),
+            &[("x-ocean-operator", "member-key")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(changed["binding"]["generation"], "2");
+        assert!(cancel.is_cancelled());
+        assert_eq!(
+            state.requests.read().await[&request].status.state,
+            RequestState::Cancelling
+        );
+        assert!(!foreign_cancel.is_cancelled());
+        assert_eq!(
+            state.requests.read().await[&foreign_request].status.state,
+            RequestState::Running
+        );
+        assert!(!room_agent_authority::admission_generation_is_current(
+            &state, &admission
+        ));
+        for action in ["suspend", "resume", "revoke"] {
+            let current = with_rooms(&state, |s| {
+                s.room_agent_binding(&room, SOVEREIGN_MEMBER_AGENT)
+            })
+            .unwrap()
+            .unwrap();
+            let (_, current_cancel) = sovereign_running_request(&state, &room, &current).await;
+            let decision = Uuid::new_v4().to_string();
+            let (status, body) = operator_room_http_request(app.clone(), axum::http::Method::POST,
+                &format!("/v1/rooms/persistent/sovereign-consent/agents/{SOVEREIGN_MEMBER_AGENT}/{action}"),
+                Some(json!({"decision_id":decision})), &[("x-ocean-operator", "member-key")]).await;
+            assert_eq!(status, StatusCode::OK, "{action}");
+            assert_eq!(body["applied"], true);
+            assert!(current_cancel.is_cancelled(), "{action}");
+            assert!(!foreign_cancel.is_cancelled());
+            let after = with_rooms(&state, |s| s.transcript(&room, None)).unwrap();
+            let (status, replay) = operator_room_http_request(app.clone(), axum::http::Method::POST,
+                &format!("/v1/rooms/persistent/sovereign-consent/agents/{SOVEREIGN_MEMBER_AGENT}/{action}"),
+                Some(json!({"decision_id":decision})), &[("x-ocean-operator", "member-key")]).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(replay["applied"], false);
+            assert_eq!(
+                with_rooms(&state, |s| s.transcript(&room, None)).unwrap(),
+                after
+            );
+        }
+        assert!(
+            with_rooms(&state, |s| room_agent_authority::current_binding_on(
+                s,
+                &room,
+                SOVEREIGN_MEMBER_AGENT,
+                binding.generation
+            ))
+            .unwrap()
+            .is_none()
+        );
+        let (status, _) = operator_room_http_request(
+            app,
+            axum::http::Method::POST,
+            &format!(
+                "/v1/rooms/persistent/sovereign-consent/agents/{SOVEREIGN_MEMBER_AGENT}/invoke"
+            ),
+            Some(json!({"invoked_by":SOVEREIGN_MEMBER,"message_seq":1})),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(!foreign_cancel.is_cancelled());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn room_sovereign_member_lifetime_revalidates_roster_and_credentials() {
+        let _yolo = yolo_env_guard_async().await;
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _env = TestEnvRestore::capture(&[
+            "OCEAN_AUTH_FILE",
+            "OCEAN_CODEX_AUTH_FILE",
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+            "OCEAN_AGENTS_DIR",
+        ]);
+        for fault in [
+            "missing-credential",
+            "foreign-credential",
+            "removed-human",
+            "reclassified-human",
+            "foreign-agent-owner",
+            "revoked-access",
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let (state, app, room) = sovereign_room_fixture(&tmp, SOVEREIGN_MEMBER, "member-key");
+            sovereign_authorize_member(app.clone()).await;
+            let (admission, permit) = room_agent_authority::admit_room_agent(
+                &state,
+                &room,
+                SOVEREIGN_MEMBER_AGENT,
+                "invited-agent",
+                room_agent_authority::AdmissionTrigger::Explicit,
+            )
+            .await
+            .unwrap();
+            drop(permit);
+            let authority = room_agent_authority::RoomOperationAuthority::from_admission(
+                &state,
+                &admission,
+                admission.operation_cancel.clone(),
+            );
+            assert!(authority.is_current().unwrap());
+            with_rooms(&state, |s| {
+                let mut access = s.room_access(&room)?;
+                match fault {
+                    "missing-credential" => {
+                        s.revoke_room_credential(&room)?;
+                    }
+                    "foreign-credential" => {
+                        s.install_room_credential(&room, "other", SOVEREIGN_OWNER)?
+                    }
+                    "removed-human" => access.members.retain(|m| m.member_id != SOVEREIGN_MEMBER),
+                    "reclassified-human" => {
+                        access
+                            .members
+                            .iter_mut()
+                            .find(|m| m.member_id == SOVEREIGN_MEMBER)
+                            .unwrap()
+                            .actor_type = ocean_core::FederatedActorType::Agent
+                    }
+                    "foreign-agent-owner" => {
+                        access
+                            .members
+                            .iter_mut()
+                            .find(|m| m.member_id == SOVEREIGN_MEMBER_AGENT)
+                            .unwrap()
+                            .owner_member_id = Some(SOVEREIGN_OWNER.into())
+                    }
+                    "revoked-access" => access.state = ocean_core::RoomAccessState::Revoked,
+                    _ => unreachable!(),
+                }
+                s.update_room_access_safe(&room, Some(access.state), Some(&access.members), None)
+            })
+            .unwrap();
+            assert!(!authority.is_current().unwrap(), "{fault}");
+            assert!(!room_agent_authority::admission_generation_is_current(
+                &state, &admission
+            ));
+            use ocean_agent::RoomMemoryAuthority as _;
+            assert_eq!(
+                authority.authorize_operation(),
+                Err(ocean_agent::RoomMemoryAuthorityError::AuthorityChanged)
+            );
+            assert!(admission.operation_cancel.is_cancelled());
+            let before = with_rooms(&state, |s| s.transcript(&room, None)).unwrap();
+            assert!(room_agent_authority::append_admission_allow(&state, &admission).is_err());
+            assert_eq!(
+                with_rooms(&state, |s| s.transcript(&room, None)).unwrap(),
+                before
+            );
+            let decision = Uuid::new_v4().to_string();
+            let (status, body) = operator_room_http_request(
+                app,
+                axum::http::Method::POST,
+                &format!(
+                    "/v1/rooms/persistent/sovereign-consent/agents/{SOVEREIGN_MEMBER_AGENT}/revoke"
+                ),
+                Some(json!({"decision_id":decision})),
+                &[("x-ocean-operator", "member-key")],
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{fault}");
+            assert_eq!(body["error"], "room_owner_required");
+            assert!(
+                with_rooms(&state, |s| s.room_agent_decision(&room, &decision))
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(
+                with_rooms(&state, |s| s.transcript(&room, None)).unwrap(),
+                before
+            );
+            assert!(state.requests.read().await.is_empty());
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn room_sovereign_member_explicit_invoke_keeps_session_and_token_authority() {
+        let _yolo = yolo_env_guard_async().await;
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _env = TestEnvRestore::capture(&[
+            "OCEAN_AUTH_FILE",
+            "OCEAN_CODEX_AUTH_FILE",
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+            "OCEAN_AGENTS_DIR",
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, app, room) = sovereign_room_fixture(&tmp, SOVEREIGN_MEMBER, "member-key");
+        sovereign_authorize_member(app.clone()).await;
+        let authored = with_rooms(&state, |s| {
+            s.append_message(
+                &room,
+                SOVEREIGN_MEMBER,
+                RoomParticipantKind::Human,
+                RoomMessageKind::Message,
+                "invoke my agent",
+                Utc::now(),
+            )
+        })
+        .unwrap();
+        let path = format!(
+            "/v1/rooms/persistent/sovereign-consent/agents/{SOVEREIGN_MEMBER_AGENT}/invoke"
+        );
+        for (invoker, seq, code) in [
+            (SOVEREIGN_OWNER, authored.seq, "invoke_author_mismatch"),
+            (SOVEREIGN_MEMBER, u64::MAX, "invoke_message_not_found"),
+        ] {
+            let (status, body) = operator_room_http_request(
+                app.clone(),
+                axum::http::Method::POST,
+                &path,
+                Some(json!({"invoked_by":invoker,"message_seq":seq})),
+                &[],
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN);
+            assert_eq!(body["error"], code);
+            assert!(state.requests.read().await.is_empty());
+        }
+        let token = ocean_core::mint_decision_token();
+        let (status, queued) = operator_room_http_request(app, axum::http::Method::POST, &path,
+            Some(json!({"invoked_by":SOVEREIGN_MEMBER,"message_seq":authored.seq,"decision_token":token})), &[]).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let request_id: RequestId = queued["request_id"].as_str().unwrap().parse().unwrap();
+        let expected_session = core_sid(persistent_rooms::authorized_room_agent_session_id(
+            &room,
+            SOVEREIGN_MEMBER_AGENT,
+            1,
+        ));
+        for _ in 0..200 {
+            if state.requests.read().await[&request_id].status.state == RequestState::Completed {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let requests = state.requests.read().await;
+        let request = &requests[&request_id];
+        assert_eq!(request.status.state, RequestState::Completed);
+        assert_eq!(request.status.session_id, Some(expected_session));
+        assert_eq!(request.decision_token.as_deref(), Some(token.as_str()));
+        let authority = request.room_agent_authority.as_ref().unwrap();
+        assert_eq!(authority.room, room);
+        assert_eq!(authority.agent_member_id, SOVEREIGN_MEMBER_AGENT);
+        assert_eq!(authority.generation, 1);
+        assert_eq!(authority.session_id, expected_session);
+        assert_ne!(
+            expected_session,
+            core_sid(persistent_rooms::authorized_room_agent_session_id(
+                &room,
+                SOVEREIGN_OWNER_AGENT,
+                1
+            ))
+        );
+        assert_ne!(
+            expected_session,
+            core_sid(persistent_rooms::authorized_room_agent_session_id(
+                &room,
+                SOVEREIGN_MEMBER_AGENT,
+                2
+            ))
+        );
+        drop(requests);
+        let outbox = with_rooms(&state, |s| s.pending_outbox(&room)).unwrap();
+        assert_eq!(outbox.len(), 1);
+        assert_eq!(outbox[0].author_member_id, SOVEREIGN_MEMBER_AGENT);
+        assert!(!serde_json::to_string(&outbox).unwrap().contains(&token));
+    }
+
+    /// PR D: the work card a room invoke starts names the exact daemon
+    /// request the invoke response returned, so a client can cancel that run
+    /// through `POST /v1/requests/{id}/cancel`. Both projections — `GET
+    /// .../runs` and the room tail's `room_agent_run` frame — carry the id,
+    /// and neither carries the invoker's decision token.
+    /// Mutation: start the run with any id but the registered request's -> RED.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn room_invoke_run_carries_the_invoke_request_id() {
+        use http_body_util::BodyExt;
+        use tower::ServiceExt as _;
+
+        let _yolo = yolo_env_guard_async().await;
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _env = TestEnvRestore::capture(&[
+            "OCEAN_AUTH_FILE",
+            "OCEAN_CODEX_AUTH_FILE",
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+            "OCEAN_AGENTS_DIR",
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, app, room) = sovereign_room_fixture(&tmp, SOVEREIGN_MEMBER, "member-key");
+        sovereign_authorize_member(app.clone()).await;
+        let authored = with_rooms(&state, |s| {
+            s.append_message(
+                &room,
+                SOVEREIGN_MEMBER,
+                RoomParticipantKind::Human,
+                RoomMessageKind::Message,
+                "invoke my agent",
+                Utc::now(),
+            )
+        })
+        .unwrap();
+        let token = ocean_core::mint_decision_token();
+        let (status, queued) = operator_room_http_request(
+            app.clone(),
+            axum::http::Method::POST,
+            &format!(
+                "/v1/rooms/persistent/sovereign-consent/agents/{SOVEREIGN_MEMBER_AGENT}/invoke"
+            ),
+            Some(json!({
+                "invoked_by": SOVEREIGN_MEMBER,
+                "message_seq": authored.seq,
+                "decision_token": token,
+            })),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let request_id: RequestId = queued["request_id"].as_str().unwrap().parse().unwrap();
+
+        // The card is durable before invoke returns, so it is readable now,
+        // before the turn settles.
+        let runs = with_rooms(&state, |s| s.room_agent_runs(&room, 10)).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].trigger_seq, authored.seq);
+        assert_eq!(runs[0].session_id, queued["session_id"].as_str().unwrap());
+        assert_eq!(
+            runs[0].request_id.as_deref(),
+            Some(request_id.to_string().as_str())
+        );
+        assert!(state.requests.read().await.contains_key(&request_id));
+
+        for _ in 0..200 {
+            if state.requests.read().await[&request_id].status.state == RequestState::Completed {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            state.requests.read().await[&request_id].status.state,
+            RequestState::Completed
+        );
+
+        let (status, listed) = operator_room_http_request(
+            app.clone(),
+            axum::http::Method::GET,
+            "/v1/rooms/persistent/sovereign-consent/runs",
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let listed_runs = listed["runs"].as_array().unwrap();
+        assert_eq!(listed_runs.len(), 1);
+        assert_eq!(listed_runs[0]["request_id"], queued["request_id"]);
+        assert!(!listed.to_string().contains(&token));
+
+        let response = app
+            .oneshot(
+                axum::http::Request::get("/v1/rooms/persistent/sovereign-consent/events")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body();
+        let mut run_frame = None;
+        for _ in 0..16 {
+            let frame = tokio::time::timeout(std::time::Duration::from_secs(2), body.frame())
+                .await
+                .expect("frame timeout")
+                .expect("SSE body ended")
+                .expect("SSE body error");
+            let text = String::from_utf8_lossy(&frame.into_data().unwrap_or_default()).to_string();
+            if text.contains("event: room_agent_run\n") {
+                run_frame = Some(text);
+                break;
+            }
+        }
+        let run_frame = run_frame.expect("room_agent_run frame");
+        assert!(!run_frame.contains(&token));
+        let data = run_frame
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .expect("room_agent_run data line");
+        let frame_run: serde_json::Value = serde_json::from_str(data).unwrap();
+        assert_eq!(frame_run["request_id"], queued["request_id"]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn room_sovereign_member_tool_approval_requires_its_turn_token_and_current_custody() {
+        let _yolo = yolo_env_guard_async().await;
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _env = TestEnvRestore::capture(&[
+            "OCEAN_AUTH_FILE",
+            "OCEAN_CODEX_AUTH_FILE",
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+            "OCEAN_AGENTS_DIR",
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, app, room) = sovereign_room_fixture(&tmp, SOVEREIGN_MEMBER, "member-key");
+        sovereign_authorize_member(app.clone()).await;
+        let (admission, permit) = room_agent_authority::admit_room_agent(
+            &state,
+            &room,
+            SOVEREIGN_MEMBER_AGENT,
+            "invited-agent",
+            room_agent_authority::AdmissionTrigger::Explicit,
+        )
+        .await
+        .unwrap();
+        let binding = with_rooms(&state, |s| {
+            s.room_agent_binding(&room, SOVEREIGN_MEMBER_AGENT)
+        })
+        .unwrap()
+        .unwrap();
+        let (request_id, cancel) = sovereign_running_request(&state, &room, &binding).await;
+        let session = core_sid(persistent_rooms::authorized_room_agent_session_id(
+            &room,
+            SOVEREIGN_MEMBER_AGENT,
+            binding.generation,
+        ));
+        let token = ocean_core::mint_decision_token();
+        let mut inner = gating_policy_with_mode(PermissionMode::Manual, Some(token.clone()));
+        inner.request_id = request_id;
+        inner.session_id = Some(session);
+        inner.permissions = state.permissions.clone();
+        inner.requests = state.requests.clone();
+        inner.events = state.events.clone();
+        inner.cancel = cancel.clone();
+        let control = room_agent_authority::attach_operation_authority(
+            ocean_agent::PromptControl::new(Arc::new(inner)),
+            &state,
+            &admission,
+            cancel.clone(),
+        );
+        let policy = control.permission.clone();
+        assert!(policy.should_check("write", &json!({"path":"synthetic"}), true));
+        let check =
+            tokio::spawn(async move { policy.check("write", &json!({"path":"synthetic"})).await });
+        let permission = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if let Some(id) = state.permissions.read().await.keys().next().copied() {
+                    break id;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            state.permissions.read().await[&permission]
+                .status
+                .request_id,
+            request_id
+        );
+        assert_eq!(
+            state.permissions.read().await[&permission]
+                .status
+                .session_id,
+            Some(session)
+        );
+        // Neither Room Owner role, another node's operator key, this node's
+        // operator key nor another invocation's token approves this request.
+        for presented in [
+            None,
+            Some("owner-key".to_owned()),
+            Some("member-key".to_owned()),
+            Some(ocean_core::mint_decision_token()),
+        ] {
+            let (status, _) = operator_room_http_request(
+                app.clone(),
+                axum::http::Method::POST,
+                &format!("/v1/permissions/{permission}/decision"),
+                Some(
+                    serde_json::to_value(PermissionDecisionRequest {
+                        permission_id: permission,
+                        decision: PermissionDecisionBody::Allow,
+                        decision_token: presented,
+                    })
+                    .unwrap(),
+                ),
+                &[("x-ocean-operator", "member-key")],
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN);
+            assert!(state.permissions.read().await.contains_key(&permission));
+            assert!(!check.is_finished());
+        }
+        // Serialize the canonical DTO, rather than guessing its decision wire.
+        let body = serde_json::to_value(PermissionDecisionRequest {
+            permission_id: permission,
+            decision: PermissionDecisionBody::Allow,
+            decision_token: Some(token.clone()),
+        })
+        .unwrap();
+        let (status, _) = operator_room_http_request(
+            app.clone(),
+            axum::http::Method::POST,
+            &format!("/v1/permissions/{permission}/decision"),
+            Some(body.clone()),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), check)
+                .await
+                .unwrap()
+                .unwrap(),
+            AgentPermissionDecision::Allow
+        ));
+        let (status, _) = operator_room_http_request(
+            app.clone(),
+            axum::http::Method::POST,
+            &format!("/v1/permissions/{permission}/decision"),
+            Some(body),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let policy = control.permission.clone();
+        assert!(policy.should_check("edit", &json!({"path":"synthetic"}), true));
+        let check =
+            tokio::spawn(async move { policy.check("edit", &json!({"path":"synthetic"})).await });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if !state.permissions.read().await.is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let (status, _) = operator_room_http_request(
+            app,
+            axum::http::Method::POST,
+            &format!(
+                "/v1/rooms/persistent/sovereign-consent/agents/{SOVEREIGN_MEMBER_AGENT}/revoke"
+            ),
+            Some(json!({"decision_id":Uuid::new_v4().to_string()})),
+            &[("x-ocean-operator", "member-key")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(cancel.is_cancelled());
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), check)
+                .await
+                .unwrap()
+                .unwrap(),
+            AgentPermissionDecision::Deny { .. }
+        ));
+        assert!(state.permissions.read().await.is_empty());
+        assert_eq!(
+            state.requests.read().await[&request_id].status.state,
+            RequestState::Cancelling
+        );
+        drop(permit);
+    }
+
+    // Callers own the environment locks and restore the fixture overrides.
+    #[cfg(unix)]
+    async fn reviewed_digest_fixture(tmp: &tempfile::TempDir) -> (AppState, Router, RoomKey) {
+        let agents = tmp.path().join("agents");
+        write_agent_fixture(
+            &agents,
+            "builder",
+            "description = 'Builder'\n",
+            Some("reviewed v1"),
+        );
+        std::env::set_var("OCEAN_AGENTS_DIR", agents);
+        let state = isolated_room_fixture_state(tmp);
+        let key = RoomKey::new("reviewed-consent");
+        with_rooms(&state, |store| {
+            store.create(key.clone(), "Reviewed Consent", None, Utc::now())?;
+            store.add_participant(
+                &key,
+                RoomParticipant {
+                    id: "human-1".into(),
+                    kind: RoomParticipantKind::Human,
+                    display_name: "Human One".into(),
+                },
+                Utc::now(),
+            )?;
+            Ok::<_, ocean_store::RoomStoreError>(())
+        })
+        .unwrap();
+        let app = room_routes().with_state(state.clone());
+        let (status, _) = operator_room_http_request(
+            app.clone(),
+            axum::http::Method::POST,
+            "/v1/rooms/persistent/reviewed-consent/agents/bootstrap",
+            Some(json!({"owner_member_id":"human-1", "agent_package_id":"builder"})),
+            &[("x-ocean-operator", "test-room-operator")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        (state, app, key)
+    }
+
+    #[cfg(unix)]
+    async fn reviewed_digest_preview(app: Router) -> String {
+        let (status, body) = operator_room_http_request(
+            app,
+            axum::http::Method::GET,
+            "/v1/rooms/persistent/reviewed-consent/agents/preview/builder",
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["owner_eligible"], true);
+        body["definition_digest"].as_str().unwrap().to_string()
+    }
+
+    #[cfg(unix)]
+    fn reviewed_digest_authorize_body(decision: &str) -> serde_json::Value {
+        json!({
+            "agent_member_id":"builder", "agent_package_id":"builder",
+            "owner_member_id":"human-1", "decision_id":decision,
+        })
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn room_reviewed_digest_authorize_refuses_changed_preview_without_side_effects() {
+        let _yolo_guard = yolo_env_guard_async().await;
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _env = TestEnvRestore::capture(&[
+            "OCEAN_AUTH_FILE",
+            "OCEAN_CODEX_AUTH_FILE",
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+            "OCEAN_AGENTS_DIR",
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, app, key) = reviewed_digest_fixture(&tmp).await;
+        let reviewed = reviewed_digest_preview(app.clone()).await;
+        let decision = Uuid::new_v4().to_string();
+        let mut request = reviewed_digest_authorize_body(&decision);
+        request["expected_definition_digest"] = json!(reviewed);
+        let transcript = with_rooms(&state, |store| store.transcript(&key, None)).unwrap();
+        let request_id = RequestId::new_v4();
+        let control = status(request_id, RequestState::Running);
+        let cancel = control.cancel.clone();
+        state.requests.write().await.insert(request_id, control);
+        let requests = requests_snapshot(&state.requests).await;
+        std::fs::write(
+            tmp.path().join("agents/builder/instructions.md"),
+            "changed v2",
+        )
+        .unwrap();
+
+        let (status, body) = operator_room_http_request(
+            app.clone(),
+            axum::http::Method::POST,
+            "/v1/rooms/persistent/reviewed-consent/agents",
+            Some(request.clone()),
+            &[("x-ocean-operator", "test-room-operator")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(
+            body,
+            json!({"ok":false, "error":"definition_digest_mismatch"})
+        );
+        assert!(
+            with_rooms(&state, |store| store.room_agent_binding(&key, "builder"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            with_rooms(&state, |store| store.room_agent_decision(&key, &decision))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            with_rooms(&state, |store| store.transcript(&key, None)).unwrap(),
+            transcript
+        );
+        assert_eq!(requests_snapshot(&state.requests).await, requests);
+        assert!(!cancel.is_cancelled());
+
+        let fresh = reviewed_digest_preview(app.clone()).await;
+        assert_ne!(fresh, reviewed);
+        request["expected_definition_digest"] = json!(fresh);
+        let (status, authorized) = operator_room_http_request(
+            app.clone(),
+            axum::http::Method::POST,
+            "/v1/rooms/persistent/reviewed-consent/agents",
+            Some(request.clone()),
+            &[("x-ocean-operator", "test-room-operator")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(authorized["binding"]["agent_definition_digest"], fresh);
+        assert_eq!(authorized["binding"]["generation"], "1");
+        let after = with_rooms(&state, |store| store.transcript(&key, None)).unwrap();
+        assert_eq!(after.len(), transcript.len() + 1);
+
+        // The precondition is not part of the decision hash: an omitted-field
+        // replay of a guarded decision remains the same idempotent decision.
+        for expected in [Some(json!(fresh)), None] {
+            let mut replay = request.clone();
+            replay
+                .as_object_mut()
+                .unwrap()
+                .remove("expected_definition_digest");
+            if let Some(expected) = expected {
+                replay["expected_definition_digest"] = expected;
+            }
+            let (status, body) = operator_room_http_request(
+                app.clone(),
+                axum::http::Method::POST,
+                "/v1/rooms/persistent/reviewed-consent/agents",
+                Some(replay),
+                &[("x-ocean-operator", "test-room-operator")],
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["created"], false);
+            assert_eq!(body["binding"], authorized["binding"]);
+        }
+        // A supplied stale precondition refuses even an already-used decision.
+        for (mut conflicting, code) in [
+            (request.clone(), "agent_binding_exists"),
+            (request.clone(), "decision_replay_mismatch"),
+            (request.clone(), "definition_digest_mismatch"),
+        ] {
+            match code {
+                "agent_binding_exists" => {
+                    conflicting["decision_id"] = json!(Uuid::new_v4().to_string())
+                }
+                "decision_replay_mismatch" => conflicting["memory_scope"] = json!("room"),
+                _ => conflicting["expected_definition_digest"] = json!(reviewed),
+            }
+            let (status, body) = operator_room_http_request(
+                app.clone(),
+                axum::http::Method::POST,
+                "/v1/rooms/persistent/reviewed-consent/agents",
+                Some(conflicting.clone()),
+                &[("x-ocean-operator", "test-room-operator")],
+            )
+            .await;
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert_eq!(body, json!({"ok":false, "error":code}));
+            if code == "agent_binding_exists" {
+                assert!(with_rooms(&state, |store| store
+                    .room_agent_decision(&key, conflicting["decision_id"].as_str().unwrap()))
+                .unwrap()
+                .is_none());
+            }
+        }
+        assert_eq!(
+            with_rooms(&state, |store| store.transcript(&key, None)).unwrap(),
+            after
+        );
+        assert_eq!(requests_snapshot(&state.requests).await, requests);
+        assert!(!cancel.is_cancelled());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn room_reviewed_digest_reauthorize_preserves_live_generation_until_fresh_consent() {
+        let _yolo_guard = yolo_env_guard_async().await;
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _env = TestEnvRestore::capture(&[
+            "OCEAN_AUTH_FILE",
+            "OCEAN_CODEX_AUTH_FILE",
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+            "OCEAN_AGENTS_DIR",
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, app, key) = reviewed_digest_fixture(&tmp).await;
+        let reviewed = reviewed_digest_preview(app.clone()).await;
+        let initial_decision = Uuid::new_v4().to_string();
+        let (authorization_status, _) = operator_room_http_request(
+            app.clone(),
+            axum::http::Method::POST,
+            "/v1/rooms/persistent/reviewed-consent/agents",
+            Some(reviewed_digest_authorize_body(&initial_decision)),
+            &[("x-ocean-operator", "test-room-operator")],
+        )
+        .await;
+        assert_eq!(authorization_status, StatusCode::CREATED);
+        let binding = with_rooms(&state, |store| store.room_agent_binding(&key, "builder"))
+            .unwrap()
+            .unwrap();
+        let transcript = with_rooms(&state, |store| store.transcript(&key, None)).unwrap();
+        let request_id = RequestId::new_v4();
+        let mut control = status(request_id, RequestState::Running);
+        control.room_agent_authority = Some(request_control::RoomAgentRequestAuthority {
+            room: key.clone(),
+            agent_member_id: "builder".into(),
+            generation: binding.generation,
+            admission_id: Uuid::new_v4().to_string(),
+            decision_id: binding.decision_id.clone(),
+            approved_definition_digest: binding.agent_definition_digest.clone(),
+            session_id: core_sid(persistent_rooms::authorized_room_agent_session_id(
+                &key,
+                "builder",
+                binding.generation,
+            )),
+        });
+        let cancel = control.cancel.clone();
+        state.requests.write().await.insert(request_id, control);
+        let requests = requests_snapshot(&state.requests).await;
+        std::fs::write(
+            tmp.path().join("agents/builder/instructions.md"),
+            "changed v2",
+        )
+        .unwrap();
+        let decision = Uuid::new_v4().to_string();
+        let mut request = json!({"decision_id":decision, "expected_definition_digest":reviewed});
+        let path = "/v1/rooms/persistent/reviewed-consent/agents/builder/reauthorize";
+        let fresh = reviewed_digest_preview(app.clone()).await;
+        assert_ne!(fresh, reviewed);
+        for (body, code) in [
+            (request.clone(), "definition_digest_mismatch"),
+            (
+                json!({"decision_id":initial_decision, "expected_definition_digest":reviewed}),
+                "definition_digest_mismatch",
+            ),
+            (
+                json!({"decision_id":initial_decision, "expected_definition_digest":fresh}),
+                "decision_replay_mismatch",
+            ),
+        ] {
+            let (status, body) = operator_room_http_request(
+                app.clone(),
+                axum::http::Method::POST,
+                path,
+                Some(body),
+                &[("x-ocean-operator", "test-room-operator")],
+            )
+            .await;
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert_eq!(body, json!({"ok":false, "error":code}));
+            assert_eq!(
+                with_rooms(&state, |store| store.room_agent_binding(&key, "builder"))
+                    .unwrap()
+                    .unwrap(),
+                binding
+            );
+            assert!(
+                with_rooms(&state, |store| store.room_agent_decision(&key, &decision))
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(
+                with_rooms(&state, |store| store.transcript(&key, None)).unwrap(),
+                transcript
+            );
+            assert_eq!(requests_snapshot(&state.requests).await, requests);
+            assert!(!cancel.is_cancelled());
+        }
+        request["expected_definition_digest"] = json!(fresh);
+        let (status, authorized) = operator_room_http_request(
+            app.clone(),
+            axum::http::Method::POST,
+            path,
+            Some(request.clone()),
+            &[("x-ocean-operator", "test-room-operator")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(authorized["applied"], true);
+        assert_eq!(authorized["previous_definition_digest"], reviewed);
+        assert_eq!(authorized["definition_changed"], true);
+        assert_eq!(authorized["binding"]["agent_definition_digest"], fresh);
+        assert_eq!(authorized["binding"]["generation"], "2");
+        assert!(
+            cancel.is_cancelled(),
+            "successful new generation cancels its predecessor"
+        );
+        assert_eq!(
+            state.requests.read().await[&request_id].status.state,
+            RequestState::Cancelling
+        );
+        let after = with_rooms(&state, |store| store.transcript(&key, None)).unwrap();
+        let (status, replay) = operator_room_http_request(
+            app,
+            axum::http::Method::POST,
+            path,
+            Some(request),
+            &[("x-ocean-operator", "test-room-operator")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(replay["applied"], false);
+        assert_eq!(replay["binding"], authorized["binding"]);
+        assert_eq!(
+            with_rooms(&state, |store| store.transcript(&key, None)).unwrap(),
+            after
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn room_reviewed_digest_legacy_null_exact_strings_and_strict_json() {
+        use http_body_util::BodyExt as _;
+        use tower::ServiceExt as _;
+
+        let _yolo_guard = yolo_env_guard_async().await;
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _env = TestEnvRestore::capture(&[
+            "OCEAN_AUTH_FILE",
+            "OCEAN_CODEX_AUTH_FILE",
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+            "OCEAN_AGENTS_DIR",
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, app, key) = reviewed_digest_fixture(&tmp).await;
+        let digest = reviewed_digest_preview(app.clone()).await;
+        let decision = Uuid::new_v4().to_string();
+        let authorize_path = "/v1/rooms/persistent/reviewed-consent/agents";
+        let reauthorize_path = "/v1/rooms/persistent/reviewed-consent/agents/builder/reauthorize";
+        let baseline = with_rooms(&state, |store| store.transcript(&key, None)).unwrap();
+        for expected in [
+            String::new(),
+            format!(" {digest}"),
+            format!("{digest} "),
+            digest.to_ascii_uppercase(),
+        ] {
+            assert_ne!(expected, digest);
+            let mut body = reviewed_digest_authorize_body(&decision);
+            body["expected_definition_digest"] = json!(expected);
+            let (status, body) = operator_room_http_request(
+                app.clone(),
+                axum::http::Method::POST,
+                authorize_path,
+                Some(body),
+                &[("x-ocean-operator", "test-room-operator")],
+            )
+            .await;
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert_eq!(
+                body,
+                json!({"ok":false, "error":"definition_digest_mismatch"})
+            );
+        }
+        assert!(
+            with_rooms(&state, |store| store.room_agent_decision(&key, &decision))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            with_rooms(&state, |store| store.transcript(&key, None)).unwrap(),
+            baseline
+        );
+
+        let mut legacy = reviewed_digest_authorize_body(&decision);
+        legacy["expected_definition_digest"] = serde_json::Value::Null;
+        let (status, authorized) = operator_room_http_request(
+            app.clone(),
+            axum::http::Method::POST,
+            authorize_path,
+            Some(legacy.clone()),
+            &[("x-ocean-operator", "test-room-operator")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        // Adding the digest to a legacy decision does not change its hash.
+        legacy["expected_definition_digest"] = json!(digest);
+        let (status, replay) = operator_room_http_request(
+            app.clone(),
+            axum::http::Method::POST,
+            authorize_path,
+            Some(legacy),
+            &[("x-ocean-operator", "test-room-operator")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(replay["binding"], authorized["binding"]);
+        for expected in [None, Some(serde_json::Value::Null)] {
+            let mut body = json!({"decision_id":Uuid::new_v4().to_string()});
+            if let Some(expected) = expected {
+                body["expected_definition_digest"] = expected;
+            }
+            let (status, body) = operator_room_http_request(
+                app.clone(),
+                axum::http::Method::POST,
+                reauthorize_path,
+                Some(body),
+                &[("x-ocean-operator", "test-room-operator")],
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["applied"], true);
+        }
+        let binding =
+            with_rooms(&state, |store| store.room_agent_binding(&key, "builder")).unwrap();
+        let transcript = with_rooms(&state, |store| store.transcript(&key, None)).unwrap();
+        let consumed_decision =
+            with_rooms(&state, |store| store.room_agent_decision(&key, &decision)).unwrap();
+        let current = binding.as_ref().unwrap();
+        let request_id = RequestId::new_v4();
+        let mut control = self::status(request_id, RequestState::Running);
+        control.room_agent_authority = Some(request_control::RoomAgentRequestAuthority {
+            room: key.clone(),
+            agent_member_id: "builder".into(),
+            generation: current.generation,
+            admission_id: Uuid::new_v4().to_string(),
+            decision_id: current.decision_id.clone(),
+            approved_definition_digest: current.agent_definition_digest.clone(),
+            session_id: core_sid(persistent_rooms::authorized_room_agent_session_id(
+                &key,
+                "builder",
+                current.generation,
+            )),
+        });
+        let cancel = control.cancel.clone();
+        state.requests.write().await.insert(request_id, control);
+        let requests = requests_snapshot(&state.requests).await;
+        let refused_reauthorization_decision = Uuid::new_v4().to_string();
+        for path in [authorize_path, reauthorize_path] {
+            let malformed_decision = if path == reauthorize_path {
+                refused_reauthorization_decision.clone()
+            } else {
+                Uuid::new_v4().to_string()
+            };
+            let base = if path == authorize_path {
+                reviewed_digest_authorize_body(&malformed_decision)
+            } else {
+                json!({"decision_id":malformed_decision})
+            };
+            // These are full, shape-correct serde positional forms. Without
+            // object-only decoding, authorize replays a valid decision and
+            // reauthorize bumps this live generation and cancels its request.
+            let positional = if path == authorize_path {
+                json!([
+                    "builder",
+                    "builder",
+                    "human-1",
+                    decision,
+                    null,
+                    "explicit_only",
+                    "invocation_only",
+                    "none",
+                    []
+                ])
+            } else {
+                json!([
+                    malformed_decision,
+                    null,
+                    "explicit_only",
+                    "invocation_only",
+                    "none",
+                    []
+                ])
+            };
+            let (status, body) = operator_room_http_request(
+                app.clone(),
+                axum::http::Method::POST,
+                path,
+                Some(positional),
+                &[("x-ocean-operator", "test-room-operator")],
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(body, json!({"ok":false, "error":"invalid_request"}));
+            assert_eq!(
+                with_rooms(&state, |store| store.room_agent_binding(&key, "builder")).unwrap(),
+                binding
+            );
+            assert_eq!(
+                with_rooms(&state, |store| store.room_agent_decision(&key, &decision)).unwrap(),
+                consumed_decision
+            );
+            assert!(with_rooms(&state, |store| store
+                .room_agent_decision(&key, &malformed_decision))
+            .unwrap()
+            .is_none());
+            assert_eq!(
+                with_rooms(&state, |store| store.transcript(&key, None)).unwrap(),
+                transcript
+            );
+            assert_eq!(requests_snapshot(&state.requests).await, requests);
+            assert!(!cancel.is_cancelled());
+            for expected in [json!(1), json!(false), json!([]), json!({})] {
+                let mut body = base.clone();
+                body["expected_definition_digest"] = expected;
+                let (status, body) = operator_room_http_request(
+                    app.clone(),
+                    axum::http::Method::POST,
+                    path,
+                    Some(body),
+                    &[("x-ocean-operator", "test-room-operator")],
+                )
+                .await;
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+                assert_eq!(body, json!({"ok":false, "error":"invalid_request"}));
+            }
+            let mut unknown = base.clone();
+            unknown["unexpected"] = json!(true);
+            for malformed in [unknown, json!(null), json!("not an object")] {
+                let (status, body) = operator_room_http_request(
+                    app.clone(),
+                    axum::http::Method::POST,
+                    path,
+                    Some(malformed),
+                    &[("x-ocean-operator", "test-room-operator")],
+                )
+                .await;
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+                assert_eq!(body, json!({"ok":false, "error":"invalid_request"}));
+            }
+            // Values cannot represent duplicate keys: send the actual strict
+            // JSON body through the registered router instead of a DTO helper.
+            let raw = base.to_string();
+            let raw = format!(
+                "{},\"expected_definition_digest\":null,\"expected_definition_digest\":\"{}\"}}",
+                &raw[..raw.len() - 1],
+                digest
+            );
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method(axum::http::Method::POST)
+                        .uri(path)
+                        .header(axum::http::header::CONTENT_TYPE, "application/json")
+                        .header("x-ocean-operator", "test-room-operator")
+                        .body(axum::body::Body::from(raw))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+                json!({"ok":false, "error":"invalid_request"})
+            );
+            assert!(with_rooms(&state, |store| store
+                .room_agent_decision(&key, &malformed_decision))
+            .unwrap()
+            .is_none());
+        }
+        assert_eq!(
+            with_rooms(&state, |store| store.room_agent_binding(&key, "builder")).unwrap(),
+            binding
+        );
+        assert_eq!(
+            with_rooms(&state, |store| store.transcript(&key, None)).unwrap(),
+            transcript
+        );
+        assert_eq!(requests_snapshot(&state.requests).await, requests);
+        assert!(!cancel.is_cancelled());
+
+        // Equivalent object controls prove the positional refusals are not
+        // owner, package, policy, or decision refusals. Reusing the previously
+        // refused new decision also proves that no array consumed it.
+        let (status, replay) = operator_room_http_request(
+            app.clone(),
+            axum::http::Method::POST,
+            authorize_path,
+            Some(json!({
+                "agent_member_id":"builder", "agent_package_id":"builder",
+                "owner_member_id":"human-1", "decision_id":decision,
+                "expected_definition_digest":null, "activation_policy":"explicit_only",
+                "context_policy":"invocation_only", "memory_scope":"none",
+                "room_capability_grants":[],
+            })),
+            &[("x-ocean-operator", "test-room-operator")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(replay["created"], false);
+        assert_eq!(
+            replay["binding"]["generation"],
+            current.generation.to_string()
+        );
+        assert_eq!(
+            with_rooms(&state, |store| store.transcript(&key, None)).unwrap(),
+            transcript
+        );
+        assert_eq!(requests_snapshot(&state.requests).await, requests);
+        assert!(!cancel.is_cancelled());
+        let (status, applied) = operator_room_http_request(
+            app,
+            axum::http::Method::POST,
+            reauthorize_path,
+            Some(json!({
+                "decision_id":refused_reauthorization_decision,
+                "expected_definition_digest":null, "activation_policy":"explicit_only",
+                "context_policy":"invocation_only", "memory_scope":"none",
+                "room_capability_grants":[],
+            })),
+            &[("x-ocean-operator", "test-room-operator")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(applied["applied"], true);
+        assert_eq!(
+            applied["binding"]["generation"],
+            (current.generation + 1).to_string()
+        );
+        assert!(with_rooms(&state, |store| store
+            .room_agent_decision(&key, &refused_reauthorization_decision))
+        .unwrap()
+        .is_some());
+        assert_eq!(
+            with_rooms(&state, |store| store.transcript(&key, None))
+                .unwrap()
+                .len(),
+            transcript.len() + 1
+        );
+        assert!(cancel.is_cancelled());
+        assert_eq!(
+            state.requests.read().await[&request_id].status.state,
+            RequestState::Cancelling
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
