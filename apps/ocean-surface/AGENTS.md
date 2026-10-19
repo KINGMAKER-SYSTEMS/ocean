@@ -520,7 +520,13 @@ Web surface session UI:
 - Invite creation and redemption use daemon-owned outbound routes. Native
   `ocean://room/{key}/join?code={code}` links are strict attacker-triggerable
   input: stage them for explicit confirmation, send codes only in POST bodies,
-  and never log or project a code outside the explicit invite result.
+  and never log or persist codes. Codes appear only in explicit sharing or
+  invitation-entry controls. The room list's single Add room disclosure offers
+  Create room and Join room on every host. Browser invitation entry reuses the
+  native-link parser, rejects session links, clears its draft on cancel/staging,
+  and stages the existing confirmation without redeeming. Focus moves to the
+  confirmation; Escape cancels entry before it can close Rooms. Joining still
+  uses this client's own daemon identity, never the invitation sender's proxy.
 - Redemption completion owns only the exact accepted invite revision and room
   navigation generation; stage, dismiss, or navigation invalidates it. The
   existing Join control blocks duplicate submission of that pending intent.

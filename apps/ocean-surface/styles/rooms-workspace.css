@@ -1333,8 +1333,9 @@
 }
 
 .rooms-workspace__left-create {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
   gap: 6px;
   padding: 12px;
   background: var(--bg-raised);
@@ -1345,7 +1346,49 @@
   cursor: pointer;
 }
 
+.rooms-workspace__entry-menu summary,
+.rooms-workspace__entry-menu button,
+.rooms-workspace__entry-cancel {
+  padding: 8px 10px;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--fg-2);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rooms-workspace__entry-menu button {
+  display: block;
+  width: 100%;
+}
+
+.rooms-workspace__entry-menu summary:hover,
+.rooms-workspace__entry-menu button:hover,
+.rooms-workspace__entry-cancel:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__entry-menu summary:focus-visible,
+.rooms-workspace__entry-menu button:focus-visible,
+.rooms-workspace__entry-cancel:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.rooms-workspace__left-create > input,
+.rooms-workspace__left-create > select,
+.rooms-workspace__entry-menu,
+.rooms-workspace__entry-error { grid-column: 1 / -1; }
+
+.rooms-workspace__entry-cancel { order: 1; grid-column: 1; justify-self: start; }
+.rooms-workspace__entry-error { color: var(--fg); font-size: 12px; }
+
 .rooms-workspace__create-submit {
+  order: 2;
+  grid-column: 2;
   align-self: flex-end;
   height: 34px;
   padding: 0 14px;
