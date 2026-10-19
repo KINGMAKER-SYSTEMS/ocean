@@ -2572,3 +2572,13 @@ area: [backend]
 
 Ported Risingtides-dev/ocean-os#528 (menu half). `gpt-5.4`, `gpt-5.4-mini` and `gpt-5.3-codex-spark` leave `known_models()` because the Codex backend refuses them for ChatGPT accounts (400, verified live 2026-10-02 in the legacy PR); they stay routable as legacy arms in `resolve_model_selection` so pinned sessions still resolve and then fail over at selection. The fallback half of the legacy PR already landed via #63 (`gpt-6-astra`). New test `retired_codex_ids_stay_routable_but_leave_the_menu_and_fallback`; the menu snapshot test drops the three ids. Validation: `cargo test -p ocean-providers --lib`.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [14:40] [10-19-26]
+agent: [claude code] [claude-fable-5-1]
+worktree: [fix/surface-queued-prompts] [~/dev/oceanwork/wt-surface]
+type: [feature] [bug report]
+area: [frontend]
+
+John could not send a second message while a turn was running in Surface: the composer sent immediately, the daemon answered its one-operation-per-session `409 session has an active operation; try again shortly`, and the transcript showed it as an `assistant_error` block. The TUI has queued prompts client-side since OCEAN-275; Surface now does the same. `Daemon::send_prompt_with_display` and `send_voice_prompt` park the prompt in `queued_prompts` whenever a turn is streaming, earlier prompts are queued, or the head of the queue is waiting out a busy daemon; queued rows render below the live-activity row as dimmed, dashed user bubbles with a remove control; the `install_queue_drain` effect sends the oldest when `streaming` returns to false. A 409 on a send now re-queues the prompt at the head (taking back its echoed row) and retries every 1.5 s up to 40 times before the error block. Stop, New Session and a session switch clear the queue. Separately, the live-activity label "Getting started…" (shown between a sent message and the first streamed block, which with reasoning models is the whole thinking stretch) now reads "Thinking…". Validation: `cargo test -p ocean-surface-ui` (six new daemon tests), WASM clippy with warnings denied, WASM check. No live run claimed.
+_________________________________________________________________________________
