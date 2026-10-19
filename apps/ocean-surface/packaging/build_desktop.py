@@ -112,7 +112,7 @@ def tools(target):
             ABOUT_HASHES[target], directory, "cargo-about" + suffix, False)
     else:
         # Upstream 0.9.1 has no Intel Mac asset; build its locked release source.
-        run(["cargo", "install", "cargo-about", "--version", ABOUT_VERSION, "--locked", "--root", directory], cwd=SURFACE)
+        run(["cargo", "install", "cargo-about", "--version", ABOUT_VERSION, "--locked", "--features", "cli", "--root", directory], cwd=SURFACE)
         about = directory / "bin/cargo-about"
     if run([tauri, "--version"], capture=True) != f"tauri-cli {TAURI_VERSION}":
         raise RuntimeError("Unexpected Tauri CLI version")

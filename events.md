@@ -2892,3 +2892,12 @@ type: [feature-request]
 area: [frontend] [testing] [workflow]
 
 Prepare opt-in native installer candidates for Apple Silicon Mac, Intel Mac and Windows x64 from one clean committed revision. The builder pins Tauri/tool archives, generates native/UI/daemon license inventories, stages the matching daemon as a sidecar, checks executable architecture and Windows GUI subsystem, inspects actual DMG/NSIS contents, and runs only disposable bundled-daemon startup. Added four artifact regressions and restored the bundled Poppins OFL/Google bootstrap notices. Actionlint, workflow fixtures and artifact tests pass; actual installer builds are not yet proven. Added packaging/AGENTS.md and its Surface parent index. Signing, update/recovery, first-run configuration and two-machine use remain separate acceptance gates. Source inspection confirms the fresh daemon currently requires a selected model before binding its API; the existing explicit-model startup fixture does not prove blank first-run behavior. No live service, provider credential or distribution release changed.
+
+_________________________________________________________________________________
+time: [19:37] [19-10-26]
+agent: [Codex] [GPT-6]
+worktree: [codex/desktop-installer-repairs]
+type: [bug report]
+area: [testing]
+
+Native installer candidate run 39342381378 exposed cargo-about 0.9.1's opt-in cli feature on Intel Mac. Enable that feature when building the pinned license tool from source. Four artifact-integrity tests pass; actual Intel packaging remains pending. Existing packaging contracts remain unchanged because target, provenance, license and publication boundaries are unchanged.
