@@ -2874,3 +2874,12 @@ type: [workflow]
 area: [testing] [review]
 
 Prepared one unreviewed integration candidate from current canonical main and PRs #117, #118, #119, #120, #121 and #122. Reconciled only overlapping workflow, contract and public ledger additions: preserve all three opt-in read-only Windows probes, skip Mac packaging for any Windows probe, retain real registry-bootstrap coverage and all native fixture commands. Source comparisons confirm native shell, proxy, provider/Agent changes, Room package reader and TUI discovery are byte-identical to their candidate branches. Actionlint and the combined release-workflow fixtures pass. Source compilation, independent review and installation remain separate gates; this branch does not authorize merging, releasing or replacing a live service. Parent ownership indexes remain unchanged; the shared Windows file-primitive contract now lists all consumers.
+
+_________________________________________________________________________________
+time: [19:14] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/windows-native-room-consent]
+type: [bug report]
+area: [frontend] [testing]
+
+The native executable lacked Windows GUI-subsystem metadata, so a release launch would open an unwanted console. Set the release-only Windows subsystem attribute and verify the actual built PE header in the native probe. Debug builds retain console behavior. Updated Surface and workflow contracts; actionlint and workflow fixtures pass. Native artifact verification is pending; no installer or deployment claim.

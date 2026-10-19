@@ -654,4 +654,18 @@ jobs:
         run: cargo test --locked --release --lib
       - name: Build native executable
         working-directory: apps/ocean-surface/crates/ocean-tauri
-        run: cargo build --locked --release
+        run: |
+          cargo build --locked --release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $bytes = [System.IO.File]::ReadAllBytes((Join-Path $PWD 'target/release/ocean-tauri.exe'))
+          if ($bytes.Length -lt 64 -or [BitConverter]::ToUInt16($bytes, 0) -ne 0x5a4d) {
+            throw 'Native output is not a Windows executable'
+          }
+          $pe = [BitConverter]::ToInt32($bytes, 60)
+          if ($pe -lt 0 -or $pe -gt ($bytes.Length - 94) -or [BitConverter]::ToUInt32($bytes, $pe) -ne 0x4550) {
+            throw 'Invalid PE header in native output'
+          }
+          if ([BitConverter]::ToUInt16($bytes, $pe + 92) -ne 2) {
+            throw 'Desktop release would open a console window'
+          }
+          Write-Output 'Windows GUI subsystem verified'
