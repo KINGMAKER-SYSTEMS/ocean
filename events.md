@@ -2599,6 +2599,7 @@ area: [backend] [testing]
 Ported Risingtides-dev/ocean-surface#222. The Surface proxy allow-list now carries the three `/v1` route families the Surface calls and the daemon serves but the table never listed: `GET /v1/fs/file`, `GET /v1/agent/history/search`, and the five read-only `GET /v1/repo/github/{project_id}/...` projections. In the shipped PWA every one of these was same-origin, fell through to ServeDir and answered 404 with an empty body, which the callers render as blank rather than as an error. The GitHub family rebuilds its upstream path from the matched route template and refuses dot-segment captures so `%2e%2e` cannot collapse upstream. The other three families from the legacy PR (`/v1/requests`, `/v1/browser/screencast`, `/v1/browser/input`) were already routed here. New guard test `every_surface_v1_path_is_routed` scans the UI crate's URL builders against `build_app` and fails naming any unrouted path (mutation-checked by dropping `/v1/fs/file`); `github_routes_refuse_dot_segments_before_they_collapse_upstream` runs the router against a recording stub daemon. Validation: `cargo test -p ocean-surface-proxy` 37 passed, clippy `-D warnings` and rustfmt clean.
 _________________________________________________________________________________
 
+_________________________________________________________________________________
 time: [15:19] [19-10-26] EDT UTC-04:00
 agent: [Codex] [GPT-6]
 worktree: [codex/rooms-daily-use]
@@ -2621,6 +2622,35 @@ PR #111 at f49ad1ce passed 950 UI tests, WASM Clippy with denied warnings, forma
 No merge or deployment. Fresh acknowledgement of the review repair is still required. Legacy Surface rollback bytes remain missing; live daemon intake and limited disk prevented its separate release rebuild/install. Windows and Intel Mac distribution remains unverified, and current package release metadata still points to the personal repository. A recovered one-host reply is not team acceptance.
 
 _________________________________________________________________________________
+time: [15:47] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/org-team-distribution]
+type: [bug report]
+area: [automations] [testing]
+
+Corrected the active monorepo publisher, package repository metadata, onboarding registry mapping/install command, updater and staging checks to use @kingmaker-systems/ocean. The prior active workflow targeted the personal package despite running in KINGMAKER-SYSTEMS/ocean. Existing personal registry mappings remain untouched; the package guide describes an explicit org install rather than claiming an automatic namespace migration. Updated current release dispatch/ruleset documentation and owning workflow/runtime/packaging devlogs. Root child indexes and archived nested workflows remain unchanged.
+
+Validation: 13 onboarding fixtures pass, root release ownership/path/security contract passes, actionlint and shell syntax pass, and real updater scripts invoke the expected org package through mocked bun and npm. These are source and command-routing checks, not a published package or coworker install. A manual read-only release-candidate run is the next artifact validation gate. No release tag, package publication, service restart or credential change.
+
+_________________________________________________________________________________
+time: [15:48] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/org-team-distribution]
+type: [workflow]
+area: [testing]
+
+Correction to the preceding validation entry: the first lint invocation still reported a second pre-existing unused retry-loop variable. Repaired both unused indices without changing retry counts. A separate final actionlint invocation now exits zero, as do release ownership/path/security contract and diff checks.
+
+_________________________________________________________________________________
+time: [15:55] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/org-team-distribution]
+type: [bug report]
+area: [review] [testing]
+
+Addressed independent review of PR #113: an npm-only host with the personal package installed hits EEXIST because both scopes expose the same global commands. Onboarding now detects that installed personal package before credential reads/config writes and explains the explicit download/remove/local-install transition; it does not force-overwrite links or silently remove the working package. Updated the package guide and owning onboarding contract. All 15 onboarding fixtures pass. An isolated real-npm reproduction confirmed the collision, then the documented transition produced all three org command links. No real global package, identity or service was changed.
+
+_________________________________________________________________________________
 time: [16:01] [19-10-26] EDT UTC-04:00
 agent: [Codex] [GPT-6]
 worktree: [codex/rooms-daily-use]
@@ -2630,6 +2660,15 @@ area: [frontend] [review] [testing]
 Addressed the second independent PR #111 finding: active bindings previously rendered no status on browser/extension hosts. All bindings now expose the existing quiet status label independently of native consent controls. Active reads Authorized rather than Ready, since binding authority alone does not prove provider/workspace readiness. Updated the owning Surface contract. Six focused binding tests, formatting, Trunk and diff checks pass; delta WASM Clippy is running. Safari rendered the real active binding as Authorized, with no browser Review/Revoke controls; Escape restored Room options focus. A screenshot is retained locally. Prior full-suite evidence remains 951 passing tests at 199ab049; fresh-head review/build remains required.
 
 _________________________________________________________________________________
+time: [16:05] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/org-team-distribution]
+type: [bug report]
+area: [review] [testing]
+
+Completed the next PR #113 review delta: inspect the personal npm installation before choosing Bun or npm, preventing an earlier npm command path from masking a Bun org install. Added the mixed-manager regression and corrected the component's canonical onboarding prerequisite to the org package. Updated owning runtime/docs contracts; child indexes are unchanged. All 16 onboarding fixtures, shell syntax, diff check and cargo xtask docs-check pass (30 packages, 161 active Markdown files, 185 local links). Initial Mac release candidate run 39314057475 passed build, license inventory, packaging and isolated npm/Bun installation; current-head verification remains separate.
+
+_________________________________________________________________________________
 time: [16:11] [19-10-26] EDT UTC-04:00
 agent: [Codex] [GPT-6]
 worktree: [codex/rooms-daily-use]
@@ -2637,6 +2676,24 @@ type: [bug report]
 area: [frontend] [review] [testing]
 
 Repaired suffix-free authority/bootstrap projections from independent review. Both exact labels and space-delimited agent forms refresh daemon binding state; anonymous notices remain readable and unknown refusal codes retain their diagnostic text. Human messages are unchanged. All 952 UI tests (922 unit, 30 integration), WASM Clippy with denied warnings, formatting and diff checks pass. Owning Surface contract updated; parent indexes and runtime contracts unchanged because ownership and runtime behavior are unchanged. Fresh exact-head review and hosted build are still required; no merge or deployment claimed.
+
+_________________________________________________________________________________
+time: [16:13] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/org-team-distribution]
+type: [bug report]
+area: [review] [testing]
+
+Repaired the third independent onboarding finding: npm's active prefix does not describe every command on PATH. Before auth/config mutation, inspect resolved Ocean command package manifests and reject personal-package links from any prefix. After installation, require all three commands to resolve to matching bin entries in one org package before writing member identity. No Ocean commands are executed, overwritten or removed. Twenty fixture tests pass, including inactive npm prefixes, arbitrary shadow commands, mixed org installs and mismatched bin entries; shell syntax, ShellCheck and diff checks pass. Updated the component root contract; child indexes and packaging docs unchanged because ownership and documented migration commands are unchanged. Fresh exact-head review/CI remains required; no merge, package publication or deployment claimed.
+
+_________________________________________________________________________________
+time: [16:21] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/org-team-distribution]
+type: [bug report]
+area: [review] [testing]
+
+Independent review identified a stale org installation shadowing the package manager just updated. Post-install verification now compares every resolved command to the selected npm package root or Bun global bin links, rather than accepting any consistent org installation. No command execution or automatic removal. Twenty-two onboarding fixtures pass, including stale npm/Bun org copies and successful retry after PATH correction; shell syntax, ShellCheck and diff checks pass. Owning component contract updated; indexes unchanged. Hosted routine builds passed preceding 24ca448a. Fresh-head review/build and candidate artifact validation remain pending; no merge or publication claimed.
 
 _________________________________________________________________________________
 time: [16:30] [19-10-26] EDT UTC-04:00

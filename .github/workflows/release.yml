@@ -261,7 +261,7 @@ jobs:
         with:
           node-version: 22
           registry-url: "https://npm.pkg.github.com"
-          scope: "@risingtides-dev"
+          scope: "@kingmaker-systems"
 
       - name: Preflight npm payload integrity
         working-directory: platform/ocean-os/release-staging/npm
@@ -270,7 +270,7 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          package="@risingtides-dev/ocean"
+          package="@kingmaker-systems/ocean"
           version="${GITHUB_REF_NAME#v}"
           pack_json="$(npm pack --ignore-scripts --json --pack-destination "$RUNNER_TEMP")"
           local_integrity="$(printf '%s' "$pack_json" | node -e '
@@ -307,6 +307,8 @@ jobs:
           set -euo pipefail
           [[ "$RELEASE_TAG_RULESET_ID" =~ ^[0-9]+$ ]]
           echo "verifying required ruleset '$RELEASE_TAG_RULESET_NAME' (id $RELEASE_TAG_RULESET_ID)"
+          # JavaScript template literals below must not expand in the shell.
+          # shellcheck disable=SC2016
           curl --fail --location --proto '=https' --tlsv1.2 --silent --show-error \
             "https://api.github.com/repos/$GITHUB_REPOSITORY/rulesets/$RELEASE_TAG_RULESET_ID" | node -e '
             let input = "";
@@ -384,7 +386,7 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          package="@risingtides-dev/ocean"
+          package="@kingmaker-systems/ocean"
           version="${GITHUB_REF_NAME#v}"
           version_tag="version-$version"
 
@@ -415,7 +417,7 @@ jobs:
           fi
 
           published_integrity=""
-          for attempt in 1 2 3 4 5 6; do
+          for _attempt in 1 2 3 4 5 6; do
             if published_json="$(npm view "$package@$version" dist.integrity --json 2>/dev/null)"; then
               published_integrity="$(printf '%s' "$published_json" | node -e '
                 let input = "";
@@ -457,7 +459,7 @@ jobs:
           # successfully completing tag job recomputes after its own write and
           # requires two consecutive observations of registry-max == @latest.
           reconciled=0
-          for attempt in 1 2 3 4 5 6 7 8; do
+          for _attempt in 1 2 3 4 5 6 7 8; do
             candidate="$(registry_max)"
             npm dist-tag add "$package@$candidate" latest
             sleep 2

@@ -2,11 +2,13 @@
 """Offline contract checks for the root Ocean OS release workflow."""
 
 from pathlib import Path
+import json
 
 
 ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW = ROOT / ".github/workflows/release.yml"
 source = WORKFLOW.read_text()
+package = json.loads((ROOT / "platform/ocean-os/packaging/npm/package.json").read_text())
 
 
 def require(condition: bool, message: str) -> None:
@@ -15,6 +17,15 @@ def require(condition: bool, message: str) -> None:
 
 
 require(WORKFLOW.is_file(), "GitHub-discoverable root workflow exists")
+require(package["name"] == "@kingmaker-systems/ocean", "release package belongs to the canonical organization")
+require(package["repository"] == {
+    "type": "git",
+    "url": "git+https://github.com/KINGMAKER-SYSTEMS/ocean.git",
+    "directory": "platform/ocean-os/packaging/npm",
+}, "package links to its canonical monorepo component")
+require('scope: "@kingmaker-systems"' in source, "registry authentication uses the organization scope")
+require(source.count('package="@kingmaker-systems/ocean"') == 2, "publication and latest-tag reconciliation target the same org package")
+require("@risingtides-dev" not in source, "active publisher cannot target the personal package")
 require("workflow_dispatch:" in source, "manual release-candidate validation is available")
 require("pull_request:" not in source, "routine pull requests do not run release packaging")
 require('tags: ["v*"]' in source, "stable tag pattern invokes release validation")

@@ -11,6 +11,8 @@ Root GitHub Actions builds for the public Ocean monorepo.
   and stable-tag validation/publishing. Routine pull requests use the two build
   checks; manual validation never publishes. Package paths remain rooted under
   `platform/ocean-os/`, and release secrets stay confined to the tag-publish job.
+  Registry authentication, publication and latest-tag reconciliation target
+  `@kingmaker-systems/ocean`, linked to this canonical repository.
 - `build-scope.py` selects changed components; `test-build-scope.py` checks scope decisions, including NUL-terminated Git output. Unknown or unavailable diffs build both.
 - Root CI builds Ocean OS and the active Surface deliverables. Publishing and
   deployment remain owned by their component workflows and installers.

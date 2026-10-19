@@ -38,6 +38,8 @@ This child contract governs current architecture, operations, cross-repository r
   are not design, migration, or prompt inputs.
 - A document under `specs/` or `superpowers/` is not current architecture merely because it exists. Preserve its status and verify implementation before using it as a work order.
 - `TEAM_ONBOARDING.md` owns public package/host-identity preparation only. Keep repository routing canonical, package commands source-backed, and PR41 identity and supervised/federation installation prerequisites explicit. Never include private host/network/access inventories or claim configuration writes establish runtime activation.
+  Package access targets `@kingmaker-systems/ocean`; personal npm installations
+  require the package guide's explicit migration even when Bun is available.
 - Rooms means durable `/v1/rooms/persistent/*` collaboration plus the independent LiveKit token route; Track-0 projection-room material is historical.
 
 ## Proposed A3b amendment boundary

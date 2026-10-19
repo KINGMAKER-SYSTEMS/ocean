@@ -74,6 +74,17 @@ Use `crates/AGENTS.md` for all current workspace packages, ownership exclusions,
 - Run the nearest owning crate's narrow command from `crates/AGENTS.md` or its local contract.
 - Daemon installer changes: `bash -n ops/install-ocean-daemon.sh` and `PYTHONDONTWRITEBYTECODE=1 python3 ops/test_install_ocean_daemon.py`. Fixtures redirect only the copied script's home-path token, preserve process `HOME`, and substitute build/network/service commands inside a temporary tree; they never install, read auth, or operate live launchd. A real locked production-feature build and merged-revision runtime readback remain separate release checks.
 - Onboarding preparation: `ops/onboard-teammate.sh` and `ops/onboarding_files.py` install only the published package commands and prepare strict host identity. Python 3.11+ owns descriptor-anchored, no-follow atomic owner-only config writes; reject symlink, nonregular, foreign-owned and multiply-linked destinations. No service promotion, restart, federation activation, credential-file loader or MCP executable is supplied by this candidate. Identity projection requires PR41 in the installed daemon; configuration is not caller authentication. Verify with `bash -n ops/onboard-teammate.sh` and `PYTHONDONTWRITEBYTECODE=1 python3 ops/test_onboard_teammate.py`; fixtures preserve process HOME, redirect only copied home-path tokens, and mock all package/auth/platform commands.
+  The package and registry mapping are `@kingmaker-systems/ocean` and
+  `@kingmaker-systems`; preserve unrelated mappings, including the old personal
+  scope, when preparing the org install. Existing personal packages need an
+  explicit org install before their updater follows org releases.
+  Onboarding checks npm even when Bun is available and refuses a still-installed personal package before credential
+  reads or config writes; download the org tarball, remove the personal package,
+  then install that local archive before retrying. Never force-overwrite global
+  command links or silently remove a working installation. Resolved PATH commands
+  are inspected before auth for personal packages from any prefix; after install,
+  all three commands must match the bin entries of the installation just updated
+  before identity is written (npm package root or Bun global bin links). Never execute those commands to infer provenance.
 - For docs-only changes, run `cargo xtask docs-check`; it validates active repo-local Markdown file targets (not heading fragments), archive boundaries, canonical workspace-index parity, and non-default-member rationale.
 
 ### Targeted completion checks
