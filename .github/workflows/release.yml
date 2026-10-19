@@ -532,6 +532,14 @@ jobs:
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: platform/ocean-os -> target
+      - name: Test Windows profile defaults
+        run: cargo test --locked -p ocean-providers profile
+      - name: Test Windows provider credential publication
+        run: |
+          cargo test --locked -p ocean-providers auth_file -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p ocean-oauth store -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Test Windows credential security
         run: cargo test --locked -p ocean-observatory auth
       - name: Build Windows daemon and TUI

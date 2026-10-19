@@ -52,8 +52,11 @@ pub(crate) fn resolve(env: &ProviderEnv) -> Option<ResolvedCredential> {
     }
     // A custom CLI config selects only its own file; never borrow the default account.
     let directory = custom.map(PathBuf::from).or_else(|| {
-        env.get("HOME")
-            .map(|home| PathBuf::from(home).join(".claude"))
+        crate::home_dir_with(
+            env.get("HOME").map(std::ffi::OsStr::new),
+            env.get("USERPROFILE").map(std::ffi::OsStr::new),
+        )
+        .map(|home| home.join(".claude"))
     })?;
     let path = directory.join(".credentials.json");
     let mut bytes = Vec::new();
@@ -71,7 +74,7 @@ pub(crate) fn resolve(env: &ProviderEnv) -> Option<ResolvedCredential> {
     })
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 fn bounded_output(
     mut command: std::process::Command,
     deadline: std::time::Duration,
@@ -235,5 +238,38 @@ mod tests {
         let start = std::time::Instant::now();
         assert!(bounded_output(command, std::time::Duration::from_millis(30)).is_none());
         assert!(start.elapsed() < std::time::Duration::from_secs(1));
+    }
+    #[cfg(windows)]
+    #[test]
+    fn windows_profile_native_login_uses_only_the_selected_home() {
+        let profile = tempfile::tempdir().unwrap();
+        let native = profile.path().join(".claude");
+        std::fs::create_dir(&native).unwrap();
+        let bytes = fixture(i64::MAX, serde_json::json!(["user:inference"]));
+        std::fs::write(native.join(".credentials.json"), &bytes).unwrap();
+        let mut env = ProviderEnv::default();
+        env.vars
+            .insert("USERPROFILE".into(), profile.path().display().to_string());
+        assert!(resolve(&env).is_some());
+        let other = tempfile::tempdir().unwrap();
+        env.vars
+            .insert("HOME".into(), other.path().display().to_string());
+        assert!(
+            resolve(&env).is_none(),
+            "must not borrow the profile account after HOME selected another"
+        );
+        env.vars.remove("HOME");
+        env.vars.insert(
+            "CLAUDE_CONFIG_DIR".into(),
+            other.path().display().to_string(),
+        );
+        assert!(
+            resolve(&env).is_none(),
+            "explicit CLI config must remain exclusive"
+        );
+        assert_eq!(
+            std::fs::read(native.join(".credentials.json")).unwrap(),
+            bytes
+        );
     }
 }

@@ -44,7 +44,8 @@ manifest (`docs/specs/2026-07-17-observatory-gate1-implementation-manifest.md`).
   → fsync of the parent directory; a new entry is not durable without the
   last step. Token claims need `expires_at > issued_at`.
 - Windows credential files use `src/auth_windows.rs`, also shared with daemon
-  operator-key storage. Creation installs a protected DACL granting only the
+  operator-key storage and provider auth-file temporary creation. These callers
+  share only file custody, not the Observatory store or policy. Creation installs a protected DACL granting only the
   process user full access; handle checks refuse other owners, inherited/broad
   ACLs, reparse points, directories and multiple links without repairing them.
   Publication flushes and closes the temporary file before a same-volume

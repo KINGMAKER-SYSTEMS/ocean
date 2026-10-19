@@ -109,6 +109,8 @@ require("cargo build --locked --release -p ocean-daemon -p ocean-tui" in windows
 require("rustc --edition=2021 --test crates/ocean-tui/src/shell/daemon_boot.rs" in windows_job,
         "Windows probe executes actual-source daemon discovery tests")
 require("cancel-in-progress: true" in windows_job, "superseded Windows probes cancel by ref")
+require("cargo test --locked -p ocean-providers auth_file -- --test-threads=1" in windows_job, "Windows probe exercises credential publication")
+require("cargo test --locked -p ocean-oauth store -- --test-threads=1" in windows_job, "Windows probe exercises login credential merges")
 
 # Exercise the actual registry-max function with npm, including its default-tag
 # resolution. The first publication has a version tag but no latest tag yet.

@@ -14,10 +14,11 @@ Root GitHub Actions builds for the public Ocean monorepo.
   Registry authentication, publication and latest-tag reconciliation target
   `@kingmaker-systems/ocean`, linked to this canonical repository.
   Manual `windows_probe` builds daemon/TUI executables and runs Observatory
-  credential, operator-key, guarded skill/package-file and TUI discovery tests.
+  credential, operator-key, guarded skill/package-file, TUI discovery,
+  provider profile-default and auth-file/OAuth-store publication tests.
   Disposable-daemon fixtures verify startup identity and Room package preview,
   digest changes, missing packages, link refusal and file limits without
-  provider credentials. The probe
+  provider requests or real credentials. The probe
   has read-only permissions and never publishes. This probe is separate from routine CI and Mac package validation.
   The publish job has no source checkout: its first shell starts at the existing
   workspace root, verifies the artifact digest, then creates the component

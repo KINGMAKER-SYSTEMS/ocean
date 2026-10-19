@@ -134,9 +134,10 @@ impl AuthFileGuard {
         std::fs::read(&self.auth_file)
     }
 
-    /// Publish a fresh merge through a unique create-new sibling. Unix mode0600
-    /// is set at creation, before any bytes. Pre-rename failures preserve the
-    /// old file; post-rename directory-sync failure is explicitly distinguished.
+    /// Publish through a unique create-new sibling. Unix mode0600 or a Windows
+    /// protected current-user-only ACL is set before any bytes. Failures before
+    /// replacement preserve the old file; post-rename directory-sync failure is
+    /// explicitly distinguished.
     pub fn publish(&self, bytes: &[u8]) -> Result<(), AuthFileWriteError> {
         self.publish_with(bytes, |_| Ok(()), sync_parent)
     }
@@ -203,14 +204,19 @@ fn create_private_temp(auth_file: &Path) -> io::Result<PrivateTemp> {
 }
 
 fn create_private_temp_at(path: PathBuf) -> io::Result<PrivateTemp> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let file = options.open(&path)?;
+    #[cfg(windows)]
+    let file = ocean_observatory::auth::windows_file::create(&path)?;
+    #[cfg(not(windows))]
+    let file = {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options.open(&path)?
+    };
     Ok(PrivateTemp {
         path,
         file: Some(file),
@@ -246,6 +252,33 @@ mod tests {
     fn private(path: &Path) -> bool {
         use std::os::unix::fs::PermissionsExt;
         std::fs::metadata(path).unwrap().permissions().mode() & 0o777 == 0o600
+    }
+
+    #[cfg(windows)]
+    fn private(path: &Path) -> bool {
+        ocean_observatory::auth::windows_file::open(path).is_ok()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn auth_file_windows_temp_is_private_before_content_and_after_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let mut temp = create_private_temp(&path).unwrap();
+        assert_eq!(temp.file.as_ref().unwrap().metadata().unwrap().len(), 0);
+        // The writer deliberately denies write sharing; close it before the
+        // independent checked read verifies the protected ACL on the empty file.
+        drop(temp.file.take());
+        assert!(private(&temp.path));
+        drop(temp);
+        assert!(no_temps(dir.path()));
+        let guard = lock_auth_file(&path).unwrap();
+        guard.publish(b"{\"synthetic\":1}").unwrap();
+        assert!(private(&path));
+        guard.publish(b"{\"synthetic\":2}").unwrap();
+        assert!(private(&path));
+        assert_eq!(guard.read().unwrap(), b"{\"synthetic\":2}");
+        assert!(no_temps(dir.path()));
     }
 
     #[test]
@@ -315,9 +348,9 @@ mod tests {
             .publish_with(
                 b"{\"synthetic\":true}",
                 |temp| {
-                    #[cfg(unix)]
+                    #[cfg(any(unix, windows))]
                     assert!(private(temp));
-                    #[cfg(not(unix))]
+                    #[cfg(not(any(unix, windows)))]
                     let _ = temp;
                     Err(io::Error::from(io::ErrorKind::PermissionDenied))
                 },
@@ -347,7 +380,7 @@ mod tests {
             .unwrap_err();
         assert!(error.published());
         assert!(guard.read().unwrap() == b"{\"synthetic\":true}");
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         assert!(private(&path));
         assert!(no_temps(dir.path()));
     }

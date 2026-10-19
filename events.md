@@ -2793,3 +2793,21 @@ type: [feature-request]
 area: [backend] [testing]
 
 Implemented the Windows Room-package capture path through retained local-drive directory handles. Reused checked no-reparse opens, added bounded synchronous handle enumeration with strict UTF-16 names, exact child lookup and fixed error mapping; common map hashing and count/depth/byte ceilings remain unchanged. Added native fixtures for directory limits, Unicode names, root retargeting, path/link refusal and malformed directory records. Windows cross-target denied-warning Clippy passes; all 22 existing package-authority tests, daemon check, docs-check, actionlint and release contracts pass locally. A disposable actual-daemon HTTP fixture passes on the existing Mac release, verifying identity, complete-map digest, nested byte changes, missing packages, symlink refusal and size bounds; it is now in the opt-in native Windows probe. Native Windows execution and fresh independent review remain pending. Updated daemon/workflow contracts; parent indexes unchanged because ownership is unchanged. No provider reply, Windows installer, resource/attachment support or deployment acceptance claimed.
+
+_________________________________________________________________________________
+time: [18:30] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/windows-profile-paths]
+type: [bug report]
+area: [backend] [testing]
+
+Windows machines without HOME now select absolute USERPROFILE for shared Agent state and default Ocean/Codex/native Claude credential paths. Explicit config and account paths retain precedence; Unix behavior is unchanged. Added synthetic profile/account-isolation fixtures and native Windows workflow execution. Fixed the native Claude subprocess helper cfg so Windows test compilation does not include an unused Unix-only test helper. Local provider 74, OAuth store 6, and Agent refresh 10 tests pass; host and Windows cross-target provider Clippy, docs-check, actionlint, and workflow contracts pass. Native Windows execution and fresh independent review remain pending. Updated provider, Agent, crate-index and workflow contracts; no new boundaries. No installation or real provider login claimed.
+
+_________________________________________________________________________________
+time: [19:06] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/windows-profile-paths]
+type: [bug report]
+area: [backend] [testing]
+
+Provider credential publication on Windows now creates its temporary file with the existing protected current-user-only ACL primitive before writing any bytes, instead of inheriting folder permissions. The target-only Observatory dependency supplies file creation only; publication leases, merge behavior and provider routing remain unchanged. Added native checks for empty-file privacy and replacement ACLs, plus provider custody and OAuth store tests in the manual Windows probe. Host 9 custody, 6 store and 10 refresh tests pass; provider Clippy, docs-check, format, actionlint and workflow contracts pass. Native Windows execution of the new credential checks is pending. Updated Providers, Observatory, OAuth and workflow contracts; ownership indexes unchanged.
