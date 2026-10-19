@@ -242,7 +242,7 @@ struct Pending {
 
 #[derive(Debug)]
 enum Decision {
-    Consent(Frozen),
+    Consent(Box<Frozen>),
     Revoke {
         room: String,
         agent: String,
@@ -719,7 +719,7 @@ impl ConsentBroker {
         let preview = frozen.projection(&id, self.ttl);
         entries.push(Entry {
             id,
-            decision: Decision::Consent(frozen),
+            decision: Decision::Consent(Box::new(frozen)),
             created: Instant::now(),
             phase: Phase::Ready,
         });
@@ -742,7 +742,7 @@ impl ConsentBroker {
             return Err("consent_invalidated".into());
         };
         entry.phase = Phase::Confirming;
-        Ok(frozen.clone())
+        Ok((**frozen).clone())
     }
 
     /// Settle the native confirmation. Only a still-claimed, confirmed,
@@ -762,7 +762,7 @@ impl ConsentBroker {
         let Decision::Consent(frozen) = &entry.decision else {
             return Err("consent_invalidated".into());
         };
-        Ok(Some(frozen.clone()))
+        Ok(Some((**frozen).clone()))
     }
 
     fn settle_confirmation(
@@ -1774,7 +1774,7 @@ mod tests {
         let id = fresh_id();
         broker.pending.lock().entries.push(Entry {
             id: id.clone(),
-            decision: Decision::Consent(frozen),
+            decision: Decision::Consent(Box::new(frozen)),
             created: Instant::now(),
             phase: Phase::Ready,
         });
