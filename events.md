@@ -2619,3 +2619,12 @@ area: [frontend] [review] [testing]
 PR #111 at f49ad1ce passed 950 UI tests, WASM Clippy with denied warnings, formatting, Trunk and hosted Surface build. Final Safari wide and compact checks confirmed the close control receives focus and Escape closes only the requested thread, restoring its exact trigger. Screenshots retained locally. Independent Codex review then identified valid routine audit projections without agent names. Repaired exact-label matching while retaining space-delimited agent suffixes; a regression preserves human messages and unrecognized suffixes. The repaired source passes 951 UI tests and formatting; delta WASM Clippy and hosted build remain pending at this entry. Updated the owning Surface contract; other indexes and runtime docs remain unchanged because their contracts are unaffected.
 
 No merge or deployment. Fresh acknowledgement of the review repair is still required. Legacy Surface rollback bytes remain missing; live daemon intake and limited disk prevented its separate release rebuild/install. Windows and Intel Mac distribution remains unverified, and current package release metadata still points to the personal repository. A recovered one-host reply is not team acceptance.
+
+_________________________________________________________________________________
+time: [16:01] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/rooms-daily-use]
+type: [bug report]
+area: [frontend] [review] [testing]
+
+Addressed the second independent PR #111 finding: active bindings previously rendered no status on browser/extension hosts. All bindings now expose the existing quiet status label independently of native consent controls. Active reads Authorized rather than Ready, since binding authority alone does not prove provider/workspace readiness. Updated the owning Surface contract. Six focused binding tests, formatting, Trunk and diff checks pass; delta WASM Clippy is running. Safari rendered the real active binding as Authorized, with no browser Review/Revoke controls; Escape restored Room options focus. A screenshot is retained locally. Prior full-suite evidence remains 951 passing tests at 199ab049; fresh-head review/build remains required.

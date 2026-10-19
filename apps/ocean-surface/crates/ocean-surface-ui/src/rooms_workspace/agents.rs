@@ -213,9 +213,7 @@ pub(super) fn AgentBindingMenu(rooms: Rooms, member_id: String) -> impl IntoView
         let revoke_binding = binding.clone();
         let revocable = status != "revoked";
         Some(view! {
-            {(status != "active").then(|| view! {
-                <span class="rooms-workspace__member-binding">{binding_status_label(&status)}</span>
-            })}
+            <span class="rooms-workspace__member-binding">{binding_status_label(&status)}</span>
             {crate::host::room_consent_supported().then(|| view! {
             <span class="room-overflow">
                 <button
@@ -271,7 +269,7 @@ fn binding_status_label(status: &str) -> &'static str {
         "suspended" => "Paused",
         "stale" => "Review needed",
         "revoked" => "Access removed",
-        "active" => "Ready",
+        "active" => "Authorized",
         _ => "Unavailable",
     }
 }
@@ -359,6 +357,7 @@ mod tests {
 
     #[test]
     fn binding_labels_distinguish_paused_review_and_removed_access() {
+        assert_eq!(binding_status_label("active"), "Authorized");
         assert_eq!(binding_status_label("suspended"), "Paused");
         assert_eq!(binding_status_label("stale"), "Review needed");
         assert_eq!(binding_status_label("revoked"), "Access removed");

@@ -464,6 +464,8 @@ Web surface session UI:
   unknown failures or rewrite human messages. System rows wrap legibly; grouped
   messages keep the avatar gutter with time revealed on intent.
 - Agent binding status is visible on every host, including browser and extension.
+  Active bindings read "Authorized": room access alone does not establish
+  provider connectivity, workspace availability or successful inference.
   Fresh authority/bootstrap/refusal SSE messages refresh bindings through the
   existing room-generation and latest-request guards; duplicate replay rows do
   not dispatch refreshes. Native consent controls remain native-only.
