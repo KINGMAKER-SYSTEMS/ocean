@@ -521,21 +521,29 @@ Web surface session UI:
   preview itself and freezes room, package, agent, owner, digest, policies
   and a fresh UUIDv4 decision id; the
   page gets a projection and an opaque consent id, never a digest it can
-  supply. At most 4 consents live for 120 s; a newer preview supersedes an
-  idle one for the same agent. The TTL covers the dialog too: idle and
-  confirming consents are pruned past it, and a confirmation settled after it
-  is refused (`consent_expired`) and sends nothing; only an in-flight send
-  keeps its slot.
+  supply. Authorize and revoke share at most 4 pending decisions, with a
+  120 s TTL; a newer preview supersedes an idle decision for the same agent.
+  The TTL covers both the dialog and blocking-worker queue. Dispatch claims
+  a still-owned, unexpired queued decision under the native mutex, then
+  releases that mutex before I/O; only a dispatch-claimed send keeps its slot.
+  Preview/bootstrap capture a native cancellation epoch before entering the
+  blocking queue, and may insert a preview only if that epoch is still current.
 - Authorize/reauthorize require a native dialog (`tauri-plugin-dialog`, Rust
   side; the webview gains no dialog permission) and always send the frozen
   non-null `expected_definition_digest`. The authorize dialog shows only
   frozen preview values: room, package id, agent member id, owner, requested
-  capabilities and digest. Decline, cancel, expiry, navigation
-  invalidation (`room_consent_cancel(None)` from the shared room reset) or an
-  invalidation racing the dialog sends zero privileged requests. A definitive
-  reply consumes the consent; a lost acknowledgement is `unknown`, is never
-  retried automatically, and an explicit re-confirmed retry replays the same
-  decision id. Revoke is natively confirmed with a fresh decision id; its
+  capabilities and digest. Decline, expiry or cancellation received natively
+  before the dispatch claim sends zero authorization/revoke requests.
+  `room_consent_cancel(None)` clears all tracked decisions and advances the
+  epoch, including while a revoke dialog or preview/bootstrap read is pending.
+  This boundary is native receipt, not a page navigation click or IPC enqueue:
+  after the dispatch claim, a request may finish, but cancellation prevents its
+  late completion from restoring retry state. Bootstrap side effects are not
+  rolled back. A definitive reply consumes the decision; a lost acknowledgement
+  is `unknown`, never retried automatically, and an explicit re-confirmed retry
+  replays the same decision id. Revoke registers native custody before its
+  dialog, invalidates older authorization for that target, and uses a fresh
+  decision id unless explicitly retrying a still-live unknown decision; its
   dialog names the exact room and `agent_member_id` being revoked.
 - Native dialog text: member ids and capabilities containing controls,
   line/paragraph separators, bidi or invisible formatting characters are
@@ -545,8 +553,9 @@ Web surface session UI:
 - Consent transport: the shared `daemon_transport.rs` (below) with fixed
   typed intents (`Intent::{Preview, Authorize, Reauthorize, Revoke, Me,
   Bootstrap}`; only the preview and `Me` are unprivileged). A transport bad reply (hostile chunk size,
-  redirect, non-JSON, oversize) on a decision is `unknown` and frees the slot,
-  never a panic; an untrusted `OCEAN_DAEMON_URL` makes every consent command
+  redirect, non-JSON, oversize) on a decision is `unknown` and returns an
+  uncancelled entry to Ready for a manual same-decision retry, never a panic;
+  an untrusted `OCEAN_DAEMON_URL` makes every consent command
   `consent_unavailable`. Consent commands refuse any webview other than
   `main` (`consent_window_refused`).
 - Local bootstrap (PR G): a plain Local `POST .../participants` never
@@ -569,6 +578,7 @@ Web surface session UI:
   retried (the page re-reads the roster). Text lives in
   `rooms::bootstrap_error_text`. Web/extension hosts keep the plain
   participant add and get no bootstrap control.
+- Binding GETs publish only for the newest request in the current Room generation; reset retires pending reads, and failed refreshes keep the last projection without reviving older responses.
 - Surface: `host.rs` wrappers are absent off-Tauri, so browser/extension hosts
   render bindings but never emulate consent. `rooms.rs` owns the bindings
   client (`GET .../agents`), the consent draft (room generation + ticket
@@ -701,6 +711,7 @@ Web surface session UI:
 - The private `host/native_events.mjs` adapter belongs to the `host.rs` seam and uses Tauri 2 IPC callback registration and `plugin:event|listen/unlisten`; legacy subscribers retain their app lifetime. Workspace path listeners belong to the component; cleanup unregisters even late native registration. Ignore events outside the root by path-component boundary. All transcript tool argument previews, including browser tools, are capped at 60 Unicode characters; no remaining consumer parses whole preview JSON.
 - Verify the production event adapter with `node --test scripts/native-events.test.mjs`; its mocked pinned Tauri API exercises delivery, cancellation, late admission and failure cleanup.
 - Pinned cards use the vertical gutter only with the workspace closed; open-workspace layouts retain the horizontal strip.
+- Below 900px, the existing workspace toggle stays above the open pane in a safe-area-aware corner outside its scrolling tabs. It uses the same pane visibility state for dismissal and reopening; do not add a second permanent close control. Desktop docking and reveal/Escape policy stay unchanged.
 
 ## Workspace Map
 
