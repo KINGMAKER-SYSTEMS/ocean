@@ -71,8 +71,11 @@ auth-file write custody. Provider wire encoding remains in `ocean-protocol`.
   contention deadline. Open/lock/timeout errors refuse the write; there is no
   unlocked fallback. Dropping custody never removes the shared lock file.
 - A guard binds its configured auth path and publishes unique create-new sibling
-  files, Unix0600 at creation, file sync then atomic replacement. Only owned
-  temporary files receive bounded best-effort cleanup.
+  files, Unix0600 or protected current-user-only Windows ACLs at creation,
+  file sync then atomic replacement. Windows reuses Observatory's checked
+  credential-file creation primitive through a target-only dependency; this
+  initializes no store and changes no provider routing or credential discovery.
+  Only owned temporary files receive bounded best-effort cleanup.
 - Pre-rename failure preserves the previous file. Post-rename Unix directory-sync
   failure means published bytes with durability unconfirmed; do not restore a
   stale snapshot. Directory fsync remains unsupported off Unix.

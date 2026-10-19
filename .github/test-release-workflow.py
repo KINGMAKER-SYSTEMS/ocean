@@ -105,5 +105,7 @@ require("if: github.event_name == 'workflow_dispatch' && inputs.windows_probe" i
 require("contents: read" in windows_job and ": write" not in windows_job, "Windows probe has no write authority")
 require("cargo build --locked --release -p ocean-daemon -p ocean-tui" in windows_job, "Windows probe compiles the actual release binaries")
 require("cancel-in-progress: true" in windows_job, "superseded Windows probes cancel by ref")
+require("cargo test --locked -p ocean-providers auth_file -- --test-threads=1" in windows_job, "Windows probe exercises credential publication")
+require("cargo test --locked -p ocean-oauth store -- --test-threads=1" in windows_job, "Windows probe exercises login credential merges")
 
 print("Ocean release workflow root/path/security contract: PASS")
