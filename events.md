@@ -2883,3 +2883,12 @@ type: [bug report]
 area: [frontend] [testing]
 
 The native executable lacked Windows GUI-subsystem metadata, so a release launch would open an unwanted console. Set the release-only Windows subsystem attribute and verify the actual built PE header in the native probe. Debug builds retain console behavior. Updated Surface and workflow contracts; actionlint and workflow fixtures pass. Native artifact verification is pending; no installer or deployment claim.
+
+_________________________________________________________________________________
+time: [19:30] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/desktop-installers]
+type: [feature-request]
+area: [frontend] [testing] [workflow]
+
+Prepare opt-in native installer candidates for Apple Silicon Mac, Intel Mac and Windows x64 from one clean committed revision. The builder pins Tauri/tool archives, generates native/UI/daemon license inventories, stages the matching daemon as a sidecar, checks executable architecture and Windows GUI subsystem, inspects actual DMG/NSIS contents, and runs only disposable bundled-daemon startup. Added four artifact regressions and restored the bundled Poppins OFL/Google bootstrap notices. Actionlint, workflow fixtures and artifact tests pass; actual installer builds are not yet proven. Added packaging/AGENTS.md and its Surface parent index. Signing, update/recovery, first-run configuration and two-machine use remain separate acceptance gates. Source inspection confirms the fresh daemon currently requires a selected model before binding its API; the existing explicit-model startup fixture does not prove blank first-run behavior. No live service, provider credential or distribution release changed.

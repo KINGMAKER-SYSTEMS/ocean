@@ -971,3 +971,9 @@ cwd-authoritative rule.
 ocean-surface-ui --target wasm32-unknown-unknown`, `cargo check -p
 ocean-surface-proxy`, `cargo test -p ocean-surface-ui --target
 wasm32-unknown-unknown --no-run`, `cargo test -p ocean-surface-ui`.
+
+
+## Child devlog Index
+
+- `packaging/` — native desktop candidates, bundled daemon and legal payload →
+  `packaging/AGENTS.md`. Existing proxy deployment remains owned by this parent.

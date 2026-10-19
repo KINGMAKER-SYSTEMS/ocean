@@ -32,6 +32,11 @@ Root GitHub Actions builds for the public Ocean monorepo.
   Tauri candidate check. It builds the real web bundle, runs native shell/Room-consent tests and
   builds the executable and verifies its Windows GUI subsystem. It does not
   package, publish or install the app.
+- Manual `desktop_candidate` builds unsigned installer artifacts on native
+  Apple Silicon, Intel Mac and Windows x64 runners. Surface packaging owns
+  the matching daemon, legal inventories and artifact-content checks. The job
+  runs only disposable-daemon acceptance, has read-only permissions and uploads
+  checked candidates without signing, publishing or installing them.
 - `build-scope.py` selects changed components; `test-build-scope.py` checks scope decisions, including NUL-terminated Git output. Unknown or unavailable diffs build both.
 - `test-daemon-startup.py` checks actual candidate startup, revision, isolated
   member identity and state-file creation; Unix also checks private file modes.

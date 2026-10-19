@@ -17,6 +17,10 @@ on:
         description: Test and build the Windows native shell without publishing
         type: boolean
         default: false
+      desktop_candidate:
+        description: Build unsigned Mac and Windows desktop installers without publishing
+        type: boolean
+        default: false
   push:
     tags: ["v*"]
 
@@ -30,7 +34,7 @@ env:
 jobs:
   validate:
     name: validate package (macos-arm64)
-    if: github.event_name == 'push' || (!inputs.windows_probe && !inputs.windows_surface_probe && !inputs.windows_native_probe)
+    if: github.event_name == 'push' || (!inputs.windows_probe && !inputs.windows_surface_probe && !inputs.windows_native_probe && !inputs.desktop_candidate)
     runs-on: macos-latest
     timeout-minutes: 60
     defaults:
@@ -669,3 +673,62 @@ jobs:
             throw 'Desktop release would open a console window'
           }
           Write-Output 'Windows GUI subsystem verified'
+
+  desktop-candidate:
+    name: desktop candidate (${{ matrix.target }})
+    if: github.event_name == 'workflow_dispatch' && inputs.desktop_candidate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    concurrency:
+      group: desktop-candidate-${{ matrix.target }}-${{ github.ref }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Install repository-pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          toolchain="$(awk -F '"' '/^channel = / { print $2; exit }' apps/ocean-surface/rust-toolchain.toml)"
+          test -n "$toolchain"
+          rustup toolchain install "$toolchain" --profile minimal --target wasm32-unknown-unknown
+          echo "RUSTUP_TOOLCHAIN=$toolchain" >> "$GITHUB_ENV"
+      - name: Cache cargo and target
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: |
+            platform/ocean-os -> target
+            apps/ocean-surface -> target
+            apps/ocean-surface/crates/ocean-tauri -> target
+      - name: Install Trunk
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
+        with:
+          tool: trunk@0.21.14
+          fallback: none
+      - name: Check packaging fixtures
+        run: python -B -m unittest discover -s apps/ocean-surface/packaging -p 'test_*.py'
+      - name: Build and inspect native installer
+        run: python -B apps/ocean-surface/packaging/build_desktop.py --target '${{ matrix.target }}'
+      - name: Upload unsigned candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ocean-desktop-${{ matrix.target }}-${{ github.sha }}
+          path: apps/ocean-surface/target/desktop/${{ github.sha }}/${{ matrix.target }}/artifacts/*
+          if-no-files-found: error
+          retention-days: 14
