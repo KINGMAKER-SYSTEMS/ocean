@@ -2712,3 +2712,12 @@ type: [bug report]
 area: [frontend] [testing]
 
 Restored missing persistent-room PATCH forwarding in the authenticated browser proxy. The read cursor could previously fail to save despite a successful room load. All 38 proxy tests and denied-warning Clippy pass, including an actual upstream fixture proving method/path/query/body preservation and refusal without a proxy session; browser cookies and forged operator headers stay stripped. Safari on the localhost candidate saved the room cursor from 24 to 40, cleared its unread dot, and retained that state after reload. Owning Surface contract updated; parent indexes unchanged. The paired Rooms changes at 015a3b1c passed independent review and hosted Ocean/Surface builds, but this proxy delta still requires fresh-head review and CI. Distribution PR #113 merged at 945c91cb; its release validation is running and no package is published. Live Surface remains unchanged because legacy recovery bytes are missing.
+
+_________________________________________________________________________________
+time: [17:01] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/rooms-browser-invites]
+type: [feature-request]
+area: [frontend] [testing]
+
+Added browser invitation entry through one Add room disclosure containing Create room and Join room. Reuses the existing strict Ocean-link parser and daemon-owned redemption flow; session links are rejected, codes stay only in the input/in-memory pending invitation, and Continue stages confirmation without redeeming. Cancellation clears invitation drafts, restores focus and consumes Escape before Rooms; compact staging closes the drawer and focuses the existing confirmation. Creation retains its optional project selection and operation-id guards. Removed redundant confirmation copy and aligned form actions. All 954 UI tests, WASM Clippy with denied warnings, Trunk and diff checks pass. Safari checked desktop/narrow entry, menu/form Escape, invalid session-link rejection, cleared draft on reopen, and synthetic invitation staging/dismissal without redemption. Owning Surface contract and team setup guide updated; parent indexes unchanged because ownership is unchanged. Independent review, exact-head CI and real coworker redemption remain pending.
