@@ -2883,3 +2883,14 @@ type: [bug report]
 area: [frontend] [testing]
 
 The native executable lacked Windows GUI-subsystem metadata, so a release launch would open an unwanted console. Set the release-only Windows subsystem attribute and verify the actual built PE header in the native probe. Debug builds retain console behavior. Updated Surface and workflow contracts; actionlint and workflow fixtures pass. Native artifact verification is pending; no installer or deployment claim.
+
+_________________________________________________________________________________
+time: [20:13] [19-10-26]
+agent: [Codex] [GPT-6]
+worktree: [codex/desktop-first-run]
+type: [feature-request]
+area: [frontend]
+
+A blank native Ocean profile exited before HTTP startup because no model was selected. Add explicit first-launch model intent through main-window-only native commands, a validated non-secret desktop preference and child-only OCEAN_DEFAULT_MODEL fallback; existing daemon/environment selections retain precedence. Serialize child admission and retire exited children without stale-probe kills. Gate initial Rooms mounting on native availability, suppress offline ready indicators, and preserve existing conversation/drafts during later outages with one compact restart action and guarded direct-chat submission.
+
+Validation: 91 native tests, 954 UI tests, native/WASM Clippy, actual Trunk bundle and docs-check pass. Actual isolated macOS app started a blank daemon, entered Rooms without a stale error, reused the saved model on relaunch, preserved an unsent draft through daemon interruption/restart, and refused Enter/Send while offline. Fixture config/auth/Claude fallback/logs and preferences were isolated; no provider request or live-service replacement. Updated Surface contract; parent ownership/index unchanged. Windows first-run, provider login, independent review, merge and deployment remain separate gates.

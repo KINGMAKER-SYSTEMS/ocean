@@ -1,3 +1,49 @@
+.ocean-surface.is-offline .ocean-header > .island-host,
+.ocean-surface.is-offline .ocean-runtime,
+.ocean-surface.is-starting .ocean-header__right { display: none; }
+.ocean-startup {
+  flex: 1;
+  display: grid;
+  place-items: center;
+  min-height: 280px;
+  padding: 24px;
+}
+.ocean-startup__form {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  width: min(100%, 320px);
+}
+.ocean-startup h2 { margin: 0; font-size: 1.25rem; font-weight: 500; }
+.ocean-startup__field { display: flex; flex-direction: column; gap: 8px; font-size: .875rem; }
+.ocean-startup select, .ocean-startup__start {
+  min-height: 44px;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font: inherit;
+  color: var(--fg);
+  background: var(--bg-raised);
+}
+.ocean-startup select { appearance: none; height: 44px; padding-right: 36px; }
+.ocean-startup__field { position: relative; }
+.ocean-startup__field::after {
+  content: ""; position: absolute; right: 16px; bottom: 19px;
+  width: 7px; height: 7px; border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor; transform: rotate(45deg);
+  pointer-events: none;
+}
+.ocean-startup--compact { flex: none; min-height: 0; padding: 8px 16px; }
+.ocean-startup--compact .ocean-startup__form { width: auto; max-width: 100%; gap: 8px; }
+.ocean-startup--compact .ocean-startup__start { background: var(--bg-raised); border-color: var(--border); color: var(--fg-2); }
+.ocean-startup--compact .ocean-startup__start:hover:not(:disabled) { background: var(--bg-hover); }
+.ocean-startup__start { background: var(--accent); color: var(--fg-on-accent); border-color: transparent; cursor: pointer; }
+.ocean-startup__start:hover:not(:disabled) { background: var(--accent-bright); }
+.ocean-startup :disabled { opacity: .5; cursor: default; }
+.ocean-startup :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.ocean-startup__error { margin: 0; color: var(--fg-2); font-size: .875rem; }
+
 /* ═══════════════════════════════════════════════════════════════════
    Shared slide-over overlay pattern
    ═══════════════════════════════════════════════════════════════════ */

@@ -613,6 +613,55 @@ pub struct DaemonStatus {
     pub pid: Option<u32>,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+pub struct StartupModel {
+    pub id: String,
+    pub label: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct DaemonSetup {
+    pub models: Vec<StartupModel>,
+    pub selected: Option<String>,
+    pub needs_model: bool,
+}
+
+pub async fn daemon_setup() -> Result<Option<DaemonSetup>, String> {
+    if !running_in_tauri() {
+        return Ok(None);
+    }
+    let value = tauri_invoke("daemon_setup", &Object::new())
+        .await
+        .map_err(|error| {
+            error
+                .as_string()
+                .unwrap_or_else(|| "Couldn't load Ocean setup.".into())
+        })?;
+    consent_decode(&value).map(Some)
+}
+
+pub async fn daemon_start_with_model(model: Option<String>) -> Result<(), String> {
+    if !running_in_tauri() {
+        return Err("Open Ocean in the desktop app.".into());
+    }
+    let args = Object::new();
+    if let Some(model) = model {
+        let _ = Reflect::set(
+            &args,
+            &JsValue::from_str("initialModel"),
+            &JsValue::from_str(&model),
+        );
+    }
+    tauri_invoke("daemon_start", &args)
+        .await
+        .map(|_| ())
+        .map_err(|error| {
+            error
+                .as_string()
+                .unwrap_or_else(|| "Couldn't start Ocean.".into())
+        })
+}
+
 /// Current daemon supervision state (cached from the shell's background
 /// poller). `None` on non-Tauri hosts — the browser/extension never supervise
 /// a daemon, so there is no shell state to report.

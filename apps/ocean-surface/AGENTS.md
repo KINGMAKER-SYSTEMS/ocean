@@ -84,6 +84,22 @@ Native surface direction:
 - Native LiveKit Rust client is a later phase behind a feature flag, not part
   of this batch.
 - Ocean daemon stays the session/runtime authority.
+- Native first-run setup is collected through `host.rs` and the main-window-only
+  `daemon_setup`/`daemon_start` commands. `startup_model.rs` shares only the
+  runtime provider catalog's metadata; no credential or provider call enters
+  Surface. A user-selected catalog route is stored under the desktop app's
+  own config directory and supplied only as `OCEAN_DEFAULT_MODEL` to its child.
+  Existing environment defaults and daemon-persisted model choices take
+  precedence. The desktop never writes daemon configuration or picks a model
+  silently. Corrupt/nonregular desktop settings fail visibly without replacement.
+  The startup form exists only while native supervision is offline. Initial
+  native status must resolve before mounting Rooms; a later disconnect preserves
+  the conversation and unsent draft, refuses direct-chat submission, and shows
+  a compact restart action. Offline headers expose
+  no ready indicators. Ordinary connected model/effort controls remain unchanged.
+  Successful startup refreshes
+  model/project state and reconnects the focused session. Verify with native
+  `cargo test --lib startup_model`, native daemon tests, and the real WASM build.
 - Native daemon start resolves the operator's `OCEAN_DAEMON_BIN`, then the
   installed executable sibling, then the platform binary on PATH. No IPC
   argument may select an executable. Explicit start/restart remains unchanged.
@@ -91,6 +107,10 @@ Native surface direction:
   never the app's inherited workspace; Windows children have no console window.
   Home/profile also owns native daemon logs. Verify native launch with
   `cargo test --lib daemon_` from `crates/ocean-tauri`.
+  A native-process `OCEAN_DAEMON_LOG` may select an absolute log file for
+  diagnostics; no webview argument controls that path. Isolated startup
+  acceptance keeps config, auth, Claude fallback and logs in disposable paths
+  while preserving the operating-system home and the live daemon.
 - Canvas ledger/state injected into turns as surface context; the Leptos canvas
   already lives at `crates/ocean-surface-ui/src/canvas.rs`.
 - `docs/OCEAN_GPUI_CANVAS_LIVEKIT_SPEC.md` is retained as a historical reference

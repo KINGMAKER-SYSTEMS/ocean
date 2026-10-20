@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command as ProcessCommand, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -27,6 +27,7 @@ use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut,
 mod daemon_transport;
 mod owner_mutation;
 mod room_consent;
+mod startup_model;
 
 /// One surfaced filesystem change, serialized to the webview as `path-changed`.
 ///
@@ -1054,10 +1055,10 @@ struct DaemonStatusDto {
 
 /// Supervised ocean-daemon process + liveness tracking. Shared between the
 /// command handlers and the background poller via `Arc` (cloned into the
-/// poller thread; the original lives in [`AppState`]). Every method acquires
-/// at most one inner mutex at a time, so there is no lock-ordering hazard
-/// across `probe` / `snapshot` / `start` / `stop`.
+/// poller thread; the original lives in [`AppState`]). Start and probe hold the
+/// child lock before publishing status. No method takes these locks in reverse.
 struct DaemonSup {
+    startup_path: OnceLock<PathBuf>,
     /// The child we spawned. `std::process::Child` does NOT kill on drop, so
     /// the daemon survives a shell crash — supervision is explicit
     /// (start/stop/restart), never `kill_on_drop`.
@@ -1077,6 +1078,7 @@ struct DaemonSup {
 impl DaemonSup {
     fn new(host: String, port: u16) -> Self {
         Self {
+            startup_path: OnceLock::new(),
             child: Mutex::new(None),
             last: Mutex::new(DaemonState::Stopped),
             reachable_ever: Mutex::new(false),
@@ -1088,16 +1090,6 @@ impl DaemonSup {
     /// pid of the owned child, if any (`Child::id`).
     fn pid(&self) -> Option<u32> {
         self.child.lock().as_ref().map(|c| c.id())
-    }
-
-    /// True iff we own a child that has not yet exited — `try_wait` returns
-    /// `Ok(None)` while the process is still running.
-    fn child_alive(&self) -> bool {
-        self.child
-            .lock()
-            .as_mut()
-            .map(|c| c.try_wait().ok().flatten().is_none())
-            .unwrap_or(false)
     }
 
     /// Kill + reap the owned child if any, then clear the slot. `kill` errors
@@ -1120,16 +1112,40 @@ impl DaemonSup {
     /// already served — a graceful no-op in both cases so we never spawn a
     /// second daemon that would fail to bind.
     fn start(&self, bin: &Path) -> Result<(), String> {
-        if self.child_alive() {
-            return Ok(());
+        self.start_with_model(bin, None)
+    }
+
+    fn start_with_model(&self, bin: &Path, initial_model: Option<&str>) -> Result<(), String> {
+        if let Some(model) = initial_model {
+            startup_model::validate(model)?;
+        }
+        // Keep admission and publication under one lock so double-clicks cannot
+        // start two children or persist two competing startup choices.
+        let mut slot = self.child.lock();
+        if let Some(child) = slot.as_mut() {
+            if child
+                .try_wait()
+                .map_err(|_| "Couldn't check Ocean's process.")?
+                .is_none()
+            {
+                return Ok(());
+            }
         }
         if self.reachable() {
             // An external daemon is already serving — don't spawn a rival.
             return Ok(());
         }
-        self.reap_child();
-        let child = spawn_daemon(bin)?;
-        *self.child.lock() = Some(child);
+        let path = self
+            .startup_path
+            .get()
+            .ok_or("Ocean is still opening. Try again.")?;
+        if let Some(model) = initial_model {
+            startup_model::save(path, model)?;
+        }
+        let model = startup_model::load(path)?;
+        // Any previous child has already exited (try_wait above also reaps it).
+        *slot = Some(spawn_daemon(bin, model.as_deref())?);
+        *self.last.lock() = DaemonState::Starting;
         Ok(())
     }
 
@@ -1149,15 +1165,18 @@ impl DaemonSup {
     /// result as `last`. Blocking — poller-thread only.
     fn probe(&self) -> DaemonState {
         let reachable = self.reachable();
-        let alive = self.child_alive();
+        let mut slot = self.child.lock();
+        let alive = slot.as_mut().is_some_and(|child| {
+            // A failed observation is not proof that a process has stopped.
+            !matches!(child.try_wait(), Ok(Some(_)))
+        });
+        if !alive {
+            slot.take();
+        }
         let ever = *self.reachable_ever.lock();
         let state = decide_daemon_state(reachable, alive, ever);
         if reachable {
             *self.reachable_ever.lock() = true;
-        }
-        if !alive {
-            // Reap a dead slot so a subsequent start() doesn't see a zombie.
-            self.reap_child();
         }
         *self.last.lock() = state;
         state
@@ -1259,6 +1278,14 @@ fn parse_host_port(url: &str) -> Option<(String, u16)> {
 /// `~/.local/state/ocean/ocean-daemon.log`; falls back to the OS temp dir so
 /// a missing `$HOME` or an unwritable state dir never blocks the spawn.
 fn daemon_log_path() -> PathBuf {
+    // Native-process configuration only; useful for isolated desktop acceptance.
+    // No webview argument can redirect the log or select an executable.
+    if let Some(path) = std::env::var_os("OCEAN_DAEMON_LOG")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+    {
+        return path;
+    }
     if let Some(home) = daemon_home() {
         let dir = home.join(".local/state/ocean");
         if std::fs::create_dir_all(&dir).is_ok() {
@@ -1271,7 +1298,7 @@ fn daemon_log_path() -> PathBuf {
 /// Spawn the daemon binary detached: stdin null, stdout+stderr appended to
 /// the log file. The returned `Child` is NOT `kill_on_drop`, so it outlives
 /// the shell if the shell crashes — supervision stays explicit.
-fn spawn_daemon(bin: &Path) -> Result<Child, String> {
+fn spawn_daemon(bin: &Path, initial_model: Option<&str>) -> Result<Child, String> {
     let log_path = daemon_log_path();
     let log = std::fs::OpenOptions::new()
         .create(true)
@@ -1282,7 +1309,9 @@ fn spawn_daemon(bin: &Path) -> Result<Child, String> {
         .try_clone()
         .map_err(|e| format!("dup daemon log: {e}"))?;
     let cwd = daemon_home().unwrap_or_else(std::env::temp_dir);
-    daemon_process(bin, &cwd)?
+    let mut command = daemon_process(bin, &cwd)?;
+    startup_model::apply(&mut command, initial_model);
+    command
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(stderr))
         .spawn()
@@ -1357,14 +1386,33 @@ async fn daemon_status(state: State<'_, AppState>) -> Result<DaemonStatusDto, St
 /// UI flips without waiting for the next poll.
 #[tauri::command]
 async fn daemon_start(
+    window: tauri::WebviewWindow,
     state: State<'_, AppState>,
     app: AppHandle,
+    initial_model: Option<String>,
 ) -> Result<DaemonStatusDto, String> {
+    daemon_transport::require_main_window(window.label(), "Start Ocean from the main window.")?;
     // TASK-78: no caller-supplied binary path — see `resolve_daemon_bin`.
-    state.daemon.start(&resolve_daemon_bin())?;
+    state
+        .daemon
+        .start_with_model(&resolve_daemon_bin(), initial_model.as_deref())?;
     let snap = state.daemon.snapshot();
     let _ = app.emit("daemon-status", snap.clone());
     Ok(snap)
+}
+
+#[tauri::command]
+async fn daemon_setup(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+) -> Result<startup_model::Setup, String> {
+    daemon_transport::require_main_window(window.label(), "Open Ocean in the main window.")?;
+    let path = state
+        .daemon
+        .startup_path
+        .get()
+        .ok_or("Ocean is still opening. Try again.")?;
+    startup_model::setup(path)
 }
 
 /// Stop the daemon the shell owns (never an external one). Emits a final
@@ -2100,6 +2148,12 @@ pub fn run() {
             }),
         })
         .setup(|app| {
+            let startup_path = app.path().app_config_dir()?.join("startup-model");
+            let _ = app
+                .state::<AppState>()
+                .daemon
+                .startup_path
+                .set(startup_path);
             // Background daemon-supervision liveness poller: probes the daemon
             // port every ~5s and emits `daemon-status` to the webview ON CHANGE
             // ONLY. Spawned first so the first event fires within one probe of
@@ -2428,6 +2482,7 @@ pub fn run() {
             set_badge,
             open_file,
             daemon_status,
+            daemon_setup,
             daemon_start,
             daemon_stop,
             daemon_restart,
