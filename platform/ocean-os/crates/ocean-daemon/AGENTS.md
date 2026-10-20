@@ -23,6 +23,20 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   identifiers; never log callback descriptions or arbitrary error chains.
 
 - Daemon health is `GET /health`, not `/v1/health`.
+- `room_connection.rs` owns operator-only `GET/PUT /v1/rooms/connection`.
+  First setup accepts one bounded, canonical service origin through the existing
+  federation URL validator; strict object bodies reject duplicate/unknown fields.
+  The store atomically refuses existing federation history, credentials or pending
+  invitations, and never replaces a saved origin. A configured client, invalid
+  startup configuration or existing owner token also refuses initialization.
+  Saving requires an explicit daemon restart and does not claim connectivity.
+  Startup preserves legacy environment configuration; a saved origin pins the
+  destination and a conflicting environment origin fails closed. No membership,
+  token, live-task, provider or Bedrock-schema mutation belongs to this route.
+  An unconfigured invite redemption refuses before creating pending authority;
+  configured-but-offline redemption keeps its existing durable retry behavior.
+  Verify `cargo test --locked -p ocean-daemon room_connection -- --test-threads=1`
+  and the store connection/migration fixtures, with isolated auth/config paths.
 - `windows_skill_file.rs` supplies Windows skill and Room-package no-follow opens.
   Accept only absolute local-drive paths; retain directory handles and open each
   component relative to its parent, refusing every reparse point and alternate

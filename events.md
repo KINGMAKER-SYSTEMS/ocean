@@ -3046,3 +3046,16 @@ Corrected desktop onboarding to follow current P2 identity: /v1/me creates a per
 Verified the downloaded Apple Silicon installer at 69c0df19 against its artifact and daemon SHA256 receipt. Its extracted daemon, run only in disposable state with isolated provider discovery, creates a local owner without member.toml, admits a bodyless human join, attributes the posted fixture message to that owner, and retains owner and transcript across restart. The fixture stops only its children and detaches its own read-only image. This is backend acceptance from the actual package, not native UI installation, provider inference or two-machine federation acceptance. Local owner ids are scoped to their daemon and may match across fresh profiles; global uniqueness is not the contract. Docs-check and whitespace checks pass.
 
 Combined source 8ca79ae2 passes both ordinary hosted builds in run 39355865422. Standalone MCP Windows probe 39354455876 now passes completely. Three-platform combined installer run 39355915592 remains live; no replacement run was dispatched.
+
+_________________________________________________________________________________
+time: [22:22] [19-10-26]
+agent: [Codex desktop] [GPT-6]
+worktree: [codex/desktop-team-connection]
+type: [feature-request]
+area: [backend]
+
+Implemented the backend for initial desktop team-service setup: operator-only GET/PUT /v1/rooms/connection, strict object/origin validation, and a singleton origin in the existing Room store. One IMMEDIATE transaction refuses origin replacement and existing credential, access-history or pending-redemption authority. Local owners/rooms survive migration and restart. A saved origin pins the destination; legacy environment configuration remains supported, but a conflicting environment override fails closed. Existing owner tokens or invalid startup configuration also refuse initialization. Activation remains at an explicit restart; configuration does not imply connectivity or membership. An unconfigured invite refuses before creating pending secrets, while configured offline retries retain their durable path.
+
+Validation: all 307 store tests, seven focused daemon connection tests and all 95 federation tests pass (the focused and federation groups overlap). Locked daemon compilation, store all-target Clippy, formatting, docs-check and whitespace checks pass. Full daemon Clippy remains blocked by unchanged baseline warnings in ocean-oauth (too_many_arguments), room_attachments (unnecessary_cast), room_summary (large_enum_variant), and model_catalog (items_after_test_module); those files match base 744b4dae. Updated store/daemon contracts and the crate index. The native setup command/dialog and their Mac/Windows/rendered acceptance remain unfinished; this backend is local source only, not part of the tested installers, a release, or a live configuration change.
+
+Release run 39355915592 at 8ca79ae2 now passes all three actual desktop installer jobs. Logs confirm extracted daemon startup plus bundled MCP stdio, matching daemon revision and Room projection on Apple Silicon, Intel Mac and Windows. PR129 records those results; its documentation head 744b4dae also passes both Build checks in 39356649575. Independent review, signing/installation, provider reply, team setup and two-machine acceptance remain open.

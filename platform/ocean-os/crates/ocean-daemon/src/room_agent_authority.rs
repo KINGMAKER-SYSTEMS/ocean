@@ -64,6 +64,12 @@ const PHASE1_SAFE_CAPABILITIES: &[&str] = &[];
 #[derive(Debug)]
 pub(super) struct MapOnly<T>(T);
 
+impl<T> MapOnly<T> {
+    pub(super) fn into_inner(self) -> T {
+        self.0
+    }
+}
+
 impl<'de, T: Deserialize<'de>> Deserialize<'de> for MapOnly<T> {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         struct MapOnlyVisitor<T>(std::marker::PhantomData<T>);

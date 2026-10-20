@@ -164,6 +164,7 @@ mod room_agent_runs;
 /// Room attachments: durable file bytes beside the DB that indexes them.
 mod room_attachments;
 /// Restart-safe outbound Bedrock room client and per-room supervisor (S2 P2-B).
+mod room_connection;
 mod room_federation;
 /// Retention sweeps and orphan cleanup for closed rooms.
 mod room_maintenance;
@@ -1645,6 +1646,8 @@ fn banner_routes() -> &'static [&'static str] {
         "POST /v1/rooms/{room_id}/livekit-token",
         "GET /v1/me",
         "PUT /v1/me",
+        "GET /v1/rooms/connection",
+        "PUT /v1/rooms/connection",
         "GET /v1/rooms/persistent",
         "POST /v1/rooms/persistent",
         "GET /v1/rooms/persistent/{key}",
@@ -3003,6 +3006,10 @@ fn room_routes() -> Router<AppState> {
     Router::new()
         // Team-platform P2: the daemon owner identity every room author derives from.
         .route("/v1/me", get(me_get).put(me_put))
+        .route(
+            "/v1/rooms/connection",
+            get(room_connection::get).put(room_connection::put),
+        )
         .route(
             "/v1/rooms/persistent",
             get(rooms_list_persistent).post(room_create),
