@@ -98,7 +98,32 @@ class DesktopArtifactTests(unittest.TestCase):
             (root / 'app.wasm').write_bytes(b'\0asm\x01\0\0\0fixture')
             desktop.verify_web_bundle(root)
 
-    def test_stale_daemon_and_missing_notices_are_refused(self):
+    def test_windows_payload_requires_matching_console_sidecars_and_gui_app(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            app = root / 'installed'
+            app.mkdir()
+            legal = root / 'legal'
+            legal.mkdir()
+            data = bytearray(222)
+            data[:2] = b'MZ'
+            struct.pack_into('<I', data, 60, 128)
+            data[128:132] = b'PE\0\0'
+            struct.pack_into('<H', data, 132, 0x8664)
+            struct.pack_into('<H', data, 220, 3)
+            daemon, mcp = root / 'daemon.exe', root / 'mcp.exe'
+            for path in (daemon, mcp, app / 'ocean-daemon.exe', app / 'ocean-mcp.exe'):
+                path.write_bytes(data)
+            struct.pack_into('<H', data, 220, 2)
+            (app / 'ocean-tauri.exe').write_bytes(data)
+            bundled = desktop.verify_payload(app, daemon, mcp, legal, 'x86_64-pc-windows-msvc')
+            self.assertEqual(bundled, (app / 'ocean-daemon.exe', app / 'ocean-mcp.exe'))
+            struct.pack_into('<H', data, 132, 0xaa64)
+            (app / 'ocean-mcp.exe').write_bytes(data)
+            with self.assertRaises(RuntimeError):
+                desktop.verify_payload(app, daemon, mcp, legal, 'x86_64-pc-windows-msvc')
+
+    def test_stale_or_missing_sidecars_and_notices_are_refused(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             app = root / 'Ocean.app'
@@ -107,20 +132,28 @@ class DesktopArtifactTests(unittest.TestCase):
             header = b'\xcf\xfa\xed\xfe' + struct.pack('<I', 0x0100000c)
             daemon = root / 'daemon'
             daemon.write_bytes(header + b'new')
+            mcp = root / 'mcp'
+            mcp.write_bytes(header + b'bridge-new')
             (bins / 'ocean-tauri').write_bytes(header)
             (bins / 'ocean-daemon').write_bytes(header + b'old')
             legal = root / 'legal'
             legal.mkdir()
             (legal / 'NOTICE.txt').write_text('required notice')
             with self.assertRaisesRegex(RuntimeError, 'does not match'):
-                desktop.verify_payload(app, daemon, legal, 'aarch64-apple-darwin')
+                desktop.verify_payload(app, daemon, mcp, legal, 'aarch64-apple-darwin')
             (bins / 'ocean-daemon').write_bytes(daemon.read_bytes())
             with self.assertRaises(FileNotFoundError):
-                desktop.verify_payload(app, daemon, legal, 'aarch64-apple-darwin')
+                desktop.verify_payload(app, daemon, mcp, legal, 'aarch64-apple-darwin')
+            (bins / 'ocean-mcp').write_bytes(header + b'bridge-old')
+            with self.assertRaisesRegex(RuntimeError, 'ocean-mcp does not match'):
+                desktop.verify_payload(app, daemon, mcp, legal, 'aarch64-apple-darwin')
+            (bins / 'ocean-mcp').write_bytes(mcp.read_bytes())
+            with self.assertRaises(FileNotFoundError):
+                desktop.verify_payload(app, daemon, mcp, legal, 'aarch64-apple-darwin')
             dest = app / 'Contents/Resources/legal'
             dest.mkdir(parents=True)
             (dest / 'NOTICE.txt').write_text('required notice')
-            desktop.verify_payload(app, daemon, legal, 'aarch64-apple-darwin')
+            desktop.verify_payload(app, daemon, mcp, legal, 'aarch64-apple-darwin')
 
 
 if __name__ == '__main__':

@@ -35,12 +35,13 @@ Connect Ocean to external MCP servers, and expose the local daemon to MCP hosts.
 
 ## Work Guidance
 
-- Build `cargo build --locked -p ocean-mcp --bin ocean-mcp`. Configure the MCP
+- Development build: `cargo build --locked -p ocean-mcp --bin ocean-mcp`. Configure the MCP
   host with that executable's absolute path and `serve` as its argument.
   Windows produces `ocean-mcp.exe`; `--daemon` can select another loopback port.
-- Building this executable is not package publication, host installation or
-  two-machine acceptance. Existing package and desktop installers do not yet
-  distribute it. Existing host configurations are not modified by this crate.
+- Desktop candidates bundle this executable beside the daemon and verify its
+  stdio connection in disposable state. The npm package does not distribute it.
+  Building or bundling is not stable publication, host setup or two-machine
+  acceptance. Existing host configurations are not modified by this crate.
 
 ## Verification
 

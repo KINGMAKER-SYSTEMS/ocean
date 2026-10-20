@@ -1052,5 +1052,5 @@ wasm32-unknown-unknown --no-run`, `cargo test -p ocean-surface-ui`.
 
 ## Child devlog Index
 
-- `packaging/` — native desktop candidates, bundled daemon and legal payload →
+- `packaging/` — native desktop candidates, bundled daemon/MCP bridge and legal payload →
   `packaging/AGENTS.md`. Existing proxy deployment remains owned by this parent.

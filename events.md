@@ -3022,3 +3022,14 @@ area: [backend]
 The installed older Ocean MCP server reports local roster rows for a live shared room and assumes execution fields on the migration-only inspect route. The organization repo contains only the MCP client library, so it cannot rebuild that server. Added a daemon-backed ocean-mcp executable with bounded stdio/HTTP, numeric loopback/no-redirect transport and no credential reads. Shared rosters use access.members; inspection reads actual bindings/resource/slot endpoints, retaining partial failures. Human joins/posts carry no claimed identity. Transcript and session pagination match the current daemon, including turns and thread/session links; unsupported backward cursors are refused instead of silently returning a prefix as newest. Large completed-turn output preserves session/request/outcome with an explicit excerpt flag.
 
 Validation: 23 client unit tests, 11 bridge tests, nine existing client integration tests and two real-server stdio tests pass across the targeted runs. Native all-target Clippy, format, docs-check, release-workflow fixtures and actionlint pass. Read-only actual stdio against the operated daemon confirms the live shared roster, agent binding and session counts with zero mutations. Manual Windows probing now builds/tests the actual MCP executable; hosted Windows evidence remains pending. The installed bridge, daemon, credentials and MCP host configuration are unchanged.
+
+_________________________________________________________________________________
+time: [21:49] [19-10-26]
+agent: [Codex desktop] [GPT-6]
+worktree: [codex/desktop-mcp-delivery]
+type: [feature-request]
+area: [testing]
+
+Integrated the maintained MCP bridge e989e431 into the desktop candidate. Installer construction now builds the daemon and MCP executable at one clean revision, bundles both through Tauri externalBin, inventories all four dependency graphs, checks both sidecar hashes/architectures and all three native executable dependencies, and records both sidecar checksums. The actual startup fixture can run bundled MCP stdio against its own disposable daemon; it checks tool discovery, daemon revision and room projection. Claude fallback discovery is also scoped to disposable state. MCP host configuration remains explicit and unchanged.
+
+Validation: nine artifact-integrity fixtures pass, including missing/stale MCP and Windows executable layout/architecture refusal; combined daemon/MCP locked compilation and 45 MCP tests pass. Docs-check, actionlint, release-workflow fixtures and whitespace checks pass. The expanded real-process smoke verifier passes using the existing 58177 daemon and e989 MCP test binaries, proving the verifier path but not a newly packaged same-revision artifact. New exact-source installer acceptance remains pending. No installed app, daemon, host configuration, credentials or stable release was changed.

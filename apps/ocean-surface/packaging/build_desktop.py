@@ -140,6 +140,7 @@ def license_inventory(about, target, stage):
     shutil.copyfile(SURFACE / "public/fonts/OFL.txt", legal / "POPPINS-OFL.txt")
     shutil.copyfile(SURFACE / "packaging/ASSET-NOTICES.txt", legal / "ASSET-NOTICES.txt")
     graphs = (("daemon", RUNTIME / "crates/ocean-daemon", target),
+              ("mcp", RUNTIME / "crates/ocean-mcp", target),
               ("desktop", NATIVE, target),
               ("web-ui", SURFACE / "crates/ocean-surface-ui", "wasm32-unknown-unknown"))
     config_source = (RUNTIME / "packaging/about.toml").read_text(encoding="utf-8")
@@ -270,19 +271,21 @@ def detach_image(mount, image):
             raise
 
 
-def verify_payload(app_root, daemon, legal, target):
+def verify_payload(app_root, daemon, mcp, legal, target):
     suffix = ".exe" if "windows" in target else ""
     binaries = app_root if suffix else app_root / "Contents/MacOS"
     resources = app_root if suffix else app_root / "Contents/Resources"
     bundled_daemon = binaries / ("ocean-daemon" + suffix)
     binary_architecture(binaries / ("ocean-tauri" + suffix), target, gui=True)
-    binary_architecture(bundled_daemon, target)
-    if digest(bundled_daemon) != digest(daemon):
-        raise RuntimeError("Bundled daemon does not match this source build")
+    bundled_mcp = binaries / ("ocean-mcp" + suffix)
+    for bundled, source in ((bundled_daemon, daemon), (bundled_mcp, mcp)):
+        binary_architecture(bundled, target)
+        if digest(bundled) != digest(source):
+            raise RuntimeError(f"Bundled {bundled.name} does not match this source build")
     for file in legal.rglob("*"):
         if file.is_file() and digest(resources / "legal" / file.relative_to(legal)) != digest(file):
             raise RuntimeError("Bundled legal payload differs from its inventory")
-    return bundled_daemon
+    return bundled_daemon, bundled_mcp
 
 
 def build(target):
@@ -297,18 +300,21 @@ def build(target):
     stage.mkdir(parents=True, exist_ok=True)
     tauri, about = tools(target)
     legal = license_inventory(about, target, stage)
-    run(["cargo", "build", "--locked", "--release", "--target", target, "-p", "ocean-daemon"], cwd=RUNTIME)
+    run(["cargo", "build", "--locked", "--release", "--target", target, "-p", "ocean-daemon", "-p", "ocean-mcp", "--bin", "ocean-daemon", "--bin", "ocean-mcp"], cwd=RUNTIME)
     suffix = ".exe" if "windows" in target else ""
     daemon = RUNTIME / "target" / target / "release" / ("ocean-daemon" + suffix)
+    mcp = RUNTIME / "target" / target / "release" / ("ocean-mcp" + suffix)
     binary_architecture(daemon, target)
+    binary_architecture(mcp, target)
     run(["trunk", "build", "--locked", "--release"], cwd=SURFACE)
     verify_web_bundle(SURFACE / "dist")
     sidecars = stage / "sidecars"
     sidecars.mkdir(exist_ok=True)
-    shutil.copy2(daemon, sidecars / (f"ocean-daemon-{target}" + suffix))
+    for name, binary in (("ocean-daemon", daemon), ("ocean-mcp", mcp)):
+        shutil.copy2(binary, sidecars / (f"{name}-{target}" + suffix))
     config = stage / "bundle.json"
     config.write_text(json.dumps({"bundle": {
-        "externalBin": [str(sidecars / "ocean-daemon")],
+        "externalBin": [str(sidecars / name) for name in ("ocean-daemon", "ocean-mcp")],
         "resources": {str(legal) + os.sep: "legal/"},
         "windows": {"nsis": {"installMode": "currentUser"}},
     }}))
@@ -323,23 +329,23 @@ def build(target):
                 raise RuntimeError("Expected one Windows installer")
             extractor = shutil.which("7z") or str(Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "7-Zip/7z.exe")
             run([extractor, "x", installers[0], f"-o{temporary / 'unpacked'}", "-y"])
-            bundled_daemon = verify_payload(temporary / "unpacked", daemon, legal, target)
+            bundled_daemon, bundled_mcp = verify_payload(temporary / "unpacked", daemon, mcp, legal, target)
             dumpbin = windows_dependency_tool()
-            for binary in (temporary / "unpacked/ocean-tauri.exe", bundled_daemon):
+            for binary in (temporary / "unpacked/ocean-tauri.exe", bundled_daemon, bundled_mcp):
                 verify_windows_runtime(run([dumpbin, "/DEPENDENTS", binary], capture=True))
         else:
             installers = list((bundles / "dmg").glob("*.dmg"))
             if len(installers) != 1:
                 raise RuntimeError("Expected one Mac disk image")
             with mount_image(installers[0], temporary) as app:
-                bundled_daemon = verify_payload(app, daemon, legal, target)
-                for binary in (app / "Contents/MacOS/ocean-tauri", bundled_daemon):
+                bundled_daemon, bundled_mcp = verify_payload(app, daemon, mcp, legal, target)
+                for binary in (app / "Contents/MacOS/ocean-tauri", bundled_daemon, bundled_mcp):
                     verify_macos_libraries(run(["otool", "-L", binary], capture=True))
-                run([os.sys.executable, ROOT / ".github/test-daemon-startup.py", bundled_daemon, revision])
+                run([os.sys.executable, ROOT / ".github/test-daemon-startup.py", bundled_daemon, revision, "--mcp", bundled_mcp])
         # The fixture strips provider credentials, uses disposable state, checks
         # source revision/member identity and stops only the child it creates.
         if suffix:
-            run([os.sys.executable, ROOT / ".github/test-daemon-startup.py", bundled_daemon, revision])
+            run([os.sys.executable, ROOT / ".github/test-daemon-startup.py", bundled_daemon, revision, "--mcp", bundled_mcp])
         if clean_revision() != revision:
             raise RuntimeError("Source changed during packaging")
         prepared = temporary / "artifacts"
@@ -347,7 +353,7 @@ def build(target):
         for installer in installers:
             shutil.copy2(installer, prepared / installer.name)
         receipt = {"revision": revision, "target": target, "signing": "unsigned",
-                   "daemon_sha256": digest(daemon),
+                   "daemon_sha256": digest(daemon), "mcp_sha256": digest(mcp),
                    "files": {p.name: digest(p) for p in sorted(prepared.iterdir())}}
         (prepared / "candidate.json").write_text(json.dumps(receipt, indent=2) + "\n")
         prepared.rename(output)

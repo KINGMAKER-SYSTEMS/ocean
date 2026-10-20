@@ -567,7 +567,7 @@ jobs:
           & ./target/windows-daemon-boot-tests.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Boot Windows daemon in an isolated profile
-        run: python ../../.github/test-daemon-startup.py target/release/ocean-daemon.exe $env:GITHUB_SHA
+        run: python ../../.github/test-daemon-startup.py target/release/ocean-daemon.exe $env:GITHUB_SHA --mcp target/release/ocean-mcp.exe
       - name: Test Windows Room package capture
         run: python ../../.github/test-room-package.py target/release/ocean-daemon.exe $env:GITHUB_SHA
       - name: Verify executable outputs

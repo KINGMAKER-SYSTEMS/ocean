@@ -28,6 +28,13 @@ credentials; verify a real reply separately. Desktop startup does not yet
 configure the coworker's member identity or federation connection. The host
 setup and shared-room acceptance below are still required.
 
+The desktop candidate also includes `ocean-mcp` (`ocean-mcp.exe` on Windows)
+beside its daemon. An external MCP host can run that installed executable with
+the argument `serve`; it connects to the same local daemon. On macOS it lives
+inside `Ocean.app/Contents/MacOS/`; on Windows it lives in the app's installation
+directory. Host configuration is still an explicit setup step. The bridge's
+`doctor` command checks the daemon connection and local owner identity.
+
 ## First coworker
 
 1. Verify a release from canonical main and access to its package. The

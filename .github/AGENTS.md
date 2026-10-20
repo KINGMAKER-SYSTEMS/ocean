@@ -40,6 +40,8 @@ Root GitHub Actions builds for the public Ocean monorepo.
 - `build-scope.py` selects changed components; `test-build-scope.py` checks scope decisions, including NUL-terminated Git output. Unknown or unavailable diffs build both.
 - `test-daemon-startup.py` checks actual candidate startup, revision, isolated
   member identity and state-file creation; Unix also checks private file modes.
+  Its optional `--mcp` checks the bundled bridge over real stdio against that
+  same disposable daemon. All provider credential discovery stays isolated.
   It does not establish Windows ACLs, provider inference or installation.
 - `test-room-package.py` owns the disposable actual-daemon package-preview
   fixture. It verifies child identity before creating fixture Rooms, uses only

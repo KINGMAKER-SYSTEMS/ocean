@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Build native Ocean desktop candidates with their matching daemon and legal payload.
+Build native Ocean desktop candidates with their matching daemon, MCP bridge and legal payload.
 
 ## Ownership
 
@@ -14,21 +14,21 @@ Build native Ocean desktop candidates with their matching daemon and legal paylo
 ## Local Contracts
 
 - Build only clean committed canonical source, with locked Cargo graphs and
-  repository Rust pins. App, UI and daemon must come from the same revision.
+  repository Rust pins. App, UI, daemon and MCP bridge must come from the same revision.
 - Preserve the native manifest's tracked LF checkout attribute; Tauri must not
   change its bytes during a Windows build. Never reset source to pass the gate.
 - Native targets are Apple Silicon Mac, Intel Mac and Windows x64. Refuse a
   different host architecture rather than label a cross-build as acceptance.
-- Bundle the daemon as a sibling executable through Tauri `externalBin`;
+- Bundle the daemon and MCP bridge as sibling executables through Tauri `externalBin`;
   no caller-controlled executable path or private configuration enters a bundle.
 - `ASSET-NOTICES.txt` and the font-adjacent OFL file retain bundled asset notices.
-- Include full dependency licenses for the native shell, WASM UI and daemon,
+- Include full dependency licenses for the native shell, WASM UI, daemon and MCP bridge,
   plus applicable upstream NOTICE files and project legal files.
 - Inventory the native shell with Tauri's release `custom-protocol` feature.
-  Mac app and daemon imports must resolve only to macOS system libraries;
+  Mac app and both sidecar imports must resolve only to macOS system libraries;
   Homebrew, local-development and unresolved rpath dependencies fail packaging.
-- Build the Windows daemon with static CRT linkage as well as the Tauri app;
-  inspect both extracted executables and refuse Visual C++ redistributable DLL
+- Build both Windows sidecars with static CRT linkage as well as the Tauri app;
+  inspect all three extracted executables and refuse Visual C++ redistributable DLL
   imports. This does not establish clean-machine WebView or installer acceptance.
 - Candidate builds are unsigned and do not publish, install, start live services,
   change credentials, or establish update/recovery or coworker acceptance.
@@ -45,7 +45,9 @@ Build native Ocean desktop candidates with their matching daemon and legal paylo
 - `python3 -m unittest discover -s packaging -p 'test_*.py'`
 - `python3 packaging/build_desktop.py --target <native Rust target>`
 - Hosted native builds must inspect actual bundle contents and boot the bundled
-  daemon in disposable state before a candidate is considered packaged.
+  daemon in disposable state, then verify the bundled MCP bridge's stdio handshake,
+  daemon revision and room projection. Record both sidecar checksums in the receipt.
+  This does not configure an external MCP host or establish provider inference.
 
 ## Child devlog Index
 
