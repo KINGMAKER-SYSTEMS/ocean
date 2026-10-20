@@ -58,6 +58,7 @@ pub(super) fn agent_to_ocean_event(event: AgentTurnEvent) -> Option<OceanEvent> 
         AgentTurnEvent::BrowserActivity { .. } => None,
         AgentTurnEvent::SurfacePatch { .. } => None,
         AgentTurnEvent::SlackCanvas { .. } => None,
+        AgentTurnEvent::SteeringDelivered { .. } => None,
     }
 }
 
@@ -80,6 +81,7 @@ pub(super) fn agent_event_type_name(event: &AgentTurnEvent) -> &'static str {
         AgentTurnEvent::BrowserActivity { .. } => "browser_activity",
         AgentTurnEvent::SurfacePatch { .. } => "surface_patch",
         AgentTurnEvent::SlackCanvas { .. } => "slack_canvas",
+        AgentTurnEvent::SteeringDelivered { .. } => "steering_delivered",
     }
 }
 
@@ -122,6 +124,15 @@ mod tests {
                     delta: "hello".into(),
                 },
                 "assistant_text_delta",
+            ),
+            (
+                AgentTurnEvent::SteeringDelivered {
+                    session_id,
+                    turn_id,
+                    steer_id: "steer-1".into(),
+                    text: "also check the tests".into(),
+                },
+                "steering_delivered",
             ),
             (
                 AgentTurnEvent::ThinkingDelta {

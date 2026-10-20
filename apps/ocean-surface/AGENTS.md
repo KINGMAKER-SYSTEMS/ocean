@@ -172,9 +172,20 @@ token to browser code, bundle it, or cache it in client storage.
   active-turn action. Its model panel is anchored to the compact composer.
   Browser float mode uses Ocean's background; native overlay transparency is
   gated through the existing `host::running_in_tauri` seam.
+- Enter while one of this surface's turns is streaming steers it: the text
+  goes to `POST /v1/agent/sessions/{id}/steer` and shows as a
+  `turn--steering` row ("Steering · next step", no remove control) until the
+  daemon's `steering_delivered` frame, when it becomes a user turn at the
+  point it landed and the next round renders below it. A refusal (409/429/
+  network) sends it to the queue; an accepted steer still pending when the
+  active turn's `turn_finished` arrives goes to the FRONT of the queue and runs
+  as the next turn. Delivery matches by `steer_id`, or by text for a row whose
+  POST answer has not arrived yet. Messages with staged images, voice
+  prompts, and sends with no acknowledged turn take the queue instead. Stop,
+  New Session and a session switch clear pending steers with the queue.
 - The main composer never refuses a send because a turn is running. A prompt
-  sent while `streaming` is true, while earlier prompts are queued, or while the
-  head of the queue is waiting out a busy daemon goes into
+  that cannot steer (see above), sent while earlier prompts are queued, or
+  while the head of the queue is waiting out a busy daemon goes into
   `Daemon::queued_prompts` (oldest first) and renders as a dimmed, dashed
   `turn--queued` row below the live-activity row with a remove control; it
   becomes an ordinary user turn when `drain_queued_prompt` sends it, which the

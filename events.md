@@ -2797,6 +2797,13 @@ The composer's think level did nothing on GLM: `apply_reasoning` left every non-
 _________________________________________________________________________________
 
 _________________________________________________________________________________
+time: [12:40] [10-20-26]
+agent: [claude code] [claude-opus-5-5]
+worktree: [feat/mid-turn-steering] [~/dev/oceanwork/wt-steer]
+type: [feature]
+area: [backend] [frontend]
+
+Mid-turn steering, approved by John on 2026-10-20. ocean-runtime gains `SteeringInbox` (bounded at 16, push/take/close_if_idle/close under one lock) on `AgentConfig::steering`: after each completed round the loop delivers waiting messages as user messages after that round's tool results, emits `SteeringDelivered` and checkpoints them; where the loop would end it runs another round if anything is waiting, otherwise closes the inbox in the same step, so an accepted message is delivered or handed back, never lost. ocean-agent registers one inbox per operator turn (`open_steering` / `SteeringRegistration`, carried through `PromptControl::steering` so failover retries share it). The daemon adds `POST /v1/agent/sessions/{id}/steer` (202 steer_id, 409 no_active_turn, 429 steering_full, 400, 413) and relays `steering_delivered` on `/v1/agent/events`; ACP, the Observatory and the legacy mirror drop it. Surface: Enter during a turn steers it, with a pending "Steering · next step" row that becomes a user turn where it landed; refusals and undelivered steers fall back to the #112 queue; the proxy carries the new route. Validation: ocean-runtime (6 new loop tests), ocean-agent (2 registry tests), daemon steer-route test, router parity at 147, ocean-surface-ui (8 new) and proxy suites, clippy -D warnings, rustfmt. The full daemon suite's only failure was the known order-dependent `orphan_gc_leaves_nested_entries_instead_of_recursing`, which passes single-threaded. No live run yet.
 time: [09:40] [10-20-26]
 agent: [claude code] [claude-opus-5-5]
 worktree: [port/surface-235-tauri-acceptance] [~/dev/oceanwork/wt-235]

@@ -583,6 +583,7 @@ fn build_app(state: Arc<AppState>, dist: &std::path::Path) -> Router {
             "/v1/agent/sessions/{id}/messages",
             post(proxy_session_message_append),
         )
+        .route("/v1/agent/sessions/{id}/steer", post(proxy_session_steer))
         // Longhouse council CONTROL endpoints (convene / demo) reach the daemon
         // through this origin, so the native in-app council surface can drive a
         // real council same-origin (e.g. POST /v1/longhouse/demo). The resulting
@@ -1444,6 +1445,24 @@ async fn proxy_session_message_append(
     body: Bytes,
 ) -> impl IntoResponse {
     proxy_post_json(&state, &format!("/v1/agent/sessions/{id}/messages"), body).await
+}
+
+/// Reverse-proxy POST /v1/agent/sessions/{id}/steer (mid-turn steering). The
+/// daemon's status passes through unchanged: the composer reads 202 as
+/// "accepted" and anything else as "send it as the next turn instead".
+async fn proxy_session_steer(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Response {
+    if matches!(id.as_str(), "." | "..") {
+        return (StatusCode::BAD_REQUEST, "invalid session id").into_response();
+    }
+    let path = format!(
+        "/v1/agent/sessions/{}/steer",
+        percent_encode_path_segment(&id)
+    );
+    proxy_post_json(&state, &path, body).await
 }
 
 /// Reverse-proxy POST /v1/rooms/{room_id}/livekit-token.
