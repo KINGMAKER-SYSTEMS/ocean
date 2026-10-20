@@ -23,6 +23,7 @@ jobs:
         shell: python
         run: |
           import difflib, hashlib, json, os, pathlib, subprocess, sys, tomllib
+          sys.dont_write_bytecode = True
           sys.path.insert(0, str(pathlib.Path('apps/ocean-surface/packaging').resolve()))
           import build_desktop as desktop
           target = 'x86_64-pc-windows-msvc'
@@ -46,3 +47,5 @@ jobs:
           print(''.join(difflib.unified_diff(before.decode().splitlines(True), after.decode().splitlines(True))))
           subprocess.run(['git', 'status', '--porcelain'], check=True)
           subprocess.run(['git', 'diff', '--no-ext-diff', '--', 'apps/ocean-surface/crates/ocean-tauri/Cargo.toml'], check=True)
+          assert before == after, 'Tauri changed the LF-pinned manifest'
+          assert not subprocess.check_output(['git', 'status', '--porcelain'], text=True).strip(), 'Probe changed source'
