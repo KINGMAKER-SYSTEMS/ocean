@@ -49,5 +49,6 @@ jobs:
         working-directory: apps/ocean-surface/crates/ocean-tauri
         run: |
           for attempt in 1 2 3; do
+            echo "Watcher repetition $attempt"
             cargo test --locked --lib scoped_native_watch_release -- --nocapture
           done
