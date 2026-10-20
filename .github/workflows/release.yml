@@ -727,6 +727,9 @@ jobs:
         run: python -B -m unittest discover -s apps/ocean-surface/packaging -p 'test_*.py'
       - name: Build and inspect native installer
         run: python -B apps/ocean-surface/packaging/build_desktop.py --target '${{ matrix.target }}'
+      - name: Exercise Windows install and update refusal
+        if: runner.os == 'Windows'
+        run: python -B .github/test-windows-installer.py 'apps/ocean-surface/target/desktop/${{ github.sha }}/${{ matrix.target }}/artifacts' '${{ github.sha }}'
       - name: Upload unsigned candidate
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

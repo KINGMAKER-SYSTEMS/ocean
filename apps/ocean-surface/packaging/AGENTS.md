@@ -12,6 +12,9 @@ Build native Ocean desktop candidates with their matching daemon, MCP bridge and
   unsigned candidate; `SIGNING.md` owns its operator handoff and remaining
   notarization/installation gates. It never changes Keychain permissions.
 - The monorepo release workflow owns opt-in hosted builds and artifact upload.
+- `windows-hooks.nsh` replaces the pinned NSIS template's process-kill macro
+  with refusal. Install/uninstall must not force-terminate Ocean or touch files
+  while its app or installed sidecars are in use. Explicit app Quit owns shutdown.
 - Existing proxy/daemon service installers retain live-service ownership.
 
 ## Local Contracts
@@ -35,6 +38,8 @@ Build native Ocean desktop candidates with their matching daemon, MCP bridge and
   imports. This does not establish clean-machine WebView or installer acceptance.
 - Candidate builds are unsigned and do not publish, install, start live services,
   change credentials, or establish update/recovery or coworker acceptance.
+  A separate opt-in workflow check runs the actual Windows installer only on a
+  disposable hosted runner, with no existing Ocean installation or profile.
 - Signing uses a private verified snapshot, fixed app/sidecar identities, the
   expected Apple team, hardened runtime and secure timestamps. Original inputs
   and existing outputs are immutable; only a fully verified signed copy is
@@ -55,6 +60,11 @@ Build native Ocean desktop candidates with their matching daemon, MCP bridge and
   daemon in disposable state, then verify the bundled MCP bridge's stdio handshake,
   daemon revision and room projection. Record both sidecar checksums in the receipt.
   This does not configure an external MCP host or establish provider inference.
+- The Windows candidate workflow then checks actual silent install, refusal
+  without file changes or process termination, idle reinstall/uninstall, and
+  preservation of fixture markers in the real default profile directories.
+  It does not establish provider sign-in, user-driven GUI installation, older
+  uninstaller behavior, atomic rollback or clean-machine acceptance.
 
 ## Child devlog Index
 

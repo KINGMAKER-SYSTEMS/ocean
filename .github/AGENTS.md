@@ -35,8 +35,15 @@ Root GitHub Actions builds for the public Ocean monorepo.
 - Manual `desktop_candidate` builds unsigned installer artifacts on native
   Apple Silicon, Intel Mac and Windows x64 runners. Surface packaging owns
   the matching daemon, legal inventories and artifact-content checks. The job
-  runs only disposable-daemon acceptance, has read-only permissions and uploads
-  checked candidates without signing, publishing or installing them.
+  has read-only permissions and uploads checked candidates without signing or
+  publishing. Windows additionally exercises the actual NSIS installer on its
+  disposable hosted account before artifact upload.
+- `test-windows-installer.py` refuses non-hosted/non-Windows execution and any
+  existing Ocean install, process or profile. It checks silent install, refusal
+  for a running app and locked sidecars without killing processes or changing
+  installed files, idle reinstall/uninstall, and retained fixture profile markers.
+  All processes and profile markers are fixture-owned. This is installer-process
+  evidence, not provider inference, interactive GUI or coworker acceptance.
 - `build-scope.py` selects changed components; `test-build-scope.py` checks scope decisions, including NUL-terminated Git output. Unknown or unavailable diffs build both.
 - `test-daemon-startup.py` checks actual candidate startup, revision, isolated
   member identity and state-file creation; Unix also checks private file modes.

@@ -316,7 +316,10 @@ def build(target):
     config.write_text(json.dumps({"bundle": {
         "externalBin": [str(sidecars / name) for name in ("ocean-daemon", "ocean-mcp")],
         "resources": {str(legal) + os.sep: "legal/"},
-        "windows": {"nsis": {"installMode": "currentUser"}},
+        "windows": {"nsis": {
+            "installMode": "currentUser",
+            "installerHooks": str(SURFACE / "packaging/windows-hooks.nsh"),
+        }},
     }}))
     run([tauri, "build", "--ci", "--no-sign", "--target", target, "--bundles",
          "nsis" if suffix else "app,dmg", "--config", config, "--", "--locked"], cwd=NATIVE)
