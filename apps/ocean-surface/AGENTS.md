@@ -330,6 +330,17 @@ Web surface session UI:
   daemon-owned running/Stop projection and continuing the scoped SSE tail.
   Never quarantine a live session behind client-side detail polling,
   `detail syncing…`, or a manual refresh control.
+- The daemon's `event: error` reset frame on `GET /v1/agent/events`
+  (published `agent_events_error`: `live_lag`, `anchor_unavailable`,
+  `malformed_anchor`, `reset_required`) shares its name with the DOM
+  connection-error event, so gloo reports it as a `ConnectionError`.
+  `src/agent_events_reset.rs` tells the two apart (a reset frame is a
+  `MessageEvent` with data; a transport error is a plain `Event`), and
+  `Daemon::connect` polls that subscription first, leaves the connection once
+  on a reset and takes the existing reconnect path (fresh projection, fresh
+  `EventSource`, no stale anchor). A plain transport error stays with gloo's
+  handling. `tests/unheld_agent_stream_reset.rs` pins that wiring; its table
+  records which mutations the compiler holds and which only the guard does.
 - Token telemetry consumes the daemon's additive `TurnFinished` provider
   footprint and cache-read/cache-write breakdowns. The provider total is
   authoritative; cache buckets may already be included in input and total, so
