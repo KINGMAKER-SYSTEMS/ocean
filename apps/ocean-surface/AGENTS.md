@@ -89,6 +89,22 @@ Native surface direction:
   OpenSSL or other developer-installed libraries.
 - The native `.gitattributes` pins `Cargo.toml` to LF. Tauri serializes it with
   LF on every host; Windows checkout conversion must not dirty packaged source.
+- Native first-run setup is collected through `host.rs` and the main-window-only
+  `daemon_setup`/`daemon_start` commands. `startup_model.rs` shares only the
+  runtime provider catalog's metadata; no credential or provider call enters
+  Surface. A user-selected catalog route is stored under the desktop app's
+  own config directory and supplied only as `OCEAN_DEFAULT_MODEL` to its child.
+  Existing environment defaults and daemon-persisted model choices take
+  precedence. The desktop never writes daemon configuration or picks a model
+  silently. Corrupt/nonregular desktop settings fail visibly without replacement.
+  The startup form exists only while native supervision is offline. Initial
+  native status must resolve before mounting Rooms; a later disconnect preserves
+  the conversation and unsent draft, refuses direct-chat submission, and shows
+  a compact restart action. Offline headers expose
+  no ready indicators. Ordinary connected model/effort controls remain unchanged.
+  Successful startup refreshes
+  model/project state and reconnects the focused session. Verify with native
+  `cargo test --lib startup_model`, native daemon tests, and the real WASM build.
 - Native daemon start resolves the operator's `OCEAN_DAEMON_BIN`, then the
   installed executable sibling, then the platform binary on PATH. No IPC
   argument may select an executable. Explicit start/restart remains unchanged.
@@ -96,6 +112,10 @@ Native surface direction:
   never the app's inherited workspace; Windows children have no console window.
   Home/profile also owns native daemon logs. Verify native launch with
   `cargo test --lib daemon_` from `crates/ocean-tauri`.
+  A native-process `OCEAN_DAEMON_LOG` may select an absolute log file for
+  diagnostics; no webview argument controls that path. Isolated startup
+  acceptance keeps config, auth, Claude fallback and logs in disposable paths
+  while preserving the operating-system home and the live daemon.
 - Canvas ledger/state injected into turns as surface context; the Leptos canvas
   already lives at `crates/ocean-surface-ui/src/canvas.rs`.
 - `docs/OCEAN_GPUI_CANVAS_LIVEKIT_SPEC.md` is retained as a historical reference
@@ -162,6 +182,30 @@ token to browser code, bundle it, or cache it in client storage.
 - Verify the full proxy suite on Windows with `cargo test --locked -p
   ocean-surface-proxy`; the manual Windows probe owns this check. Compilation
   and synthetic transport fixtures do not establish packaged/client acceptance.
+
+## Desktop Accounts
+
+- `src/accounts.rs` owns the native Accounts dialog, reached through the existing
+  header overflow. Native dialog focus trapping, Escape and return focus apply.
+  Provider rows keep stable identity; pending actions retain keyboard focus with
+  `aria-disabled` plus handler admission guards. Restore menu focus after unmount.
+  No credential forms, provider calls, login URLs or tokens enter the webview.
+- `src/host.rs` calls the main-window-only `provider_accounts` command.
+  `crates/ocean-tauri/src/provider_accounts.rs` admits only List, Login and Cancel
+  for Claude, Codex and ChatGPT. Cancel carries the exact daemon attempt id;
+  no caller chooses a URL, method, path, credential or executable.
+- The existing shared native transport attaches the owner-only operator key to
+  numeric loopback only. Room owner-mutation routes remain unchanged. Responses
+  project only provider/status/attempt fields. Login opens only that provider's
+  fixed HTTPS authorization endpoint in the system browser, never in the app.
+- The daemon owns callback listeners, credential publication and cancellation.
+  Closing Accounts retires reads, not the browser login; reopening reads its
+  current state. New intent retires older list replies. Reads poll only while a
+  login is pending; mutations never retry automatically. Credential availability
+  means Connected, not verified provider inference. Model readiness refreshes
+  after projected account changes.
+- Verify native `cargo test --lib provider_accounts`, UI `cargo test -p
+  ocean-surface-ui accounts`, the real WASM bundle and rendered native dialog.
 
 ## Empty Session Surface
 
@@ -766,7 +810,8 @@ ships today and are updated slice by slice.
   command and its `OwnerMutationState`) and `room_consent.rs` (`Intent`s),
   and their `lib.rs` wiring (one `DaemonTransport` built from
   `daemon_url_from_env()` + `operator_key_path()`, cloned into
-  `OwnerMutationState` and `ConsentBroker`). Callers keep typed intent enums
+  `OwnerMutationState`, `ConsentBroker` and `provider_accounts::AccountState`).
+  Account intent is governed by Desktop Accounts above. Callers keep typed intent enums
   on top; JS never supplies a method, path or header.
 - Rules (strictest of the two former transports): daemon address from
   `OCEAN_DAEMON_URL` restricted to `http://<numeric loopback>[:port][/]`

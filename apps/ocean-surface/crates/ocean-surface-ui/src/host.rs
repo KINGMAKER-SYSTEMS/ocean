@@ -613,6 +613,102 @@ pub struct DaemonStatus {
     pub pid: Option<u32>,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+pub struct StartupModel {
+    pub id: String,
+    pub label: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct DaemonSetup {
+    pub models: Vec<StartupModel>,
+    pub selected: Option<String>,
+    pub needs_model: bool,
+}
+
+pub async fn daemon_setup() -> Result<Option<DaemonSetup>, String> {
+    if !running_in_tauri() {
+        return Ok(None);
+    }
+    let value = tauri_invoke("daemon_setup", &Object::new())
+        .await
+        .map_err(|error| {
+            error
+                .as_string()
+                .unwrap_or_else(|| "Couldn't load Ocean setup.".into())
+        })?;
+    consent_decode(&value).map(Some)
+}
+
+pub async fn daemon_start_with_model(model: Option<String>) -> Result<(), String> {
+    if !running_in_tauri() {
+        return Err("Open Ocean in the desktop app.".into());
+    }
+    let args = Object::new();
+    if let Some(model) = model {
+        let _ = Reflect::set(
+            &args,
+            &JsValue::from_str("initialModel"),
+            &JsValue::from_str(&model),
+        );
+    }
+    tauri_invoke("daemon_start", &args)
+        .await
+        .map(|_| ())
+        .map_err(|error| {
+            error
+                .as_string()
+                .unwrap_or_else(|| "Couldn't start Ocean.".into())
+        })
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct AccountLogin {
+    pub provider: String,
+    pub attempt_id: String,
+    pub state: String,
+}
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct ProviderAccount {
+    pub provider: String,
+    pub status: String,
+    pub login: Option<AccountLogin>,
+}
+#[derive(Clone, Debug, Deserialize)]
+pub struct AccountReply {
+    pub providers: Option<Vec<ProviderAccount>>,
+    pub login: Option<AccountLogin>,
+    pub browser_opened: Option<bool>,
+}
+
+pub async fn provider_accounts(
+    action: &str,
+    provider: Option<&str>,
+    attempt: Option<&str>,
+) -> Result<AccountReply, String> {
+    if !running_in_tauri() {
+        return Err("accounts_unavailable".into());
+    }
+    let args = Object::new();
+    for (key, value) in [
+        ("action", Some(action)),
+        ("provider", provider),
+        ("attemptId", attempt),
+    ] {
+        if let Some(value) = value {
+            let _ = Reflect::set(&args, &key.into(), &value.into());
+        }
+    }
+    let value = tauri_invoke("provider_accounts", &args)
+        .await
+        .map_err(|error| {
+            error
+                .as_string()
+                .unwrap_or_else(|| "account_request_failed".into())
+        })?;
+    consent_decode(&value)
+}
+
 /// Current daemon supervision state (cached from the shell's background
 /// poller). `None` on non-Tauri hosts — the browser/extension never supervise
 /// a daemon, so there is no shell state to report.

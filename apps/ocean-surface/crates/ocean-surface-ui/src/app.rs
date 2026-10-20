@@ -1567,16 +1567,44 @@ pub fn App() -> impl IntoView {
     // existing connection chip already covers the reachable case. Off-Tauri
     // this is a no-op: `daemon_status()` is None and the listener never fires,
     // so the signal stays None and the indicator never mounts.
+    let in_tauri = crate::host::running_in_tauri();
     let daemon_shell_status = RwSignal::new(None::<DaemonStatus>);
+    let native_connected_once = RwSignal::new(false);
+    let native_offline = move || {
+        in_tauri
+            && daemon_shell_status
+                .get()
+                .is_none_or(|status| status.state != "running")
+    };
+    let native_startup = move || native_offline() && !native_connected_once.get();
     {
         let sig = daemon_shell_status;
-        crate::host::on_daemon_status(move |s| sig.set(Some(s)));
+        let reconnect = daemon.clone();
+        let accept_status = move |s: DaemonStatus| {
+            let became_available = s.state == "running"
+                && sig
+                    .get_untracked()
+                    .is_none_or(|previous| previous.state != "running");
+            if s.state == "running" {
+                native_connected_once.set(true);
+            }
+            sig.set(Some(s));
+            if became_available {
+                reconnect.connect();
+                reconnect.fetch_models();
+                reconnect.fetch_projects();
+            }
+        };
+        crate::host::on_daemon_status(accept_status.clone());
         // Seed from the current status so the indicator is correct before the
         // first on-change event (best-effort; None off-Tauri).
         let sig = daemon_shell_status;
         wasm_bindgen_futures::spawn_local(async move {
             if let Some(s) = crate::host::daemon_status().await {
-                sig.set(Some(s));
+                // A newer native event wins over this in-flight seed read.
+                if sig.get_untracked().is_none() {
+                    accept_status(s);
+                }
             }
         });
     }
@@ -1638,6 +1666,7 @@ pub fn App() -> impl IntoView {
     // topics snapshot (GET /v1/longhouse/topics), polled while the deck is
     // open.
     let show_council = RwSignal::new(false);
+    let show_accounts = RwSignal::new(false);
     // Ocean Floor is a primary read-only Observatory stage over the daemon's
     // durable snapshot/live/replay contract. It is mounted only while open so
     // its single SSE connection and renderer loop tear down deterministically.
@@ -1686,7 +1715,6 @@ pub fn App() -> impl IntoView {
     // persisted to localStorage so a relaunch restores it. Host posture
     // (docked split vs overlay) is decided by viewport width in CSS, never by
     // host. `in_tauri` survives only for native titlebar chrome.
-    let in_tauri = crate::host::running_in_tauri();
     let daemon_for_island = StoredValue::new(daemon.clone());
     let palette_open = RwSignal::new(false);
     // Every Island entry point shares one overlay policy. Agent interaction,
@@ -2255,6 +2283,9 @@ pub fn App() -> impl IntoView {
         let registry = registry.clone();
         move |ev: SubmitEvent| {
             ev.prevent_default();
+            if native_offline() {
+                return;
+            }
             let mut text = input.get_untracked();
             let attachments = composer_attachments.get_untracked();
             if text.trim().is_empty() && attachments.is_empty() {
@@ -2491,6 +2522,8 @@ pub fn App() -> impl IntoView {
             // Desktop-only: the header doubles as the window titlebar (Tauri
             // overlay traffic lights float over it) — pads the brand clear.
             class:is-titlebar=in_tauri
+            class:is-starting=native_startup
+            class:is-offline=native_offline
             class:voice-chat-active=voice_chat_active
             class:voice-chat-docked=voice_chat_docked
             style=("--voice-level", voice_level_style)
@@ -2601,26 +2634,6 @@ pub fn App() -> impl IntoView {
                         <span class="ocean-status__dot"></span>
                         <span class="ocean-status__text">{move || status.get()}</span>
                     </div>
-                    // Daemon-supervision indicator (Tauri shell only). Shown
-                    // ONLY when the shell reports the daemon process is down
-                    // (stopped/unreachable) — explaining why the connection chip
-                    // above is also failing, and pointing at the palette/tray to
-                    // start it. Hidden whenever the daemon is up or off-Tauri
-                    // (signal is None), so it adds no permanent chrome.
-                    <Show when=move || {
-                        daemon_shell_status
-                            .get()
-                            .map(|s| matches!(s.state.as_str(), "stopped" | "unreachable"))
-                            .unwrap_or(false)
-                    }>
-                        <div
-                            class="ocean-status"
-                            title="The ocean-daemon process isn't running. Start it via ⌘K → Start Daemon or the tray menu."
-                        >
-                            <span class="ocean-status__dot"></span>
-                            <span class="ocean-status__text">"daemon offline"</span>
-                        </div>
-                    </Show>
                     </div>
                     // Secondary actions live behind one overflow control:
                     // council deck, rooms, voice mute, extension tab capture.
@@ -2631,6 +2644,11 @@ pub fn App() -> impl IntoView {
                             "⋯"
                         </summary>
                         <div class="ocean-more__menu" role="menu">
+                            <crate::accounts::AccountsMenuItem on_open=Callback::new(move |()| {
+                                if let Some(menu) = more_ref.get() { let _ = menu.remove_attribute("open"); }
+                                island_mode.set(IslandMode::Closed);
+                                show_accounts.set(true);
+                            }) />
                             <Show when=move || !livekit_token_path.get().trim().is_empty()>
                                 <button
                                     class="ocean-more__item"
@@ -2727,6 +2745,10 @@ pub fn App() -> impl IntoView {
                 </div>
             </header>
 
+            <Show when=native_offline>
+                <crate::model_control::NativeStartup status=daemon_shell_status compact=native_connected_once.get_untracked() />
+            </Show>
+
             // Chat surface. (The Leptos component "gauntlet" toggle was removed
             // in OCEAN-202 — it was a dev-only component harness, not shipping UI.)
             // Call/collaboration utility line. Hidden while idle so the app has
@@ -2757,7 +2779,7 @@ pub fn App() -> impl IntoView {
             // retain the existing session transcript/composer and are reached
             // explicitly from the app menu; selecting a room never swaps in a
             // separate stage or overlay.
-            <Show when=move || show_rooms.get() && endpoint_ready.get()>
+            <Show when=move || show_rooms.get() && endpoint_ready.get() && !native_startup()>
                 <RoomsWorkspace
                     rooms=rooms
                     daemon=daemon_for_island.get_value()
@@ -2765,7 +2787,7 @@ pub fn App() -> impl IntoView {
                 />
             </Show>
 
-            <Show when=move || !show_rooms.get()>
+            <Show when=move || !show_rooms.get() && !native_startup()>
 
                         // Live call-mode view (OCEAN-CALL). Self-contained: it
                         // subscribes to the daemon's `/v1/events` control stream
@@ -3077,8 +3099,8 @@ pub fn App() -> impl IntoView {
                                         aria-label="send"
                                         title="Send"
                                         disabled=move || {
-                                            input.get().trim().is_empty()
-                                                && composer_attachments.get().is_empty()
+                                            native_offline() || (input.get().trim().is_empty()
+                                                && composer_attachments.get().is_empty())
                                         }
                                     >
                                         <crate::icons::Send />
@@ -3106,6 +3128,18 @@ pub fn App() -> impl IntoView {
                 />
             </Show>
 
+            <Show when=move || show_accounts.get()>
+                <crate::accounts::Accounts daemon=daemon_for_island.get_value() on_close=Callback::new(move |()| {
+                    show_accounts.set(false);
+                    request_animation_frame(move || {
+                        if let Some(menu) = more_ref.get() {
+                            if let Ok(Some(summary)) = menu.query_selector("summary") {
+                                if let Ok(summary) = summary.dyn_into::<web_sys::HtmlElement>() { let _ = summary.focus(); }
+                            }
+                        }
+                    });
+                }) />
+            </Show>
             <SessionsPanel daemon=daemon_for_panel open=show_sessions />
 
             // Workspace pane: THE right-side surface on every host, tabbed
