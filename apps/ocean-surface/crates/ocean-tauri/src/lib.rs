@@ -26,6 +26,7 @@ use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut,
 
 mod daemon_transport;
 mod owner_mutation;
+mod provider_accounts;
 mod room_consent;
 mod startup_model;
 
@@ -2128,6 +2129,7 @@ pub fn run() {
         // Operator-gated Room requests (owner mutations, agent consent) share
         // one numeric-loopback transport; an untrusted OCEAN_DAEMON_URL
         // (including `localhost`) leaves every one of them unsent.
+        .manage(provider_accounts::AccountState(operator_transport.clone()))
         .manage(owner_mutation::OwnerMutationState(
             operator_transport.clone(),
         ))
@@ -2491,6 +2493,7 @@ pub fn run() {
             ui_debug_resize,
             open_external_url,
             owner_mutation::room_owner_mutation,
+            provider_accounts::provider_accounts,
             room_consent::room_consent_preview,
             room_consent::room_consent_authorize,
             room_consent::room_consent_cancel,

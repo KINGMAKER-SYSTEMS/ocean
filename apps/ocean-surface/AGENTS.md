@@ -171,6 +171,30 @@ token to browser code, bundle it, or cache it in client storage.
   ocean-surface-proxy`; the manual Windows probe owns this check. Compilation
   and synthetic transport fixtures do not establish packaged/client acceptance.
 
+## Desktop Accounts
+
+- `src/accounts.rs` owns the native Accounts dialog, reached through the existing
+  header overflow. Native dialog focus trapping, Escape and return focus apply.
+  Provider rows keep stable identity; pending actions retain keyboard focus with
+  `aria-disabled` plus handler admission guards. Restore menu focus after unmount.
+  No credential forms, provider calls, login URLs or tokens enter the webview.
+- `src/host.rs` calls the main-window-only `provider_accounts` command.
+  `crates/ocean-tauri/src/provider_accounts.rs` admits only List, Login and Cancel
+  for Claude, Codex and ChatGPT. Cancel carries the exact daemon attempt id;
+  no caller chooses a URL, method, path, credential or executable.
+- The existing shared native transport attaches the owner-only operator key to
+  numeric loopback only. Room owner-mutation routes remain unchanged. Responses
+  project only provider/status/attempt fields. Login opens only that provider's
+  fixed HTTPS authorization endpoint in the system browser, never in the app.
+- The daemon owns callback listeners, credential publication and cancellation.
+  Closing Accounts retires reads, not the browser login; reopening reads its
+  current state. New intent retires older list replies. Reads poll only while a
+  login is pending; mutations never retry automatically. Credential availability
+  means Connected, not verified provider inference. Model readiness refreshes
+  after projected account changes.
+- Verify native `cargo test --lib provider_accounts`, UI `cargo test -p
+  ocean-surface-ui accounts`, the real WASM bundle and rendered native dialog.
+
 ## Empty Session Surface
 
 - Empty transcripts show the existing static circular Ocean mark and an
@@ -754,7 +778,8 @@ Web surface session UI:
   command and its `OwnerMutationState`) and `room_consent.rs` (`Intent`s),
   and their `lib.rs` wiring (one `DaemonTransport` built from
   `daemon_url_from_env()` + `operator_key_path()`, cloned into
-  `OwnerMutationState` and `ConsentBroker`). Callers keep typed intent enums
+  `OwnerMutationState`, `ConsentBroker` and `provider_accounts::AccountState`).
+  Account intent is governed by Desktop Accounts above. Callers keep typed intent enums
   on top; JS never supplies a method, path or header.
 - Rules (strictest of the two former transports): daemon address from
   `OCEAN_DAEMON_URL` restricted to `http://<numeric loopback>[:port][/]`

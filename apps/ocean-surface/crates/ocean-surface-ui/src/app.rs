@@ -1664,6 +1664,7 @@ pub fn App() -> impl IntoView {
     // topics snapshot (GET /v1/longhouse/topics), polled while the deck is
     // open.
     let show_council = RwSignal::new(false);
+    let show_accounts = RwSignal::new(false);
     // Ocean Floor is a primary read-only Observatory stage over the daemon's
     // durable snapshot/live/replay contract. It is mounted only while open so
     // its single SSE connection and renderer loop tear down deterministically.
@@ -2641,6 +2642,11 @@ pub fn App() -> impl IntoView {
                             "⋯"
                         </summary>
                         <div class="ocean-more__menu" role="menu">
+                            <crate::accounts::AccountsMenuItem on_open=Callback::new(move |()| {
+                                if let Some(menu) = more_ref.get() { let _ = menu.remove_attribute("open"); }
+                                island_mode.set(IslandMode::Closed);
+                                show_accounts.set(true);
+                            }) />
                             <Show when=move || !livekit_token_path.get().trim().is_empty()>
                                 <button
                                     class="ocean-more__item"
@@ -3120,6 +3126,18 @@ pub fn App() -> impl IntoView {
                 />
             </Show>
 
+            <Show when=move || show_accounts.get()>
+                <crate::accounts::Accounts daemon=daemon_for_island.get_value() on_close=Callback::new(move |()| {
+                    show_accounts.set(false);
+                    request_animation_frame(move || {
+                        if let Some(menu) = more_ref.get() {
+                            if let Ok(Some(summary)) = menu.query_selector("summary") {
+                                if let Ok(summary) = summary.dyn_into::<web_sys::HtmlElement>() { let _ = summary.focus(); }
+                            }
+                        }
+                    });
+                }) />
+            </Show>
             <SessionsPanel daemon=daemon_for_panel open=show_sessions />
 
             // Workspace pane: THE right-side surface on every host, tabbed

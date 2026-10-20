@@ -2894,3 +2894,16 @@ area: [frontend]
 A blank native Ocean profile exited before HTTP startup because no model was selected. Add explicit first-launch model intent through main-window-only native commands, a validated non-secret desktop preference and child-only OCEAN_DEFAULT_MODEL fallback; existing daemon/environment selections retain precedence. Serialize child admission and retire exited children without stale-probe kills. Gate initial Rooms mounting on native availability, suppress offline ready indicators, and preserve existing conversation/drafts during later outages with one compact restart action and guarded direct-chat submission.
 
 Validation: 91 native tests, 954 UI tests, native/WASM Clippy, actual Trunk bundle and docs-check pass. Actual isolated macOS app started a blank daemon, entered Rooms without a stale error, reused the saved model on relaunch, preserved an unsent draft through daemon interruption/restart, and refused Enter/Send while offline. Fixture config/auth/Claude fallback/logs and preferences were isolated; no provider request or live-service replacement. Updated Surface contract; parent ownership/index unchanged. Windows first-run, provider login, independent review, merge and deployment remain separate gates.
+
+_________________________________________________________________________________
+time: [20:43] [19-10-26]
+agent: [Codex] [GPT-6]
+worktree: [codex/desktop-accounts]
+type: [feature-request]
+area: [frontend]
+
+Add one native Accounts entry to the existing overflow for daemon-owned Claude, Codex and ChatGPT login/status/cancellation. Main-window-only fixed intents use the existing loopback operator transport; provider authorization URLs open natively and never enter the webview. Closing retires reads; exact attempts and newer intent fence stale state; no mutation automatically retries. Stable provider rows, guarded aria-disabled actions and post-unmount focus restoration preserve keyboard navigation.
+
+Validation: 96 native and 956 UI tests, native/WASM Clippy, formatting, docs-check and actual Trunk build pass. The actual isolated macOS app renders provider state, cancels an exact pending Codex attempt, preserves button focus and returns Escape focus to More. Daemon read-back confirms cancellation with no credential file; no browser login or inference was completed. Initial disk exhaustion was cleared using only task-owned incremental build caches; the unchanged watcher test then passed in the full native suite. Surface contract updated; parent ownership and indexes unchanged. Clean committed-source verification, Windows checks, independent review, merge and live delivery remain separate gates.
+
+Follow-up evidence: PR #124 Windows run 39346724849 passed 90 native tests, actual web bundle and release GUI executable at 87c7ff07. PR #123 a454dafc Intel packaging passed; b4e7c2e6 three-platform candidate run 39347359624 continues. Current org main is 956d0055, with additional Rooms documentation; this account change does not modify that rendering program.
