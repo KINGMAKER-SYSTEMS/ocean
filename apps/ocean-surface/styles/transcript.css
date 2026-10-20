@@ -350,6 +350,46 @@
   white-space: pre-wrap;
 }
 
+/* Queued prompts: the operator's own text waiting behind the running turn.
+   Same right-aligned bubble as a user turn, dimmed and dashed so it reads as
+   "not sent yet", with a Queued label and a remove control. */
+.turn--queued .turn__body {
+  background: transparent;
+  border: 1px dashed var(--fg-3);
+  box-shadow: none;
+  color: var(--fg-2);
+}
+
+.turn__queued-meta {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--fg-3);
+}
+
+.turn__queued-remove {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--fg-3);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+  border-radius: 4px;
+}
+
+.turn__queued-remove:hover,
+.turn__queued-remove:focus-visible {
+  color: var(--fg);
+  outline: none;
+  box-shadow: 0 0 0 2px var(--accent-ring);
+}
+
 .turn--assistant .turn__body {
   /* TASK-52 open document flow: the assistant turn is DE-BUBBLED. No card
      background, border, radius, or shadow — content sits directly on the

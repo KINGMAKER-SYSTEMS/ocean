@@ -1967,6 +1967,35 @@ struct PlannerStreamSources {
     lifecycle: PlannerStreamLifecycle,
 }
 
+/// A prompt the operator sent while the session was busy: a turn was still
+/// streaming here, or the daemon answered the send with its one-operation
+/// refusal (`409 session has an active operation`). It is shown as a queued
+/// row at the transcript tail and sent, in order, as soon as the session is
+/// free. The TUI has carried the same queue since OCEAN-275; this is the
+/// Surface half of it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QueuedPrompt {
+    /// Stable identity for the row (never reused within a session).
+    pub id: u64,
+    /// The wire prompt (may carry attached text context).
+    pub prompt: String,
+    /// What the transcript shows for it.
+    pub display: String,
+    /// Per-turn routing tag (`surface-web` / `leo-voice` / …).
+    pub client_type: &'static str,
+    /// Images staged when it was queued; they ride on this prompt, not the next.
+    pub images: Vec<TurnImage>,
+}
+
+/// How many times the head of the queue is re-offered to a daemon that keeps
+/// answering "busy" before the Surface gives up and shows the error block.
+/// At [`QUEUE_BUSY_RETRY_MS`] apart that is about a minute of another
+/// client's turn.
+const QUEUE_BUSY_RETRY_LIMIT: u32 = 40;
+const QUEUE_BUSY_RETRY_MS: u32 = 1_500;
+/// The daemon's one-operation-per-session refusal, as its error text begins.
+const SESSION_BUSY_MARKER: &str = "session has an active operation";
+
 #[derive(Clone)]
 pub struct Daemon {
     pub url: RwSignal<String>,
@@ -2190,6 +2219,19 @@ pub struct Daemon {
     /// `AgentTurnRequest::images`, then is drained. Empty = no attachment, so the
     /// field is omitted and the daemon behaves exactly as before.
     pub pending_images: RwSignal<Vec<TurnImage>>,
+    /// Prompts waiting for the session to be free (see [`QueuedPrompt`]),
+    /// oldest first. Drained one at a time by `drain_queued_prompt` whenever
+    /// `streaming` returns to false (effect installed by
+    /// [`Self::install_queue_drain`]) or a busy-retry timer fires.
+    pub queued_prompts: RwSignal<Vec<QueuedPrompt>>,
+    /// Monotonic id source for queued rows.
+    queued_prompt_seq: RwSignal<u64>,
+    /// Consecutive busy (409) refusals for the head of the queue; reset once a
+    /// send is accepted.
+    queue_busy_retries: RwSignal<u32>,
+    /// A busy-retry timer is pending: the drain waits for it instead of
+    /// re-sending on every signal tick.
+    queue_retry_pending: RwSignal<bool>,
     /// Canvas patches the agent has applied this session, oldest first
     /// (OCEAN-178). Populated from the daemon's `surface_patch` SSE event. The
     /// GPUI native shell renders these on a full `CanvasLedger`; the web surface
@@ -2567,6 +2609,10 @@ impl Daemon {
             // choice, not a sticky preference. Starts `None` (surface profile).
             agent_override: RwSignal::new(None),
             pending_images: RwSignal::new(Vec::new()),
+            queued_prompts: RwSignal::new(Vec::new()),
+            queued_prompt_seq: RwSignal::new(0),
+            queue_busy_retries: RwSignal::new(0),
+            queue_retry_pending: RwSignal::new(false),
             canvas_patches: RwSignal::new(Vec::new()),
             pinned_widgets: RwSignal::new(Vec::new()),
             active_decision_token: RwSignal::new(None),
@@ -2646,6 +2692,10 @@ impl Daemon {
             model_override: RwSignal::new(None),
             agent_override: RwSignal::new(None),
             pending_images: RwSignal::new(Vec::new()),
+            queued_prompts: RwSignal::new(Vec::new()),
+            queued_prompt_seq: RwSignal::new(0),
+            queue_busy_retries: RwSignal::new(0),
+            queue_retry_pending: RwSignal::new(false),
             canvas_patches: RwSignal::new(Vec::new()),
             pinned_widgets: RwSignal::new(Vec::new()),
             active_decision_token: RwSignal::new(None),
@@ -3445,9 +3495,193 @@ impl Daemon {
         if prompt.trim().is_empty() {
             return;
         }
+        if self.session_is_busy() {
+            self.enqueue_prompt(prompt, display_prompt, surface_client_type());
+            return;
+        }
         self.turns.update(|t| t.push(Turn::user(display_prompt)));
         self.streaming.set(true);
         self.dispatch_prompt(prompt, false, surface_client_type());
+    }
+
+    /// True while a send must wait: a turn is streaming, earlier prompts are
+    /// already queued (a new one goes behind them), or the head of the queue
+    /// is waiting out a busy daemon.
+    fn session_is_busy(&self) -> bool {
+        self.streaming.get_untracked()
+            || self.queue_retry_pending.get_untracked()
+            || self.queued_prompts.with_untracked(|q| !q.is_empty())
+    }
+
+    /// Park `prompt` behind the running turn. The images staged for it leave
+    /// `pending_images` now so they ride on this prompt rather than whichever
+    /// send happens next.
+    fn enqueue_prompt(&self, prompt: String, display: String, client_type: &'static str) {
+        let id = self.next_queued_prompt_id();
+        let images = self.pending_images.get_untracked();
+        self.pending_images.set(Vec::new());
+        self.queued_prompts.update(|q| {
+            q.push(QueuedPrompt {
+                id,
+                prompt,
+                display,
+                client_type,
+                images,
+            })
+        });
+        let waiting = self.queued_prompts.with_untracked(|q| q.len());
+        self.status
+            .set(format!("message queued · {waiting} waiting"));
+        self.status_detail.set(None);
+    }
+
+    fn next_queued_prompt_id(&self) -> u64 {
+        let id = self.queued_prompt_seq.get_untracked().wrapping_add(1);
+        self.queued_prompt_seq.set(id);
+        id
+    }
+
+    /// Drop one queued prompt (the row's remove control). Its staged images go
+    /// with it; nothing is sent.
+    pub fn remove_queued_prompt(&self, id: u64) {
+        let removed = self
+            .queued_prompts
+            .try_update(|q| {
+                let before = q.len();
+                q.retain(|p| p.id != id);
+                before != q.len()
+            })
+            .unwrap_or(false);
+        if !removed {
+            return;
+        }
+        let waiting = self.queued_prompts.with_untracked(|q| q.len());
+        self.status.set(if waiting == 0 {
+            "queued message removed".into()
+        } else {
+            format!("queued message removed · {waiting} waiting")
+        });
+        self.status_detail.set(None);
+    }
+
+    /// Empty the queue and forget any busy-retry count. Stop, New Session and
+    /// a session switch all call this: a queued follow-up belongs to the
+    /// conversation the operator was in when they typed it.
+    fn clear_queued_prompts(&self) -> usize {
+        let cleared = self.queued_prompts.with_untracked(|q| q.len());
+        if cleared > 0 {
+            self.queued_prompts.set(Vec::new());
+        }
+        self.queue_busy_retries.set(0);
+        cleared
+    }
+
+    /// Send the oldest queued prompt if the session is free. A no-op while a
+    /// turn streams, a busy-retry timer is pending, a lazy session create is
+    /// still being adopted, or the queue is empty.
+    fn drain_queued_prompt(&self) {
+        if self.streaming.get_untracked()
+            || self.queue_retry_pending.get_untracked()
+            || self.awaiting_session_adoption.get_untracked()
+        {
+            return;
+        }
+        let next = self
+            .queued_prompts
+            .try_update(|q| {
+                if q.is_empty() {
+                    None
+                } else {
+                    Some(q.remove(0))
+                }
+            })
+            .flatten();
+        let Some(next) = next else {
+            return;
+        };
+        let waiting = self.queued_prompts.with_untracked(|q| q.len());
+        self.pending_images.set(next.images);
+        self.turns.update(|t| t.push(Turn::user(next.display)));
+        self.streaming.set(true);
+        self.status.set(if waiting > 0 {
+            format!("sending queued message · {waiting} waiting")
+        } else {
+            "sending queued message".into()
+        });
+        self.status_detail.set(None);
+        self.dispatch_prompt(next.prompt, false, next.client_type);
+    }
+
+    /// Install the effect that drains the queue whenever a turn ends. The app
+    /// shell calls this once at mount; it does nothing until something is
+    /// queued.
+    pub fn install_queue_drain(&self) {
+        let streaming = self.streaming;
+        let daemon = self.clone();
+        Effect::new(move |_| {
+            if !streaming.get() {
+                daemon.drain_queued_prompt();
+            }
+        });
+    }
+
+    /// The daemon refused a send because another operation holds the session
+    /// (`409 session has an active operation`): another client's turn, or a
+    /// turn this Surface could not see yet. Rather than an error block, take
+    /// the echoed user row back as the head of the queue and try again
+    /// shortly. After [`QUEUE_BUSY_RETRY_LIMIT`] refusals in a row this
+    /// returns `false` and the caller shows the error as before.
+    fn requeue_busy_send(&self, prompt: &str, client_type: &'static str) -> bool {
+        let retries = self.queue_busy_retries.get_untracked() + 1;
+        if retries > QUEUE_BUSY_RETRY_LIMIT {
+            self.queue_busy_retries.set(0);
+            return false;
+        }
+        self.queue_busy_retries.set(retries);
+        let display = self
+            .turns
+            .try_update(take_echoed_user_turn)
+            .flatten()
+            .unwrap_or_else(|| prompt.to_string());
+        let id = self.next_queued_prompt_id();
+        let images = self.pending_images.get_untracked();
+        self.pending_images.set(Vec::new());
+        self.queued_prompts.update(|q| {
+            q.insert(
+                0,
+                QueuedPrompt {
+                    id,
+                    prompt: prompt.to_string(),
+                    display,
+                    client_type,
+                    images,
+                },
+            )
+        });
+        let waiting = self.queued_prompts.with_untracked(|q| q.len());
+        self.status.set(format!(
+            "session is busy — will send when it frees · {waiting} waiting"
+        ));
+        self.status_detail.set(None);
+        // Arm the timer BEFORE releasing `streaming`, so the drain effect that
+        // fires on the release sees the pending retry and waits for it.
+        self.schedule_queue_retry();
+        self.awaiting_session_adoption.set(false);
+        self.streaming.set(false);
+        true
+    }
+
+    fn schedule_queue_retry(&self) {
+        if self.queue_retry_pending.get_untracked() {
+            return;
+        }
+        self.queue_retry_pending.set(true);
+        let daemon = self.clone();
+        spawn_local(async move {
+            gloo_timers::future::TimeoutFuture::new(QUEUE_BUSY_RETRY_MS).await;
+            daemon.queue_retry_pending.set(false);
+            daemon.drain_queued_prompt();
+        });
     }
 
     /// Send a voice-orb transcript. Identical to [`send_prompt`] except the turn
@@ -3458,6 +3692,10 @@ impl Daemon {
     /// message and that voice guidance would be unreachable (OCEAN-181).
     pub fn send_voice_prompt(&self, prompt: String) {
         if prompt.trim().is_empty() {
+            return;
+        }
+        if self.session_is_busy() {
+            self.enqueue_prompt(prompt.clone(), prompt, VOICE_CLIENT_TYPE);
             return;
         }
         self.turns.update(|t| t.push(Turn::user(prompt.clone())));
@@ -3818,6 +4056,7 @@ impl Daemon {
             match res {
                 Ok(resp) => match resp.json::<AgentTurnResponse>().await {
                     Ok(r) if r.ok => {
+                        daemon.queue_busy_retries.set(0);
                         // Bind decision authority for this turn (TASK-44, finding
                         // 4). The daemon's turn id IS the request id, so a later
                         // permission gate on this turn resolves to exactly the
@@ -3872,6 +4111,13 @@ impl Daemon {
                             daemon.retire_permission_state();
                             status.set("session expired — starting fresh".into());
                             daemon.dispatch_prompt(prompt, true, client_type);
+                            return;
+                        }
+                        // Another operation holds the session: queue instead
+                        // of erroring, and try again once it frees.
+                        if err.contains(SESSION_BUSY_MARKER)
+                            && daemon.requeue_busy_send(&prompt, client_type)
+                        {
                             return;
                         }
                         surface_turn_failure(
@@ -4334,6 +4580,14 @@ impl Daemon {
     /// the same explicit request-cancel path so their status/error behavior
     /// cannot drift.
     pub fn halt(&self) {
+        // Stop means stop: a queued follow-up must not start the moment the
+        // running turn is cancelled (same rule as the TUI).
+        let cleared = self.clear_queued_prompts();
+        if cleared > 0 {
+            self.status
+                .set(format!("stopping · {cleared} queued message(s) cleared"));
+            self.status_detail.set(None);
+        }
         let Some(turn_id) = self.active_turn_id.get_untracked() else {
             return;
         };
@@ -4796,6 +5050,7 @@ impl Daemon {
         self.canvas_patches.set(Vec::new());
         self.pinned_widgets.set(Vec::new());
         self.pending_images.set(Vec::new());
+        self.clear_queued_prompts();
         // TASK-69: clear permission cards/tombstones and advance the epoch so an
         // in-flight publisher for the session we're leaving is superseded (shared
         // with new-session + strict-resume via one helper — codex HOLD on af82ee8).
@@ -5130,6 +5385,7 @@ impl Daemon {
         self.canvas_patches.set(Vec::new());
         self.pinned_widgets.set(Vec::new());
         self.pending_images.set(Vec::new());
+        self.clear_queued_prompts();
         // TASK-69: clear permission cards/tombstones and advance the epoch so an
         // in-flight publisher for the session we're leaving is superseded (shared
         // with new-session + strict-resume via one helper — codex HOLD on af82ee8).
@@ -7265,6 +7521,29 @@ fn summarize_args(args: &Value) -> String {
             .join("\n"),
         other => serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string()),
     }
+}
+
+/// Take back the user row a refused send had just echoed, returning its text.
+/// Only the tail turn qualifies, and only while it is still a plain user turn
+/// (no daemon turn id, no assistant turn opened after it); anything else is
+/// left alone and `None` tells the caller to fall back to the wire prompt.
+fn take_echoed_user_turn(turns: &mut Vec<Turn>) -> Option<String> {
+    let is_echo = turns
+        .last()
+        .is_some_and(|turn| matches!(turn.role, Role::User) && turn.turn_id.is_none());
+    if !is_echo {
+        return None;
+    }
+    turns.pop().map(|turn| {
+        turn.blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Text(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    })
 }
 
 /// Append an expanded error tool block to the transcript for a failed turn.
@@ -13098,6 +13377,160 @@ mod tests {
             state: None, // terminal (no live turn)
             active_requests: vec![],
         }
+    }
+
+    // ── Queued prompts (send while a turn runs) ─────────────────────────
+    //
+    // `send_prompt` itself reads browser statics (client type detection), so
+    // these drive the queue primitives it delegates to.
+
+    #[test]
+    fn a_running_turn_or_a_waiting_queue_makes_the_session_busy() {
+        let daemon = Daemon::dummy();
+        assert!(!daemon.session_is_busy(), "idle, nothing queued");
+        daemon.streaming.set(true);
+        assert!(daemon.session_is_busy(), "a streaming turn");
+        daemon.streaming.set(false);
+        daemon.queue_retry_pending.set(true);
+        assert!(
+            daemon.session_is_busy(),
+            "head of the queue waiting out a busy daemon"
+        );
+        daemon.queue_retry_pending.set(false);
+        daemon.enqueue_prompt("first".into(), "first".into(), "surface-web");
+        assert!(
+            daemon.session_is_busy(),
+            "a new prompt goes behind earlier queued ones even when idle"
+        );
+    }
+
+    #[test]
+    fn enqueued_prompts_keep_order_take_their_staged_images_and_report_status() {
+        let daemon = Daemon::dummy();
+        daemon.streaming.set(true);
+        daemon.pending_images.set(vec![TurnImage {
+            mime_type: "image/png".into(),
+            data: "AAAA".into(),
+        }]);
+        daemon.enqueue_prompt("first wire".into(), "first".into(), "surface-web");
+        assert_eq!(daemon.status.get_untracked(), "message queued · 1 waiting");
+        daemon.enqueue_prompt("second".into(), "second".into(), "leo-voice");
+        assert_eq!(daemon.status.get_untracked(), "message queued · 2 waiting");
+        assert!(
+            daemon.turns.get_untracked().is_empty(),
+            "no echoed user row yet"
+        );
+        let queued = daemon.queued_prompts.get_untracked();
+        assert_eq!(queued.len(), 2);
+        assert_eq!(queued[0].display, "first");
+        assert_eq!(queued[0].prompt, "first wire");
+        assert_eq!(queued[0].client_type, "surface-web");
+        assert_eq!(
+            queued[0].images.len(),
+            1,
+            "images ride on the prompt they were staged for"
+        );
+        assert_eq!(queued[1].display, "second");
+        assert_eq!(queued[1].client_type, "leo-voice");
+        assert!(queued[1].images.is_empty());
+        assert!(daemon.pending_images.get_untracked().is_empty());
+        assert_ne!(queued[0].id, queued[1].id);
+    }
+
+    #[test]
+    fn removing_a_queued_prompt_drops_only_that_row() {
+        let daemon = Daemon::dummy();
+        daemon.enqueue_prompt("keep".into(), "keep".into(), "surface-web");
+        daemon.enqueue_prompt("drop".into(), "drop".into(), "surface-web");
+        let drop_id = daemon.queued_prompts.get_untracked()[1].id;
+        daemon.remove_queued_prompt(drop_id);
+        let queued = daemon.queued_prompts.get_untracked();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].display, "keep");
+        assert_eq!(
+            daemon.status.get_untracked(),
+            "queued message removed · 1 waiting"
+        );
+        daemon.remove_queued_prompt(999);
+        assert_eq!(
+            daemon.queued_prompts.get_untracked().len(),
+            1,
+            "unknown id is a no-op"
+        );
+        daemon.remove_queued_prompt(queued[0].id);
+        assert!(daemon.queued_prompts.get_untracked().is_empty());
+        assert_eq!(daemon.status.get_untracked(), "queued message removed");
+    }
+
+    #[test]
+    fn clearing_the_queue_forgets_rows_and_busy_retries() {
+        let daemon = Daemon::dummy();
+        daemon.enqueue_prompt("stale".into(), "stale".into(), "surface-web");
+        daemon.enqueue_prompt("staler".into(), "staler".into(), "surface-web");
+        daemon.queue_busy_retries.set(3);
+        assert_eq!(daemon.clear_queued_prompts(), 2);
+        assert!(daemon.queued_prompts.get_untracked().is_empty());
+        assert_eq!(daemon.queue_busy_retries.get_untracked(), 0);
+        assert_eq!(
+            daemon.clear_queued_prompts(),
+            0,
+            "empty queue clears to nothing"
+        );
+    }
+
+    #[test]
+    fn the_drain_waits_while_a_turn_streams_or_a_retry_is_pending() {
+        // `drain_queued_prompt` dispatches over the network once it decides to
+        // send, so only its refusals are checked natively: the queue must be
+        // untouched in every case where the session is not free.
+        let daemon = Daemon::dummy();
+        daemon.enqueue_prompt("later".into(), "later".into(), "surface-web");
+        daemon.streaming.set(true);
+        daemon.drain_queued_prompt();
+        assert_eq!(daemon.queued_prompts.get_untracked().len(), 1, "streaming");
+        daemon.streaming.set(false);
+        daemon.queue_retry_pending.set(true);
+        daemon.drain_queued_prompt();
+        assert_eq!(
+            daemon.queued_prompts.get_untracked().len(),
+            1,
+            "retry pending"
+        );
+        daemon.queue_retry_pending.set(false);
+        daemon.awaiting_session_adoption.set(true);
+        daemon.drain_queued_prompt();
+        assert_eq!(
+            daemon.queued_prompts.get_untracked().len(),
+            1,
+            "session create in flight"
+        );
+        assert!(daemon.turns.get_untracked().is_empty());
+    }
+
+    #[test]
+    fn echoed_user_row_is_taken_back_only_while_it_is_the_plain_tail() {
+        let mut turns = vec![Turn::user("earlier"), Turn::user("just sent")];
+        assert_eq!(
+            take_echoed_user_turn(&mut turns).as_deref(),
+            Some("just sent")
+        );
+        assert_eq!(turns.len(), 1);
+
+        // An assistant turn opened after it: nothing is taken.
+        let mut turns = vec![Turn::user("sent"), Turn::assistant("t1".into())];
+        assert_eq!(take_echoed_user_turn(&mut turns), None);
+        assert_eq!(turns.len(), 2);
+
+        // A user row that already carries a daemon turn id is history, not
+        // this send's echo.
+        let mut hydrated = Turn::user("from snapshot");
+        hydrated.turn_id = Some("t0".into());
+        let mut turns = vec![hydrated];
+        assert_eq!(take_echoed_user_turn(&mut turns), None);
+        assert_eq!(turns.len(), 1);
+
+        let mut turns: Vec<Turn> = Vec::new();
+        assert_eq!(take_echoed_user_turn(&mut turns), None);
     }
 
     /// Sentinel Daemon for production-seam tests: sync_pending active, known
