@@ -13,8 +13,8 @@ Root GitHub Actions builds for the public Ocean monorepo.
   `platform/ocean-os/`, and release secrets stay confined to the tag-publish job.
   Registry authentication, publication and latest-tag reconciliation target
   `@kingmaker-systems/ocean`, linked to this canonical repository.
-  Manual `windows_probe` builds daemon/TUI executables and runs Observatory
-  credential, operator-key and guarded skill-file tests on Windows. The probe
+  Manual `windows_probe` builds daemon/TUI/MCP executables and runs Observatory
+  credential, operator-key, guarded skill-file and MCP bridge/stdio tests on Windows. The probe
   has read-only permissions and never publishes. This probe is separate from routine CI and Mac package validation.
   The publish job has no source checkout: its first shell starts at the existing
   workspace root, verifies the artifact digest, then creates the component

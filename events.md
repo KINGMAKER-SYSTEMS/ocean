@@ -2778,3 +2778,14 @@ area: [docs]
 
 Ported Risingtides-dev/ocean-os#440. Adds `docs/specs/2026-09-01-ocean-rooms-definition-of-done.md`, the cross-repository Rooms finish-line contract that `ocean-store/src/lib.rs` already cites (definition-of-done §4.1), plus the "Rooms and federation" section of `docs/OPERATIONS.md`. Indexed from `docs/README.md` (active plans), `docs/AGENTS.md` (child contract) and `ROADMAP.md` (near-term gaps); the ROADMAP's "Explicitly not implied" paragraph no longer lists room federation, which shipped in `room_federation.rs`. The spec records the open items as of 2026-09-01; the ROADMAP bullet says to re-verify each line against this tree before claiming it. Validation: `cargo xtask docs-check` PASS (30 packages, 162 active Markdown files, 187 local links).
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [21:35] [19-10-26]
+agent: [Codex desktop] [GPT-6]
+worktree: [codex/team-mcp-bridge]
+type: [bug report]
+area: [backend]
+
+The installed older Ocean MCP server reports local roster rows for a live shared room and assumes execution fields on the migration-only inspect route. The organization repo contains only the MCP client library, so it cannot rebuild that server. Added a daemon-backed ocean-mcp executable with bounded stdio/HTTP, numeric loopback/no-redirect transport and no credential reads. Shared rosters use access.members; inspection reads actual bindings/resource/slot endpoints, retaining partial failures. Human joins/posts carry no claimed identity. Transcript and session pagination match the current daemon, including turns and thread/session links; unsupported backward cursors are refused instead of silently returning a prefix as newest. Large completed-turn output preserves session/request/outcome with an explicit excerpt flag.
+
+Validation: 23 client unit tests, 11 bridge tests, nine existing client integration tests and two real-server stdio tests pass across the targeted runs. Native all-target Clippy, format, docs-check, release-workflow fixtures and actionlint pass. Read-only actual stdio against the operated daemon confirms the live shared roster, agent binding and session counts with zero mutations. Manual Windows probing now builds/tests the actual MCP executable; hosted Windows evidence remains pending. The installed bridge, daemon, credentials and MCP host configuration are unchanged.

@@ -65,7 +65,7 @@ The workspace currently contains 30 Rust packages.
 | `ocean-hooks` | Plugin-agnostic subprocess lifecycle hooks | Plugin/MCP tool protocols | `ocean-hooks/src/lib.rs` | — | `cargo test -p ocean-hooks` |
 | `ocean-longhouse` | Correlation-aware sequential evidence, pure review planning, legacy net-weight quorum, council/convene, titles, escrow, recall/revocation, deterministic exact-token and inspectable skills/workflow preparation, advisory spec assembly | Daemon execution authority; extension-owned subagent dispatch/orchestration | `ocean-longhouse/src/lib.rs`, `evidence.rs`, `quorum.rs`, `planner.rs`, `convene.rs`, `prepare.rs`, `escrow.rs` | — | `cargo test -p ocean-longhouse` |
 | `ocean-lsp` | Language-server clients, discovery, diagnostics ledger, `lsp` tool | General AST parsing or editor UI | `ocean-lsp/src/lib.rs`, `tool.rs` | `ocean-lsp/AGENTS.md` | `cargo test -p ocean-lsp` |
-| `ocean-mcp` | Client connections to external MCP servers and tool adapters | Ocean MCP server; subprocess plugins | `ocean-mcp/src/lib.rs`, `provider.rs` | — | `cargo test -p ocean-mcp` |
+| `ocean-mcp` | External MCP client adapters and local-daemon stdio server | Daemon execution/identity authority; subprocess plugins | `ocean-mcp/src/lib.rs`, `provider.rs`, `ocean-mcp/src/bin/ocean_mcp.rs` | `ocean-mcp/AGENTS.md` | `cargo test -p ocean-mcp` |
 | `ocean-memory` | Typed provenance-bearing SQLite operator/Room memory, scoped migration, reversible offline rollback and ingest | Session transcripts; shared Bedrock storage; daemon admission | `ocean-memory/src/lib.rs`, `ocean-memory/src/bin/ocean-memory-rollback.rs` | `ocean-memory/AGENTS.md` | `cargo test -p ocean-memory` |
 | `ocean-minimizer` | Standalone conservative output minimization for already-tokenized cargo/git/gh/npm/npx/pytest invocations | Shell parsing/execution; TOML/config; artifacts; live runtime wiring | `ocean-minimizer/src/lib.rs::minimize` | `ocean-minimizer/AGENTS.md` | `cargo test -p ocean-minimizer && cargo clippy -p ocean-minimizer --all-targets -- -D warnings` |
 | `ocean-oauth` | Browser OAuth/PKCE login and Ocean auth-file writes | Model routing and provider wire calls | `ocean-oauth/src/lib.rs` | `ocean-oauth/AGENTS.md` | `cargo test -p ocean-oauth` |
@@ -124,6 +124,7 @@ The workspace currently contains 30 Rust packages.
 - `ocean-daemon/` — long-running HTTP daemon and API surface → `ocean-daemon/AGENTS.md`
 - `ocean-extension/` — non-executing extension package schema validation → `ocean-extension/AGENTS.md`
 - `ocean-lsp/` — code intelligence over workspace language servers → `ocean-lsp/AGENTS.md`
+- `ocean-mcp/` — MCP clients and daemon-backed stdio server → `ocean-mcp/AGENTS.md`
 - `ocean-memory/` — scoped operator/Room memory, migration and offline rollback → `ocean-memory/AGENTS.md`
 - `ocean-minimizer/` — standalone conservative command-output minimization → `ocean-minimizer/AGENTS.md`
 - `ocean-oauth/` — browser OAuth + PKCE provider login → `ocean-oauth/AGENTS.md`
