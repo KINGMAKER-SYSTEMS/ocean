@@ -3002,3 +3002,12 @@ area: [testing]
 Reconciled desktop installers 19e16c8b and first-run/Accounts 8d39b059 with organization main a3af6a0e into d498a729. Preserved current queued prompts and Observatory replay; merge conflicts were additive Surface contracts and ledger entries. Updated the team guide to distinguish unsigned three-platform desktop candidates from released command-line packages and to retain identity/federation, provider reply, installation and update acceptance gates. Combined source: 970 UI tests, eight artifact fixtures, formatting and docs-check pass; a clean detached checkout builds the real Trunk bundle. Native combined-source testing is in progress.
 
 Accounts Windows run 39349745632 passes 95 native tests and the release GUI executable check. Fresh hosted Mac diagnostic 39351619321 verifies unchanged Accounts application source, builds the real bundle and passes 96 native tests plus three watcher repetitions. Local FSEvents experiments did not establish a reliable fix and were discarded; no watcher behavior or timeout changed. Installer run 39350726191 has passed both Mac architectures; Windows remains running. No release, live service replacement, provider inference or coworker acceptance is claimed.
+
+_________________________________________________________________________________
+time: [21:16] [19-10-26]
+agent: [Codex desktop] [GPT-6]
+worktree: [codex/team-desktop-candidate]
+type: [workflow]
+area: [testing]
+
+Combined detached source d498a729: real Trunk bundle and WASM Clippy pass. Native suite passes 95 tests and times out in the unchanged scoped native file-watcher test, matching the earlier local Accounts failure. Fresh hosted Mac evidence remains specific to unchanged Accounts source 8d39b059; it does not establish combined-candidate native acceptance. No production watcher changes were retained. Team documentation links resolve; later candidate changes are documentation only.
