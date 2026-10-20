@@ -2757,4 +2757,11 @@ type: [docs] [port]
 area: [docs] [design]
 
 Ported Risingtides-dev/ocean-surface#220. Adds `apps/ocean-surface/docs/OCEAN_ROOMS_DESIGN_DIRECTION.md`, the Rooms design direction (identity rule, transcript vs activity, room details drawer, agent authoring, S0-S8 slice plan) that `platform/ocean-os/docs/specs/2026-09-09-ocean-rooms-participant-retirement.md` already cites, and points `docs/OCEAN_ROOMS_PRODUCT.md` and the Surface `AGENTS.md` Rooms Contract at it. The design doc applied as-is; the AGENTS.md paragraph was placed by hand under the Rooms Contract heading. Docs only.
+time: [15:20] [10-19-26]
+agent: [claude code] [claude-fable-5-1]
+worktree: [port/os-440-rooms-definition-of-done] [~/dev/oceanwork/wt-port2]
+type: [docs] [port]
+area: [docs]
+
+Ported Risingtides-dev/ocean-os#440. Adds `docs/specs/2026-09-01-ocean-rooms-definition-of-done.md`, the cross-repository Rooms finish-line contract that `ocean-store/src/lib.rs` already cites (definition-of-done §4.1), plus the "Rooms and federation" section of `docs/OPERATIONS.md`. Indexed from `docs/README.md` (active plans), `docs/AGENTS.md` (child contract) and `ROADMAP.md` (near-term gaps); the ROADMAP's "Explicitly not implied" paragraph no longer lists room federation, which shipped in `room_federation.rs`. The spec records the open items as of 2026-09-01; the ROADMAP bullet says to re-verify each line against this tree before claiming it. Validation: `cargo xtask docs-check` PASS (30 packages, 162 active Markdown files, 187 local links).
 _________________________________________________________________________________
