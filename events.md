@@ -2750,6 +2750,13 @@ area: [backend] [testing]
 Native Windows probe 39326283845 passed all 20 credential tests, then exposed the next compiler blocker: the skill reader treated every non-Linux host as Unix. Added a Windows reader for absolute local-drive paths, retaining directory handles and opening each child relative to its parent with reparse refusal; device, UNC, parent-traversal and alternate-stream paths stay refused. Added actual-source native integration fixtures for guarded reads, parent retargeting and operator-key/header behavior; existing Unix skill reads remain unchanged. Windows cross-target Clippy passes; fresh native execution and review remain pending. Updated daemon and workflow contracts; no new devlog boundary or changed parent index. Release repair PR #115 merged at 50985671 after review and exact-head CI; immutable v0.2.1 validation/publication is running as 39328117964. No release availability or Windows runtime acceptance claimed.
 
 _________________________________________________________________________________
+time: [15:30] [10-19-26]
+agent: [claude code] [claude-fable-5-1]
+worktree: [port/surface-220-rooms-design-direction] [~/dev/oceanwork/wt-port2]
+type: [docs] [port]
+area: [docs] [design]
+
+Ported Risingtides-dev/ocean-surface#220. Adds `apps/ocean-surface/docs/OCEAN_ROOMS_DESIGN_DIRECTION.md`, the Rooms design direction (identity rule, transcript vs activity, room details drawer, agent authoring, S0-S8 slice plan) that `platform/ocean-os/docs/specs/2026-09-09-ocean-rooms-participant-retirement.md` already cites, and points `docs/OCEAN_ROOMS_PRODUCT.md` and the Surface `AGENTS.md` Rooms Contract at it. The design doc applied as-is; the AGENTS.md paragraph was placed by hand under the Rooms Contract heading. Docs only.
 time: [15:20] [10-19-26]
 agent: [claude code] [claude-fable-5-1]
 worktree: [port/os-440-rooms-definition-of-done] [~/dev/oceanwork/wt-port2]
