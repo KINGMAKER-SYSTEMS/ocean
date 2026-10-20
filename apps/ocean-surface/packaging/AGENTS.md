@@ -8,6 +8,9 @@ Build native Ocean desktop candidates with their matching daemon, MCP bridge and
 
 - `build_desktop.py` owns candidate builds, tool pins, license inventories,
   bundle verification and revision-addressed output.
+- `sign_macos.py` owns explicit local Developer ID preparation from a verified
+  unsigned candidate; `SIGNING.md` owns its operator handoff and remaining
+  notarization/installation gates. It never changes Keychain permissions.
 - The monorepo release workflow owns opt-in hosted builds and artifact upload.
 - Existing proxy/daemon service installers retain live-service ownership.
 
@@ -32,6 +35,10 @@ Build native Ocean desktop candidates with their matching daemon, MCP bridge and
   imports. This does not establish clean-machine WebView or installer acceptance.
 - Candidate builds are unsigned and do not publish, install, start live services,
   change credentials, or establish update/recovery or coworker acceptance.
+- Signing uses a private verified snapshot, fixed app/sidecar identities, the
+  expected Apple team, hardened runtime and secure timestamps. Original inputs
+  and existing outputs are immutable; only a fully verified signed copy is
+  published locally. Its receipt must explicitly say notarization is pending.
 - Generated tools, staging and outputs stay under ignored component `target/`.
   Completed candidate directories are never overwritten.
 
