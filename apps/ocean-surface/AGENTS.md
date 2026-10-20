@@ -77,11 +77,25 @@ Native surface direction:
 
 - Tauri 2.x shell (`crates/ocean-tauri`) loads `dist/` as `frontendDist` — the
   same Trunk-built Leptos WASM bundle the browser PWA ships.
+  Windows release builds use the GUI subsystem so app launch opens no console;
+  the native probe checks that setting in the built PE executable.
 - Rust commands in the Tauri backend replace the GPUI crate's `rfd` (folder
   dialogs) and `notify` (path watcher) native bits.
 - Native LiveKit Rust client is a later phase behind a feature flag, not part
   of this batch.
 - Ocean daemon stays the session/runtime authority.
+- Native Git inspection uses vendored libgit2 without SSH/HTTPS transports.
+  It reads local repository state; desktop startup must not require Homebrew
+  OpenSSL or other developer-installed libraries.
+- The native `.gitattributes` pins `Cargo.toml` to LF. Tauri serializes it with
+  LF on every host; Windows checkout conversion must not dirty packaged source.
+- Native daemon start resolves the operator's `OCEAN_DAEMON_BIN`, then the
+  installed executable sibling, then the platform binary on PATH. No IPC
+  argument may select an executable. Explicit start/restart remains unchanged.
+  Children run from the absolute home/profile (or OS temporary directory),
+  never the app's inherited workspace; Windows children have no console window.
+  Home/profile also owns native daemon logs. Verify native launch with
+  `cargo test --lib daemon_` from `crates/ocean-tauri`.
 - Canvas ledger/state injected into turns as surface context; the Leptos canvas
   already lives at `crates/ocean-surface-ui/src/canvas.rs`.
 - `docs/OCEAN_GPUI_CANVAS_LIVEKIT_SPEC.md` is retained as a historical reference
@@ -128,9 +142,26 @@ or a skipped event reads as incomplete; a replay the daemon cannot serve reads
 as "replay unavailable", never as offline. Animation is truthful:
 typing/blink/wave and screen activity render recorded phases, the one-shot
 walk-in visualizes a live admission event, and reduced motion stops the loop.
-The web proxy reads the daemon-minted mode-0600 observer token immediately
+The web proxy reads the daemon-minted private observer token immediately
 before each upstream request and injects it server-side. Never expose that
 token to browser code, bundle it, or cache it in client storage.
+
+## Windows proxy files
+
+- The Windows proxy uses `ocean_observatory::auth::windows_file` from the public
+  runtime component for session-secret creation and observer/operator reads.
+  This target-only dependency shares file validation, not execution authority.
+  It requires a protected current-user-only ACL and refuses reparse points,
+  nonregular files and extra hard links without repairing existing files.
+  Unix mode-0600/no-follow behavior remains unchanged.
+- Default state and session-secret paths use absolute HOME or USERPROFILE on
+  Windows, preserving explicit config/key/secret overrides and Unix HOME rules.
+- The session gate and exact owner-mutation route allowlist apply on both
+  platforms. No operator credential is exposed to the browser or attached
+  when proxy login is disabled. Native Room consent remains Tauri-only.
+- Verify the full proxy suite on Windows with `cargo test --locked -p
+  ocean-surface-proxy`; the manual Windows probe owns this check. Compilation
+  and synthetic transport fixtures do not establish packaged/client acceptance.
 
 ## Empty Session Surface
 
@@ -767,12 +798,32 @@ ships today and are updated slice by slice.
   daemon's owner routes always answer JSON objects. Error strings are now
   fixed codes. The command refuses any webview other than `main`
   (`owner_mutation_window_refused`).
+- Windows native transport uses the daemon's `ocean_observatory::auth::windows_file`
+  reader: protected current-user-only ACL, regular single-link file, no reparse
+  points, bounded read and the same header-safe token predicate. It never repairs
+  unsafe files. Default config uses absolute HOME or USERPROFILE; explicit config
+  and key paths retain precedence. Unix ownership/mode behavior is unchanged.
+  The target-only dependency shares file validation, not runtime policy.
+- The transport, owner-mutation and consent fixtures run on Windows and Unix;
+  Windows fixtures create protected files or deliberately inherited ACLs. The
+  manual native workflow builds the real UI and shell; no test bypasses the
+  existing native confirmation, frozen preview or main-window gates.
 - Verification: `cd crates/ocean-tauri && cargo test daemon_transport`
   (loopback refusal, key-file refusal incl. foreign owner, redirect,
   oversize/invalid reply, lost-ack → unknown), `cargo test owner_mutation`,
   `cargo test room_consent`, `cargo clippy --all-targets -- -D warnings`.
 
 ## Workspace Files lifecycle
+
+- Native Open Externally is a document action. On Windows it refuses known
+  executable, script-host, installer, registry, shortcut and application-link
+  suffixes, case-insensitively and after trailing dot/space normalization.
+  The canonical target is checked before the OS opener; caller-supplied root
+  containment is not an execution permission. Unix executable-bit/Mac suffix
+  behavior is unchanged. This is a known-launcher guard, not an audit of every
+  user-customized file association. Verify with `cargo test --lib document_open`
+  and `cargo test --lib open_file_refuses_targets_that_would_execute` in Tauri.
+
 
 - Native empty Files exposes the host folder picker as pane-local browsing; picking never rewrites daemon session cwd. Session/cwd intent changes retire picked roots, previews, tree caches and asynchronous results synchronously, including A-B-A; disposal rejects late picker/watch/read completions.
 - Files acquires one native root lease per generation and drops only that lease on change or cleanup. `watch_paths`/`unwatch_paths` accept an optional owner token scoped by the injected native window label; scoped canonical maps are independent of legacy Repo watchers and other consumers/windows. Page-load Started and window destruction retire only that window’s scoped leases; a native page generation rejects pending old-page admissions, while Finished leaves new watches intact. Events carry the lease owner and canonical paths map back to the requested alias. Never clear the legacy canonical map for Files cleanup.
@@ -952,3 +1003,9 @@ cwd-authoritative rule.
 ocean-surface-ui --target wasm32-unknown-unknown`, `cargo check -p
 ocean-surface-proxy`, `cargo test -p ocean-surface-ui --target
 wasm32-unknown-unknown --no-run`, `cargo test -p ocean-surface-ui`.
+
+
+## Child devlog Index
+
+- `packaging/` — native desktop candidates, bundled daemon and legal payload →
+  `packaging/AGENTS.md`. Existing proxy deployment remains owned by this parent.

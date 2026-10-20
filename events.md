@@ -2778,3 +2778,192 @@ area: [docs]
 
 Ported Risingtides-dev/ocean-os#440. Adds `docs/specs/2026-09-01-ocean-rooms-definition-of-done.md`, the cross-repository Rooms finish-line contract that `ocean-store/src/lib.rs` already cites (definition-of-done §4.1), plus the "Rooms and federation" section of `docs/OPERATIONS.md`. Indexed from `docs/README.md` (active plans), `docs/AGENTS.md` (child contract) and `ROADMAP.md` (near-term gaps); the ROADMAP's "Explicitly not implied" paragraph no longer lists room federation, which shipped in `room_federation.rs`. The spec records the open items as of 2026-09-01; the ROADMAP bullet says to re-verify each line against this tree before claiming it. Validation: `cargo xtask docs-check` PASS (30 packages, 162 active Markdown files, 187 local links).
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [17:37] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/windows-daemon-discovery]
+type: [bug report]
+area: [testing] [backend]
+
+Corrected TUI daemon discovery for Windows: native PATH parsing, .exe sibling/default lookup and suffix-free overrides, rejection of directory candidates, and absolute USERPROFILE/native temporary fallback for neutral cwd/log placement. Unix HOME and launchd ownership behavior are preserved. All 28 standalone boot-module tests pass under pinned Rust; actual-source Windows metadata compilation and cargo check -p ocean-tui pass. Release build and native Windows execution remain pending. Updated the owning TUI contract; no child index or ownership boundary changed. No installation or team-readiness claim.
+
+_________________________________________________________________________________
+time: [17:52] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/windows-daemon-discovery]
+type: [bug report]
+area: [testing] [workflow]
+
+PR #116 merged at dfaa85fe after fresh review, exact-head builds and native Windows proof: both release executables and all 39 credential/operator/guarded-file tests passed. Reconciled daemon discovery with that source and added actual-source boot-module execution to the opt-in Windows probe. Local TUI check/release and 28 host boot-module tests passed; native discovery execution remains pending. Updated the owning workflow contract; parent indexes unchanged. No Windows package, installation or team-readiness claim.
+
+_________________________________________________________________________________
+time: [17:54] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/windows-daemon-discovery]
+type: [workflow]
+area: [testing]
+
+Added an actual daemon startup smoke to the manual Windows probe: disposable state, explicit model, no inherited provider credentials, unique loopback listener, revision/member verification and owned-child cleanup. The same script passes against the downloaded Mac 0.2.1 binary; Windows execution remains pending. Windows ACL acceptance stays with native Rust fixtures rather than POSIX mode assertions. Updated workflow ownership; parent indexes unchanged. Release bootstrap PR #118 is pushed at 42f61896 with local regression proof; both hosted review services report exhausted quota, so fresh review and landing are blocked without a quota change or another qualified reviewer. No bypass, package promotion or live Surface replacement performed.
+
+_________________________________________________________________________________
+time: [17:49] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/release-first-tag]
+type: [bug report]
+area: [workflow] [testing]
+
+Tag run 39328117964 published @kingmaker-systems/ocean 0.2.1 and verified its payload integrity on retry, but latest-tag convergence failed because npm's unversioned view resolves through latest before latest exists. Query the complete versions catalog through the verified version instead. A real npm loopback-registry fixture reproduces the old failure without latest, verifies first publication, and proves the pinned lookup still discovers newer versions. Actionlint, release workflow contracts and diff checks pass. Owning workflow contract updated; parent indexes unchanged. Downloaded draft asset checksum matched f0b4c4e69a6079cf2cbfe46230895cd3a71a92117bd0ec6ffc4f34c6acf16e09; the actual packaged daemon passed isolated-profile startup, health/revision, member identity and private state-file checks with an explicit model and no provider credentials. GitHub release remains draft and local registry readback is blocked by the current CLI token's missing read:packages scope; no public release or provider-reply claim.
+
+_________________________________________________________________________________
+time: [18:20] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/windows-room-packages]
+type: [feature-request]
+area: [backend] [testing]
+
+Implemented the Windows Room-package capture path through retained local-drive directory handles. Reused checked no-reparse opens, added bounded synchronous handle enumeration with strict UTF-16 names, exact child lookup and fixed error mapping; common map hashing and count/depth/byte ceilings remain unchanged. Added native fixtures for directory limits, Unicode names, root retargeting, path/link refusal and malformed directory records. Windows cross-target denied-warning Clippy passes; all 22 existing package-authority tests, daemon check, docs-check, actionlint and release contracts pass locally. A disposable actual-daemon HTTP fixture passes on the existing Mac release, verifying identity, complete-map digest, nested byte changes, missing packages, symlink refusal and size bounds; it is now in the opt-in native Windows probe. Native Windows execution and fresh independent review remain pending. Updated daemon/workflow contracts; parent indexes unchanged because ownership is unchanged. No provider reply, Windows installer, resource/attachment support or deployment acceptance claimed.
+
+_________________________________________________________________________________
+time: [18:30] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/windows-profile-paths]
+type: [bug report]
+area: [backend] [testing]
+
+Windows machines without HOME now select absolute USERPROFILE for shared Agent state and default Ocean/Codex/native Claude credential paths. Explicit config and account paths retain precedence; Unix behavior is unchanged. Added synthetic profile/account-isolation fixtures and native Windows workflow execution. Fixed the native Claude subprocess helper cfg so Windows test compilation does not include an unused Unix-only test helper. Local provider 74, OAuth store 6, and Agent refresh 10 tests pass; host and Windows cross-target provider Clippy, docs-check, actionlint, and workflow contracts pass. Native Windows execution and fresh independent review remain pending. Updated provider, Agent, crate-index and workflow contracts; no new boundaries. No installation or real provider login claimed.
+
+_________________________________________________________________________________
+time: [19:06] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/windows-profile-paths]
+type: [bug report]
+area: [backend] [testing]
+
+Provider credential publication on Windows now creates its temporary file with the existing protected current-user-only ACL primitive before writing any bytes, instead of inheriting folder permissions. The target-only Observatory dependency supplies file creation only; publication leases, merge behavior and provider routing remain unchanged. Added native checks for empty-file privacy and replacement ACLs, plus provider custody and OAuth store tests in the manual Windows probe. Host 9 custody, 6 store and 10 refresh tests pass; provider Clippy, docs-check, format, actionlint and workflow contracts pass. Native Windows execution of the new credential checks is pending. Updated Providers, Observatory, OAuth and workflow contracts; ownership indexes unchanged.
+
+_________________________________________________________________________________
+time: [18:36] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/windows-surface-proxy]
+type: [bug report]
+area: [backend] [testing]
+
+The browser proxy imported Unix file APIs unconditionally. Added Windows credential/session-secret reads and create-new writes through the daemon's existing protected-owner-ACL file primitive, plus absolute HOME/USERPROFILE defaults. Existing Unix file semantics, login gate, exact owner routes and browser credential boundary remain unchanged. Converted transport fixtures to platform-private file creation; added Windows persistence, unsafe-file/link refusal and profile fixtures. Full 38-test host proxy suite, all-target Clippy, actionlint, workflow contracts and docs-check pass. Native Windows proxy execution is added to the manual read-only probe and remains pending. Updated Surface, runtime file-owner and workflow contracts; parent boundary indexes unchanged. No Windows installer, native Tauri consent, real-provider or deployed-client acceptance claimed.
+
+_________________________________________________________________________________
+time: [18:37] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/windows-surface-proxy]
+type: [workflow]
+area: [testing]
+
+Keep Windows Surface validation separate from the daemon candidate: opt-in windows_surface_probe runs the full proxy suite and real release build without unrelated daemon/TUI builds or Mac packaging. It remains read-only, bounded and same-ref cancelling. Workflow contracts/actionlint pass; the committed Surface source at 0c61d800 also passed all 38 proxy tests from a clean detached checkout before push.
+
+_________________________________________________________________________________
+time: [18:40] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/windows-surface-proxy]
+type: [bug report]
+area: [testing]
+
+Native Windows run 39336237747 compiled the proxy and passed 38 of 39 tests, including protected credentials, owner forwarding and observer SSE. The route-inventory source scan failed on checkout CRLF before scanning build_app. Normalize source line endings in that test without changing route coverage; the targeted host test passes. Owner contracts remain unchanged because only the test parser changed. Fresh native validation is required; the failed run is not acceptance.
+
+_________________________________________________________________________________
+time: [18:47] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/windows-native-room-consent]
+type: [bug report]
+area: [frontend] [backend] [testing]
+
+Replace the desktop transport's unconditional non-Unix credential refusal with a Windows checked owner-only file read, bounded header-token validation and absolute HOME/USERPROFILE defaults. Preserve the fixed native intents, main-window gate, frozen consent preview/dialog, numeric-loopback restriction and no automatic retry. Port existing transport, owner-mutation and consent fixtures to Windows with protected/inherited ACL fixtures and link refusal. Add a separate opt-in read-only Windows native probe that builds the actual web bundle, runs the full shell suite and builds the native executable. Host Trunk build, 49 changed-domain tests, Clippy, docs-check and workflow checks pass. The full host suite passed 81 tests and timed out one unchanged macOS watcher test; that test passed alone on retry. Native Windows execution and fresh independent review remain pending. Updated Surface, runtime file-owner and workflow contracts; indexes unchanged. No installer, served desktop or coworker acceptance claimed.
+
+_________________________________________________________________________________
+time: [18:59] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/windows-native-room-consent]
+type: [bug report]
+area: [frontend] [testing]
+
+Include the Windows document-opener guard in the native desktop candidate: refuse known executable, script, installer, registry and shortcut suffixes before the OS opener while preserving normal documents and Unix behavior. Host policy and existing executable-refusal tests plus all-target Clippy pass. The added Windows command-level refusal test awaits native execution. Surface contract updated; parent indexes unchanged. No installer or live replacement.
+
+_________________________________________________________________________________
+time: [19:02] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/windows-native-room-consent]
+type: [bug report]
+area: [frontend] [testing]
+
+Native desktop start now finds a daemon executable beside the app before PATH, preserves the operator environment override, uses the absolute home/profile or OS temporary directory for child cwd, and suppresses Windows console windows. No executable path is accepted from the webview; start/restart remains explicit. A real child-process test verifies cwd and discovery fixtures cover absent/directory/nonexecutable siblings and override precedence. All 21 filtered launch/transport tests and all-target Clippy pass on the pinned host toolchain. The earlier native Windows probe at f7154629 has passed its full shell suite and is building the release executable; these additional launch/document changes still need exact-head native validation. Updated the Surface contract; other ownership and child indexes remain unchanged.
+
+_________________________________________________________________________________
+time: [19:09] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/team-desktop-integration]
+type: [workflow]
+area: [testing] [review]
+
+Prepared one unreviewed integration candidate from current canonical main and PRs #117, #118, #119, #120, #121 and #122. Reconciled only overlapping workflow, contract and public ledger additions: preserve all three opt-in read-only Windows probes, skip Mac packaging for any Windows probe, retain real registry-bootstrap coverage and all native fixture commands. Source comparisons confirm native shell, proxy, provider/Agent changes, Room package reader and TUI discovery are byte-identical to their candidate branches. Actionlint and the combined release-workflow fixtures pass. Source compilation, independent review and installation remain separate gates; this branch does not authorize merging, releasing or replacing a live service. Parent ownership indexes remain unchanged; the shared Windows file-primitive contract now lists all consumers.
+
+_________________________________________________________________________________
+time: [19:14] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/windows-native-room-consent]
+type: [bug report]
+area: [frontend] [testing]
+
+The native executable lacked Windows GUI-subsystem metadata, so a release launch would open an unwanted console. Set the release-only Windows subsystem attribute and verify the actual built PE header in the native probe. Debug builds retain console behavior. Updated Surface and workflow contracts; actionlint and workflow fixtures pass. Native artifact verification is pending; no installer or deployment claim.
+
+_________________________________________________________________________________
+time: [19:30] [19-10-26] EDT UTC-04:00
+agent: [Codex] [GPT-6]
+worktree: [codex/desktop-installers]
+type: [feature-request]
+area: [frontend] [testing] [workflow]
+
+Prepare opt-in native installer candidates for Apple Silicon Mac, Intel Mac and Windows x64 from one clean committed revision. The builder pins Tauri/tool archives, generates native/UI/daemon license inventories, stages the matching daemon as a sidecar, checks executable architecture and Windows GUI subsystem, inspects actual DMG/NSIS contents, and runs only disposable bundled-daemon startup. Added four artifact regressions and restored the bundled Poppins OFL/Google bootstrap notices. Actionlint, workflow fixtures and artifact tests pass; actual installer builds are not yet proven. Added packaging/AGENTS.md and its Surface parent index. Signing, update/recovery, first-run configuration and two-machine use remain separate acceptance gates. Source inspection confirms the fresh daemon currently requires a selected model before binding its API; the existing explicit-model startup fixture does not prove blank first-run behavior. No live service, provider credential or distribution release changed.
+
+_________________________________________________________________________________
+time: [19:37] [19-10-26]
+agent: [Codex] [GPT-6]
+worktree: [codex/desktop-installer-repairs]
+type: [bug report]
+area: [testing]
+
+Native installer candidate run 39342381378 exposed cargo-about 0.9.1's opt-in cli feature on Intel Mac. Enable that feature when building the pinned license tool from source. Four artifact-integrity tests pass; actual Intel packaging remains pending. Existing packaging contracts remain unchanged because target, provenance, license and publication boundaries are unchanged.
+
+_________________________________________________________________________________
+time: [19:42] [19-10-26]
+agent: [Codex] [GPT-6]
+worktree: [codex/desktop-installer-repairs]
+type: [bug report]
+area: [testing]
+
+Actual Mac candidate inspection found Homebrew OpenSSL imports in the desktop executable. Disable unused native Git network transports; local repository checks still pass (2 tests), and native cargo check passes. Packaging now rejects non-system Mac dependencies, inventories Tauri's release feature, builds the Windows daemon with static CRT and checks extracted app/daemon imports for redistributable DLL dependencies. Seven artifact tests pass. The first Mac candidate's bundled daemon boot passed, then its read-only image was briefly busy at detach; retry only the owned mount before a bounded force detach. Its stale mount was detached normally. Docs-check passes; final native installers and first-run setup remain unaccepted.
+
+_________________________________________________________________________________
+time: [19:51] [19-10-26]
+agent: [Codex] [GPT-6]
+worktree: [codex/desktop-installer-repairs]
+type: [bug report]
+area: [testing]
+
+The revised actual Mac disk image passes system-library checks and bundled-daemon startup. hdiutil completed detach after the command observation timed out; retries then incorrectly treated the absent image as failure. Inspect authoritative hdiutil image state after a timeout/error before retrying only the owned mount. Eight artifact tests pass, including a timeout-after-completed-detach regression. Packaging ownership and publication contracts are unchanged. Final installer acceptance remains pending.
+
+_________________________________________________________________________________
+time: [20:08] [19-10-26]
+agent: [Codex] [GPT-6]
+worktree: [codex/desktop-installer-repairs]
+type: [bug report]
+area: [testing]
+
+Desktop candidate 58177ac2 passed actual Apple Silicon DMG content, system-library, legal-payload and isolated bundled-daemon checks locally. Hosted a454dafc Apple Silicon packaging passed. Windows built and extracted its NSIS installer, passed GUI/architecture/legal/static-CRT checks and actual isolated daemon startup, then correctly refused artifact publication because source cleanliness changed. Include changed paths in that refusal so the next native run can identify the generated-file defect; do not weaken the clean-source gate. Eight packaging fixtures pass. Packaging contracts are unchanged. Intel native packaging remains in progress; no install, signing or release publication.
+
+_________________________________________________________________________________
+time: [20:55] [19-10-26]
+agent: [Codex] [GPT-6]
+worktree: [codex/desktop-installer-repairs]
+type: [bug report]
+area: [testing]
+
+Native Windows diagnostic 39350277028 proves pinned Tauri 2.11.3 rewrites Cargo.toml from CRLF to LF before compilation. Parsed TOML is identical; the resulting SHA256 f775793a3f9813636f336528f30ac7d3373952e711ca37aa7d3afb791b0c70b2 equals the committed LF manifest, while the Windows status check reports it modified. Pin LF checkout for this one manifest with native .gitattributes rather than resetting source or weakening packaging cleanliness. Eight artifact checks and git attribute inspection pass. Surface and packaging contracts updated; parent ownership/index unchanged. Native Windows byte-stability proof and the actual installer rerun remain pending.

@@ -21,6 +21,8 @@
 //!   (non-symlink) file, owned by the effective uid, with no group/other
 //!   permission bits, and hold one header-safe token. It is never cached,
 //!   returned, logged or embedded in an error: errors carry fixed codes only.
+//!   Windows uses the daemon's protected current-user-only ACL reader instead,
+//!   refusing reparse points and extra hard links with the same token bound.
 //! * Replies must be JSON objects of at most 256 KiB. Redirects are refused,
 //!   duplicate `Content-Length`, non-chunked transfer codings and bad chunk
 //!   framing are bad replies, and a hostile chunk size can never panic.
@@ -84,8 +86,27 @@ pub(crate) fn loopback_endpoint(url: &str) -> Option<SocketAddr> {
 
 // ── credential custody ──────────────────────────────────────────────────
 
-/// The daemon's runtime config dir, resolved exactly as the daemon and the
-/// Surface proxy resolve it.
+/// Select an absolute Windows home, preserving the existing Unix HOME rule.
+pub(crate) fn profile_home(
+    home: Option<std::ffi::OsString>,
+    profile: Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        [home, profile]
+            .into_iter()
+            .flatten()
+            .map(PathBuf::from)
+            .find(|path| path.is_absolute())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = profile;
+        home.map(PathBuf::from)
+    }
+}
+
+/// The daemon state directory, with explicit config overrides first.
 fn ocean_config_dir() -> PathBuf {
     if let Some(path) = std::env::var_os("OCEAN_CONFIG_DIR") {
         return PathBuf::from(path);
@@ -93,8 +114,8 @@ fn ocean_config_dir() -> PathBuf {
     if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
         return PathBuf::from(xdg).join("ocean-rs");
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home).join(".config").join("ocean-rs");
+    if let Some(home) = profile_home(std::env::var_os("HOME"), std::env::var_os("USERPROFILE")) {
+        return home.join(".config").join("ocean-rs");
     }
     PathBuf::from(".ocean-rs")
 }
@@ -109,6 +130,7 @@ pub(crate) fn operator_key_path() -> PathBuf {
 
 /// Ownership and permission policy for the opened key file: owned by the
 /// effective uid, no group/other permission bits.
+#[cfg(unix)]
 fn credential_policy(owner_uid: u32, mode: u32, euid: u32) -> Result<(), &'static str> {
     if owner_uid != euid {
         return Err("operator_credential_foreign_owner");
@@ -163,7 +185,38 @@ pub(crate) fn read_operator_key(path: &Path) -> Result<String, &'static str> {
     Ok(key.to_string())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub(crate) fn read_operator_key(path: &Path) -> Result<String, &'static str> {
+    use std::os::windows::fs::MetadataExt;
+    let link = std::fs::symlink_metadata(path).map_err(|_| CREDENTIAL_UNAVAILABLE)?;
+    // FILE_ATTRIBUTE_REPARSE_POINT includes symlinks and junctions.
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    if !link.is_file() || link.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err("operator_credential_not_regular");
+    }
+    let mut file = ocean_observatory::auth::windows_file::open(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::PermissionDenied {
+            "operator_credential_not_private"
+        } else {
+            CREDENTIAL_UNAVAILABLE
+        }
+    })?;
+    if file.metadata().map_err(|_| CREDENTIAL_UNAVAILABLE)?.len() > MAX_KEY_FILE_BYTES {
+        return Err(CREDENTIAL_UNAVAILABLE);
+    }
+    let mut raw = String::new();
+    (&mut file)
+        .take(MAX_KEY_FILE_BYTES + 1)
+        .read_to_string(&mut raw)
+        .map_err(|_| CREDENTIAL_UNAVAILABLE)?;
+    let key = raw.trim();
+    if !header_safe_token(key) {
+        return Err(CREDENTIAL_UNAVAILABLE);
+    }
+    Ok(key.to_owned())
+}
+
+#[cfg(not(any(unix, windows)))]
 pub(crate) fn read_operator_key(_path: &Path) -> Result<String, &'static str> {
     Err(CREDENTIAL_UNAVAILABLE)
 }
@@ -451,10 +504,11 @@ pub(crate) fn require_main_window(label: &str, refusal: &'static str) -> Result<
 
 // ── shared test fixtures ────────────────────────────────────────────────
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 pub(crate) mod test_support {
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::time::Duration;
@@ -465,9 +519,41 @@ pub(crate) mod test_support {
         let path = dir.join("operator.key");
         // Replace rather than rewrite: an earlier fixture may be read-only.
         let _ = std::fs::remove_file(&path);
-        std::fs::write(&path, format!("{KEY}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        #[cfg(unix)]
+        {
+            std::fs::write(&path, format!("{KEY}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+        #[cfg(windows)]
+        if mode & 0o077 == 0 {
+            private_bytes(&path, format!("{KEY}\n").as_bytes());
+        } else {
+            // An ordinary inherited DACL is the Windows unsafe-file fixture.
+            std::fs::write(&path, format!("{KEY}\n")).unwrap();
+        }
         path
+    }
+
+    pub(crate) fn private_bytes(path: &Path, bytes: &[u8]) {
+        let _ = std::fs::remove_file(path);
+        #[cfg(unix)]
+        {
+            std::fs::write(path, bytes).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            let mut file = ocean_observatory::auth::windows_file::create(path).unwrap();
+            file.write_all(bytes).unwrap();
+            file.sync_all().unwrap();
+        }
+    }
+
+    pub(crate) fn credential_symlink(source: &Path, link: &Path) {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(source, link).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(source, link).unwrap();
     }
 
     pub(crate) fn http(status: &str, body: &str) -> String {
@@ -542,18 +628,47 @@ pub(crate) mod test_support {
 
 // ── tests ───────────────────────────────────────────────────────────────
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 mod tests {
     use super::test_support::*;
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
-
     fn transport(port: u16, key: &Path) -> DaemonTransport {
         DaemonTransport::new(&format!("http://127.0.0.1:{port}"), key.to_path_buf())
     }
 
     fn privileged() -> DaemonRequest {
         DaemonRequest::operator(Method::Put, "/v1/me".into(), Some("{}".into()))
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_native_profile_and_link_custody() {
+        use std::ffi::OsString;
+        let profile = OsString::from(r"C:\Users\Coworker");
+        assert_eq!(
+            profile_home(None, Some(profile.clone())),
+            Some(PathBuf::from(&profile))
+        );
+        assert_eq!(
+            profile_home(Some("relative".into()), Some(profile)),
+            Some(PathBuf::from(r"C:\Users\Coworker"))
+        );
+        assert_eq!(
+            profile_home(Some(r"D:\Chosen".into()), Some(r"C:\Users\Coworker".into())),
+            Some(PathBuf::from(r"D:\Chosen"))
+        );
+        assert_eq!(profile_home(None, Some("relative".into())), None);
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_file(dir.path(), 0o600);
+        let before = std::fs::read(&key).unwrap();
+        std::fs::hard_link(&key, dir.path().join("second.key")).unwrap();
+        let (port, listener) = silent_daemon();
+        assert!(matches!(
+            transport(port, &key).send(&privileged()),
+            Err(SendError::NotSent(_))
+        ));
+        assert_never_contacted(&listener);
+        assert_eq!(std::fs::read(&key).unwrap(), before);
     }
 
     #[test]
@@ -641,7 +756,7 @@ mod tests {
         }
         let private = key_file(dir.path(), 0o600);
         let link = dir.path().join("link.key");
-        std::os::unix::fs::symlink(&private, &link).unwrap();
+        credential_symlink(&private, &link);
         assert_eq!(
             read_operator_key(&link).unwrap_err(),
             "operator_credential_not_regular"
@@ -657,17 +772,16 @@ mod tests {
             "",
         ] {
             let path = dir.path().join("odd.key");
-            std::fs::write(&path, content).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            private_bytes(&path, content.as_bytes());
             let error = read_operator_key(&path).unwrap_err();
             assert_eq!(error, CREDENTIAL_UNAVAILABLE, "{content:?}");
         }
         let big = dir.path().join("big.key");
-        std::fs::write(&big, "a".repeat(5000)).unwrap();
-        std::fs::set_permissions(&big, std::fs::Permissions::from_mode(0o600)).unwrap();
+        private_bytes(&big, "a".repeat(5000).as_bytes());
         assert_eq!(read_operator_key(&big).unwrap_err(), CREDENTIAL_UNAVAILABLE);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_key_owned_by_another_user_is_refused() {
         assert_eq!(credential_policy(501, 0o100600, 501), Ok(()));

@@ -1,3 +1,5 @@
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 // Thin binary — all wiring lives in the library so `tauri::mobile_entry_point`
 // (a later phase) can reuse `ocean_tauri::run`.
 

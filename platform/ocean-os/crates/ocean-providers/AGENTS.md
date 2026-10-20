@@ -19,6 +19,14 @@ auth-file write custody. Provider wire encoding remains in `ocean-protocol`.
   credential blocks, file paths, and environment names out of this projection.
   Its synchronous file/native work belongs on a blocking worker at async callers.
 
+- `default_config_dir` is shared by Agent state and default Ocean credentials:
+  explicit `OCEAN_CONFIG_DIR`, then `XDG_CONFIG_HOME/ocean-rs`, then selected
+  home `.config/ocean-rs`. Windows selects absolute `HOME` or `USERPROFILE`;
+  Unix HOME behavior is unchanged. Codex and native Claude defaults use the
+  same home selection; explicit auth/CLI config overrides retain precedence.
+  Directory selection performs no I/O; only Agent retains its historical cwd
+  fallback. Native Claude uses its captured environment and never borrows a
+  different account after an explicit home/config selection.
 - Preserve forward model/catalog routes and feature credential isolation.
 - Public Codex routes include GPT-6.1 Sol, GPT-6 Sol, GPT-6 Luna and GPT-6
   Astra. Claude Opus aliases track 5.5 (1M/128K); explicit 5/4.x ids remain
@@ -63,8 +71,11 @@ auth-file write custody. Provider wire encoding remains in `ocean-protocol`.
   contention deadline. Open/lock/timeout errors refuse the write; there is no
   unlocked fallback. Dropping custody never removes the shared lock file.
 - A guard binds its configured auth path and publishes unique create-new sibling
-  files, Unix0600 at creation, file sync then atomic replacement. Only owned
-  temporary files receive bounded best-effort cleanup.
+  files, Unix0600 or protected current-user-only Windows ACLs at creation,
+  file sync then atomic replacement. Windows reuses Observatory's checked
+  credential-file creation primitive through a target-only dependency; this
+  initializes no store and changes no provider routing or credential discovery.
+  Only owned temporary files receive bounded best-effort cleanup.
 - Pre-rename failure preserves the previous file. Post-rename Unix directory-sync
   failure means published bytes with durability unconfirmed; do not restore a
   stale snapshot. Directory fsync remains unsupported off Unix.
@@ -81,6 +92,7 @@ auth-file write custody. Provider wire encoding remains in `ocean-protocol`.
 - `cargo test -p ocean-providers auth_file --locked -- --test-threads=1`
 - `cargo test -p ocean-providers --locked`
 - Credential consumer changes also require OAuth store and Agent refresh tests.
+- Native Windows profile fixtures: `cargo test -p ocean-providers profile --locked`.
 
 ## Child devlog Index
 

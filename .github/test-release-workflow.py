@@ -8,6 +8,8 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -99,11 +101,87 @@ require(
     "release publication follows registry convergence",
 )
 require("-F draft=false" in source, "verified release is made public only after registry convergence")
-require("if: github.event_name == 'push' || !inputs.windows_probe" in source, "Windows probe does not also run Mac packaging")
+require("if: github.event_name == 'push' || (!inputs.windows_probe && !inputs.windows_surface_probe && !inputs.windows_native_probe && !inputs.desktop_candidate)" in source, "Windows probes do not also run Mac packaging")
 windows_job = source[source.index("  windows-probe:") :]
 require("if: github.event_name == 'workflow_dispatch' && inputs.windows_probe" in windows_job, "Windows probe is manual and opt-in")
 require("contents: read" in windows_job and ": write" not in windows_job, "Windows probe has no write authority")
 require("cargo build --locked --release -p ocean-daemon -p ocean-tui" in windows_job, "Windows probe compiles the actual release binaries")
+require("rustc --edition=2021 --test crates/ocean-tui/src/shell/daemon_boot.rs" in windows_job,
+        "Windows probe executes actual-source daemon discovery tests")
 require("cancel-in-progress: true" in windows_job, "superseded Windows probes cancel by ref")
+require("cargo test --locked -p ocean-providers auth_file -- --test-threads=1" in windows_job, "Windows probe exercises credential publication")
+require("cargo test --locked -p ocean-oauth store -- --test-threads=1" in windows_job, "Windows probe exercises login credential merges")
 
+# Exercise the actual registry-max function with npm, including its default-tag
+# resolution. The first publication has a version tag but no latest tag yet.
+registry_function = "registry_max() {" + publish_job.split("registry_max() {", 1)[1].split("\n          reconciled=", 1)[0]
+require('npm view "$package@$version" versions --json' in registry_function,
+        "registry enumeration does not depend on an existing latest tag")
+packument = {"name": "@kingmaker-systems/ocean", "dist-tags": {"version-0.2.1": "0.2.1"},
+             "versions": {"0.2.1": {"name": "@kingmaker-systems/ocean", "version": "0.2.1"}}}
+
+class RegistryFixture(BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = json.dumps(packument).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *_args):
+        pass
+
+server = ThreadingHTTPServer(("127.0.0.1", 0), RegistryFixture)
+worker = threading.Thread(target=server.serve_forever, daemon=True)
+worker.start()
+try:
+    with tempfile.TemporaryDirectory() as temp:
+        fixture = Path(temp)
+        registry = f"http://127.0.0.1:{server.server_port}"
+        (fixture / "npmrc").write_text(f"@kingmaker-systems:registry={registry}\n")
+        (fixture / "global-npmrc").write_text("")
+        env = {key: value for key, value in os.environ.items()
+               if key in {"PATH", "HOME", "SYSTEMROOT", "TMPDIR", "LANG"}}
+        env.update(NPM_CONFIG_USERCONFIG=str(fixture / "npmrc"),
+                   NPM_CONFIG_GLOBALCONFIG=str(fixture / "global-npmrc"),
+                   NPM_CONFIG_CACHE=str(fixture / "cache"),
+                   NPM_CONFIG_UPDATE_NOTIFIER="false", package=packument["name"], version="0.2.1")
+
+        def registry_max(script=registry_function):
+            return subprocess.run(["bash", "-c", "set -euo pipefail\n" + script + "\nregistry_max\n"],
+                                  cwd=fixture, env=env, text=True, capture_output=True, timeout=15)
+
+        result = registry_max()
+        require(result.returncode == 0 and result.stdout == "0.2.1",
+                f"first publication resolves without latest: {result.stderr}")
+        old = registry_max(registry_function.replace('"$package@$version"', '"$package"'))
+        require(old.returncode != 0, "fixture reproduces the original missing-latest failure")
+        packument["versions"]["0.2.2"] = {"name": packument["name"], "version": "0.2.2"}
+        result = registry_max()
+        require(result.returncode == 0 and result.stdout == "0.2.2",
+                "pinned lookup still enumerates newer published versions")
+finally:
+    server.shutdown()
+    worker.join()
+    server.server_close()
+
+surface_job = source[source.index("  windows-surface-probe:") :]
+require("if: github.event_name == 'workflow_dispatch' && inputs.windows_surface_probe" in surface_job, "Windows Surface probe is manual and opt-in")
+require("contents: read" in surface_job and ": write" not in surface_job, "Windows Surface probe has no write authority")
+require("working-directory: apps/ocean-surface" in surface_job, "Surface probe uses its own component")
+require("cargo test --locked -p ocean-surface-proxy" in surface_job, "Surface probe runs production router and credential fixtures")
+require("cargo build --locked --release -p ocean-surface-proxy" in surface_job, "Surface probe builds the real executable")
+require("cancel-in-progress: true" in surface_job, "superseded Surface probes cancel by ref")
+native_job = source[source.index("  windows-native-probe:") :]
+require("if: github.event_name == 'workflow_dispatch' && inputs.windows_native_probe" in native_job, "Native probe is manual and opt-in")
+require("contents: read" in native_job and ": write" not in native_job, "Native probe has no write authority")
+require("trunk build --locked" in native_job, "Native probe builds the actual UI")
+require("cargo test --locked --release --lib" in native_job, "Native probe runs shell and consent fixtures")
+require("working-directory: apps/ocean-surface/crates/ocean-tauri" in native_job and "cargo build --locked --release" in native_job, "Native probe builds the actual shell")
+desktop_job = source[source.index("  desktop-candidate:") :]
+require("if: github.event_name == 'workflow_dispatch' && inputs.desktop_candidate" in desktop_job, "Desktop installer candidate is opt-in")
+require("contents: read" in desktop_job and ": write" not in desktop_job, "Desktop candidate cannot publish a release")
+require("build_desktop.py" in desktop_job and "if-no-files-found: error" in desktop_job, "Only checked installer outputs become candidate artifacts")
+require("macos-15-intel" in desktop_job and "aarch64-apple-darwin" in desktop_job and "x86_64-pc-windows-msvc" in desktop_job, "Candidate covers both Mac architectures and Windows x64")
 print("Ocean release workflow root/path/security contract: PASS")

@@ -28,3 +28,8 @@ sha2         = "0.10"
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 tempfile = "3"
+
+# Use the daemon's checked Windows file contract for local operator/observer
+# credentials and the proxy session secret. No daemon execution is embedded.
+[target.'cfg(windows)'.dependencies]
+ocean-observatory = { path = "../../../../platform/ocean-os/crates/ocean-observatory" }

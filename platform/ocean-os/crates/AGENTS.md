@@ -16,6 +16,10 @@ This child doc governs `crates/` and is the canonical ownership, entry-point, an
 - Treat each package as an ownership boundary.
 - Read the target package's local `AGENTS.md` when the index links one.
 - Do not introduce cross-crate coupling without documenting the contract in affected owner docs.
+- `ocean-observatory::auth::windows_file` supplies protected current-user-only
+  file primitives for daemon credentials, provider auth-file publication, the
+  Surface proxy and Tauri Room consent. These callers share file custody only,
+  not Observatory storage or runtime policy.
 - When adding/removing/renaming a workspace package, update this index in the same change and verify it against `cargo metadata --no-deps --format-version=1`.
 - Every package manifest must inherit the root non-publication contract with `publish.workspace = true` / `publish = { workspace = true }`, or set `publish = false` explicitly. `cargo xtask docs-check` rejects a workspace member that omits this safeguard.
 - Keep entry points and narrow validation current; stale routing information is a correctness defect for agent work.
@@ -72,7 +76,7 @@ The workspace currently contains 30 Rust packages.
 | `ocean-observatory` | Metadata-only event schema, structural redaction allow-list, cursor semantics, SQLite/WAL persistence, scoped observer auth (HMAC-SHA256), boot-bound mode-0600 token-file distribution, extension admission validation (cycle/depth/cross-authority/idempotency), and in-memory single-use binding tokens | Daemon event adapters or Surface rendering | `ocean-observatory/src/lib.rs`, `ocean-observatory/src/auth.rs`, `ocean-observatory/src/admission.rs` | — | `cargo test -p ocean-observatory` |
 | `ocean-plugin` | Subprocess plugin manifests, lifecycle, JSON-RPC, capability adapter | External MCP transport | `ocean-plugin/src/lib.rs`, `plugin.rs` | — | `cargo test -p ocean-plugin` |
 | `ocean-protocol` | Anthropic/OpenAI/Gemini/Codex wire encoding, streaming, retry | Model catalog, credentials, readiness | `ocean-protocol/src/lib.rs`, `providers/` | `ocean-protocol/AGENTS.md` | `cargo test -p ocean-protocol` |
-| `ocean-providers` | Model catalog/routing, credentials, aliases, readiness and shared auth-file write custody | Provider request/stream encoding | `ocean-providers/src/lib.rs`, `ocean-providers/src/auth_file.rs` | `ocean-providers/AGENTS.md` | `cargo test -p ocean-providers` |
+| `ocean-providers` | Model catalog/routing, credentials, aliases, readiness, shared state/auth directory selection and auth-file write custody | Provider request/stream encoding | `ocean-providers/src/lib.rs`, `ocean-providers/src/auth_file.rs` | `ocean-providers/AGENTS.md` | `cargo test -p ocean-providers` |
 | `ocean-runtime` | Agent loop, permission gates, cancellation, capability/tool execution, runtime events | Session persistence; model credential routing | `ocean-runtime/src/lib.rs`, `agent_loop.rs` | `ocean-runtime/AGENTS.md` | `cargo test -p ocean-runtime` |
 | `ocean-search` | Standalone bounded typed in-memory and trusted-root filesystem byte search over `ocean-walker` | Live runtime grep/glob, path authorization, capability/profile/tool wiring | `ocean-search/src/lib.rs::search_bytes`, `search_path` | `ocean-search/AGENTS.md` | `cargo test -p ocean-search && cargo clippy -p ocean-search --all-targets -- -D warnings` |
 | `ocean-store` | SQLite durable rooms/rosters/transcripts; access/outbox and normalized federation mentions; local owner roles and generation-bound agent decisions; attachment metadata, profiles, resource grants/audits and participant retirement | Agent sessions, memory, Longhouse titles; federation network client | `ocean-store/src/lib.rs`, `room_profile.rs`, `room_resources.rs`, `room_retirement.rs` | `ocean-store/AGENTS.md` | `cargo test -p ocean-store` |

@@ -815,11 +815,57 @@ const EXECUTING_EXTENSIONS: &[&str] = &[
     "osascript",
 ];
 
-/// True when opening this target would EXECUTE it rather than view it —
-/// either because macOS treats the extension as runnable, or because the
-/// file carries an executable bit (a `#!` script `open(1)` will hand to a
-/// shell).
+/// Windows shell launchers are not document-viewing targets. Keep this guard
+/// independent of the caller's root: both root and path come from the webview.
+#[cfg(any(windows, test))]
+fn windows_launch_target(target: &Path) -> bool {
+    let Some(name) = target.file_name() else {
+        return false;
+    };
+    let name = name.to_string_lossy();
+    // Win32 shell handling can normalize trailing dots/spaces; do not let
+    // that spelling disguise an executable or shortcut suffix.
+    let name = name.trim_end_matches(['.', ' ']);
+    let Some((_, extension)) = name.rsplit_once('.') else {
+        return false;
+    };
+    matches!(
+        extension.to_ascii_lowercase().as_str(),
+        "exe"
+            | "com"
+            | "bat"
+            | "cmd"
+            | "ps1"
+            | "psm1"
+            | "vbs"
+            | "vbe"
+            | "js"
+            | "jse"
+            | "wsf"
+            | "wsh"
+            | "hta"
+            | "scr"
+            | "pif"
+            | "cpl"
+            | "msc"
+            | "msi"
+            | "msp"
+            | "mst"
+            | "reg"
+            | "lnk"
+            | "url"
+            | "application"
+            | "appref-ms"
+    )
+}
+
+/// Refuse known platform launch types and, on Unix, executable file modes
+/// before handing a document to its associated application.
 fn opens_as_executable(target: &Path) -> bool {
+    #[cfg(windows)]
+    if windows_launch_target(target) {
+        return true;
+    }
     if let Some(ext) = target.extension().and_then(|e| e.to_str()) {
         let ext = ext.to_ascii_lowercase();
         if EXECUTING_EXTENSIONS.iter().any(|e| *e == ext) {
@@ -853,7 +899,7 @@ fn opens_as_executable(target: &Path) -> bool {
 /// session workspace, which it does not today.
 ///
 /// So the real gate is the consequence, not the location: this refuses to
-/// open anything macOS would EXECUTE (`opens_as_executable`). That closes
+/// open known launch targets (`opens_as_executable`). That closes
 /// the primitive that matters here — the daemon runs tools ungated, so it
 /// can already write a payload and mark it executable; without this check
 /// `open_file` was the launcher. Viewing a document in its default app,
@@ -1073,7 +1119,7 @@ impl DaemonSup {
     /// Start the daemon unless we already own a live child or the port is
     /// already served — a graceful no-op in both cases so we never spawn a
     /// second daemon that would fail to bind.
-    fn start(&self, bin: &str) -> Result<(), String> {
+    fn start(&self, bin: &Path) -> Result<(), String> {
         if self.child_alive() {
             return Ok(());
         }
@@ -1094,7 +1140,7 @@ impl DaemonSup {
 
     /// Restart the shell-owned daemon (stop + start). On an external daemon
     /// this reduces to a start that no-ops because the port is served.
-    fn restart(&self, bin: &str) -> Result<(), String> {
+    fn restart(&self, bin: &Path) -> Result<(), String> {
         self.stop();
         self.start(bin)
     }
@@ -1133,7 +1179,7 @@ fn daemon_url_from_env() -> String {
 }
 
 /// Binary resolution order (testable via [`resolve_daemon_bin_with`]):
-/// `OCEAN_DAEMON_BIN` env → `ocean-daemon` on PATH.
+/// `OCEAN_DAEMON_BIN` env → executable sibling → platform binary on PATH.
 ///
 /// TASK-78: there is deliberately NO caller-supplied override. `daemon_start`
 /// and `daemon_restart` used to accept an optional binary-path argument
@@ -1143,17 +1189,49 @@ fn daemon_url_from_env() -> String {
 /// registered through `generate_handler!` (it gates plugin/`core:` commands),
 /// so the crate's otherwise-minimal capability set gave no protection there.
 /// The env var is a trusted operator-set channel; an IPC argument is not.
-fn resolve_daemon_bin() -> String {
-    resolve_daemon_bin_with(std::env::var("OCEAN_DAEMON_BIN").ok().as_deref())
+fn resolve_daemon_bin() -> PathBuf {
+    resolve_daemon_bin_with(
+        std::env::var("OCEAN_DAEMON_BIN").ok().as_deref(),
+        std::env::current_exe().ok().as_deref(),
+    )
 }
 
-/// Pure core of [`resolve_daemon_bin`] — takes the env value as a parameter
-/// so the resolution order is unit-testable without mutating process env.
-fn resolve_daemon_bin_with(env_bin: Option<&str>) -> String {
+/// Resolve only from native process state, never a webview-supplied path.
+fn resolve_daemon_bin_with(env_bin: Option<&str>, executable: Option<&Path>) -> PathBuf {
     if let Some(bin) = env_bin.map(str::trim).filter(|s| !s.is_empty()) {
-        return bin.to_string();
+        return PathBuf::from(bin);
     }
-    "ocean-daemon".to_string()
+    let name = format!("ocean-daemon{}", std::env::consts::EXE_SUFFIX);
+    if let Some(parent) = executable.and_then(Path::parent) {
+        let sibling = parent.join(&name);
+        if sibling.is_absolute() && daemon_binary_file(&sibling) {
+            return sibling;
+        }
+    }
+    PathBuf::from(name)
+}
+
+fn daemon_binary_file(path: &Path) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+fn daemon_home() -> Option<PathBuf> {
+    daemon_transport::profile_home(std::env::var_os("HOME"), std::env::var_os("USERPROFILE"))
+        .filter(|home| home.is_absolute() && home.is_dir())
 }
 
 /// Parse a `http://host:port[/…]` URL into `(host, port)`. IPv6 brackets are
@@ -1181,12 +1259,10 @@ fn parse_host_port(url: &str) -> Option<(String, u16)> {
 /// `~/.local/state/ocean/ocean-daemon.log`; falls back to the OS temp dir so
 /// a missing `$HOME` or an unwritable state dir never blocks the spawn.
 fn daemon_log_path() -> PathBuf {
-    if let Ok(home) = std::env::var("HOME") {
-        if !home.is_empty() {
-            let dir = PathBuf::from(home).join(".local/state/ocean");
-            if std::fs::create_dir_all(&dir).is_ok() {
-                return dir.join("ocean-daemon.log");
-            }
+    if let Some(home) = daemon_home() {
+        let dir = home.join(".local/state/ocean");
+        if std::fs::create_dir_all(&dir).is_ok() {
+            return dir.join("ocean-daemon.log");
         }
     }
     std::env::temp_dir().join("ocean-daemon.log")
@@ -1195,7 +1271,7 @@ fn daemon_log_path() -> PathBuf {
 /// Spawn the daemon binary detached: stdin null, stdout+stderr appended to
 /// the log file. The returned `Child` is NOT `kill_on_drop`, so it outlives
 /// the shell if the shell crashes — supervision stays explicit.
-fn spawn_daemon(bin: &str) -> Result<Child, String> {
+fn spawn_daemon(bin: &Path) -> Result<Child, String> {
     let log_path = daemon_log_path();
     let log = std::fs::OpenOptions::new()
         .create(true)
@@ -1205,12 +1281,33 @@ fn spawn_daemon(bin: &str) -> Result<Child, String> {
     let stderr = log
         .try_clone()
         .map_err(|e| format!("dup daemon log: {e}"))?;
-    ProcessCommand::new(bin)
-        .stdin(Stdio::null())
+    let cwd = daemon_home().unwrap_or_else(std::env::temp_dir);
+    daemon_process(bin, &cwd)?
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(stderr))
         .spawn()
-        .map_err(|e| format!("spawn {bin}: {e}"))
+        .map_err(|e| format!("spawn {}: {e}", bin.display()))
+}
+
+/// Never inherit the app's project or installation directory as a workspace.
+/// Keep explicitly configured relative paths relative to the launching app.
+fn daemon_process(bin: &Path, cwd: &Path) -> Result<ProcessCommand, String> {
+    let bin = if bin.is_relative() && bin.components().count() > 1 {
+        std::env::current_dir()
+            .map_err(|e| format!("resolve daemon path: {e}"))?
+            .join(bin)
+    } else {
+        bin.to_path_buf()
+    };
+    let mut command = ProcessCommand::new(bin);
+    command.current_dir(cwd).stdin(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW: the desktop app owns this background process.
+        command.creation_flags(0x0800_0000);
+    }
+    Ok(command)
 }
 
 /// Blocking TCP connect probe — `true` when something is accepting on
@@ -1254,9 +1351,9 @@ async fn daemon_status(state: State<'_, AppState>) -> Result<DaemonStatusDto, St
     Ok(state.daemon.snapshot())
 }
 
-/// Start the supervised ocean-daemon. `bin` overrides `OCEAN_DAEMON_BIN` →
-/// PATH. A graceful no-op when the shell already owns a live child or the
-/// port is already served. Emits a `daemon-status` event immediately so the
+/// Start the supervised ocean-daemon from the native environment or install.
+/// A graceful no-op when the shell already owns a live child or the port is
+/// already served. Emits a `daemon-status` event immediately so the
 /// UI flips without waiting for the next poll.
 #[tauri::command]
 async fn daemon_start(
@@ -1575,6 +1672,72 @@ mod tests {
         assert!(parse_host_port("http://").is_none());
     }
 
+    #[test]
+    fn windows_document_open_refuses_launchers_and_disguised_suffixes() {
+        for name in [
+            "payload.exe",
+            "payload.COM",
+            "run.bat",
+            "run.CMD",
+            "run.ps1",
+            "module.psm1",
+            "script.vbs",
+            "encoded.vbe",
+            "script.js",
+            "encoded.jse",
+            "script.wsf",
+            "script.wsh",
+            "page.hta",
+            "screen.scr",
+            "old.pif",
+            "panel.cpl",
+            "console.msc",
+            "setup.msi",
+            "patch.msp",
+            "transform.mst",
+            "settings.reg",
+            "document.pdf.lnk",
+            "website.url",
+            "setup.application",
+            "app.appref-ms",
+            "payload.ExE. ",
+            "link.LNK...",
+            "settings.REG ",
+        ] {
+            assert!(windows_launch_target(Path::new(name)), "{name}");
+        }
+        for name in [
+            "notes.md",
+            "report.pdf",
+            "image.png",
+            "data.json",
+            "LICENSE",
+            "source.rs",
+            "example.exe.txt",
+            "not-a-launcher.exe.notes.md",
+        ] {
+            assert!(!windows_launch_target(Path::new(name)), "{name}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_document_command_refuses_before_launching() {
+        let root = tempfile::tempdir().unwrap();
+        for name in ["payload.exe", "shortcut.LNK", "script.CMD", "script.ps1"] {
+            let target = root.path().join(name);
+            std::fs::write(&target, b"inert fixture, never execute").unwrap();
+            assert_eq!(
+                open_file(
+                    root.path().display().to_string(),
+                    target.display().to_string()
+                ),
+                Err("refusing to open an executable file".into()),
+                "{name}"
+            );
+        }
+    }
+
     /// TASK-78: the resolver takes ONLY the env value. There is no
     /// caller-supplied override, because that argument was reachable from the
     /// webview and ended in `ProcessCommand::spawn`. If someone re-adds an
@@ -1636,14 +1799,78 @@ mod tests {
 
     #[test]
     fn resolve_daemon_bin_env_wins_over_path_default() {
-        assert_eq!(resolve_daemon_bin_with(Some("/env/od")), "/env/od");
+        assert_eq!(
+            resolve_daemon_bin_with(Some("/env/od"), None),
+            Path::new("/env/od")
+        );
         // Whitespace-only env falls through to the PATH default.
-        assert_eq!(resolve_daemon_bin_with(Some("  ")), "ocean-daemon");
+        assert_eq!(
+            resolve_daemon_bin_with(Some("  "), None),
+            PathBuf::from(format!("ocean-daemon{}", std::env::consts::EXE_SUFFIX))
+        );
     }
 
     #[test]
     fn resolve_daemon_bin_path_default_when_nothing_set() {
-        assert_eq!(resolve_daemon_bin_with(None), "ocean-daemon");
+        assert_eq!(
+            resolve_daemon_bin_with(None, None),
+            PathBuf::from(format!("ocean-daemon{}", std::env::consts::EXE_SUFFIX))
+        );
+    }
+
+    #[test]
+    fn daemon_resolution_prefers_installed_sibling_and_keeps_env_override() {
+        let install = tempfile::tempdir().unwrap();
+        let executable = install.path().join("Ocean");
+        let sibling = install
+            .path()
+            .join(format!("ocean-daemon{}", std::env::consts::EXE_SUFFIX));
+        let fallback = PathBuf::from(format!("ocean-daemon{}", std::env::consts::EXE_SUFFIX));
+        assert_eq!(resolve_daemon_bin_with(None, Some(&executable)), fallback);
+        std::fs::create_dir(&sibling).unwrap();
+        assert_eq!(resolve_daemon_bin_with(None, Some(&executable)), fallback);
+        std::fs::remove_dir(&sibling).unwrap();
+        std::fs::write(&sibling, b"inert discovery fixture").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&sibling, std::fs::Permissions::from_mode(0o600)).unwrap();
+            assert_eq!(resolve_daemon_bin_with(None, Some(&executable)), fallback);
+            std::fs::set_permissions(&sibling, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        assert_eq!(resolve_daemon_bin_with(None, Some(&executable)), sibling);
+        assert_eq!(
+            resolve_daemon_bin_with(Some("custom-daemon"), Some(&executable)),
+            Path::new("custom-daemon")
+        );
+    }
+
+    #[test]
+    fn daemon_child_uses_neutral_directory() {
+        const PROBE_HOME: &str = "OCEAN_SURFACE_TEST_CHILD_CWD";
+        if let Some(expected) = std::env::var_os(PROBE_HOME) {
+            assert_eq!(
+                std::env::current_dir().unwrap().canonicalize().unwrap(),
+                PathBuf::from(expected).canonicalize().unwrap()
+            );
+            return;
+        }
+        let home = tempfile::tempdir().unwrap();
+        let output = daemon_process(&std::env::current_exe().unwrap(), home.path())
+            .unwrap()
+            .args([
+                "--exact",
+                "tests::daemon_child_uses_neutral_directory",
+                "--nocapture",
+            ])
+            .env(PROBE_HOME, home.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     /// The IPC commands must expose no path parameter at all. Source-pinned

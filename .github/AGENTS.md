@@ -14,12 +14,37 @@ Root GitHub Actions builds for the public Ocean monorepo.
   Registry authentication, publication and latest-tag reconciliation target
   `@kingmaker-systems/ocean`, linked to this canonical repository.
   Manual `windows_probe` builds daemon/TUI executables and runs Observatory
-  credential, operator-key and guarded skill-file tests on Windows. The probe
+  credential, operator-key, guarded skill/package-file, TUI discovery,
+  provider profile-default and auth-file/OAuth-store publication tests.
+  Disposable-daemon fixtures verify startup identity and Room package preview,
+  digest changes, missing packages, link refusal and file limits without
+  provider requests or real credentials. The probe
   has read-only permissions and never publishes. This probe is separate from routine CI and Mac package validation.
   The publish job has no source checkout: its first shell starts at the existing
   workspace root, verifies the artifact digest, then creates the component
   staging directory used by subsequent steps.
+  Registry convergence reads the complete version list through the verified
+  version, so a package without a `latest` tag can finish its first publication.
+- Manual `windows_surface_probe` runs the full Surface proxy suite with
+  synthetic local credentials/upstreams and builds its release executable.
+  It has read-only permissions and does not start Mac packaging or publish.
+- The release workflow's manual `windows_native_probe` is a read-only Windows
+  Tauri candidate check. It builds the real web bundle, runs native shell/Room-consent tests and
+  builds the executable and verifies its Windows GUI subsystem. It does not
+  package, publish or install the app.
+- Manual `desktop_candidate` builds unsigned installer artifacts on native
+  Apple Silicon, Intel Mac and Windows x64 runners. Surface packaging owns
+  the matching daemon, legal inventories and artifact-content checks. The job
+  runs only disposable-daemon acceptance, has read-only permissions and uploads
+  checked candidates without signing, publishing or installing them.
 - `build-scope.py` selects changed components; `test-build-scope.py` checks scope decisions, including NUL-terminated Git output. Unknown or unavailable diffs build both.
+- `test-daemon-startup.py` checks actual candidate startup, revision, isolated
+  member identity and state-file creation; Unix also checks private file modes.
+  It does not establish Windows ACLs, provider inference or installation.
+- `test-room-package.py` owns the disposable actual-daemon package-preview
+  fixture. It verifies child identity before creating fixture Rooms, uses only
+  fixture state/auth paths, and stops only its own process. It performs no
+  provider inference or live daemon mutation.
 - Root CI builds Ocean OS and the active Surface deliverables. Publishing and
   deployment remain owned by their component workflows and installers.
 
@@ -47,6 +72,8 @@ Root GitHub Actions builds for the public Ocean monorepo.
 - `actionlint .github/workflows/release.yml`
 - `PYTHONDONTWRITEBYTECODE=1 python3 .github/test-build-scope.py`
 - `PYTHONDONTWRITEBYTECODE=1 python3 .github/test-release-workflow.py`
+- The release contract fixtures use local Node/npm and a loopback-only npm
+  registry to exercise first publication without credentials or an existing tag.
 - Actual hosted builds establish build success. Syntax checking alone does not.
 
 ## Child devlog Index

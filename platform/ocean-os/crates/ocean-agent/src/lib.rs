@@ -70,8 +70,6 @@ pub use room_resources::{
 mod rooms;
 pub use rooms::{RoomRecord, RoomRegistry, RoomStoreError};
 
-const APP_NAME: &str = "ocean-rs";
-
 /// How long to wait for a single MCP server to connect + list its tools at
 /// startup. A server that exceeds this contributes no tools (non-fatal) rather
 /// than wedging daemon startup.
@@ -4388,20 +4386,11 @@ pub fn load_permission_mode(config_dir: &std::path::Path) -> Option<PermissionMo
 
 /// The directory the daemon uses for its on-disk state (sessions, projects, and
 /// the persistent-rooms SQLite DB). Resolved from `OCEAN_CONFIG_DIR`, then
-/// `XDG_CONFIG_HOME/ocean-rs`, then `~/.config/ocean-rs`, falling back to
-/// `./.ocean-rs`. Exposed so other crates (e.g. the daemon wiring `ocean-store`)
+/// `XDG_CONFIG_HOME/ocean-rs`, then `.config/ocean-rs` under HOME (or Windows
+/// USERPROFILE), falling back to `./.ocean-rs`. Exposed so other crates (e.g. the daemon wiring `ocean-store`)
 /// place their files alongside the agent's, under one config dir.
 pub fn config_dir_from_env() -> PathBuf {
-    if let Some(path) = std::env::var_os("OCEAN_CONFIG_DIR") {
-        return PathBuf::from(path);
-    }
-    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
-        return PathBuf::from(xdg).join(APP_NAME);
-    }
-    if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home).join(".config").join(APP_NAME);
-    }
-    PathBuf::from(".ocean-rs")
+    ocean_providers::default_config_dir().unwrap_or_else(|| PathBuf::from(".ocean-rs"))
 }
 
 /// A language server relevant to a workspace, for the TUI `/lsp` surface: its
