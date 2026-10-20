@@ -68,8 +68,9 @@ def digest(path):
 
 
 def clean_revision():
-    if run(["git", "status", "--porcelain", "--untracked-files=normal"], capture=True):
-        raise RuntimeError("Desktop packaging requires a clean committed checkout")
+    changed = run(["git", "status", "--porcelain", "--untracked-files=normal"], capture=True)
+    if changed:
+        raise RuntimeError(f"Desktop packaging requires a clean committed checkout:\n{changed}")
     remote = run(["git", "remote", "get-url", "origin"], capture=True).removesuffix(".git").lower()
     if remote not in ("https://github.com/kingmaker-systems/ocean", "git@github.com:kingmaker-systems/ocean"):
         raise RuntimeError("Desktop packaging requires the canonical organization repository")

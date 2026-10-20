@@ -2919,3 +2919,12 @@ type: [bug report]
 area: [testing]
 
 The revised actual Mac disk image passes system-library checks and bundled-daemon startup. hdiutil completed detach after the command observation timed out; retries then incorrectly treated the absent image as failure. Inspect authoritative hdiutil image state after a timeout/error before retrying only the owned mount. Eight artifact tests pass, including a timeout-after-completed-detach regression. Packaging ownership and publication contracts are unchanged. Final installer acceptance remains pending.
+
+_________________________________________________________________________________
+time: [20:08] [19-10-26]
+agent: [Codex] [GPT-6]
+worktree: [codex/desktop-installer-repairs]
+type: [bug report]
+area: [testing]
+
+Desktop candidate 58177ac2 passed actual Apple Silicon DMG content, system-library, legal-payload and isolated bundled-daemon checks locally. Hosted a454dafc Apple Silicon packaging passed. Windows built and extracted its NSIS installer, passed GUI/architecture/legal/static-CRT checks and actual isolated daemon startup, then correctly refused artifact publication because source cleanliness changed. Include changed paths in that refusal so the next native run can identify the generated-file defect; do not weaken the clean-source gate. Eight packaging fixtures pass. Packaging contracts are unchanged. Intel native packaging remains in progress; no install, signing or release publication.
