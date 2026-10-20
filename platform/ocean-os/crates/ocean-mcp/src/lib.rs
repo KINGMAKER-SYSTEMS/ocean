@@ -1,5 +1,8 @@
 //! `ocean-mcp` — Ocean as an MCP **client**.
 //!
+//! The separate `ocean-mcp` executable is a thin stdio server for the local
+//! daemon; it does not move daemon authority into this library.
+//!
 //! Connects to external [Model Context Protocol](https://modelcontextprotocol.io)
 //! servers and exposes their tools to the Ocean agent through the runtime's
 //! [`CapabilityProvider`](ocean_runtime::capability::CapabilityProvider) seam.

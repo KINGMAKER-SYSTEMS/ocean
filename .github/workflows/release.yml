@@ -554,8 +554,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Test Windows credential security
         run: cargo test --locked -p ocean-observatory auth
-      - name: Build Windows daemon and TUI
-        run: cargo build --locked --release -p ocean-daemon -p ocean-tui
+      - name: Build Windows daemon, TUI and MCP bridge
+        run: cargo build --locked --release -p ocean-daemon -p ocean-tui -p ocean-mcp
+      - name: Test Windows MCP bridge
+        run: cargo test --locked --release -p ocean-mcp --bin ocean-mcp --test server_e2e
       - name: Test Windows file and operator security
         run: cargo test --locked --release -p ocean-daemon --test windows_file_security
       - name: Test Windows daemon discovery
@@ -568,9 +570,9 @@ jobs:
         run: python ../../.github/test-daemon-startup.py target/release/ocean-daemon.exe $env:GITHUB_SHA
       - name: Test Windows Room package capture
         run: python ../../.github/test-room-package.py target/release/ocean-daemon.exe $env:GITHUB_SHA
-      - name: Verify both executable outputs
+      - name: Verify executable outputs
         run: |
-          foreach ($binary in @('ocean-daemon.exe', 'ocean-tui.exe')) {
+          foreach ($binary in @('ocean-daemon.exe', 'ocean-tui.exe', 'ocean-mcp.exe')) {
             $path = Join-Path 'target/release' $binary
             if (!(Test-Path -PathType Leaf $path)) { throw "Missing $path" }
             Get-FileHash -Algorithm SHA256 $path

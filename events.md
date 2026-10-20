@@ -3011,3 +3011,14 @@ type: [workflow]
 area: [testing]
 
 Combined detached source d498a729: real Trunk bundle and WASM Clippy pass. Native suite passes 95 tests and times out in the unchanged scoped native file-watcher test, matching the earlier local Accounts failure. Fresh hosted Mac evidence remains specific to unchanged Accounts source 8d39b059; it does not establish combined-candidate native acceptance. No production watcher changes were retained. Team documentation links resolve; later candidate changes are documentation only.
+
+_________________________________________________________________________________
+time: [21:35] [19-10-26]
+agent: [Codex desktop] [GPT-6]
+worktree: [codex/team-mcp-bridge]
+type: [bug report]
+area: [backend]
+
+The installed older Ocean MCP server reports local roster rows for a live shared room and assumes execution fields on the migration-only inspect route. The organization repo contains only the MCP client library, so it cannot rebuild that server. Added a daemon-backed ocean-mcp executable with bounded stdio/HTTP, numeric loopback/no-redirect transport and no credential reads. Shared rosters use access.members; inspection reads actual bindings/resource/slot endpoints, retaining partial failures. Human joins/posts carry no claimed identity. Transcript and session pagination match the current daemon, including turns and thread/session links; unsupported backward cursors are refused instead of silently returning a prefix as newest. Large completed-turn output preserves session/request/outcome with an explicit excerpt flag.
+
+Validation: 23 client unit tests, 11 bridge tests, nine existing client integration tests and two real-server stdio tests pass across the targeted runs. Native all-target Clippy, format, docs-check, release-workflow fixtures and actionlint pass. Read-only actual stdio against the operated daemon confirms the live shared roster, agent binding and session counts with zero mutations. Manual Windows probing now builds/tests the actual MCP executable; hosted Windows evidence remains pending. The installed bridge, daemon, credentials and MCP host configuration are unchanged.
