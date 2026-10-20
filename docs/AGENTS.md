@@ -14,6 +14,9 @@ Keep canonical repository routing, the public/private split and team setup disco
 
 - Public code lands in `KINGMAKER-SYSTEMS/ocean`; private operational work lands in `KINGMAKER-SYSTEMS/ocean-private`.
 - Do not publish historical mixed-repository branches or private PR discussions.
+- Team setup distinguishes the daemon's persisted local owner (`/v1/me`) from
+  invitation-derived shared membership. Do not make legacy `member.toml`
+  preparation a desktop prerequisite or describe it as team authentication.
 
 ## Work Guidance
 

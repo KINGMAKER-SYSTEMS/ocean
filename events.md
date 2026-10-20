@@ -3033,3 +3033,16 @@ area: [testing]
 Integrated the maintained MCP bridge e989e431 into the desktop candidate. Installer construction now builds the daemon and MCP executable at one clean revision, bundles both through Tauri externalBin, inventories all four dependency graphs, checks both sidecar hashes/architectures and all three native executable dependencies, and records both sidecar checksums. The actual startup fixture can run bundled MCP stdio against its own disposable daemon; it checks tool discovery, daemon revision and room projection. Claude fallback discovery is also scoped to disposable state. MCP host configuration remains explicit and unchanged.
 
 Validation: nine artifact-integrity fixtures pass, including missing/stale MCP and Windows executable layout/architecture refusal; combined daemon/MCP locked compilation and 45 MCP tests pass. Docs-check, actionlint, release-workflow fixtures and whitespace checks pass. The expanded real-process smoke verifier passes using the existing 58177 daemon and e989 MCP test binaries, proving the verifier path but not a newly packaged same-revision artifact. New exact-source installer acceptance remains pending. No installed app, daemon, host configuration, credentials or stable release was changed.
+
+_________________________________________________________________________________
+time: [22:01] [19-10-26]
+agent: [Codex desktop] [GPT-6]
+worktree: [codex/desktop-handoff-guide]
+type: [handoff]
+area: [testing]
+
+Corrected desktop onboarding to follow current P2 identity: /v1/me creates a persisted local owner without member.toml, while accepted invitations supply shared membership. Legacy CLI host preparation is optional and does not authenticate team membership. The guide explicitly identifies missing desktop federation configuration rather than sending Windows users through the Mac script. Updated the nearest docs contract; root/component runtime contracts are unchanged because no application behavior changed.
+
+Verified the downloaded Apple Silicon installer at 69c0df19 against its artifact and daemon SHA256 receipt. Its extracted daemon, run only in disposable state with isolated provider discovery, creates a local owner without member.toml, admits a bodyless human join, attributes the posted fixture message to that owner, and retains owner and transcript across restart. The fixture stops only its children and detaches its own read-only image. This is backend acceptance from the actual package, not native UI installation, provider inference or two-machine federation acceptance. Local owner ids are scoped to their daemon and may match across fresh profiles; global uniqueness is not the contract. Docs-check and whitespace checks pass.
+
+Combined source 8ca79ae2 passes both ordinary hosted builds in run 39355865422. Standalone MCP Windows probe 39354455876 now passes completely. Three-platform combined installer run 39355915592 remains live; no replacement run was dispatched.
