@@ -48,8 +48,14 @@ This crate owns the multi-provider LLM wire protocol layer for Anthropic, OpenAI
   takes no other field, so it never carries `display`.
 - An explicit `ThinkingLevel::Off` reaches every encoder (the runtime no longer
   drops it), so each encoder's off shape is live: Anthropic `disabled` or
-  `between_tools`, Codex `none`, DeepSeek `disabled`. `None` means the caller
-  made no choice and sends the provider default.
+  `between_tools`, Codex `none`, DeepSeek `disabled`, GLM `disabled`. `None`
+  means the caller made no choice and sends the provider default.
+- Z.AI GLM takes a top-level `reasoning_effort` (Minimal/Low → `low`, Medium →
+  `medium`, High/Xhigh/Max → `high`) and `thinking: {"type": "disabled"}` for
+  Off. Z.AI answers 200 to unknown fields, so only shapes measured to change
+  reasoning tokens count: the DeepSeek-style nested effort did not. Low
+  measured the same as Off and nothing exceeded High (2026-10-20, glm-5.3
+  and five siblings), so the picker offers off/medium/high.
 - On OpenAI Chat Completions only reasoning families (the o-series, GPT-5 and
   later) receive `reasoning_effort`. Every other id rejects it with a 400, so
   an unrecognized id gets nothing. A Gemini model whose descriptor says it

@@ -657,6 +657,27 @@ fn deepseek_reasoning_effort(level: ThinkingLevel) -> Option<&'static str> {
     }
 }
 
+/// Z.AI GLM effort ladder. GLM accepts a top-level `reasoning_effort` and its
+/// thinking visibly scales with it; nothing above `high` is distinguishable
+/// from `high` (or from sending no effort at all), so higher levels clamp
+/// there rather than claim a deeper setting the backend does not have.
+/// `Off` is not an effort: it is `thinking: {"type": "disabled"}` (see
+/// `apply_reasoning`). Measured live against api.z.ai's coding endpoint
+/// 2026-10-20, median reasoning tokens over four runs of a fixed arithmetic
+/// prompt on glm-5.3: off 89, low 93, medium 189, high 306, max 371, unset
+/// 364. Low behaves like Off, which is why the picker
+/// (`ocean_providers::model_effort_levels`) offers only off/medium/high for
+/// GLM; `low` is still what a Minimal/Low request sends. glm-5.3-flash,
+/// glm-5.2, glm-4.7, glm-4.6 and glm-4.5 showed the same off/low/high split.
+fn glm_reasoning_effort(level: ThinkingLevel) -> Option<&'static str> {
+    match level {
+        ThinkingLevel::Off => None,
+        ThinkingLevel::Minimal | ThinkingLevel::Low => Some("low"),
+        ThinkingLevel::Medium => Some("medium"),
+        ThinkingLevel::High | ThinkingLevel::Xhigh | ThinkingLevel::Max => Some("high"),
+    }
+}
+
 /// Injects the reasoning-effort request param onto an OpenAI-compatible body,
 /// using the right wire shape for the routed backend.
 ///
@@ -669,6 +690,8 @@ fn deepseek_reasoning_effort(level: ThinkingLevel) -> Option<&'static str> {
 /// blasting one param everywhere (an unknown field 400s on stricter gateways):
 ///   - OpenAI o-series      → top-level `reasoning_effort` (minimal|low|medium|high)
 ///   - DeepSeek (V4)        → `thinking: {type, reasoning_effort}` (see below)
+///   - Z.AI GLM             → top-level `reasoning_effort` (low|medium|high);
+///     Off → `thinking: {"type": "disabled"}` (see `glm_reasoning_effort`)
 ///   - other openai-compatible backends → left untouched (no agreed param)
 ///
 /// DeepSeek's shape (verified live against api.deepseek.com 2026-07-12):
@@ -710,6 +733,20 @@ fn apply_reasoning(body: &mut Value, model: &Model, level: ThinkingLevel) {
                 body["thinking"] = json!({"type": "enabled", "reasoning_effort": effort});
             }
             // Off — must be explicit; see the note above.
+            None => {
+                body["thinking"] = json!({"type": "disabled"});
+            }
+        },
+        // GLM thinks by default, so Off has to be said out loud (an omitted
+        // param keeps the reasoner running, as at DeepSeek). Z.AI accepts
+        // unknown fields with HTTP 200, so the shape here is what was
+        // measured to change behaviour, not merely what was accepted: the
+        // nested `thinking.reasoning_effort` DeepSeek uses had no effect on
+        // GLM, while the top-level field did.
+        "glm" => match glm_reasoning_effort(level) {
+            Some(effort) => {
+                body["reasoning_effort"] = json!(effort);
+            }
             None => {
                 body["thinking"] = json!({"type": "disabled"});
             }
@@ -2526,6 +2563,74 @@ mod tests {
         assert!(
             body["thinking"].get("reasoning_effort").is_none(),
             "disabled thinking must not carry an effort: {body}"
+        );
+    }
+
+    fn glm_model() -> Model {
+        Model::openai_compat(
+            "glm",
+            "glm-5.3",
+            "https://api.z.ai/api/coding/paas/v4",
+            200_000,
+            131_072,
+        )
+    }
+
+    // GLM takes a TOP-LEVEL reasoning_effort. The nested DeepSeek shape was
+    // accepted with HTTP 200 but changed nothing (Z.AI ignores unknown fields),
+    // so a regression back to it would fail open, silently.
+    #[test]
+    fn build_body_sends_glm_reasoning_effort_top_level() {
+        for (level, expected) in [
+            (ThinkingLevel::Minimal, "low"),
+            (ThinkingLevel::Low, "low"),
+            (ThinkingLevel::Medium, "medium"),
+            (ThinkingLevel::High, "high"),
+            (ThinkingLevel::Xhigh, "high"),
+            (ThinkingLevel::Max, "high"),
+        ] {
+            let opts = StreamOptions {
+                reasoning: Some(level),
+                ..Default::default()
+            };
+            let body = test_body(&glm_model(), &Context::default(), &opts);
+            assert_eq!(
+                body["reasoning_effort"], expected,
+                "GLM {level:?} mismapped: {body}"
+            );
+            assert!(
+                body.get("thinking").is_none(),
+                "GLM effort must not be nested in a thinking object: {body}"
+            );
+        }
+    }
+
+    // GLM thinks by default; Off must disable it explicitly or the user pays
+    // for reasoning they turned off.
+    #[test]
+    fn build_body_explicitly_disables_glm_thinking_when_off() {
+        let opts = StreamOptions {
+            reasoning: Some(ThinkingLevel::Off),
+            ..Default::default()
+        };
+        let body = test_body(&glm_model(), &Context::default(), &opts);
+        assert_eq!(
+            body["thinking"]["type"], "disabled",
+            "GLM thinking-off must be explicit: {body}"
+        );
+        assert!(
+            body.get("reasoning_effort").is_none(),
+            "disabled GLM thinking must not carry an effort: {body}"
+        );
+    }
+
+    // No level chosen leaves the body untouched: GLM's own default applies.
+    #[test]
+    fn build_body_leaves_glm_untouched_without_a_level() {
+        let body = test_body(&glm_model(), &Context::default(), &StreamOptions::default());
+        assert!(
+            body.get("reasoning_effort").is_none() && body.get("thinking").is_none(),
+            "GLM without a chosen level must keep the backend default: {body}"
         );
     }
 

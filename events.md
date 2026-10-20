@@ -2778,3 +2778,13 @@ area: [docs]
 
 Ported Risingtides-dev/ocean-os#440. Adds `docs/specs/2026-09-01-ocean-rooms-definition-of-done.md`, the cross-repository Rooms finish-line contract that `ocean-store/src/lib.rs` already cites (definition-of-done §4.1), plus the "Rooms and federation" section of `docs/OPERATIONS.md`. Indexed from `docs/README.md` (active plans), `docs/AGENTS.md` (child contract) and `ROADMAP.md` (near-term gaps); the ROADMAP's "Explicitly not implied" paragraph no longer lists room federation, which shipped in `room_federation.rs`. The spec records the open items as of 2026-09-01; the ROADMAP bullet says to re-verify each line against this tree before claiming it. Validation: `cargo xtask docs-check` PASS (30 packages, 162 active Markdown files, 187 local links).
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time: [10:55] [10-20-26]
+agent: [claude code] [claude-opus-5-5]
+worktree: [fix/glm-thinking-level] [~/dev/oceanwork/wt-glm]
+type: [bug report]
+area: [backend]
+
+The composer's think level did nothing on GLM: `apply_reasoning` left every non-OpenAI/DeepSeek/Kimi backend untouched and `model_effort_levels` advertised no levels for `glm-*`. Probed api.z.ai's coding endpoint live with the operator's GLM key. GLM thinks by default; `thinking: {"type": "disabled"}` and a top-level `reasoning_effort` both change reasoning-token counts, while the DeepSeek-style nested effort and junk fields are accepted with 200 and change nothing. glm-5.3 medians over four runs of a fixed arithmetic prompt: off 89, low 93, medium 189, high 306, max 371, unset 364; streaming carries the reasoning deltas; 5.3-flash, 5.2, 4.7, 4.6 and 4.5 show the same split (4.5-flash timed out, unmeasured). GLM now sends `thinking: disabled` for Off and top-level `reasoning_effort` low/medium/high (High/Xhigh/Max clamp to high), and the picker offers off/medium/high. Validation: `cargo test -p ocean-protocol --lib`, `cargo test -p ocean-providers --lib`.
+_________________________________________________________________________________
