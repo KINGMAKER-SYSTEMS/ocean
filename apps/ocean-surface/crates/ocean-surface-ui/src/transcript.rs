@@ -27,7 +27,9 @@ enum LiveActivity {
     Hidden,
     /// Waiting for the operator to approve a permission request.
     WaitingForApproval,
-    /// User turn submitted, daemon hasn't returned a first token yet.
+    /// User turn submitted, daemon hasn't returned a first block yet. Reads
+    /// "Thinking…": with reasoning models this stretch is the model thinking
+    /// before anything streams, and "Getting started…" read as onboarding.
     GettingStarted,
     /// The agent is reasoning (Thinking block).
     Reasoning,
@@ -139,7 +141,7 @@ fn LiveActivityRow(activity: Signal<LiveActivity>) -> impl IntoView {
     let label = move || match activity.get() {
         LiveActivity::Hidden => None,
         LiveActivity::WaitingForApproval => Some("Waiting for approval…"),
-        LiveActivity::GettingStarted => Some("Getting started…"),
+        LiveActivity::GettingStarted => Some("Thinking…"),
         LiveActivity::Reasoning => Some("Reasoning…"),
         LiveActivity::Tool(d) => Some(d),
         LiveActivity::Responding => Some("Responding…"),
@@ -440,6 +442,7 @@ pub fn Transcript(daemon: Daemon) -> impl IntoView {
         new_below.set(false);
         scroll_to_bottom(container);
     };
+    let daemon_for_queue = daemon.clone();
 
     view! {
         <div class="transcript" node_ref=container on:scroll=on_scroll>
@@ -494,6 +497,10 @@ pub fn Transcript(daemon: Daemon) -> impl IntoView {
             // tail, outside the turn loop. Replaces SoundingsThinking + per-turn
             // ocean-status-row.
             <LiveActivityRow activity=live_activity />
+            // Prompts typed while the turn above was running (or while the
+            // daemon reported the session busy). They sit below the live row
+            // and each becomes an ordinary user turn when it is sent.
+            <QueuedPrompts daemon=daemon_for_queue />
             // Quiet return affordance: content is growing below while the
             // user reads history. Zero-height sticky dock — no layout shift,
             // never scrolls the viewport on its own.
@@ -541,6 +548,46 @@ fn TurnView(
                 None => ().into_any(),
             }}
         </div>
+    }
+}
+
+/// Queued prompts, oldest first, below the live activity row: the operator's
+/// own text in a dimmed, dashed user bubble with a "Queued" label and a
+/// remove control. A row disappears when its prompt is sent (it reappears as
+/// a normal user turn above) or when the operator removes it.
+#[component]
+fn QueuedPrompts(daemon: Daemon) -> impl IntoView {
+    let queued = daemon.queued_prompts;
+    view! {
+        <For
+            each=move || queued.get()
+            key=|q| q.id
+            children=move |q| {
+                let remove = daemon.clone();
+                let id = q.id;
+                view! {
+                    <div class="turn turn--queued">
+                        <div class="turn--user">
+                            <div class="turn__body">
+                                <div class="turn__queued-text">{q.display}</div>
+                                <div class="turn__queued-meta">
+                                    <span class="turn__queued-label">"Queued"</span>
+                                    <button
+                                        class="turn__queued-remove"
+                                        type="button"
+                                        aria-label="Remove queued message"
+                                        title="Remove"
+                                        on:click=move |_| remove.remove_queued_prompt(id)
+                                    >
+                                        "\u{00D7}"
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                }
+            }
+        />
     }
 }
 

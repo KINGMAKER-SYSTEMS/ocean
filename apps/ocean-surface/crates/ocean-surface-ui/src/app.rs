@@ -1512,6 +1512,8 @@ fn workspace_default_open(stored: Option<&str>, viewport_w: f64) -> bool {
 #[component]
 pub fn App() -> impl IntoView {
     let daemon = Daemon::new(daemon_url_from_env());
+    // Prompts typed while a turn runs queue up and are sent when it ends.
+    daemon.install_queue_drain();
     let endpoint_ready = daemon.endpoint_ready;
     let planner_state = RwSignal::new(PlannerState::Idle);
     let planner_project = RwSignal::new(String::new());

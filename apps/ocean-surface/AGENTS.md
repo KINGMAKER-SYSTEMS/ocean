@@ -172,6 +172,20 @@ token to browser code, bundle it, or cache it in client storage.
   active-turn action. Its model panel is anchored to the compact composer.
   Browser float mode uses Ocean's background; native overlay transparency is
   gated through the existing `host::running_in_tauri` seam.
+- The main composer never refuses a send because a turn is running. A prompt
+  sent while `streaming` is true, while earlier prompts are queued, or while the
+  head of the queue is waiting out a busy daemon goes into
+  `Daemon::queued_prompts` (oldest first) and renders as a dimmed, dashed
+  `turn--queued` row below the live-activity row with a remove control; it
+  becomes an ordinary user turn when `drain_queued_prompt` sends it, which the
+  `install_queue_drain` effect does each time `streaming` returns to false.
+  Staged images leave `pending_images` with the prompt they were staged for.
+  A daemon `409 session has an active operation` answer to a send re-queues
+  that prompt at the head (taking back its echoed user row) and retries every
+  1.5 s, up to 40 times, before the old error block appears. Stop, New Session
+  and a session switch clear the queue; a queued follow-up never starts the
+  moment a turn is cancelled. The live-activity label for "turn accepted, no
+  block yet" reads "Thinking…".
 
 ## Session Contract
 
