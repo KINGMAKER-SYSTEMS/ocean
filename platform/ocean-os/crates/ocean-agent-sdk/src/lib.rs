@@ -796,6 +796,19 @@ pub enum AgentTurnEvent {
         /// bridge replaces with a fulfilled one.
         result: crate::slack_canvas::SlackCanvasResult,
     },
+    /// An operator message steered into the running turn
+    /// (`POST /v1/agent/sessions/{id}/steer`) has been delivered: it is now in
+    /// the transcript as a user message, after the tool results of the round
+    /// that was running when it was sent, and the model's next round answers
+    /// it. `steer_id` is the id the steer route returned. A message accepted
+    /// but never followed by this event before `TurnFinished` was not run;
+    /// the sender should send it as a new turn.
+    SteeringDelivered {
+        session_id: AgentSessionId,
+        turn_id: AgentTurnId,
+        steer_id: String,
+        text: String,
+    },
     /// Catch-all for unexpected or extension events (e.g. Longhouse council
     /// events). Includes the raw payload and an optional session scope.
     ///
@@ -845,7 +858,8 @@ impl AgentTurnEvent {
             | AgentTurnEvent::ComponentUnmount { session_id, .. }
             | AgentTurnEvent::BrowserActivity { session_id, .. }
             | AgentTurnEvent::SurfacePatch { session_id, .. }
-            | AgentTurnEvent::SlackCanvas { session_id, .. } => Some(*session_id),
+            | AgentTurnEvent::SlackCanvas { session_id, .. }
+            | AgentTurnEvent::SteeringDelivered { session_id, .. } => Some(*session_id),
             AgentTurnEvent::Extension { scope, .. } => *scope,
         }
     }
@@ -1491,6 +1505,12 @@ mod tests {
                     crate::slack_canvas::SlackCanvasId::new("F0123ABCD"),
                 ),
             },
+            AgentTurnEvent::SteeringDelivered {
+                session_id: sid,
+                turn_id: tid,
+                steer_id: "steer-1".into(),
+                text: "also check the tests".into(),
+            },
             // Session-config RPC v1: a config pin announced on the session's
             // stream — scoped like every other session-bearing event.
             AgentTurnEvent::SessionConfigChanged {
@@ -1528,6 +1548,7 @@ mod tests {
                 | AgentTurnEvent::BrowserActivity { .. }
                 | AgentTurnEvent::SurfacePatch { .. }
                 | AgentTurnEvent::SlackCanvas { .. }
+                | AgentTurnEvent::SteeringDelivered { .. }
                 | AgentTurnEvent::Extension { .. } => {}
             }
         }

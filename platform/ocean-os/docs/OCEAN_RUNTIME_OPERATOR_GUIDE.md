@@ -540,6 +540,7 @@ GET    /v1/agent/sessions/{id}/config     session config: model/provider, permis
 PATCH  /v1/agent/sessions/{id}/config     repin the session's model { model } (catalog-validated; emits session_config_changed)
 GET    /v1/agent/history/search            bounded persisted display-transcript search (?q=<query>&limit=<1..50>, default 20)
 POST   /v1/agent/sessions/{id}/messages   append an out-of-turn user message to an existing session
+POST   /v1/agent/sessions/{id}/steer      steer { text } into the running turn at its next tool boundary (202 steer_id, 409 no_active_turn)
 
 # Voice surface support
 POST   /v1/voice/realtime/client-secret   mint an ephemeral OpenAI Realtime client secret

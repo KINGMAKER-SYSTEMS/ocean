@@ -43,6 +43,14 @@ transcripts by session id.
   bounds each call to 45 seconds, and prints fixed error classes and token counts.
   It never refreshes credentials or constructs sessions/stores. Configured
   credentials alone do not prove entitlement or completed inference.
+- Mid-turn steering is owned per operator turn: `AgentRuntime::open_steering`
+  registers one `SteeringInbox` per session and returns a
+  `SteeringRegistration` whose drop closes and unregisters it (only its own
+  entry, by pointer). `PromptControl::steering` carries the inbox into every
+  attempt of the turn, so a pre-stream failover retry delivers what the failed
+  attempt never read. `AgentRuntime::steer` refuses with `Closed` when no
+  steerable turn runs on the session. Room, subagent and direct turns carry no
+  inbox and cannot be steered.
 - A failed, cancelled or timed-out turn reports the usage of the rounds it
   completed, read from the checkpointed assistant messages, with the last
   completed round's request as its context measurement. Those rounds were

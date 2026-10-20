@@ -799,6 +799,19 @@ pub enum AgentEvent {
         #[serde(default)]
         scope: Option<String>,
     },
+    /// A message this surface (or another client) steered into the running
+    /// turn was delivered: it is now in the transcript as a user message, and
+    /// the model's next round answers it. Handled at the stream call site
+    /// (`Daemon::deliver_steering`), not in `apply_event`.
+    SteeringDelivered {
+        #[serde(default)]
+        session_id: String,
+        #[serde(default)]
+        #[allow(dead_code)]
+        turn_id: String,
+        steer_id: String,
+        text: String,
+    },
     #[serde(other)]
     Other,
 }
@@ -845,6 +858,7 @@ pub(crate) const AGENT_EVENT_NAMES: &[&str] = &[
     "browser_activity",
     "surface_patch",
     "extension",
+    "steering_delivered",
 ];
 
 impl AgentEvent {
@@ -865,7 +879,8 @@ impl AgentEvent {
             | AgentEvent::ComponentRender { session_id, .. }
             | AgentEvent::ComponentUnmount { session_id, .. }
             | AgentEvent::BrowserActivity { session_id, .. }
-            | AgentEvent::SurfacePatch { session_id, .. } => session_id.as_str(),
+            | AgentEvent::SurfacePatch { session_id, .. }
+            | AgentEvent::SteeringDelivered { session_id, .. } => session_id.as_str(),
             // An extension event's scope (when set) is its session id; a
             // council-wide one has no scope and is treated as unscoped.
             AgentEvent::Extension { scope, .. } => scope.as_deref().unwrap_or(""),
@@ -1967,6 +1982,27 @@ struct PlannerStreamSources {
     lifecycle: PlannerStreamLifecycle,
 }
 
+/// A message the operator typed while a turn was running and sent INTO that
+/// turn (`POST /v1/agent/sessions/{id}/steer`). The daemon delivers it at the
+/// turn's next tool boundary; until `steering_delivered` arrives it shows as a
+/// pending row below the live-activity row. If the daemon refuses it, or the
+/// turn ends without delivering it, it falls back to the queue and runs as
+/// the next turn instead.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SteeringPrompt {
+    /// Local row identity (shares the queued-prompt id space).
+    pub id: u64,
+    /// The daemon's id once the steer was accepted; `None` while the POST is
+    /// in flight.
+    pub steer_id: Option<String>,
+    /// The wire text (may carry attached text context).
+    pub prompt: String,
+    /// What the transcript shows for it.
+    pub display: String,
+    /// Routing tag to use if it falls back to the queue.
+    pub client_type: &'static str,
+}
+
 /// A prompt the operator sent while the session was busy: a turn was still
 /// streaming here, or the daemon answered the send with its one-operation
 /// refusal (`409 session has an active operation`). It is shown as a queued
@@ -2224,6 +2260,9 @@ pub struct Daemon {
     /// `streaming` returns to false (effect installed by
     /// [`Self::install_queue_drain`]) or a busy-retry timer fires.
     pub queued_prompts: RwSignal<Vec<QueuedPrompt>>,
+    /// Messages steered into the running turn and not yet delivered (see
+    /// [`SteeringPrompt`]), oldest first.
+    pub steering_prompts: RwSignal<Vec<SteeringPrompt>>,
     /// Monotonic id source for queued rows.
     queued_prompt_seq: RwSignal<u64>,
     /// Consecutive busy (409) refusals for the head of the queue; reset once a
@@ -2610,6 +2649,7 @@ impl Daemon {
             agent_override: RwSignal::new(None),
             pending_images: RwSignal::new(Vec::new()),
             queued_prompts: RwSignal::new(Vec::new()),
+            steering_prompts: RwSignal::new(Vec::new()),
             queued_prompt_seq: RwSignal::new(0),
             queue_busy_retries: RwSignal::new(0),
             queue_retry_pending: RwSignal::new(false),
@@ -2693,6 +2733,7 @@ impl Daemon {
             agent_override: RwSignal::new(None),
             pending_images: RwSignal::new(Vec::new()),
             queued_prompts: RwSignal::new(Vec::new()),
+            steering_prompts: RwSignal::new(Vec::new()),
             queued_prompt_seq: RwSignal::new(0),
             queue_busy_retries: RwSignal::new(0),
             queue_retry_pending: RwSignal::new(false),
@@ -3160,6 +3201,21 @@ impl Daemon {
                         break;
                     }
 
+                    // Mid-turn steering: a delivery resolves a pending row and
+                    // places the message in the transcript where it landed; the
+                    // active turn's finish sends any accepted-but-undelivered
+                    // steer as the next turn (queued before `apply_event` flips
+                    // `streaming`, so the drain effect sees it).
+                    if let AgentEvent::SteeringDelivered { steer_id, text, .. } = &evt {
+                        daemon.deliver_steering(steer_id, text);
+                        continue;
+                    }
+                    if let AgentEvent::TurnFinished { turn_id, .. } = &evt {
+                        if active_turn_id.get_untracked().as_deref() == Some(turn_id.as_str()) {
+                            daemon.requeue_undelivered_steering();
+                        }
+                    }
+
                     apply_event(
                         &evt,
                         turns,
@@ -3495,13 +3551,184 @@ impl Daemon {
         if prompt.trim().is_empty() {
             return;
         }
+        let client_type = surface_client_type();
+        if self.can_steer() {
+            self.steer_prompt(prompt, display_prompt, client_type);
+            return;
+        }
         if self.session_is_busy() {
-            self.enqueue_prompt(prompt, display_prompt, surface_client_type());
+            self.enqueue_prompt(prompt, display_prompt, client_type);
             return;
         }
         self.turns.update(|t| t.push(Turn::user(display_prompt)));
         self.streaming.set(true);
-        self.dispatch_prompt(prompt, false, surface_client_type());
+        self.dispatch_prompt(prompt, false, client_type);
+    }
+
+    /// A send goes INTO the running turn when one of ours is streaming on a
+    /// known session and the message carries no staged images (the steer route
+    /// takes text only; an image message queues for the next turn instead).
+    fn can_steer(&self) -> bool {
+        self.streaming.get_untracked()
+            && self.session_id.with_untracked(Option::is_some)
+            && self.active_turn_id.with_untracked(Option::is_some)
+            && self.pending_images.with_untracked(Vec::is_empty)
+    }
+
+    /// Steer `prompt` into the running turn. The row shows as pending until
+    /// the daemon delivers it; a refusal falls back to the queue.
+    fn steer_prompt(&self, prompt: String, display: String, client_type: &'static str) {
+        let Some(session_id) = self.session_id.get_untracked() else {
+            self.enqueue_prompt(prompt, display, client_type);
+            return;
+        };
+        let id = self.next_queued_prompt_id();
+        self.steering_prompts.update(|rows| {
+            rows.push(SteeringPrompt {
+                id,
+                steer_id: None,
+                prompt: prompt.clone(),
+                display,
+                client_type,
+            })
+        });
+        self.status.set("steering · read at the next step".into());
+        self.status_detail.set(None);
+        let url = self.url.get_untracked();
+        let daemon = self.clone();
+        spawn_local(async move {
+            let post_url = format!(
+                "{}/v1/agent/sessions/{}/steer",
+                url.trim_end_matches('/'),
+                session_id
+            );
+            let accepted = match Request::post(&post_url)
+                .header("content-type", "application/json")
+                .json(&json!({ "text": prompt }))
+            {
+                Ok(request) => match request.send().await {
+                    Ok(response) if response.status() == 202 => response
+                        .json::<Value>()
+                        .await
+                        .ok()
+                        .and_then(|body| body.get("steer_id")?.as_str().map(str::to_string)),
+                    Ok(response) => {
+                        log::info!("steer refused with HTTP {}; queueing", response.status());
+                        None
+                    }
+                    Err(error) => {
+                        log::warn!("steer failed: {error}; queueing");
+                        None
+                    }
+                },
+                Err(error) => {
+                    log::warn!("steer encode failed: {error}; queueing");
+                    None
+                }
+            };
+            daemon.settle_steer(id, accepted);
+        });
+    }
+
+    /// Record the daemon's answer to a steer. Accepted: keep the row pending
+    /// under its `steer_id` (a delivery that already arrived and removed it
+    /// makes this a no-op). Refused or failed: the turn is over or cannot take
+    /// it, so it goes to the queue and runs as the next turn.
+    fn settle_steer(&self, id: u64, steer_id: Option<String>) {
+        match steer_id {
+            Some(steer_id) => self.steering_prompts.update(|rows| {
+                if let Some(row) = rows.iter_mut().find(|row| row.id == id) {
+                    row.steer_id = Some(steer_id);
+                }
+            }),
+            None => {
+                let row = self
+                    .steering_prompts
+                    .try_update(|rows| {
+                        let index = rows.iter().position(|row| row.id == id)?;
+                        Some(rows.remove(index))
+                    })
+                    .flatten();
+                if let Some(row) = row {
+                    self.queue_steering_rows(vec![row], false);
+                    self.status
+                        .set("couldn't steer the turn · message queued".into());
+                    self.status_detail.set(None);
+                }
+            }
+        }
+    }
+
+    /// The daemon delivered a steered message: drop its pending row and show
+    /// it in the transcript where it landed. Matched by `steer_id`, or (when
+    /// the delivery outran the steer POST's response) by the oldest in-flight
+    /// row with the same text. A delivery this surface did not send (another
+    /// client steered) still renders, from the daemon's text.
+    pub(crate) fn deliver_steering(&self, steer_id: &str, text: &str) {
+        let row = self
+            .steering_prompts
+            .try_update(|rows| {
+                let index = rows
+                    .iter()
+                    .position(|row| row.steer_id.as_deref() == Some(steer_id))
+                    .or_else(|| {
+                        rows.iter()
+                            .position(|row| row.steer_id.is_none() && row.prompt.trim() == text)
+                    })?;
+                Some(rows.remove(index))
+            })
+            .flatten();
+        let display = row
+            .map(|row| row.display)
+            .unwrap_or_else(|| text.to_string());
+        self.turns.update(|t| t.push(Turn::user(display)));
+        self.status.set("steering delivered".into());
+        self.status_detail.set(None);
+    }
+
+    /// The active turn finished. Accepted steers it never delivered (it hit
+    /// its round limit, failed, or was rerouted) run next, ahead of anything
+    /// already queued; steers whose POST is still in flight settle when their
+    /// answer arrives.
+    pub(crate) fn requeue_undelivered_steering(&self) {
+        let undelivered = self
+            .steering_prompts
+            .try_update(|rows| {
+                let (accepted, in_flight): (Vec<_>, Vec<_>) =
+                    rows.drain(..).partition(|row| row.steer_id.is_some());
+                *rows = in_flight;
+                accepted
+            })
+            .unwrap_or_default();
+        if undelivered.is_empty() {
+            return;
+        }
+        self.queue_steering_rows(undelivered, true);
+        self.status
+            .set("the turn ended before reading your message · sending it next".into());
+        self.status_detail.set(None);
+    }
+
+    fn queue_steering_rows(&self, rows: Vec<SteeringPrompt>, ahead: bool) {
+        let queued: Vec<QueuedPrompt> = rows
+            .into_iter()
+            .map(|row| QueuedPrompt {
+                id: self.next_queued_prompt_id(),
+                prompt: row.prompt,
+                display: row.display,
+                client_type: row.client_type,
+                images: Vec::new(),
+            })
+            .collect();
+        self.queued_prompts.update(|q| {
+            if ahead {
+                let rest = std::mem::take(q);
+                *q = queued;
+                q.extend(rest);
+            } else {
+                q.extend(queued);
+            }
+        });
     }
 
     /// True while a send must wait: a turn is streaming, earlier prompts are
@@ -3568,9 +3795,11 @@ impl Daemon {
     /// a session switch all call this: a queued follow-up belongs to the
     /// conversation the operator was in when they typed it.
     fn clear_queued_prompts(&self) -> usize {
-        let cleared = self.queued_prompts.with_untracked(|q| q.len());
+        let cleared = self.queued_prompts.with_untracked(|q| q.len())
+            + self.steering_prompts.with_untracked(|s| s.len());
         if cleared > 0 {
             self.queued_prompts.set(Vec::new());
+            self.steering_prompts.set(Vec::new());
         }
         self.queue_busy_retries.set(0);
         cleared
@@ -6934,6 +7163,10 @@ fn apply_event(
             // snapshot (polled by the council deck), not from this stream.
             log::debug!("ignoring extension event: {extension}");
         }
+        AgentEvent::SteeringDelivered { .. } => {
+            // Handled before `apply_event` at the stream call site, which has
+            // the steering rows it must resolve (`Daemon::deliver_steering`).
+        }
         AgentEvent::Other => {
             // An event whose `type` tag this surface doesn't model fell into the
             // serde catch-all. We can't render it, but log it so a newly-added
@@ -10236,6 +10469,7 @@ mod tests {
             "component_unmount",
             "browser_activity",
             "surface_patch",
+            "steering_delivered",
         ];
         let mut expected = expected_daemon_names.to_vec();
         expected.sort_unstable();
@@ -13377,6 +13611,153 @@ mod tests {
             state: None, // terminal (no live turn)
             active_requests: vec![],
         }
+    }
+
+    // ── Mid-turn steering ────────────────────────────────────────────────
+    //
+    // `steer_prompt` POSTs over the network, so these drive the bookkeeping
+    // it hands off to: settle, deliver, requeue, clear.
+
+    fn steering_row(daemon: &Daemon, prompt: &str, steer_id: Option<&str>) -> u64 {
+        let id = daemon.next_queued_prompt_id();
+        daemon.steering_prompts.update(|rows| {
+            rows.push(SteeringPrompt {
+                id,
+                steer_id: steer_id.map(str::to_string),
+                prompt: prompt.into(),
+                display: format!("shown: {prompt}"),
+                client_type: "surface-web",
+            })
+        });
+        id
+    }
+
+    #[test]
+    fn only_a_running_turn_on_a_known_session_without_images_can_be_steered() {
+        let daemon = Daemon::dummy();
+        assert!(!daemon.can_steer(), "idle");
+        daemon.streaming.set(true);
+        assert!(!daemon.can_steer(), "no session yet");
+        daemon.session_id.set(Some("s1".into()));
+        assert!(!daemon.can_steer(), "turn not acknowledged yet");
+        daemon.active_turn_id.set(Some("t1".into()));
+        assert!(daemon.can_steer());
+        daemon.pending_images.set(vec![TurnImage {
+            mime_type: "image/png".into(),
+            data: "AAAA".into(),
+        }]);
+        assert!(!daemon.can_steer(), "images ride a turn, not a steer");
+    }
+
+    #[test]
+    fn an_accepted_steer_stays_pending_under_its_daemon_id() {
+        let daemon = Daemon::dummy();
+        let id = steering_row(&daemon, "use tabs", None);
+        daemon.settle_steer(id, Some("steer-1".into()));
+        let rows = daemon.steering_prompts.get_untracked();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].steer_id.as_deref(), Some("steer-1"));
+        assert!(daemon.queued_prompts.get_untracked().is_empty());
+    }
+
+    #[test]
+    fn a_refused_steer_falls_back_to_the_queue() {
+        let daemon = Daemon::dummy();
+        daemon.enqueue_prompt("earlier".into(), "earlier".into(), "surface-web");
+        let id = steering_row(&daemon, "use tabs", None);
+        daemon.settle_steer(id, None);
+        assert!(daemon.steering_prompts.get_untracked().is_empty());
+        let queued = daemon.queued_prompts.get_untracked();
+        assert_eq!(queued.len(), 2);
+        assert_eq!(
+            queued[1].prompt, "use tabs",
+            "behind what was already queued"
+        );
+        assert_eq!(queued[1].display, "shown: use tabs");
+        assert_eq!(
+            daemon.status.get_untracked(),
+            "couldn't steer the turn · message queued"
+        );
+    }
+
+    #[test]
+    fn a_delivered_steer_lands_in_the_transcript_and_splits_the_turn() {
+        let daemon = Daemon::dummy();
+        daemon
+            .turns
+            .set(vec![Turn::user("start"), Turn::assistant("t1".into())]);
+        steering_row(&daemon, "use tabs", Some("steer-1"));
+        daemon.deliver_steering("steer-1", "use tabs");
+        assert!(daemon.steering_prompts.get_untracked().is_empty());
+        daemon.turns.update(|t| {
+            // The next round's output for the same turn renders BELOW the
+            // steered message, not back in the earlier assistant turn.
+            let turn = ensure_assistant_turn(t, "t1");
+            turn.blocks.push(Block::Text("ok, tabs".into()));
+        });
+        let turns = daemon.turns.get_untracked();
+        assert_eq!(turns.len(), 4);
+        assert!(matches!(turns[2].role, Role::User));
+        assert!(matches!(&turns[2].blocks[0], Block::Text(t) if t == "shown: use tabs"));
+        assert!(matches!(turns[3].role, Role::Assistant));
+        assert_eq!(turns[3].turn_id.as_deref(), Some("t1"));
+    }
+
+    #[test]
+    fn a_delivery_that_outruns_the_post_answer_matches_by_text() {
+        let daemon = Daemon::dummy();
+        let id = steering_row(&daemon, "  use tabs ", None);
+        daemon.deliver_steering("steer-9", "use tabs");
+        assert!(daemon.steering_prompts.get_untracked().is_empty());
+        // The late 202 for the already-delivered row is a no-op.
+        daemon.settle_steer(id, Some("steer-9".into()));
+        assert!(daemon.steering_prompts.get_untracked().is_empty());
+        assert!(daemon.queued_prompts.get_untracked().is_empty());
+        assert_eq!(daemon.turns.get_untracked().len(), 1);
+    }
+
+    #[test]
+    fn a_delivery_from_another_client_still_renders() {
+        let daemon = Daemon::dummy();
+        daemon.deliver_steering("elsewhere", "from the phone");
+        let turns = daemon.turns.get_untracked();
+        assert_eq!(turns.len(), 1);
+        assert!(matches!(&turns[0].blocks[0], Block::Text(t) if t == "from the phone"));
+    }
+
+    #[test]
+    fn a_finished_turn_sends_its_undelivered_steers_next() {
+        let daemon = Daemon::dummy();
+        daemon.enqueue_prompt("later".into(), "later".into(), "surface-web");
+        steering_row(&daemon, "accepted, never read", Some("steer-1"));
+        steering_row(&daemon, "still in flight", None);
+        daemon.requeue_undelivered_steering();
+        let queued = daemon.queued_prompts.get_untracked();
+        assert_eq!(queued.len(), 2);
+        assert_eq!(
+            queued[0].prompt, "accepted, never read",
+            "ahead of the queue"
+        );
+        assert_eq!(queued[1].prompt, "later");
+        let pending = daemon.steering_prompts.get_untracked();
+        assert_eq!(
+            pending.len(),
+            1,
+            "an in-flight steer settles on its own answer"
+        );
+        assert_eq!(pending[0].prompt, "still in flight");
+    }
+
+    #[test]
+    fn stop_and_session_changes_clear_pending_steers() {
+        let daemon = Daemon::dummy();
+        steering_row(&daemon, "a", Some("steer-1"));
+        daemon.enqueue_prompt("b".into(), "b".into(), "surface-web");
+        assert_eq!(daemon.clear_queued_prompts(), 2);
+        assert!(daemon.steering_prompts.get_untracked().is_empty());
+        steering_row(&daemon, "c", None);
+        daemon.select_session_state("s2", "other".into());
+        assert!(daemon.steering_prompts.get_untracked().is_empty());
     }
 
     // ── Queued prompts (send while a turn runs) ─────────────────────────

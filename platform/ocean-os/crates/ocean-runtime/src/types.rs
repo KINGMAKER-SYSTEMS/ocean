@@ -271,6 +271,102 @@ pub fn tool_def(t: &dyn AgentTool) -> Tool {
     }
 }
 
+/// One operator message steered into a running turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SteeringMessage {
+    /// Caller-chosen id, echoed on [`AgentEvent::SteeringDelivered`] so the
+    /// sender can tell which of its messages landed.
+    pub id: String,
+    pub text: String,
+}
+
+/// Why [`SteeringInbox::push`] refused a message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SteerRefusal {
+    /// The run has ended (or decided to end): nothing will read this inbox
+    /// again. The sender should send the message as a new turn instead.
+    Closed,
+    /// [`SteeringInbox::MAX_PENDING`] messages are already waiting.
+    Full,
+}
+
+/// Mid-turn steering mailbox shared between whoever accepts operator messages
+/// (the daemon's steer route) and the agent loop that delivers them.
+///
+/// The one guarantee: a message `push` accepts is either delivered to the
+/// model or handed back by [`SteeringInbox::close`], never silently lost. The
+/// loop closes the inbox only through [`SteeringInbox::close_if_idle`], which
+/// checks for waiting messages and closes under the same lock, so there is no
+/// window where a push is accepted after the loop decided it was done.
+#[derive(Debug, Default)]
+pub struct SteeringInbox {
+    state: std::sync::Mutex<SteeringState>,
+}
+
+#[derive(Debug, Default)]
+struct SteeringState {
+    closed: bool,
+    pending: std::collections::VecDeque<SteeringMessage>,
+}
+
+impl SteeringInbox {
+    /// Upper bound on undelivered messages, so a stuck run cannot accumulate
+    /// an unbounded backlog.
+    pub const MAX_PENDING: usize = 16;
+
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, SteeringState> {
+        // A poisoned lock only means a holder panicked mid-update; the state
+        // (a flag and a queue) is still coherent, so keep serving it.
+        self.state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    /// Queue `message` for delivery at the run's next tool boundary.
+    pub fn push(&self, message: SteeringMessage) -> Result<(), SteerRefusal> {
+        let mut state = self.lock();
+        if state.closed {
+            return Err(SteerRefusal::Closed);
+        }
+        if state.pending.len() >= Self::MAX_PENDING {
+            return Err(SteerRefusal::Full);
+        }
+        state.pending.push_back(message);
+        Ok(())
+    }
+
+    /// Take everything waiting, oldest first, leaving the inbox open.
+    pub fn take_pending(&self) -> Vec<SteeringMessage> {
+        self.lock().pending.drain(..).collect()
+    }
+
+    /// Close the inbox if nothing is waiting and report whether it is now
+    /// closed. `false` means messages are waiting: the caller must not end
+    /// the run, but deliver them and continue. Idempotent once closed.
+    pub fn close_if_idle(&self) -> bool {
+        let mut state = self.lock();
+        if state.pending.is_empty() {
+            state.closed = true;
+        }
+        state.closed
+    }
+
+    /// Close the inbox unconditionally, returning anything still undelivered.
+    pub fn close(&self) -> Vec<SteeringMessage> {
+        let mut state = self.lock();
+        state.closed = true;
+        state.pending.drain(..).collect()
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.lock().closed
+    }
+}
+
 /// Agent configuration controlling the loop.
 #[derive(Clone)]
 pub struct AgentConfig {
@@ -302,6 +398,12 @@ pub struct AgentConfig {
     /// the real agent loop against a scripted [`Provider`] with no network or
     /// credentials. See `with_provider` and the e2e tests in `tests/`.
     pub provider: Option<Arc<dyn Provider>>,
+    /// Messages the operator sends into this run while it is working (mid-turn
+    /// steering). The loop delivers whatever is waiting at each tool boundary,
+    /// as user messages after that round's tool results, and runs one more
+    /// round instead of ending while anything is waiting. `None` (the default,
+    /// and every non-interactive run) means the run cannot be steered.
+    pub steering: Option<Arc<SteeringInbox>>,
 }
 
 impl AgentConfig {
@@ -320,7 +422,15 @@ impl AgentConfig {
             permission: Arc::new(AllowAllPolicy),
             session_id: None,
             provider: None,
+            steering: None,
         }
+    }
+
+    /// Let the operator steer this run through `inbox` (see
+    /// [`AgentConfig::steering`]).
+    pub fn with_steering(mut self, inbox: Arc<SteeringInbox>) -> Self {
+        self.steering = Some(inbox);
+        self
     }
 
     /// Attach the session id this run belongs to. Stamped onto every emitted
@@ -431,6 +541,14 @@ pub enum AgentEvent {
     UserMessage {
         session_id: Option<String>,
         message: Message,
+    },
+    /// A steered operator message (see [`AgentConfig::steering`]) was added to
+    /// the transcript as a user message at a tool boundary. `id` is the id the
+    /// sender gave it; `text` is what the model received.
+    SteeringDelivered {
+        session_id: Option<String>,
+        id: String,
+        text: String,
     },
     /// Streaming text chunk while the assistant types.
     TextDelta {
@@ -563,7 +681,8 @@ impl AgentEvent {
             | AgentEvent::Unmount { .. }
             | AgentEvent::BrowserActivity { .. }
             | AgentEvent::SurfacePatch { .. }
-            | AgentEvent::SlackCanvas { .. } => true,
+            | AgentEvent::SlackCanvas { .. }
+            | AgentEvent::SteeringDelivered { .. } => true,
             AgentEvent::AgentStart { .. }
             | AgentEvent::AgentEnd { .. }
             | AgentEvent::TurnStart { .. }
@@ -584,6 +703,7 @@ impl AgentEvent {
             | AgentEvent::TurnCheckpoint { session_id, .. }
             | AgentEvent::AssistantMessage { session_id, .. }
             | AgentEvent::UserMessage { session_id, .. }
+            | AgentEvent::SteeringDelivered { session_id, .. }
             | AgentEvent::TextDelta { session_id, .. }
             | AgentEvent::ThinkingDelta { session_id, .. }
             | AgentEvent::ToolExecutionStart { session_id, .. }
@@ -636,6 +756,11 @@ mod tests {
             assert!(!ev.is_wire_relayed(), "{ev:?}");
         }
         let relayed = [
+            AgentEvent::SteeringDelivered {
+                session_id: None,
+                id: "s".into(),
+                text: "t".into(),
+            },
             AgentEvent::TextDelta {
                 session_id: None,
                 delta: "d".into(),

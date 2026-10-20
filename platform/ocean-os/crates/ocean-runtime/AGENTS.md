@@ -41,6 +41,17 @@ This crate owns the Ocean agent loop and permission-gated tool execution runtime
   preserve transcript order and, for tool rounds, include the assistant tool-call
   message followed by every corresponding ordered `ToolResult`; never checkpoint
   an incomplete batch.
+- Mid-turn steering (`AgentConfig::steering`, `SteeringInbox`): at the top of
+  every round after the first, the loop moves waiting messages into the
+  transcript as user messages after the previous round's tool results, emits
+  `SteeringDelivered` for each, and checkpoints them at once. Never before the
+  first round: a pre-stream failover re-runs the loop from the original
+  history. Every place the loop would end (model stopped without tools, or a
+  terminating tool) calls `close_if_idle`; waiting messages win and the loop
+  runs another round, otherwise the inbox closes in the same lock, so an
+  accepted message is delivered or handed back by `close`, never lost. Error
+  and cancel returns leave the inbox open for the owner (the daemon) to close;
+  the turn limit closes it with the undelivered ones logged.
 - Runtime events must remain compatible with `ocean-core` event contracts and daemon SSE streaming.
 - `ToolExecutionEnd` intentionally sends full live content/details while only the transcript copy is capped (32 KiB text / 256 KiB image). The per-turn event sink remains unbounded; changes to this ownership seam require the finite queue/RSS characterization test and daemon replay review.
 - Keep provider concerns outside runtime unless mediated through the protocol/provider layers.

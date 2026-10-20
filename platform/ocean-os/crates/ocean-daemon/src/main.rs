@@ -788,6 +788,9 @@ fn app_router(origins: BrowserOrigins, hosts: AllowedHosts) -> Router<AppState> 
             "/v1/agent/sessions/{id}/messages",
             post(agent_session_message_append),
         )
+        // Mid-turn steering: deliver an operator message into the turn that
+        // is running on this session, at its next tool boundary.
+        .route("/v1/agent/sessions/{id}/steer", post(agent_session_steer))
         .route("/v1/events", get(events))
         .route("/v1/prompt", post(prompt))
         .route("/v1/requests", get(requests).post(create_request))
@@ -1632,6 +1635,7 @@ fn banner_routes() -> &'static [&'static str] {
         "PATCH /v1/agent/sessions/{id}/config",
         "GET /v1/agent/history/search",
         "POST /v1/agent/sessions/{id}/messages",
+        "POST /v1/agent/sessions/{id}/steer",
         "POST /v1/voice/realtime/client-secret",
         "POST /v1/voice/stt",
         "POST /v1/voice/tts",
@@ -6797,6 +6801,17 @@ async fn agent_turn(
                         delta,
                     });
                 }
+                // Mid-turn steering: the loop put an operator message into the
+                // transcript at a tool boundary. Relay it so the sender can
+                // show it where it landed and stop treating it as pending.
+                AgentEvent::SteeringDelivered { id, text, .. } => {
+                    bridge_bus.emit(AgentTurnEvent::SteeringDelivered {
+                        session_id: bridge_session_id,
+                        turn_id: bridge_turn_id,
+                        steer_id: id,
+                        text,
+                    });
+                }
                 // OCEAN-275 honesty: the failover that keeps a turn alive must
                 // also be visible — relay the reroute so surfaces can tell the
                 // operator "you asked for X, this turn ran on Y".
@@ -7181,6 +7196,13 @@ async fn agent_turn(
         Some((root, caps)) => control.with_agent_capabilities(root, caps),
         None => control,
     };
+    // Mid-turn steering: this turn's inbox, reachable through
+    // `POST /v1/agent/sessions/{id}/steer` for exactly as long as the turn
+    // runs. The registration moves into the turn task and is dropped the
+    // moment the prompt returns (or the task unwinds), closing the inbox so
+    // later steers are refused and the sender falls back to a new turn.
+    let steering = state.runtime.open_steering(core_sid(session_id));
+    let control = control.with_steering(steering.inbox());
     // ── fire-and-ack (OCEAN-410): spawn the turn, ACK immediately ──
     // The POST is an ACK carrying turn_id / session_id / event_id_prefix so the
     // client correlates the SSE stream (/v1/agent/events) that delivers ALL turn
@@ -7224,6 +7246,7 @@ async fn agent_turn(
             .prompt_with_lease(prompt_req, control, &session_lease)
             .instrument(turn_span)
             .await;
+        drop(steering);
         // Turn is done: drop the in-flight guard before the bridge drain and
         // post-processing so the gauge reflects only executing turns, then fold
         // this turn's wall_ms/ok into the metrics (OCEAN-303).
@@ -8382,6 +8405,69 @@ fn format_session_append(kind: Option<&str>, content: &str) -> String {
         Some("handoff") => format!("[voice handoff] {content}"),
         Some("planner_handoff") => format!("[voice planner handoff]\n\n{content}"),
         _ => content.to_string(),
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct SteerRequest {
+    text: String,
+}
+
+/// Longest steering message accepted, in bytes. A steer redirects work in
+/// progress; anything longer belongs in a turn of its own.
+const STEER_TEXT_MAX_BYTES: usize = 32 * 1024;
+
+/// Steer an operator message into the turn running on this session. The
+/// message joins the turn's inbox and the agent loop delivers it at the next
+/// tool boundary, as a user message after that round's tool results (or as
+/// one more round if the model was about to finish). Answers:
+///
+/// - `202 {ok, steer_id}`: accepted; `steering_delivered` with the same
+///   `steer_id` follows on `/v1/agent/events` when it lands. If
+///   `turn_finished` arrives first, it was not run: send it as a new turn.
+/// - `409 no_active_turn`: nothing steerable is running here (no turn, a
+///   room or other non-operator operation, or the turn already ended).
+/// - `429 steering_full`: too many messages already waiting.
+/// - `400` blank text, `413` text over [`STEER_TEXT_MAX_BYTES`].
+async fn agent_session_steer(
+    State(state): State<AppState>,
+    Path(session_id): Path<AgentSessionId>,
+    Json(req): Json<SteerRequest>,
+) -> (StatusCode, Json<Value>) {
+    let text = req.text.trim();
+    if text.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": "text must not be empty" })),
+        );
+    }
+    if text.len() > STEER_TEXT_MAX_BYTES {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(json!({
+                "ok": false,
+                "error": "message is too long to steer; send it as a new turn"
+            })),
+        );
+    }
+    let steer_id = Uuid::new_v4().to_string();
+    let message = ocean_runtime::SteeringMessage {
+        id: steer_id.clone(),
+        text: text.to_string(),
+    };
+    match state.runtime.steer(core_sid(session_id), message) {
+        Ok(()) => (
+            StatusCode::ACCEPTED,
+            Json(json!({ "ok": true, "steer_id": steer_id })),
+        ),
+        Err(ocean_runtime::SteerRefusal::Closed) => (
+            StatusCode::CONFLICT,
+            Json(json!({ "ok": false, "error": "no_active_turn" })),
+        ),
+        Err(ocean_runtime::SteerRefusal::Full) => (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({ "ok": false, "error": "steering_full" })),
+        ),
     }
 }
 
@@ -9684,7 +9770,8 @@ mod tests {
             | AgentEvent::Unmount { .. }
             | AgentEvent::BrowserActivity { .. }
             | AgentEvent::SurfacePatch { .. }
-            | AgentEvent::SlackCanvas { .. } => RelayClass::Relayed,
+            | AgentEvent::SlackCanvas { .. }
+            | AgentEvent::SteeringDelivered { .. } => RelayClass::Relayed,
             // Intentionally NOT relayed (OCEAN-373) — structural turn/run markers
             // the daemon covers itself, or message payloads already streamed.
             AgentEvent::AgentStart { .. }
@@ -15239,6 +15326,55 @@ mod tests {
         assert!(sync.ok);
         assert_eq!(sync.snapshot.unwrap().session_id, session_id);
         assert!(sync.fence.unwrap().event_id.is_some());
+    }
+
+    #[tokio::test]
+    async fn steer_reaches_only_a_running_turn_and_validates_its_text() {
+        let state = permission_test_state();
+        let sid = AgentSessionId::new_v4();
+        let steer = |text: &str| {
+            agent_session_steer(
+                State(state.clone()),
+                Path(sid),
+                Json(SteerRequest { text: text.into() }),
+            )
+        };
+
+        let (status, Json(body)) = steer("before any turn").await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"], "no_active_turn");
+
+        let registration = state.runtime.open_steering(core_sid(sid));
+        let inbox = registration.inbox();
+        let (status, Json(body)) = steer("  also run the linter  ").await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let steer_id = body["steer_id"].as_str().expect("steer id").to_string();
+        let pending = inbox.take_pending();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, steer_id, "the returned id names the message");
+        assert_eq!(pending[0].text, "also run the linter", "text is trimmed");
+
+        let (status, _) = steer("   ").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = steer(&"x".repeat(STEER_TEXT_MAX_BYTES + 1)).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+
+        for i in 0..ocean_runtime::SteeringInbox::MAX_PENDING {
+            let (status, _) = steer(&format!("note {i}")).await;
+            assert_eq!(status, StatusCode::ACCEPTED);
+        }
+        let (status, Json(body)) = steer("one too many").await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body["error"], "steering_full");
+
+        drop(registration);
+        let (status, Json(body)) = steer("after the turn").await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "a finished turn refuses steering"
+        );
+        assert_eq!(body["error"], "no_active_turn");
     }
 
     #[tokio::test]
@@ -26096,7 +26232,7 @@ mod tests {
         assert_eq!(admission_routes, expected_admission_routes);
         assert_eq!(
             banner.len(),
-            146,
+            147,
             "route baseline changed; review the manifest"
         );
 
