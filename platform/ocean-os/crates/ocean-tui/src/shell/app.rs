@@ -8250,8 +8250,8 @@ mod tests {
 
     #[test]
     fn thinking_cycle_without_catalog_offers_only_default() {
-        // Empty list = the route's encoder sends no effort parameter (GLM,
-        // MiniMax, Kimi K2.x, GPT-4o, Gemini 2.0 Flash) or the catalog has
+        // Empty list = the route's encoder sends no effort parameter
+        // (MiniMax, Kimi K2.x, GPT-4o, Gemini 2.0 Flash) or the catalog has
         // not loaded: `default` is the only honest choice.
         let empty: Vec<String> = vec![];
         assert_eq!(cycle_thinking(None, 1, &empty), None);
