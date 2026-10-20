@@ -87,6 +87,8 @@ Native surface direction:
 - Native Git inspection uses vendored libgit2 without SSH/HTTPS transports.
   It reads local repository state; desktop startup must not require Homebrew
   OpenSSL or other developer-installed libraries.
+- The native `.gitattributes` pins `Cargo.toml` to LF. Tauri serializes it with
+  LF on every host; Windows checkout conversion must not dirty packaged source.
 - Native daemon start resolves the operator's `OCEAN_DAEMON_BIN`, then the
   installed executable sibling, then the platform binary on PATH. No IPC
   argument may select an executable. Explicit start/restart remains unchanged.

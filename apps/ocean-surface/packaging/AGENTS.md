@@ -15,6 +15,8 @@ Build native Ocean desktop candidates with their matching daemon and legal paylo
 
 - Build only clean committed canonical source, with locked Cargo graphs and
   repository Rust pins. App, UI and daemon must come from the same revision.
+- Preserve the native manifest's tracked LF checkout attribute; Tauri must not
+  change its bytes during a Windows build. Never reset source to pass the gate.
 - Native targets are Apple Silicon Mac, Intel Mac and Windows x64. Refuse a
   different host architecture rather than label a cross-build as acceptance.
 - Bundle the daemon as a sibling executable through Tauri `externalBin`;
