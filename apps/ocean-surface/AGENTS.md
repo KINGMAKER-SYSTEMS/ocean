@@ -331,6 +331,12 @@ Web surface session UI:
   LiveKit. The workspace pane is permanent furniture, not a reveal.
 
 ## Rooms Contract
+
+Design direction for the Rooms workspace (identity rule, transcript vs
+activity, the room details drawer, agent authoring, the S0-S8 slice plan):
+`docs/OCEAN_ROOMS_DESIGN_DIRECTION.md`. It supersedes the rendering bullets of
+`docs/OCEAN_ROOMS_PRODUCT.md`; the contract bullets below describe main as it
+ships today and are updated slice by slice.
 - The operator-authorized post-G3 product-depth program is governed by
   `docs/specs/2026-08-13-ocean-rooms-post-g3-product-depth.md`. A share link is
   only the admission rail; do not describe Rooms as complete before its
