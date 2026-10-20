@@ -116,6 +116,12 @@ Native surface direction:
   diagnostics; no webview argument controls that path. Isolated startup
   acceptance keeps config, auth, Claude fallback and logs in disposable paths
   while preserving the operating-system home and the live daemon.
+- Explicit app Quit reaps only its owned daemon before exit, releasing the
+  bundled executable for updates. Committed exit closes process admission under
+  the child lock so queued starts/restarts cannot orphan a replacement. Closing
+  the window still hides to the tray; external daemons and shell-crash survival
+  are unchanged. Verify with native `cargo test --lib daemon_exit` and an isolated
+  native close/reopen/Quit check; never use the operator's live daemon as a fixture.
 - Canvas ledger/state injected into turns as surface context; the Leptos canvas
   already lives at `crates/ocean-surface-ui/src/canvas.rs`.
 - `docs/OCEAN_GPUI_CANVAS_LIVEKIT_SPEC.md` is retained as a historical reference

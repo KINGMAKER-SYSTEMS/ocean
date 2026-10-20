@@ -1063,8 +1063,8 @@ struct DaemonSup {
     startup_path: OnceLock<PathBuf>,
     /// The child we spawned. `std::process::Child` does NOT kill on drop, so
     /// the daemon survives a shell crash — supervision is explicit
-    /// (start/stop/restart), never `kill_on_drop`.
-    child: Mutex<Option<Child>>,
+    /// (start/stop/restart/quit), never `kill_on_drop`.
+    child: Mutex<DaemonChild>,
     /// Last state computed by the poller; `daemon_status` reads this so the
     /// command stays non-blocking (the poller is the freshness mechanism).
     last: Mutex<DaemonState>,
@@ -1077,11 +1077,28 @@ struct DaemonSup {
     port: u16,
 }
 
+#[derive(Default)]
+struct DaemonChild {
+    process: Option<Child>,
+    /// Guarded by the same lock as process admission: queued IPC cannot spawn
+    /// another child after the exit callback has reaped this one.
+    exiting: bool,
+}
+
+impl DaemonChild {
+    fn reap(&mut self) {
+        if let Some(mut child) = self.process.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
 impl DaemonSup {
     fn new(host: String, port: u16) -> Self {
         Self {
             startup_path: OnceLock::new(),
-            child: Mutex::new(None),
+            child: Mutex::new(DaemonChild::default()),
             last: Mutex::new(DaemonState::Stopped),
             reachable_ever: Mutex::new(false),
             host,
@@ -1091,16 +1108,23 @@ impl DaemonSup {
 
     /// pid of the owned child, if any (`Child::id`).
     fn pid(&self) -> Option<u32> {
-        self.child.lock().as_ref().map(|c| c.id())
+        self.child.lock().process.as_ref().map(|c| c.id())
     }
 
     /// Kill + reap the owned child if any, then clear the slot. `kill` errors
     /// (already-exited) are ignored; `wait` reaps any zombie so the OS does
     /// not retain it. Blocking — call only on an explicit stop/restart.
     fn reap_child(&self) {
-        if let Some(mut child) = self.child.lock().take() {
-            let _ = child.kill();
-            let _ = child.wait();
+        self.child.lock().reap();
+    }
+
+    /// Only a committed app exit ends child ownership. A close-to-tray event,
+    /// cancelled exit request, or shell crash must not stop background work.
+    fn on_run_event(&self, event: &tauri::RunEvent) {
+        if matches!(event, tauri::RunEvent::Exit) {
+            let mut slot = self.child.lock();
+            slot.exiting = true;
+            slot.reap();
         }
     }
 
@@ -1124,7 +1148,10 @@ impl DaemonSup {
         // Keep admission and publication under one lock so double-clicks cannot
         // start two children or persist two competing startup choices.
         let mut slot = self.child.lock();
-        if let Some(child) = slot.as_mut() {
+        if slot.exiting {
+            return Err("Ocean is quitting.".into());
+        }
+        if let Some(child) = slot.process.as_mut() {
             if child
                 .try_wait()
                 .map_err(|_| "Couldn't check Ocean's process.")?
@@ -1146,7 +1173,7 @@ impl DaemonSup {
         }
         let model = startup_model::load(path)?;
         // Any previous child has already exited (try_wait above also reaps it).
-        *slot = Some(spawn_daemon(bin, model.as_deref())?);
+        slot.process = Some(spawn_daemon(bin, model.as_deref())?);
         *self.last.lock() = DaemonState::Starting;
         Ok(())
     }
@@ -1168,12 +1195,12 @@ impl DaemonSup {
     fn probe(&self) -> DaemonState {
         let reachable = self.reachable();
         let mut slot = self.child.lock();
-        let alive = slot.as_mut().is_some_and(|child| {
+        let alive = slot.process.as_mut().is_some_and(|child| {
             // A failed observation is not proof that a process has stopped.
             !matches!(child.try_wait(), Ok(Some(_)))
         });
         if !alive {
-            slot.take();
+            slot.process.take();
         }
         let ever = *self.reachable_ever.lock();
         let state = decide_daemon_state(reachable, alive, ever);
@@ -1923,6 +1950,130 @@ mod tests {
         );
     }
 
+    // Run a real disposable child so exit tests prove process termination on
+    // both macOS and Windows, without a daemon install or provider credentials.
+    #[test]
+    fn daemon_exit_child() {
+        let Some(ready) = std::env::var_os("OCEAN_TEST_DAEMON_EXIT_READY") else {
+            return;
+        };
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        std::fs::write(ready, listener.local_addr().unwrap().to_string()).unwrap();
+        for connection in listener.incoming() {
+            drop(connection.unwrap());
+        }
+    }
+
+    struct DaemonExitFixture {
+        daemon: DaemonSup,
+        external: Option<Child>,
+        _directory: tempfile::TempDir,
+    }
+
+    impl DaemonExitFixture {
+        fn new(owned: bool) -> Self {
+            let directory = tempfile::tempdir().unwrap();
+            let ready = directory.path().join("ready");
+            let child = ProcessCommand::new(std::env::current_exe().unwrap())
+                .args(["--exact", "tests::daemon_exit_child"])
+                .env("OCEAN_TEST_DAEMON_EXIT_READY", &ready)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            // Install cleanup before any assertion can fail.
+            let mut fixture = Self {
+                daemon: DaemonSup::new("127.0.0.1".into(), 0),
+                external: Some(child),
+                _directory: directory,
+            };
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                if let Ok(address) = std::fs::read_to_string(&ready) {
+                    if let Ok(address) = address.parse::<std::net::SocketAddr>() {
+                        fixture.daemon.port = address.port();
+                        break;
+                    }
+                }
+                assert!(std::time::Instant::now() < deadline, "child never listened");
+                assert!(fixture
+                    .external
+                    .as_mut()
+                    .unwrap()
+                    .try_wait()
+                    .unwrap()
+                    .is_none());
+                thread::sleep(Duration::from_millis(10));
+            }
+            if owned {
+                fixture.daemon.child.lock().process = fixture.external.take();
+            }
+            assert!(fixture.daemon.reachable());
+            fixture
+        }
+    }
+
+    impl Drop for DaemonExitFixture {
+        fn drop(&mut self) {
+            self.daemon.stop();
+            if let Some(child) = self.external.as_mut() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    #[test]
+    fn daemon_exit_reaps_owned_child_and_refuses_late_restart() {
+        let fixture = DaemonExitFixture::new(true);
+        let daemon = &fixture.daemon;
+        assert!(daemon.pid().is_some());
+        daemon.on_run_event(&tauri::RunEvent::Exit);
+        assert_eq!(daemon.pid(), None);
+        assert!(!daemon.reachable(), "owned process survived Quit");
+        assert_eq!(
+            daemon.restart(Path::new("must-not-spawn")),
+            Err("Ocean is quitting.".into())
+        );
+        // Repeated exit delivery is harmless and never reopens admission.
+        daemon.on_run_event(&tauri::RunEvent::Exit);
+        assert_eq!(
+            daemon.start(Path::new("must-not-spawn")),
+            Err("Ocean is quitting.".into())
+        );
+    }
+
+    #[test]
+    fn daemon_exit_never_adopts_or_stops_external_process() {
+        let mut fixture = DaemonExitFixture::new(false);
+        let daemon = &fixture.daemon;
+        daemon.start(Path::new("must-not-spawn")).unwrap();
+        assert_eq!(daemon.pid(), None);
+        daemon.on_run_event(&tauri::RunEvent::Exit);
+        assert!(daemon.reachable(), "external process was stopped");
+        assert!(fixture
+            .external
+            .as_mut()
+            .unwrap()
+            .try_wait()
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn daemon_exit_keeps_child_alive_for_ready_and_resume_events() {
+        let fixture = DaemonExitFixture::new(true);
+        let daemon = &fixture.daemon;
+        let pid = daemon.pid();
+        for event in [tauri::RunEvent::Ready, tauri::RunEvent::Resumed] {
+            daemon.on_run_event(&event);
+            assert_eq!(daemon.pid(), pid);
+            assert!(daemon.reachable());
+        }
+        daemon.start(Path::new("must-not-spawn")).unwrap();
+    }
+
     /// The IPC commands must expose no path parameter at all. Source-pinned
     /// because the commands need a live Tauri runtime to invoke.
     #[test]
@@ -2503,6 +2654,7 @@ pub fn run() {
             room_consent::room_agent_revoke,
             room_consent::room_agent_bootstrap
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running ocean-tauri");
+        .build(tauri::generate_context!())
+        .expect("error while building ocean-tauri")
+        .run(|app, event| app.state::<AppState>().daemon.on_run_event(&event));
 }
