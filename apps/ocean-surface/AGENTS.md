@@ -207,6 +207,27 @@ token to browser code, bundle it, or cache it in client storage.
 - Verify native `cargo test --lib provider_accounts`, UI `cargo test -p
   ocean-surface-ui accounts`, the real WASM bundle and rendered native dialog.
 
+## Desktop Team Connection
+
+- `src/team_connection.rs` owns the native Team dialog in the existing header
+  overflow. Use the Accounts dialog vocabulary, native focus trap and Escape;
+  return focus to the menu on close. No permanent header setup controls.
+- `host.rs` calls main-window-only `team_connection` with Read or Save intent.
+  The native broker uses the shared operator transport for exactly GET/PUT
+  `/v1/rooms/connection`; URL validation and first-write custody stay in the
+  daemon. No credentials, arbitrary routes or raw errors reach the page.
+- Saving only selects the initial server. Show Configured only from the daemon's
+  startup projection; it proves neither reachability nor membership. Never
+  replace an existing team destination or retry a save automatically. Lost
+  acknowledgements require a read before another save; drafts survive failures.
+- Restart is explicit and offered only for a shell-owned child. Recheck ownership
+  before invoking restart and read back configuration afterward. External
+  services retain their restart requirement. Close/new intent retires reads and
+  delayed actions; committed saves are not undone by closing the dialog.
+- Verify native `cargo test --lib team_connection`, UI `cargo test -p
+  ocean-surface-ui team_connection`, the real WASM bundle and rendered native
+  setup. Hosted Windows checks remain separate from local Mac acceptance.
+
 ## Empty Session Surface
 
 - Empty transcripts show the existing static circular Ocean mark and an
@@ -810,7 +831,8 @@ ships today and are updated slice by slice.
   command and its `OwnerMutationState`) and `room_consent.rs` (`Intent`s),
   and their `lib.rs` wiring (one `DaemonTransport` built from
   `daemon_url_from_env()` + `operator_key_path()`, cloned into
-  `OwnerMutationState`, `ConsentBroker` and `provider_accounts::AccountState`).
+  `OwnerMutationState`, `ConsentBroker`, `provider_accounts::AccountState` and
+  `team_connection::ConnectionState`).
   Account intent is governed by Desktop Accounts above. Callers keep typed intent enums
   on top; JS never supplies a method, path or header.
 - Rules (strictest of the two former transports): daemon address from

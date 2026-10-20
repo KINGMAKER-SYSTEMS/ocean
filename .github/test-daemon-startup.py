@@ -4,7 +4,7 @@
 This checks startup and identity, not provider inference or installation.
 Windows ACL security is exercised by the separate native Rust fixtures.
 """
-import argparse, json, os, pathlib, socket, subprocess, tempfile, time, urllib.request, uuid
+import argparse, json, os, pathlib, socket, subprocess, tempfile, time, urllib.error, urllib.request, uuid
 
 parser = argparse.ArgumentParser()
 parser.add_argument('binary', type=pathlib.Path)
@@ -85,6 +85,51 @@ with (root / 'daemon.log').open('wb') as log:
                 expected_rooms = json.load(response)
             assert [room['room']['id'] for room in projected_rooms['rooms']] == [room['id'] for room in expected_rooms['rooms']]
             checks += ['bundled MCP stdio handshake', 'MCP daemon revision', 'MCP room projection']
+        # Exercise the packaged backend's initial team configuration without
+        # joining a service, sharing credentials or touching the operator profile.
+        def team_request(method='GET', origin=None, authorized=True):
+            headers = {'Content-Type': 'application/json'}
+            if authorized:
+                headers['X-Ocean-Operator'] = (config / 'operator.key').read_text().strip()
+            data = None if origin is None else json.dumps({'origin': origin}).encode()
+            request = urllib.request.Request(f'http://127.0.0.1:{port}/v1/rooms/connection',
+                                             data=data, headers=headers, method=method)
+            try:
+                with urllib.request.urlopen(request, timeout=3) as response:
+                    return response.status, json.load(response)
+            except urllib.error.HTTPError as error:
+                return error.code, json.load(error)
+
+        assert team_request(authorized=False)[0] == 503, 'team settings require operator authority'
+        status, initial = team_request()
+        assert status == 200 and initial['connection'] == {
+            'origin': None, 'configured': False, 'restart_required': False, 'can_initialize': True}
+        status, saved = team_request('PUT', 'https://team.example')
+        assert status == 200 and saved['connection'] == {
+            'origin': 'https://team.example/', 'configured': False,
+            'restart_required': True, 'can_initialize': False}
+        child.terminate()
+        child.wait(timeout=15)
+        child = subprocess.Popen([str(binary)], cwd=root, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=log)
+        deadline = time.monotonic() + 45
+        restarted = None
+        while time.monotonic() < deadline:
+            if child.poll() is not None:
+                raise RuntimeError(f'candidate restart exited {child.returncode}; log: {root / "daemon.log"}')
+            try:
+                with urllib.request.urlopen(f'http://127.0.0.1:{port}/v1/identity', timeout=1) as response:
+                    assert json.load(response)['member_id'] == member
+                status, restarted = team_request()
+                if status == 200:
+                    break
+            except (OSError, ValueError):
+                time.sleep(.2)
+        assert restarted and restarted.get('connection') == {
+            'origin': 'https://team.example/', 'configured': True,
+            'restart_required': False, 'can_initialize': False}, 'saved team origin did not activate'
+        assert team_request('PUT', 'https://different.example')[0] == 409, 'existing origin was replaceable'
+        assert team_request()[1]['connection']['origin'] == 'https://team.example/'
+        checks += ['operator-gated team setup', 'saved team origin survives restart', 'existing team origin cannot be replaced']
         if os.name == 'posix':
             checks.append('private startup file modes')
         result = {'result': 'PASS', 'revision': health['rev'], 'checks': checks, 'profile': str(root), 'provider_reply': 'not tested'}

@@ -1771,3 +1771,12 @@
 .ocean-accounts__name { color: var(--fg); }
 .ocean-accounts__status { color: var(--fg-3); font-size: .8125rem; }
 .ocean-accounts__error { margin: 16px 0 8px; font-size: .875rem; }
+
+/* Team settings share the existing native Accounts dialog vocabulary. */
+.ocean-team { box-shadow: none; }
+.ocean-team form { margin-top: 16px; }
+.ocean-team label { display: block; margin-bottom: 8px; font-size: .875rem; }
+.ocean-team input { box-sizing: border-box; width: 100%; min-height: 44px; padding: 8px 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-raised); color: var(--fg); font: inherit; }
+.ocean-team input:focus-visible { border-color: var(--accent); box-shadow: var(--focus-ring); outline: none; }
+.ocean-team input[readonly] { color: var(--fg-2); }
+.ocean-team__status { min-height: 1.5em; margin: 12px 0; color: var(--fg-3); font-size: .8125rem; }

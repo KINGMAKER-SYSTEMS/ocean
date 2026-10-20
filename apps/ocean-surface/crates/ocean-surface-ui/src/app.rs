@@ -1667,6 +1667,7 @@ pub fn App() -> impl IntoView {
     // open.
     let show_council = RwSignal::new(false);
     let show_accounts = RwSignal::new(false);
+    let show_team = RwSignal::new(false);
     // Ocean Floor is a primary read-only Observatory stage over the daemon's
     // durable snapshot/live/replay contract. It is mounted only while open so
     // its single SSE connection and renderer loop tear down deterministically.
@@ -2644,6 +2645,11 @@ pub fn App() -> impl IntoView {
                             "⋯"
                         </summary>
                         <div class="ocean-more__menu" role="menu">
+                            <crate::team_connection::TeamMenuItem on_open=Callback::new(move |()| {
+                                if let Some(menu) = more_ref.get() { let _ = menu.remove_attribute("open"); }
+                                island_mode.set(IslandMode::Closed);
+                                show_team.set(true);
+                            }) />
                             <crate::accounts::AccountsMenuItem on_open=Callback::new(move |()| {
                                 if let Some(menu) = more_ref.get() { let _ = menu.remove_attribute("open"); }
                                 island_mode.set(IslandMode::Closed);
@@ -3128,6 +3134,18 @@ pub fn App() -> impl IntoView {
                 />
             </Show>
 
+            <Show when=move || show_team.get()>
+                <crate::team_connection::TeamSettings on_close=Callback::new(move |()| {
+                    show_team.set(false);
+                    request_animation_frame(move || {
+                        if let Some(menu) = more_ref.get() {
+                            if let Ok(Some(summary)) = menu.query_selector("summary") {
+                                if let Ok(summary) = summary.dyn_into::<web_sys::HtmlElement>() { let _ = summary.focus(); }
+                            }
+                        }
+                    });
+                }) />
+            </Show>
             <Show when=move || show_accounts.get()>
                 <crate::accounts::Accounts daemon=daemon_for_island.get_value() on_close=Callback::new(move |()| {
                     show_accounts.set(false);

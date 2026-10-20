@@ -709,6 +709,34 @@ pub async fn provider_accounts(
     consent_decode(&value)
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct TeamConnection {
+    pub origin: Option<String>,
+    pub configured: bool,
+    pub restart_required: bool,
+    pub can_initialize: bool,
+}
+
+pub async fn team_connection(origin: Option<&str>) -> Result<TeamConnection, String> {
+    if !running_in_tauri() {
+        return Err("team_setup_unavailable".into());
+    }
+    let args = Object::new();
+    let action = if origin.is_some() { "save" } else { "read" };
+    let _ = Reflect::set(&args, &"action".into(), &action.into());
+    if let Some(origin) = origin {
+        let _ = Reflect::set(&args, &"origin".into(), &origin.into());
+    }
+    let value = tauri_invoke("team_connection", &args)
+        .await
+        .map_err(|error| {
+            error
+                .as_string()
+                .unwrap_or_else(|| "team_request_failed".into())
+        })?;
+    consent_decode(&value)
+}
+
 /// Current daemon supervision state (cached from the shell's background
 /// poller). `None` on non-Tauri hosts — the browser/extension never supervise
 /// a daemon, so there is no shell state to report.

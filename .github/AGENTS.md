@@ -42,7 +42,10 @@ Root GitHub Actions builds for the public Ocean monorepo.
   member identity and state-file creation; Unix also checks private file modes.
   Its optional `--mcp` checks the bundled bridge over real stdio against that
   same disposable daemon. All provider credential discovery stays isolated.
-  It does not establish Windows ACLs, provider inference or installation.
+  It also saves an initial fixture team origin, restarts only its own child,
+  and checks activation, operator gating and replacement refusal. No real
+  service is contacted or joined. It does not establish Windows ACLs, provider
+  inference, shared membership or installation.
 - `test-room-package.py` owns the disposable actual-daemon package-preview
   fixture. It verifies child identity before creating fixture Rooms, uses only
   fixture state/auth paths, and stops only its own process. It performs no

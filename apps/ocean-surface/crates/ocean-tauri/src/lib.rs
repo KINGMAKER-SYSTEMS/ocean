@@ -29,6 +29,7 @@ mod owner_mutation;
 mod provider_accounts;
 mod room_consent;
 mod startup_model;
+mod team_connection;
 
 /// One surfaced filesystem change, serialized to the webview as `path-changed`.
 ///
@@ -2130,6 +2131,7 @@ pub fn run() {
         // one numeric-loopback transport; an untrusted OCEAN_DAEMON_URL
         // (including `localhost`) leaves every one of them unsent.
         .manage(provider_accounts::AccountState(operator_transport.clone()))
+        .manage(team_connection::ConnectionState(operator_transport.clone()))
         .manage(owner_mutation::OwnerMutationState(
             operator_transport.clone(),
         ))
@@ -2494,6 +2496,7 @@ pub fn run() {
             open_external_url,
             owner_mutation::room_owner_mutation,
             provider_accounts::provider_accounts,
+            team_connection::team_connection,
             room_consent::room_consent_preview,
             room_consent::room_consent_authorize,
             room_consent::room_consent_cancel,

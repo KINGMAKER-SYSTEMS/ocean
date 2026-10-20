@@ -31,8 +31,11 @@ keeps its identity across restarts and later configuration changes.
 
 Shared-room membership comes from the accepted invitation and its scoped
 credential, not the local owner's name or a manually chosen member id.
-Desktop startup does not yet configure the team service connection. That
-connection and shared-room acceptance below are still required.
+**Team**, in the same app menu, saves the initial team server and offers an
+explicit restart. Configured means the daemon loaded that server; invitation
+acceptance and a shared conversation prove membership and connectivity.
+The Team control is newer than installer source `8ca79ae2`; use a rebuilt,
+validated candidate before handing off these steps.
 
 The desktop candidate also includes `ocean-mcp` (`ocean-mcp.exe` on Windows)
 beside its daemon. An external MCP host can run that installed executable with
@@ -49,11 +52,13 @@ directory. Host configuration is still an explicit setup step. The bridge's
 2. Open Ocean, choose the starting model, connect the corresponding account
    through **Accounts**, and complete one real no-tools reply. A connected
    indicator is insufficient.
-3. Configure the coworker's daemon for the existing team service. The current
-   runtime reads `OCEAN_FEDERATION_URL` at startup; there is no desktop setup
-   control for it yet. Keep the deployment's origin and access procedures in
-   the private operator runbook. A default desktop installation can use local
-   Rooms, but cannot redeem shared invitations before this connection exists.
+3. Open **Team**, enter the existing team's server address and save. Choose
+   **Restart Ocean** when offered. If the service is managed outside the app,
+   restart it through its existing supervisor, then choose **Check again**.
+   Keep the real origin and access procedures in the private operator runbook.
+   Existing installations retain `OCEAN_FEDERATION_URL`; this setup cannot
+   replace an existing destination or redirect stored membership credentials.
+   A default installation can use local Rooms before team setup.
 4. Redeem that coworker's invitation: in Rooms, choose **Add room → Join room**,
    paste the invitation link, then confirm. The invitation supplies the
    recipient's membership and shared display name. This also works in the
