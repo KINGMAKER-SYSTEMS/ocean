@@ -6,16 +6,27 @@ released client and their own connected daemon.
 
 ## Platform support
 
-| Computer | Current setup path | Remaining acceptance |
+| Computer | Released setup path | Desktop candidate |
 | --- | --- | --- |
-| Apple Silicon Mac | macOS arm64 package plus `platform/ocean-os/ops/onboard-teammate.sh` | Verify an actual release, package access, provider login and shared-room reply on the coworker's machine. |
-| Intel Mac | No prebuilt package in the current release workflow | Build, package and test this architecture before giving out an installer. |
-| Windows | No native Windows package or onboarding script | Establish and test the Windows runtime/client installation path. WSL is not a verified substitute. |
+| Apple Silicon Mac | macOS arm64 command-line package plus `platform/ocean-os/ops/onboard-teammate.sh` | Native app and matching daemon in a DMG. |
+| Intel Mac | No released desktop installer | Native app and matching daemon in a DMG. |
+| Windows x64 | No released desktop installer or onboarding script | Native app and matching daemon in an NSIS installer. |
 
-The current package and setup script accept only macOS arm64. The browser
-client does not make the local daemon cross-platform. Do not give a Windows
-user the Mac install command or present source compilation as a completed
-team installation.
+The command-line package and setup script accept only macOS arm64. The
+[desktop candidate builder](../apps/ocean-surface/packaging/AGENTS.md) builds
+each installer on its native platform, checks its contents and starts its
+bundled daemon in disposable state. These unsigned artifacts are candidates,
+not a stable release or proof of installation on a coworker's computer.
+Signing, clean-machine installation and update/recovery remain release gates.
+Do not give a Windows user the Mac install command or present source
+compilation as a completed team installation.
+
+The desktop candidate collects a starting model before launching its local
+daemon. **Accounts**, in the existing app menu, connects Claude, Codex or
+ChatGPT through the system browser. A Connected account reports available
+credentials; verify a real reply separately. Desktop startup does not yet
+configure the coworker's member identity or federation connection. The host
+setup and shared-room acceptance below are still required.
 
 ## First coworker
 

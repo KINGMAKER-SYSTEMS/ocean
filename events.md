@@ -2991,3 +2991,14 @@ Add one native Accounts entry to the existing overflow for daemon-owned Claude, 
 Validation: 96 native and 956 UI tests, native/WASM Clippy, formatting, docs-check and actual Trunk build pass. The actual isolated macOS app renders provider state, cancels an exact pending Codex attempt, preserves button focus and returns Escape focus to More. Daemon read-back confirms cancellation with no credential file; no browser login or inference was completed. Initial disk exhaustion was cleared using only task-owned incremental build caches; the unchanged watcher test then passed in the full native suite. Surface contract updated; parent ownership and indexes unchanged. Clean committed-source verification, Windows checks, independent review, merge and live delivery remain separate gates.
 
 Follow-up evidence: PR #124 Windows run 39346724849 passed 90 native tests, actual web bundle and release GUI executable at 87c7ff07. PR #123 a454dafc Intel packaging passed; b4e7c2e6 three-platform candidate run 39347359624 continues. Current org main is 956d0055, with additional Rooms documentation; this account change does not modify that rendering program.
+
+_________________________________________________________________________________
+time: [21:15] [19-10-26]
+agent: [Codex desktop] [GPT-6]
+worktree: [codex/team-desktop-candidate]
+type: [workflow]
+area: [testing]
+
+Reconciled desktop installers 19e16c8b and first-run/Accounts 8d39b059 with organization main a3af6a0e into d498a729. Preserved current queued prompts and Observatory replay; merge conflicts were additive Surface contracts and ledger entries. Updated the team guide to distinguish unsigned three-platform desktop candidates from released command-line packages and to retain identity/federation, provider reply, installation and update acceptance gates. Combined source: 970 UI tests, eight artifact fixtures, formatting and docs-check pass; a clean detached checkout builds the real Trunk bundle. Native combined-source testing is in progress.
+
+Accounts Windows run 39349745632 passes 95 native tests and the release GUI executable check. Fresh hosted Mac diagnostic 39351619321 verifies unchanged Accounts application source, builds the real bundle and passes 96 native tests plus three watcher repetitions. Local FSEvents experiments did not establish a reliable fix and were discarded; no watcher behavior or timeout changed. Installer run 39350726191 has passed both Mac architectures; Windows remains running. No release, live service replacement, provider inference or coworker acceptance is claimed.
