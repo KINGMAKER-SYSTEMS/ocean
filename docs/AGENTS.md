@@ -2,12 +2,13 @@
 
 ## Purpose
 
-Keep canonical repository routing and the public/private split discoverable.
+Keep canonical repository routing, the public/private split and team setup discoverable.
 
 ## Ownership
 
 - `MIGRATION.md` owns cutover and existing-work migration instructions.
 - `SOURCE_RECONCILIATION.md` owns verified source-tip comparisons, unresolved divergence, and catch-up constraints.
+- `TEAM_ONBOARDING.md` owns the supported platform matrix and coworker acceptance path; installation, provider inference and multi-machine collaboration are separate evidence.
 
 ## Local Contracts
 

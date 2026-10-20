@@ -380,6 +380,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn routine_audit_append_does_not_raise_jump_but_read_cursor_keeps_full_sequence() {
+        use crate::room_messages::conversation_len;
+        use crate::rooms::RoomMessageKind;
+        let mut transcript = vec![test_msg(4, "hello", None)];
+        let previous = conversation_len(&transcript);
+        let mut audit = test_msg(5, "[room agent output audit] kobe", None);
+        audit.kind = RoomMessageKind::System;
+        transcript.push(audit);
+        assert_eq!(
+            transcript_pass_action(conversation_len(&transcript), previous, true, false),
+            TranscriptPassAction::Hold
+        );
+        assert_eq!(
+            durable_read_candidate(&transcript, Some(&test_access(RoomAccessState::Local))),
+            Some(5)
+        );
+        transcript.push(test_msg(6, "[room agent output audit] kobe", None));
+        assert_eq!(
+            transcript_pass_action(conversation_len(&transcript), previous, true, false),
+            TranscriptPassAction::RaiseJump
+        );
+    }
+
     /// L2 regression, end to end through the production decision path: a
     /// `Live` room fills before the daemon confirms a global sequence, so the
     /// fill itself has no durable candidate. When the access projection lands

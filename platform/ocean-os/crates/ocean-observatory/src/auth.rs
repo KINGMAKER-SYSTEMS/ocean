@@ -1,9 +1,14 @@
 //! Scoped observer principals and HMAC-SHA256 observer tokens.
 
 use std::fmt;
-use std::fs::{self, OpenOptions};
+use std::fs;
+#[cfg(unix)]
+use std::fs::OpenOptions;
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -15,10 +20,16 @@ use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use sha2::Sha256;
 use thiserror::Error;
 
+/// Windows owner-only credential file primitives, shared with local operator auth.
+#[cfg(windows)]
+#[path = "auth_windows.rs"]
+pub mod windows_file;
+
 const SECRET_FILE: &str = "observatory-secret";
 const OBSERVER_TOKEN_FILE: &str = "observatory-token";
 const OBSERVER_TOKEN_ENV: &str = "OCEAN_OBSERVER_TOKEN";
 const SECRET_LEN: usize = 32;
+#[cfg(unix)]
 const SECRET_MODE: u32 = 0o600;
 const NONCE_BYTES: usize = 16;
 /// Default observer-token lifetime (30 minutes).
@@ -160,11 +171,11 @@ impl ObserverSecret {
 
     /// Load or securely create `<ocean_dir>/observatory-secret`.
     ///
-    /// Creation writes a mode-0600 temporary inode completely, syncs it, and
-    /// atomically links it to the final path without replacing an existing file.
-    /// Concurrent creators therefore converge on the one winning file. Existing
-    /// files are opened with `O_NOFOLLOW` and must be regular, exactly 32 bytes,
-    /// and mode 0600.
+    /// Creation writes and syncs a private temporary file, then publishes without
+    /// replacing an existing file. Concurrent creators converge on one winner.
+    /// Unix uses mode 0600, `O_NOFOLLOW`, hard-link publication and directory
+    /// sync. Windows uses a protected owner-only DACL, handle-based validation
+    /// and a write-through move. Existing files must contain exactly 32 bytes.
     ///
     /// # Errors
     ///
@@ -173,6 +184,15 @@ impl ObserverSecret {
     pub fn load_or_generate(ocean_dir: &Path) -> Result<Self, AuthError> {
         fs::create_dir_all(ocean_dir).map_err(AuthError::secret_io)?;
         let dir_metadata = fs::symlink_metadata(ocean_dir).map_err(AuthError::secret_io)?;
+        #[cfg(windows)]
+        if dir_metadata.file_attributes()
+            & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
+            != 0
+        {
+            return Err(AuthError::SecretValidation(
+                "observatory directory must not be a reparse point".into(),
+            ));
+        }
         if dir_metadata.file_type().is_symlink() || !dir_metadata.is_dir() {
             return Err(AuthError::SecretValidation(
                 "observatory directory must be a real directory".to_owned(),
@@ -190,6 +210,7 @@ impl ObserverSecret {
         rand::thread_rng().fill_bytes(&mut key);
         let temp_path = ocean_dir.join(format!(".{SECRET_FILE}.{}.tmp", random_suffix()));
         let creation = (|| -> Result<(), AuthError> {
+            #[cfg(unix)]
             let mut temp = OpenOptions::new()
                 .write(true)
                 .create_new(true)
@@ -197,12 +218,22 @@ impl ObserverSecret {
                 .custom_flags(libc::O_NOFOLLOW)
                 .open(&temp_path)
                 .map_err(AuthError::secret_io)?;
+            #[cfg(windows)]
+            let mut temp = windows_file::create(&temp_path).map_err(AuthError::secret_io)?;
             temp.write_all(&key).map_err(AuthError::secret_io)?;
             temp.sync_all().map_err(AuthError::secret_io)?;
+            #[cfg(windows)]
+            {
+                drop(temp);
+                windows_file::publish(&temp_path, &secret_path, false)
+                    .map_err(AuthError::secret_io)?;
+            }
+            #[cfg(unix)]
             fs::hard_link(&temp_path, &secret_path).map_err(AuthError::secret_io)?;
             // F11: the link is a directory-entry change; without syncing the
             // directory a crash can lose it while the daemon already signed
             // tokens with the key, and the next boot would mint a new secret.
+            #[cfg(unix)]
             sync_directory(ocean_dir)?;
             Ok(())
         })();
@@ -232,17 +263,21 @@ impl ObserverSecret {
             ));
         }
 
+        #[cfg(unix)]
         let mut file = OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW)
             .open(path)
             .map_err(AuthError::secret_io)?;
+        #[cfg(windows)]
+        let mut file = windows_file::open(path).map_err(AuthError::secret_io)?;
         let metadata = file.metadata().map_err(AuthError::secret_io)?;
         if !metadata.is_file() {
             return Err(AuthError::SecretValidation(
                 "observatory secret must be a regular file".to_owned(),
             ));
         }
+        #[cfg(unix)]
         if metadata.mode() & 0o777 != SECRET_MODE {
             return Err(AuthError::SecretValidation(
                 "observatory secret mode must be 0600".to_owned(),
@@ -296,7 +331,8 @@ impl AuthError {
 }
 
 /// Mint and atomically publish a boot-bound summary observer credential at
-/// `<ocean_dir>/observatory-token` with mode 0600.
+/// `<ocean_dir>/observatory-token` with mode 0600 on Unix or a protected
+/// owner-only DACL on Windows.
 ///
 /// The proxy and other first-party local clients read this file immediately
 /// before opening an Observatory request or stream. Replacing the file rotates
@@ -312,6 +348,15 @@ pub fn write_summary_observer_token(
 ) -> Result<String, AuthError> {
     fs::create_dir_all(ocean_dir).map_err(AuthError::secret_io)?;
     let directory = fs::symlink_metadata(ocean_dir).map_err(AuthError::secret_io)?;
+    #[cfg(windows)]
+    if directory.file_attributes()
+        & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
+        != 0
+    {
+        return Err(AuthError::CredentialConfig(
+            "observer token directory must not be a reparse point".into(),
+        ));
+    }
     if directory.file_type().is_symlink() || !directory.is_dir() {
         return Err(AuthError::CredentialConfig(
             "observer token directory must be a real directory".to_owned(),
@@ -327,6 +372,7 @@ pub fn write_summary_observer_token(
     let final_path = ocean_dir.join(OBSERVER_TOKEN_FILE);
     let temporary = ocean_dir.join(format!(".{OBSERVER_TOKEN_FILE}.{}.tmp", random_suffix()));
     let result = (|| -> Result<(), AuthError> {
+        #[cfg(unix)]
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -334,13 +380,22 @@ pub fn write_summary_observer_token(
             .custom_flags(libc::O_NOFOLLOW)
             .open(&temporary)
             .map_err(AuthError::secret_io)?;
+        #[cfg(windows)]
+        let mut file = windows_file::create(&temporary).map_err(AuthError::secret_io)?;
         file.write_all(token.as_bytes())
             .map_err(AuthError::secret_io)?;
         file.write_all(b"\n").map_err(AuthError::secret_io)?;
         file.sync_all().map_err(AuthError::secret_io)?;
+        #[cfg(windows)]
+        {
+            drop(file);
+            windows_file::publish(&temporary, &final_path, true).map_err(AuthError::secret_io)?;
+        }
+        #[cfg(unix)]
         fs::rename(&temporary, &final_path).map_err(AuthError::secret_io)?;
         // F11: make the rename itself durable, so a crash cannot roll the
         // published credential back to an older (possibly expired) file.
+        #[cfg(unix)]
         sync_directory(ocean_dir)?;
         Ok(())
     })();
@@ -373,7 +428,7 @@ pub fn observer_token_for_child(ocean_dir: &Path) -> Result<Option<String>, Auth
     observer_token_from_file(ocean_dir)
 }
 
-/// Load only the rotating mode-0600 observer token file, deliberately ignoring
+/// Load only the rotating private observer token file, deliberately ignoring
 /// `OCEAN_OBSERVER_TOKEN`. Long-lived trusted local clients use this after an
 /// environment-provided boot token receives 401 so a daemon restart can recover
 /// from the freshly rotated file without mutating process-global environment.
@@ -393,13 +448,22 @@ pub fn observer_token_from_file(ocean_dir: &Path) -> Result<Option<String>, Auth
         ));
     }
 
+    #[cfg(unix)]
     let mut file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW)
-        .open(path)
+        .open(&path)
         .map_err(AuthError::secret_io)?;
+    #[cfg(windows)]
+    let mut file = windows_file::open(&path).map_err(AuthError::secret_io)?;
     let metadata = file.metadata().map_err(AuthError::secret_io)?;
-    if !metadata.is_file() || metadata.mode() & 0o777 != SECRET_MODE {
+    if !metadata.is_file() {
+        return Err(AuthError::CredentialConfig(
+            "observer config must be a regular file".into(),
+        ));
+    }
+    #[cfg(unix)]
+    if metadata.mode() & 0o777 != SECRET_MODE {
         return Err(AuthError::CredentialConfig(
             "observer config must be a regular mode-0600 file".to_owned(),
         ));
@@ -500,6 +564,7 @@ fn validate_claims(
 /// reporting a published token as not renewed, would be a false alarm about
 /// a durability guarantee that mount never offered. A real I/O failure
 /// (EIO and the rest) still fails the call.
+#[cfg(unix)]
 fn sync_directory(directory: &Path) -> Result<(), AuthError> {
     #[cfg(test)]
     tests::DIRECTORY_SYNCS.with(|syncs| syncs.borrow_mut().push(directory.to_path_buf()));
@@ -510,6 +575,7 @@ fn sync_directory(directory: &Path) -> Result<(), AuthError> {
     }
 }
 
+#[cfg(unix)]
 fn directory_sync_unsupported(error: &std::io::Error) -> bool {
     matches!(
         error.raw_os_error(),
@@ -545,6 +611,7 @@ fn encode_hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     #[test]
     fn a_mount_that_cannot_sync_directories_is_not_a_failure() {
         for code in [libc::EINVAL, libc::ENOTSUP, libc::EOPNOTSUPP, libc::EBADF] {
@@ -557,6 +624,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     use std::os::unix::fs::{symlink, PermissionsExt};
     use std::sync::{Arc, Barrier, Mutex};
     use std::thread;
@@ -565,12 +633,14 @@ mod tests {
 
     const DAEMON_ID: &str = "a9f38dc1-fb42-46c4-9c64-0bf09aff3037";
 
+    #[cfg(unix)]
     thread_local! {
         /// Directories [`sync_directory`] synced on this test thread.
         pub(super) static DIRECTORY_SYNCS: std::cell::RefCell<Vec<std::path::PathBuf>> =
             const { std::cell::RefCell::new(Vec::new()) };
     }
 
+    #[cfg(unix)]
     fn take_directory_syncs() -> Vec<std::path::PathBuf> {
         DIRECTORY_SYNCS.with(|syncs| std::mem::take(&mut *syncs.borrow_mut()))
     }
@@ -718,17 +788,21 @@ mod tests {
     }
 
     #[test]
-    fn secret_first_creation_is_exact_and_mode_0600() {
+    fn secret_first_creation_is_exact_and_private() {
         let directory = tempfile::tempdir().expect("tempdir");
         let loaded = ObserverSecret::load_or_generate(directory.path()).expect("create secret");
         let path = directory.path().join(SECRET_FILE);
-        let metadata = fs::metadata(path).expect("metadata");
+        let metadata = fs::metadata(&path).expect("metadata");
 
         assert_eq!(loaded.key().len(), SECRET_LEN);
         assert_eq!(metadata.len(), SECRET_LEN as u64);
+        #[cfg(unix)]
         assert_eq!(metadata.permissions().mode() & 0o777, SECRET_MODE);
+        #[cfg(windows)]
+        windows_file::open(&path).expect("owner-only Windows credential");
     }
 
+    #[cfg(unix)]
     #[test]
     fn secret_load_rejects_wrong_size_mode_type_and_symlink() {
         let wrong_size = tempfile::tempdir().expect("tempdir");
@@ -774,7 +848,7 @@ mod tests {
     }
 
     #[test]
-    fn summary_token_file_is_mode_0600_boot_bound_and_readable() {
+    fn summary_token_file_is_private_boot_bound_and_readable() {
         let _guard = ENV_LOCK.lock().expect("environment lock");
         let prior = std::env::var_os(OBSERVER_TOKEN_ENV);
         std::env::remove_var(OBSERVER_TOKEN_ENV);
@@ -784,10 +858,13 @@ mod tests {
         let token = write_summary_observer_token(directory.path(), "daemon-boot", &secret)
             .expect("mint token");
         let path = directory.path().join(OBSERVER_TOKEN_FILE);
+        #[cfg(unix)]
         assert_eq!(
             fs::metadata(&path).expect("metadata").mode() & 0o777,
             SECRET_MODE
         );
+        #[cfg(windows)]
+        windows_file::open(&path).expect("owner-only Windows token");
         assert_eq!(
             observer_token_for_child(directory.path()).expect("read token"),
             Some(token.clone())
@@ -807,8 +884,17 @@ mod tests {
         let prior = std::env::var_os(OBSERVER_TOKEN_ENV);
         let directory = tempfile::tempdir().expect("tempdir");
         let config = directory.path().join(OBSERVER_TOKEN_FILE);
-        fs::write(&config, "config-token\n").expect("write config");
-        fs::set_permissions(&config, fs::Permissions::from_mode(SECRET_MODE)).expect("chmod");
+        #[cfg(unix)]
+        {
+            fs::write(&config, "config-token\n").expect("write config");
+            fs::set_permissions(&config, fs::Permissions::from_mode(SECRET_MODE)).expect("chmod");
+        }
+        #[cfg(windows)]
+        {
+            let mut file = windows_file::create(&config).expect("private config");
+            file.write_all(b"config-token\n").expect("write config");
+            file.sync_all().expect("sync config");
+        }
 
         std::env::remove_var(OBSERVER_TOKEN_ENV);
         assert_eq!(
@@ -833,6 +919,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn child_token_file_rejects_unsafe_mode_and_symlink() {
         let _guard = ENV_LOCK.lock().expect("environment lock");
@@ -890,6 +977,7 @@ mod tests {
 
     /// F11: creating the secret and publishing the token each fsync the
     /// directory holding the new entry; loading an existing secret does not.
+    #[cfg(unix)]
     #[test]
     fn secret_link_and_token_rename_sync_the_parent_directory() {
         let directory = tempfile::tempdir().expect("tempdir");
@@ -906,6 +994,35 @@ mod tests {
 
         write_summary_observer_token(directory.path(), DAEMON_ID, &secret).expect("mint token");
         assert_eq!(take_directory_syncs(), vec![directory.path().to_path_buf()]);
+    }
+
+    #[test]
+    fn token_rotation_replaces_the_previous_boot_credential() {
+        let directory = tempfile::tempdir().unwrap();
+        let secret = ObserverSecret::load_or_generate(directory.path()).unwrap();
+        let first = write_summary_observer_token(directory.path(), "first-boot", &secret).unwrap();
+        let second =
+            write_summary_observer_token(directory.path(), "second-boot", &secret).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(
+            observer_token_from_file(directory.path()).unwrap(),
+            Some(second.clone())
+        );
+        assert!(verify_token(&second, &secret, "second-boot").is_ok());
+        assert!(verify_token(&first, &secret, "second-boot").is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_private_secret_still_requires_exact_key_length() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut file = windows_file::create(&directory.path().join(SECRET_FILE)).unwrap();
+        file.write_all(&[0u8; SECRET_LEN - 1]).unwrap();
+        drop(file);
+        assert!(matches!(
+            ObserverSecret::load_or_generate(directory.path()),
+            Err(AuthError::SecretValidation(_))
+        ));
     }
 
     /// F11: a token whose expiry equals its issuance has no lifetime and is

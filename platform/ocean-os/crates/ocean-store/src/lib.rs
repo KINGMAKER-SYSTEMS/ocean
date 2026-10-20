@@ -7855,6 +7855,35 @@ impl SqliteRoomStore {
             .map_err(Into::into)
     }
 
+    /// Latest conversation entry for room-list attention. Routine execution
+    /// audits remain in the durable transcript but do not request attention.
+    /// SQL filters before LIMIT; no transcript is materialized in memory.
+    pub fn room_latest_attention_seq(&self, key: &RoomKey) -> Result<Option<u64>> {
+        if !self.room_exists(key)? {
+            return Err(RoomStoreError::UnknownRoom(key.clone()));
+        }
+        self.conn
+            .query_row(
+                "SELECT seq FROM messages WHERE room_id = ?1
+                 AND NOT (kind = 'system' AND (
+                    instr(body, 'auto-convene: ') = 1
+                    OR body IN (?2, ?3, ?4)
+                    OR substr(body, 1, length(?2) + 1) = ?2 || ' '
+                    OR substr(body, 1, length(?3) + 1) = ?3 || ' '
+                    OR substr(body, 1, length(?4) + 1) = ?4 || ' '
+                 )) ORDER BY seq DESC LIMIT 1",
+                params![
+                    key.as_str(),
+                    "[room agent bootstrap audit]",
+                    "[room agent admission audit]",
+                    "[room agent output audit]",
+                ],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     /// Count unread Local transcript rows without loading any message body.
     ///
     /// Local messages have no durable structured addressee field, so their
@@ -14605,6 +14634,75 @@ mod tests {
         )
         .unwrap();
         assert_eq!(s.room_latest_durable_seq(&key).unwrap(), Some(0));
+    }
+
+    #[test]
+    fn room_latest_attention_preserves_messages_and_failures_but_skips_routine_audits() {
+        let mut s = store();
+        let key = RoomKey::new("attention-filter");
+        s.create(key.clone(), "Attention", None, now()).unwrap();
+        assert_eq!(s.room_latest_attention_seq(&key).unwrap(), None);
+        for body in [
+            "auto-convene: kobe (on_mention)",
+            "[room agent bootstrap audit]",
+            "[room agent admission audit] kobe",
+            "[room agent output audit]",
+        ] {
+            s.append_message(
+                &key,
+                "system",
+                RoomParticipantKind::System,
+                RoomMessageKind::System,
+                body,
+                now(),
+            )
+            .unwrap();
+            assert_eq!(s.room_latest_attention_seq(&key).unwrap(), None);
+        }
+        assert_eq!(s.room_latest_durable_seq(&key).unwrap(), Some(3));
+        for (kind, body) in [
+            (RoomMessageKind::Message, "[room agent output audit]"),
+            (
+                RoomMessageKind::System,
+                "[room agent admission refused: suspended] kobe",
+            ),
+            (RoomMessageKind::System, "[room agent authority audit]"),
+            (
+                RoomMessageKind::System,
+                "auto-convene failed for kobe: turn_failed",
+            ),
+            (
+                RoomMessageKind::System,
+                "[room agent output audit]unexpected",
+            ),
+            (RoomMessageKind::System, "[ROOM AGENT OUTPUT AUDIT]"),
+        ] {
+            s.append_message(
+                &key,
+                "system",
+                RoomParticipantKind::System,
+                kind,
+                body,
+                now(),
+            )
+            .unwrap();
+            let visible = s.room_latest_durable_seq(&key).unwrap();
+            s.append_message(
+                &key,
+                "system",
+                RoomParticipantKind::System,
+                RoomMessageKind::System,
+                "[room agent output audit] kobe",
+                now(),
+            )
+            .unwrap();
+            assert_eq!(s.room_latest_attention_seq(&key).unwrap(), visible);
+            assert!(s.room_latest_durable_seq(&key).unwrap() > visible);
+        }
+        assert!(matches!(
+            s.room_latest_attention_seq(&RoomKey::new("absent")),
+            Err(RoomStoreError::UnknownRoom(_))
+        ));
     }
 
     #[test]

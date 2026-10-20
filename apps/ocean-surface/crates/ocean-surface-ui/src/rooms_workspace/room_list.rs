@@ -1,11 +1,17 @@
-//! Left rail: room listbox (roving tabindex), status line, and create input
-//! with its optional workspace selector.
+//! Left rail: room listbox (roving tabindex), status line, and a shared
+//! create/join entry menu. Creation has an optional workspace selector.
 
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
 use crate::daemon::ProjectInfo;
 use crate::rooms::{CreateResolution, Room, Rooms};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RoomEntry {
+    Create,
+    Join,
+}
 
 // ── Room-create workspace selector (pure, unit-testable) ───────────────────
 
@@ -158,7 +164,7 @@ pub(super) fn room_option_dom_id(key: &str) -> String {
     format!("rooms-opt-{key}")
 }
 
-/// Left rail: room listbox, list/create status line, and the new-room input.
+/// Left rail: room listbox, status line, and create/join entry controls.
 /// The create draft, its workspace choice, and its op-id admission state live
 /// here; nothing else in the workspace reads them.
 #[component]
@@ -174,6 +180,12 @@ pub(super) fn RoomListRail(
     on_close: Option<Callback<()>>,
 ) -> impl IntoView {
     let new_room_name = RwSignal::new(String::new());
+    let entry = RwSignal::new(None::<RoomEntry>);
+    let invitation = RwSignal::new(String::new());
+    let invite_error = RwSignal::new(false);
+    let invite_input_ref: NodeRef<leptos::html::Input> = NodeRef::new();
+    let entry_summary_ref: NodeRef<leptos::html::Summary> = NodeRef::new();
+    let entry_menu_ref: NodeRef<leptos::html::Details> = NodeRef::new();
     // Team-platform P6: the mentions inbox replaces the list while open.
     let inbox_open = RwSignal::new(false);
     let create_input_ref: NodeRef<leptos::html::Input> = NodeRef::new();
@@ -188,10 +200,23 @@ pub(super) fn RoomListRail(
         Memo::new(move |_| workspace_options(&projects.get(), picked_folder.get().as_deref()));
 
     Effect::new(move |_| {
-        if show_left_rail.get() {
-            request_animation_frame(move || {
-                if let Some(input) = create_input_ref.get() {
-                    let _ = input.focus();
+        let mode = entry.get();
+        if show_left_rail.get() || mode.is_some() {
+            request_animation_frame(move || match mode {
+                Some(RoomEntry::Create) => {
+                    if let Some(input) = create_input_ref.get() {
+                        let _ = input.focus();
+                    }
+                }
+                Some(RoomEntry::Join) => {
+                    if let Some(input) = invite_input_ref.get() {
+                        let _ = input.focus();
+                    }
+                }
+                None => {
+                    if let Some(summary) = entry_summary_ref.get() {
+                        let _ = summary.focus();
+                    }
                 }
             });
         }
@@ -203,6 +228,44 @@ pub(super) fn RoomListRail(
     //    prevents stale completions from overwriting later ops).
     let pending_create = RwSignal::new(false);
     let create_op_id: RwSignal<u64> = RwSignal::new(0);
+    let cancel_entry = move || {
+        if pending_create.get_untracked() || picker_pending.get_untracked() {
+            return;
+        }
+        invitation.set(String::new());
+        invite_error.set(false);
+        entry.set(None);
+        request_animation_frame(move || {
+            if let Some(summary) = entry_summary_ref.get() {
+                let _ = summary.focus();
+            }
+        });
+    };
+    let review_invitation = move || {
+        // Reuse the native-link parser. Pasting never redeems a code; the
+        // existing confirmation owns that explicit intent and its generation.
+        let raw = invitation.get_untracked();
+        let Some(crate::app::DeepLinkAction::RedeemRoomInvite { room_key, code }) =
+            crate::app::parse_deep_link(raw.trim())
+        else {
+            invite_error.set(true);
+            return;
+        };
+        rooms.stage_invite(room_key, code);
+        invitation.set(String::new());
+        invite_error.set(false);
+        entry.set(None);
+        show_left_rail.set(false);
+        request_animation_frame(move || {
+            if let Some(button) = web_sys::window()
+                .and_then(|window| window.document())
+                .and_then(|doc| doc.get_element_by_id("room-invite-confirm"))
+                .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok())
+            {
+                let _ = button.focus();
+            }
+        });
+    };
     let create_room = move || {
         // Prevent concurrent dispatch: if a create is already in flight,
         // ignore the keypress. The Effect clears pending_create when the
@@ -254,6 +317,7 @@ pub(super) fn RoomListRail(
                 workspace_choice.set(None);
                 picked_folder.set(None);
                 pending_create.set(false);
+                cancel_entry();
             }
             CreateResolution::KeepDraft => {
                 pending_create.set(false);
@@ -373,7 +437,7 @@ pub(super) fn RoomListRail(
                     } else if list.is_empty() {
                         view! {
                             <div class="rooms-workspace__left-empty">
-                                "No rooms yet. Create one below."
+                                "No rooms yet."
                             </div>
                         }.into_any()
                     } else {
@@ -510,8 +574,31 @@ pub(super) fn RoomListRail(
                 }
             }}
 
-            // Create input at bottom of left rail
-            <div class="rooms-workspace__left-create">
+            // One entry menu on every host; invitation codes stay in UI memory.
+            <div class="rooms-workspace__left-create"
+                on:keydown=move |ev| {
+                    if ev.key() == "Escape" && entry.get_untracked().is_some() {
+                        ev.prevent_default();
+                        ev.stop_propagation();
+                        cancel_entry();
+                    } else if ev.key() == "Escape" {
+                        if let Some(menu) = entry_menu_ref.get().filter(|menu| menu.open()) {
+                            ev.prevent_default();
+                            ev.stop_propagation();
+                            menu.set_open(false);
+                            if let Some(summary) = entry_summary_ref.get() { let _ = summary.focus(); }
+                        }
+                    }
+                }
+            >
+                <Show when=move || entry.get().is_none()>
+                    <details class="rooms-workspace__entry-menu" node_ref=entry_menu_ref>
+                        <summary node_ref=entry_summary_ref>"Add room"</summary>
+                        <button type="button" on:click=move |_| entry.set(Some(RoomEntry::Create))>"Create room"</button>
+                        <button type="button" on:click=move |_| entry.set(Some(RoomEntry::Join))>"Join room"</button>
+                    </details>
+                </Show>
+                <Show when=move || entry.get() == Some(RoomEntry::Create)>
                 <input
                     class="rooms-workspace__left-input"
                     type="text"
@@ -529,16 +616,17 @@ pub(super) fn RoomListRail(
                     }
                     disabled=move || pending_create.get()
                 />
+                <Show when=move || !new_room_name.get().trim().is_empty()>
                 <select
                     class="rooms-workspace__left-input rooms-workspace__left-workspace"
-                    aria-label="Workspace"
+                    aria-label="Project"
                     node_ref=workspace_select_ref
                     prop:value=move || workspace_choice.get().unwrap_or_default()
                     on:change=on_workspace_change
                     disabled=move || pending_create.get() || picker_pending.get()
                 >
                     <option value="" prop:selected=move || workspace_choice.get().is_none()>
-                        "No workspace"
+                        "Project (optional)"
                     </option>
                     <For
                         each=move || workspace_choices.get()
@@ -562,6 +650,51 @@ pub(super) fn RoomListRail(
                         <option value=CHOOSE_FOLDER_VALUE>"Choose folder…"</option>
                     })}
                 </select>
+                <button
+                    class="rooms-workspace__create-submit"
+                    type="button"
+                    disabled=move || pending_create.get() || picker_pending.get()
+                    on:click=move |_| create_room()
+                >
+                    {move || if pending_create.get() { "Creating…" } else { "Create" }}
+                </button>
+                </Show>
+                </Show>
+                <Show when=move || entry.get() == Some(RoomEntry::Join)>
+                    <input
+                        class="rooms-workspace__left-input"
+                        type="text"
+                        node_ref=invite_input_ref
+                        aria-label="Invitation link"
+                        placeholder="Invitation link"
+                        autocomplete="off"
+                        autocapitalize="none"
+                        inputmode="url"
+                        spellcheck="false"
+                        aria-invalid=move || invite_error.get().to_string()
+                        prop:value=move || invitation.get()
+                        on:input=move |ev| {
+                            invitation.set(event_target_value(&ev));
+                            invite_error.set(false);
+                        }
+                        on:keydown=move |ev| {
+                            if ev.key() == "Enter" { ev.prevent_default(); review_invitation(); }
+                        }
+                    />
+                    <Show when=move || invite_error.get()>
+                        <span class="rooms-workspace__entry-error" role="alert">"That invitation link is not valid."</span>
+                    </Show>
+                    <button class="rooms-workspace__create-submit" type="button"
+                        disabled=move || invitation.get().trim().is_empty()
+                        on:click=move |_| review_invitation()
+                    >"Continue"</button>
+                </Show>
+                <Show when=move || entry.get().is_some()>
+                    <button class="rooms-workspace__entry-cancel" type="button"
+                        disabled=move || pending_create.get() || picker_pending.get()
+                        on:click=move |_| cancel_entry()
+                    >"Cancel"</button>
+                </Show>
             </div>
         </div>
     }

@@ -93,6 +93,13 @@ participant retirement. One database file (`rooms.db`), one owning crate.
 
 ### Load-bearing invariants
 
+- `room_latest_attention_seq` is the Local room-list conversation frontier,
+  excluding only routine System convene/bootstrap/admission/output audit rows.
+  Exact case and label/space boundaries matter; human messages, failures and
+  authority changes remain attention. SQL filters before LIMIT without loading
+  a transcript. `room_latest_durable_seq`, cursors and all stored rows retain
+  their full sequence semantics.
+
 - **u64 as canonical decimal TEXT.** Counters, cursors, and sequences are
   stored via `write_u64_text` and re-read only through
   `parse_canonical_u64_text`; noncanonical text fails closed. Never compare

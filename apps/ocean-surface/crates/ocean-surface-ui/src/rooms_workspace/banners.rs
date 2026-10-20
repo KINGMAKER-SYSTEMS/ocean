@@ -14,7 +14,6 @@ pub(super) fn PendingInviteBanner(rooms: Rooms) -> impl IntoView {
             <div class="rooms-workspace__pending-invite" role="dialog" aria-label="Room invitation">
                 <div class="rooms-workspace__pending-invite-copy">
                     <strong>"Join shared room?"</strong>
-                    <span>"Review and join it through this Ocean."</span>
                 </div>
                 {move || {
                     let status = rooms.status.get();
@@ -23,6 +22,7 @@ pub(super) fn PendingInviteBanner(rooms: Rooms) -> impl IntoView {
                     })
                 }}
                 <button
+                    id="room-invite-confirm"
                     class="rooms-workspace__invite-button"
                     type="button"
                     disabled=move || rooms.pending_invite_joining()

@@ -30,6 +30,12 @@ elif name == "gh":
         sys.exit(int(os.environ.get("OCEAN_FIXTURE_TOKEN_EXIT", "0")))
     else: sys.exit(91)
 elif name in {"bun", "npm"}:
+    if name == "npm" and sys.argv[1:] == ["root", "--global"]:
+        print(root / "npm-global/node_modules")
+        sys.exit(0)
+    if name == "bun" and sys.argv[1:] == ["pm", "bin", "-g"]:
+        print(os.environ.get("OCEAN_FIXTURE_BUN_BIN", root / "bin"))
+        sys.exit(0)
     sys.exit(int(os.environ.get("OCEAN_FIXTURE_PACKAGE_EXIT", "0")))
 elif name in {"ocean", "ocean-daemon", "ocean-update"}:
     sys.exit(92) # Binaries may be located, never executed by preparation.
@@ -55,9 +61,19 @@ class Onboarding(unittest.TestCase):
             path = self.bin / name
             path.write_text(MOCK)
             path.chmod(0o755)
+        self.package = self.root / "npm-global/node_modules/@kingmaker-systems/ocean"
+        self.package.mkdir(parents=True)
+        bins = {"ocean": "bin/ocean", "ocean-daemon": "bin/ocean-daemon", "ocean-update": "ocean-update.sh"}
+        (self.package / "package.json").write_text(json.dumps({"name": "@kingmaker-systems/ocean", "bin": bins}))
+        for name, target in bins.items():
+            source = self.bin / name
+            dest = self.package / target
+            dest.parent.mkdir(exist_ok=True)
+            source.rename(dest)
+            source.symlink_to(dest)
         self.env = os.environ.copy()
         self.env.update(OCEAN_ONBOARD_FIXTURE_HOME=str(self.root), PATH=f"{self.bin}:/usr/bin:/bin")
-        for key in ["OCEAN_CONFIG_DIR", "XDG_CONFIG_HOME", "OCEAN_FIXTURE_PACKAGE_EXIT", "OCEAN_FIXTURE_TOKEN_EXIT"]:
+        for key in ["OCEAN_CONFIG_DIR", "XDG_CONFIG_HOME", "OCEAN_FIXTURE_PACKAGE_EXIT", "OCEAN_FIXTURE_TOKEN_EXIT", "OCEAN_FIXTURE_BUN_BIN"]:
             self.env.pop(key, None)
         self.member = self.root / ".config/ocean-rs/member.toml"
         self.npmrc = self.root / ".npmrc"
@@ -86,22 +102,127 @@ class Onboarding(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(self.member.parent.stat().st_mode), 0o700)
         self.assertEqual(stat.S_IMODE(self.npmrc.stat().st_mode), 0o600)
         self.assertIn("save-exact=true", self.npmrc.read_text())
-        self.assertEqual([c for c in self.calls() if c[0] == "bun"], [["bun", "add", "-g", "@risingtides-dev/ocean@latest"]])
+        self.assertEqual([c for c in self.calls() if c[0] == "bun"], [["bun", "add", "-g", "@kingmaker-systems/ocean@latest"], ["bun", "pm", "bin", "-g"]])
 
     def test_rerun_preserves_unrelated_npm_lines_without_duplicates(self):
-        self.npmrc.write_text("other=keep\n@risingtides-dev:registry=https://old.invalid\n//npm.pkg.github.com/:_authToken=old_fixture\n")
+        self.npmrc.write_text("other=keep\n@risingtides-dev:registry=https://npm.pkg.github.com\n@kingmaker-systems:registry=https://old.invalid\n//npm.pkg.github.com/:_authToken=old_fixture\n")
         self.run_script()
         before = self.npmrc.read_text(), self.member.read_text()
         self.run_script()
         self.assertEqual(before, (self.npmrc.read_text(), self.member.read_text()))
         self.assertEqual(self.npmrc.read_text().count("_authToken="), 1)
         self.assertIn("other=keep", self.npmrc.read_text())
+        self.assertIn("@risingtides-dev:registry=https://npm.pkg.github.com", self.npmrc.read_text())
+        self.assertEqual(self.npmrc.read_text().count("@kingmaker-systems:registry="), 1)
+        self.assertIn("@kingmaker-systems:registry=https://npm.pkg.github.com", self.npmrc.read_text())
 
     def test_dry_run_has_no_auth_network_or_mutations(self):
         self.run_script("--dry-run")
         self.assertFalse(self.npmrc.exists())
         self.assertFalse(self.member.parent.exists())
         self.assertTrue(all(c[0] == "uname" for c in self.calls()))
+
+    def test_npm_personal_package_blocks_before_credentials_or_mutations(self):
+        (self.bin / "bun").unlink()
+        npm = self.bin / "npm"
+        npm.write_text(MOCK)
+        npm.chmod(0o755)
+        (self.root / "npm-global/node_modules/@risingtides-dev/ocean").mkdir(parents=True)
+        result = self.run_script(success=False)
+        self.assertIn("npm pack @kingmaker-systems/ocean@latest", result.stderr)
+        self.assertIn("npm uninstall -g @risingtides-dev/ocean", result.stderr)
+        self.assertFalse(self.npmrc.exists())
+        self.assertFalse(self.member.exists())
+        self.assertFalse(any(c[0] == "gh" for c in self.calls()))
+        self.assertEqual([c for c in self.calls() if c[0] == "npm"], [["npm", "root", "--global"]])
+
+    def test_npm_org_install_after_personal_package_removal(self):
+        (self.bin / "bun").unlink()
+        npm = self.bin / "npm"
+        npm.write_text(MOCK)
+        npm.chmod(0o755)
+        self.run_script()
+        self.assertEqual([c for c in self.calls() if c[0] == "npm"], [
+            ["npm", "root", "--global"],
+            ["npm", "install", "-g", "@kingmaker-systems/ocean@latest"],
+        ])
+
+    def test_personal_npm_package_also_blocks_when_bun_is_available(self):
+        npm = self.bin / "npm"
+        npm.write_text(MOCK)
+        npm.chmod(0o755)
+        (self.root / "npm-global/node_modules/@risingtides-dev/ocean").mkdir(parents=True)
+        self.run_script(success=False)
+        self.assertFalse(self.npmrc.exists())
+        self.assertFalse(self.member.exists())
+        self.assertFalse(any(c[0] in {"bun", "gh"} for c in self.calls()))
+        self.assertEqual([c for c in self.calls() if c[0] == "npm"], [["npm", "root", "--global"]])
+
+    def test_personal_command_from_inactive_npm_prefix_blocks_before_auth(self):
+        npm = self.bin / "npm"
+        npm.write_text(MOCK)
+        npm.chmod(0o755)
+        manifest = self.package / "package.json"
+        data = json.loads(manifest.read_text())
+        data["name"] = "@risingtides-dev/ocean"
+        manifest.write_text(json.dumps(data))
+        self.run_script(success=False)
+        self.assertFalse(self.npmrc.exists())
+        self.assertFalse(self.member.exists())
+        self.assertFalse(any(c[0] in {"bun", "gh"} for c in self.calls()))
+
+    def test_nonpackage_command_shadowing_install_does_not_write_identity(self):
+        command = self.bin / "ocean"
+        command.unlink()
+        command.write_text(MOCK)
+        command.chmod(0o755)
+        self.run_script(success=False)
+        self.assertFalse(self.member.exists())
+
+    def test_mixed_org_installations_do_not_write_identity(self):
+        other = self.root / "another-org-install"
+        shutil.copytree(self.package, other)
+        command = self.bin / "ocean-update"
+        command.unlink()
+        command.symlink_to(other / "ocean-update.sh")
+        self.run_script(success=False)
+        self.assertFalse(self.member.exists())
+
+    def test_older_org_install_shadowing_updated_bun_does_not_write_identity(self):
+        other = self.root / "updated-bun-package"
+        shutil.copytree(self.package, other)
+        updated_bin = self.root / "updated-bun-bin"
+        updated_bin.mkdir()
+        for name, target in json.loads((other / "package.json").read_text())["bin"].items():
+            (updated_bin / name).symlink_to(other / target)
+        self.env["OCEAN_FIXTURE_BUN_BIN"] = str(updated_bin)
+        self.run_script(success=False)
+        self.assertFalse(self.member.exists())
+        self.env["PATH"] = f"{updated_bin}:{self.env['PATH']}"
+        self.run_script()
+        self.assertTrue(self.member.exists())
+
+    def test_older_org_install_shadowing_updated_npm_does_not_write_identity(self):
+        (self.bin / "bun").unlink()
+        npm = self.bin / "npm"
+        npm.write_text(MOCK)
+        npm.chmod(0o755)
+        other = self.root / "old-npm-package"
+        shutil.copytree(self.package, other)
+        for name, target in json.loads((other / "package.json").read_text())["bin"].items():
+            command = self.bin / name
+            command.unlink()
+            command.symlink_to(other / target)
+        self.run_script(success=False)
+        self.assertFalse(self.member.exists())
+
+    def test_wrong_package_bin_target_does_not_write_identity(self):
+        manifest = self.package / "package.json"
+        data = json.loads(manifest.read_text())
+        data["bin"]["ocean"] = "bin/ocean-daemon"
+        manifest.write_text(json.dumps(data))
+        self.run_script(success=False)
+        self.assertFalse(self.member.exists())
 
     def test_malformed_identity_fails_before_package_or_auth(self):
         self.member.parent.mkdir(parents=True)

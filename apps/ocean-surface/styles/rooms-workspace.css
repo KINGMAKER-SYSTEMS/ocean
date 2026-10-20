@@ -1282,9 +1282,8 @@
 
 /* ── Layout & depth (canonical) ──────────────────────────────────────
    The final say on rail geometry, density, and depth (team-platform P5).
-   Dark-first on the OCEAN depth ramp: a faint ocean glow at the top of the
-   timeline, raised active context, squircle avatars, quiet one-line system
-   rows, and a single elevated composer card. Tokens only. */
+   Dark-first on the OCEAN depth ramp: raised active context, quiet system
+   rows, a single elevated composer, and details opened on demand. Tokens only. */
 
 .rooms-workspace__left {
   flex-basis: 252px;
@@ -1308,8 +1307,10 @@
 
 .rooms-workspace__left-title,
 .rooms-workspace__right-title {
-  font-size: 11px;
-  letter-spacing: 0.11em;
+  font-size: 13px;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--fg-2);
 }
 
 .rooms-workspace__left-list {
@@ -1324,7 +1325,7 @@
 
 .rooms-workspace__room.is-active {
   background: var(--bg-elevated);
-  box-shadow: inset 2px 0 0 var(--accent), var(--elev-1);
+  box-shadow: none;
 }
 
 .rooms-workspace__room.is-active .rooms-workspace__room-name {
@@ -1332,8 +1333,9 @@
 }
 
 .rooms-workspace__left-create {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
   gap: 6px;
   padding: 12px;
   background: var(--bg-raised);
@@ -1342,6 +1344,75 @@
 .rooms-workspace__left-workspace {
   color: var(--fg-2);
   cursor: pointer;
+}
+
+.rooms-workspace__entry-menu summary,
+.rooms-workspace__entry-menu button,
+.rooms-workspace__entry-cancel {
+  padding: 8px 10px;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--fg-2);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rooms-workspace__entry-menu button {
+  display: block;
+  width: 100%;
+}
+
+.rooms-workspace__entry-menu summary:hover,
+.rooms-workspace__entry-menu button:hover,
+.rooms-workspace__entry-cancel:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__entry-menu summary:focus-visible,
+.rooms-workspace__entry-menu button:focus-visible,
+.rooms-workspace__entry-cancel:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.rooms-workspace__left-create > input,
+.rooms-workspace__left-create > select,
+.rooms-workspace__entry-menu,
+.rooms-workspace__entry-error { grid-column: 1 / -1; }
+
+.rooms-workspace__entry-cancel { order: 1; grid-column: 1; justify-self: start; }
+.rooms-workspace__entry-error { color: var(--fg); font-size: 12px; }
+
+.rooms-workspace__create-submit {
+  order: 2;
+  grid-column: 2;
+  align-self: flex-end;
+  height: 34px;
+  padding: 0 14px;
+  border: none;
+  border-radius: var(--radius);
+  background: var(--accent);
+  color: var(--fg-on-accent);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.rooms-workspace__create-submit:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.rooms-workspace__create-submit:hover:not(:disabled) {
+  background: var(--accent-bright);
+}
+
+.rooms-workspace__create-submit:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .rooms-workspace__left-input {
@@ -1354,15 +1425,11 @@
 
 .rooms-workspace__center {
   isolation: isolate;
-  background:
-    radial-gradient(120% 70% at 50% -20%,
-      color-mix(in srgb, var(--water-lo) 30%, transparent), transparent 62%),
-    var(--bg);
+  background: var(--bg);
 }
 
 .rooms-workspace__center-head {
-  background: color-mix(in srgb, var(--bg-raised) 88%, transparent);
-  backdrop-filter: blur(8px);
+  background: var(--bg);
 }
 
 .rooms-workspace__center-head {
@@ -1386,6 +1453,9 @@
 
 .rooms-workspace__msg:hover {
   background: color-mix(in srgb, var(--bg-hover) 65%, transparent);
+  margin: 0;
+  padding-left: 10px;
+  padding-right: 10px;
 }
 
 .rooms-workspace__msg-avatar,
@@ -1416,6 +1486,7 @@
   font-size: 14px;
   line-height: 1.55;
   white-space: pre-wrap;
+  max-width: 72ch;
 }
 
 /* System rows: one quiet line aligned to the text column — joins, leaves,
@@ -1451,7 +1522,7 @@
 .rooms-workspace__msg--system .rooms-workspace__msg-text {
   font-size: 12px;
   font-style: normal;
-  color: var(--fg-4);
+  color: var(--fg-3);
 }
 
 .rooms-workspace__msg--system .rooms-workspace__msg-name {
@@ -1459,9 +1530,8 @@
 }
 
 .rooms-workspace__msg--system .rooms-workspace__msg-text {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 /* Composer: one elevated card; the input is borderless inside it. */
@@ -1474,7 +1544,7 @@
 .rooms-workspace__composer-row {
   gap: 6px;
   padding: 4px 4px 4px 12px;
-  border: 1px solid var(--border-subtle);
+  border: none;
   border-radius: var(--radius-lg);
   background: var(--bg-elevated);
   box-shadow: var(--elev-1);
@@ -1512,8 +1582,13 @@
 }
 
 .rooms-workspace__right {
-  flex-basis: 236px;
-  box-shadow: inset 1px 0 0 var(--specular-soft);
+  display: none;
+  flex-basis: 300px;
+  box-shadow: none;
+}
+
+.rooms-workspace__right--open {
+  display: flex;
 }
 
 .rooms-workspace__right-list {

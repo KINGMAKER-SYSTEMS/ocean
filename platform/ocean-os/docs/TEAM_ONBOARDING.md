@@ -9,10 +9,15 @@ runtime behavior are separate outcomes.
 
 - macOS on Apple silicon, Python 3.11 or newer, and bun or npm.
 - GitHub CLI authenticated for the intended package with `read:packages` access.
-- A published `@risingtides-dev/ocean` version with verified package access.
+- A published `@kingmaker-systems/ocean` version with verified package access.
   The current package contains `ocean`, `ocean-daemon`, and `ocean-update`.
   See [the package contract](../packaging/npm/README.md); repository visibility
   alone does not establish package access or a published release.
+- Existing personal npm installations must complete the package guide's
+  download-first migration, even if Bun is also installed. Onboarding checks
+  for the old npm package before choosing a package manager or requesting
+  credentials, so an old command earlier on PATH cannot be mistaken for the
+  org installation.
 - An agreed member identifier and a supported model alias.
 - The identity route from PR41 must be reviewed, merged, and installed before
   the running daemon can project `member.toml` through `GET /v1/identity`.

@@ -40,9 +40,16 @@ manifest (`docs/specs/2026-07-17-observatory-gate1-implementation-manifest.md`).
   review doc's "F2 migration (2026-09-25)" section.
 - Retention never crosses the `first_cursor` of an admitted/running
   execution; a NULL `first_cursor` on such a row blocks pruning.
-- Secret and token files are published by write → `sync_all` → link/rename
+- On Unix, secret and token files are published by write → `sync_all` → link/rename
   → fsync of the parent directory; a new entry is not durable without the
   last step. Token claims need `expires_at > issued_at`.
+- Windows credential files use `src/auth_windows.rs`, also shared with daemon
+  operator-key storage. Creation installs a protected DACL granting only the
+  process user full access; handle checks refuse other owners, inherited/broad
+  ACLs, reparse points, directories and multiple links without repairing them.
+  Publication flushes and closes the temporary file before a same-volume
+  write-through move (no replacement for secret creation; replacement for token
+  rotation). This is not a claim of Unix directory-fsync or power-loss parity.
 - `envelope_json` is the replay/tail source of truth; the scalar columns are
   indexes over it, not a second copy the routes read.
 - Replay validates its retention boundary and reads the page under one
@@ -63,6 +70,8 @@ a schema change must not change them.
 
 - `cargo test -p ocean-observatory`
 - `cargo clippy -p ocean-observatory --all-targets -- -D warnings`
+- `cargo test --locked -p ocean-observatory auth` on native Windows exercises
+  ACL rejection, nontruncating creation, publication and token rotation.
 - `cargo test -p ocean-daemon observatory` for the route and adapter seams
 
 ## Child devlog Index

@@ -98,21 +98,8 @@ fn rooms_layout_is_compact() -> bool {
         .is_some_and(|width| width <= 650.0)
 }
 
-/// The right rail is an overlay through 1080px, independently of the
-/// room-list drawer's 650px breakpoint.
-fn right_rail_is_overlay(width: f64) -> bool {
-    width <= 1080.0
-}
-
-fn rooms_right_rail_is_overlay() -> bool {
-    web_sys::window()
-        .and_then(|window| window.inner_width().ok())
-        .and_then(|width| width.as_f64())
-        .is_some_and(right_rail_is_overlay)
-}
-
-fn right_rail_escape(overlay: bool, open: bool, default_prevented: bool) -> bool {
-    overlay && open && !default_prevented
+fn right_rail_escape(open: bool, default_prevented: bool) -> bool {
+    open && !default_prevented
 }
 
 /// Display name for an author/member id in the open room (tracked, so a late
@@ -185,11 +172,16 @@ pub fn RoomsWorkspace(
     let right_close_ref: NodeRef<leptos::html::Button> = NodeRef::new();
     let right_return_focus =
         StoredValue::new(send_wrapper::SendWrapper::new(None::<web_sys::HtmlElement>));
-    let remember_right_focus = move || {
-        let focused = web_sys::window()
-            .and_then(|window| window.document())
-            .and_then(|document| document.active_element())
-            .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok());
+    let remember_right_focus = move |target: Option<web_sys::EventTarget>| {
+        let focused = target
+            .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok())
+            .or_else(|| {
+                web_sys::window()
+                    .and_then(|window| window.document())
+                    .and_then(|document| document.active_element())
+                    .filter(|element| !matches!(element.tag_name().as_str(), "BODY" | "HTML"))
+                    .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok())
+            });
         right_return_focus.set_value(send_wrapper::SendWrapper::new(focused));
     };
     let right_open =
@@ -230,7 +222,10 @@ pub fn RoomsWorkspace(
         admission
     });
     Effect::new(move |_| {
-        if right_open() && rooms_right_rail_is_overlay() {
+        // Every rail is an explicit reveal, including the docked desktop rail.
+        // Safari does not focus mouse-clicked buttons by default; move focus
+        // inside so Escape reaches this workspace before the global handler.
+        if right_open() {
             request_animation_frame(move || {
                 if right_open() {
                     if let Some(close) = right_close_ref.get() {
@@ -243,7 +238,7 @@ pub fn RoomsWorkspace(
     // An inbox pick asks for a thread; open it once its root has loaded.
     Effect::new(move |_| {
         if let Some(root) = rooms.take_pending_thread_focus() {
-            remember_right_focus();
+            remember_right_focus(None);
             members_open.set(false);
             search_open.set(false);
             selected_thread_root_seq.set(Some(root));
@@ -285,7 +280,7 @@ pub fn RoomsWorkspace(
     let pending_read_advance = RwSignal::new(None::<ReadAdvanceRequest>);
     let refresh_handle = RwSignal::new(None::<IntervalHandle>);
     Effect::new(move |prev: Option<usize>| {
-        let len = transcript.with(|t| t.len());
+        let len = transcript.with(|t| room_messages::conversation_len(t));
         let open_key = rooms.open_key.get();
         // Track the access projection. For a `Live` room the durable candidate
         // is `last_confirmed_global_sequence`, which routinely lands *after*
@@ -642,7 +637,6 @@ pub fn RoomsWorkspace(
                     return;
                 }
                 if right_rail_escape(
-                    rooms_right_rail_is_overlay(),
                     right_open(),
                     ev.default_prevented(),
                 ) {
@@ -766,11 +760,11 @@ pub fn RoomsWorkspace(
                                             type="button"
                                             aria-label="Search"
                                             aria-pressed=move || search_open.get().to_string()
-                                            on:click=move |_| {
+                                            on:click=move |ev| {
                                                 if search_open.get_untracked() {
                                                     close_right();
                                                 } else {
-                                                    remember_right_focus();
+                                                    remember_right_focus(ev.current_target());
                                                     members_open.set(false);
                                                     selected_thread_root_seq.set(None);
                                                     show_left_rail.set(false);
@@ -925,7 +919,7 @@ pub fn RoomsWorkspace(
                                                             </time>
                                                         </div>
                                                         <div class="rooms-workspace__msg-text">
-                                                            {crate::room_markdown::body_view(m.body.clone(), member_ids)}
+                                                            {crate::room_markdown::body_view(room_messages::conversation_body(&m), member_ids)}
                                                         </div>
                                                         {move || {
                                                             if should_show_thread_button(&m) {
@@ -933,9 +927,9 @@ pub fn RoomsWorkspace(
                                                                 let thread_label = move || {
                                                                     let count = reply_count();
                                                                     if count > 0 {
-                                                                        format!("Open thread ({count})")
+                                                                        format!("{count} {}", if count == 1 { "reply" } else { "replies" })
                                                                     } else {
-                                                                        "Open thread".to_string()
+                                                                        "Reply".to_string()
                                                                     }
                                                                 };
                                                                 // Hover/focus action rail. ONLY real actions live
@@ -968,8 +962,8 @@ pub fn RoomsWorkspace(
                                                                             is_thread_open(selected_thread_root_seq.get(), root_seq)
                                                                                 .to_string()
                                                                         }
-                                                                        on:click=move |_| {
-                                                                            remember_right_focus();
+                                                                        on:click=move |ev| {
+                                                                            remember_right_focus(ev.current_target());
                                                                             members_open.set(false);
                                                                             search_open.set(false);
                                                                             selected_thread_root_seq.update(|selected| {
@@ -1163,19 +1157,10 @@ mod tests {
     }
 
     #[test]
-    fn right_rail_overlay_covers_all_collapsed_widths() {
-        for width in [390.0, 650.0, 900.0, 901.0, 1080.0] {
-            assert!(right_rail_is_overlay(width), "{width}");
-        }
-        assert!(!right_rail_is_overlay(1081.0));
-    }
-
-    #[test]
-    fn right_rail_escape_respects_nested_handlers_and_desktop_docking() {
-        assert!(right_rail_escape(true, true, false));
-        assert!(!right_rail_escape(true, true, true));
-        assert!(!right_rail_escape(true, false, false));
-        assert!(!right_rail_escape(false, true, false));
+    fn right_rail_escape_closes_explicit_panels_and_respects_nested_handlers() {
+        assert!(right_rail_escape(true, false));
+        assert!(!right_rail_escape(true, true));
+        assert!(!right_rail_escape(false, false));
     }
 
     #[test]
