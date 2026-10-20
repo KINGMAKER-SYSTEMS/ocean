@@ -2748,3 +2748,13 @@ type: [bug report]
 area: [backend] [testing]
 
 Native Windows probe 39326283845 passed all 20 credential tests, then exposed the next compiler blocker: the skill reader treated every non-Linux host as Unix. Added a Windows reader for absolute local-drive paths, retaining directory handles and opening each child relative to its parent with reparse refusal; device, UNC, parent-traversal and alternate-stream paths stay refused. Added actual-source native integration fixtures for guarded reads, parent retargeting and operator-key/header behavior; existing Unix skill reads remain unchanged. Windows cross-target Clippy passes; fresh native execution and review remain pending. Updated daemon and workflow contracts; no new devlog boundary or changed parent index. Release repair PR #115 merged at 50985671 after review and exact-head CI; immutable v0.2.1 validation/publication is running as 39328117964. No release availability or Windows runtime acceptance claimed.
+
+_________________________________________________________________________________
+time: [15:50] [10-19-26]
+agent: [claude code] [claude-fable-5-1]
+worktree: [port/surface-226-observatory-replay] [~/dev/oceanwork/wt-port]
+type: [fix] [port]
+area: [frontend]
+
+Ported Risingtides-dev/ocean-surface#226 (applied cleanly to the monorepo Surface). The Ocean Floor replay scrubber no longer asks `GET /v1/observatory/snapshot?at=` (which answers 409 `snapshot_not_historical` for any cursor before the watermark and read as "offline"); the new pure `observatory/replay.rs` pages `/v1/observatory/replay?after=&through=&limit=1000` from the earliest retained cursor, capped at 200 pages, and folds the events with the existing live reducer. `adapter.rs` replaces `snapshot_at` with `replay_to`, cancelled through the generation counter; a typed `FetchError` maps 409 and replay-range answers to a distinct "historical replay unavailable" state rather than a disconnect; `IntegrityState::Historical` marks an exact rebuild and pruned or unparseable history is labelled a gap. Validation: `cargo test -p ocean-surface-ui` 932 unit + integration suites pass, rustfmt clean; clippy was not run locally because the data volume hit ENOSPC mid-run, so the hosted Build Surface compile is the lint gate for this head.
+_________________________________________________________________________________
