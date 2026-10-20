@@ -2748,3 +2748,13 @@ type: [bug report]
 area: [backend] [testing]
 
 Native Windows probe 39326283845 passed all 20 credential tests, then exposed the next compiler blocker: the skill reader treated every non-Linux host as Unix. Added a Windows reader for absolute local-drive paths, retaining directory handles and opening each child relative to its parent with reparse refusal; device, UNC, parent-traversal and alternate-stream paths stay refused. Added actual-source native integration fixtures for guarded reads, parent retargeting and operator-key/header behavior; existing Unix skill reads remain unchanged. Windows cross-target Clippy passes; fresh native execution and review remain pending. Updated daemon and workflow contracts; no new devlog boundary or changed parent index. Release repair PR #115 merged at 50985671 after review and exact-head CI; immutable v0.2.1 validation/publication is running as 39328117964. No release availability or Windows runtime acceptance claimed.
+
+_________________________________________________________________________________
+time: [15:20] [10-19-26]
+agent: [claude code] [claude-fable-5-1]
+worktree: [port/os-440-rooms-definition-of-done] [~/dev/oceanwork/wt-port2]
+type: [docs] [port]
+area: [docs]
+
+Ported Risingtides-dev/ocean-os#440. Adds `docs/specs/2026-09-01-ocean-rooms-definition-of-done.md`, the cross-repository Rooms finish-line contract that `ocean-store/src/lib.rs` already cites (definition-of-done §4.1), plus the "Rooms and federation" section of `docs/OPERATIONS.md`. Indexed from `docs/README.md` (active plans), `docs/AGENTS.md` (child contract) and `ROADMAP.md` (near-term gaps); the ROADMAP's "Explicitly not implied" paragraph no longer lists room federation, which shipped in `room_federation.rs`. The spec records the open items as of 2026-09-01; the ROADMAP bullet says to re-verify each line against this tree before claiming it. Validation: `cargo xtask docs-check` PASS (30 packages, 162 active Markdown files, 187 local links).
+_________________________________________________________________________________

@@ -15,6 +15,14 @@ approved design or permission to alter public contracts.
       retains CLI-compatible hashline/artifact gates pending cross-repo policy.
 - [ ] Keep cross-repository session, voice, component, and room contracts under
       executable drift checks rather than prose-only synchronization.
+- [ ] Reach the production-grade finish line in
+      [`docs/specs/2026-09-01-ocean-rooms-definition-of-done.md`](docs/specs/2026-09-01-ocean-rooms-definition-of-done.md):
+      every line checked with its named executable check across ocean-os,
+      ocean-surface and ocean-bedrock. The spec records what was open on
+      2026-09-01 (operated daemon behind `main` with federation off, an empty
+      `PHASE1_SAFE_CAPABILITIES`, unauthenticated room routes, no room or
+      federation metrics, an incomplete room-route table, a red `cargo deny`);
+      re-verify each line against this tree before claiming it.
 
 ## Ocean Observatory
 
@@ -111,7 +119,9 @@ The active behavior-neutral daemon extraction is tracked in [`docs/DAEMON_REFACT
 
 ## Explicitly not implied
 
-This file does not approve legacy API removal, session schema changes, room
-federation, Longhouse economic policy, a daemon library, or a performance
-rewrite. Those require current evidence, a bounded design, compatibility gates,
+This file does not approve legacy API removal, session schema changes,
+Longhouse economic policy, a daemon library, or a performance rewrite. (Room
+federation is no longer on this list: it shipped in `room_federation.rs`, is
+operated per `docs/OPERATIONS.md`, and its remaining gaps are tracked by the
+rooms definition of done above.) Those require current evidence, a bounded design, compatibility gates,
 and independent review.
