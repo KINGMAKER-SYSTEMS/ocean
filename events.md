@@ -2928,3 +2928,12 @@ type: [bug report]
 area: [testing]
 
 Desktop candidate 58177ac2 passed actual Apple Silicon DMG content, system-library, legal-payload and isolated bundled-daemon checks locally. Hosted a454dafc Apple Silicon packaging passed. Windows built and extracted its NSIS installer, passed GUI/architecture/legal/static-CRT checks and actual isolated daemon startup, then correctly refused artifact publication because source cleanliness changed. Include changed paths in that refusal so the next native run can identify the generated-file defect; do not weaken the clean-source gate. Eight packaging fixtures pass. Packaging contracts are unchanged. Intel native packaging remains in progress; no install, signing or release publication.
+
+_________________________________________________________________________________
+time: [20:55] [19-10-26]
+agent: [Codex] [GPT-6]
+worktree: [codex/desktop-installer-repairs]
+type: [bug report]
+area: [testing]
+
+Native Windows diagnostic 39350277028 proves pinned Tauri 2.11.3 rewrites Cargo.toml from CRLF to LF before compilation. Parsed TOML is identical; the resulting SHA256 f775793a3f9813636f336528f30ac7d3373952e711ca37aa7d3afb791b0c70b2 equals the committed LF manifest, while the Windows status check reports it modified. Pin LF checkout for this one manifest with native .gitattributes rather than resetting source or weakening packaging cleanliness. Eight artifact checks and git attribute inspection pass. Surface and packaging contracts updated; parent ownership/index unchanged. Native Windows byte-stability proof and the actual installer rerun remain pending.

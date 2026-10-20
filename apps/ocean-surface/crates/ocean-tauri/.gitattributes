@@ -1,0 +1,2 @@
+# Tauri serializes this manifest with LF, including on Windows.
+Cargo.toml text eol=lf
