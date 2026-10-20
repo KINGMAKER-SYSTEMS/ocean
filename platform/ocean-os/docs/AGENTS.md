@@ -41,6 +41,10 @@ This child contract governs current architecture, operations, cross-repository r
   Package access targets `@kingmaker-systems/ocean`; personal npm installations
   require the package guide's explicit migration even when Bun is available.
 - Rooms means durable `/v1/rooms/persistent/*` collaboration plus the independent LiveKit token route; Track-0 projection-room material is historical.
+- `specs/2026-09-01-ocean-rooms-definition-of-done.md` is the active
+  cross-repository Rooms finish-line contract. It records member-visible,
+  executable acceptance criteria and remaining ownership across Ocean OS,
+  Surface, and Bedrock; it authorizes no implementation by itself.
 
 ## Proposed A3b amendment boundary
 
