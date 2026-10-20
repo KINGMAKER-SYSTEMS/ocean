@@ -910,6 +910,16 @@ Native desktop:
 
 The daemon must be running from `../ocean-os` for live agent behavior.
 
+Rooms Tauri acceptance scaffold: the `rooms-acceptance` Cargo feature adds the
+debug-only `ocean-rooms-acceptance` bin (WebDriver via the optional
+`tauri-plugin-wdio-webdriver`, its own `tauri.rooms-acceptance.conf.json`,
+`acceptance-dist/` and capability file). `lib.rs` refuses the feature in
+release builds with `compile_error!`, so production builds never carry it.
+`scripts/test-tauri-rooms.sh --validate` runs static/config checks only; the
+full Stage0 run (`test/tauri/rooms_stage0.py`) needs a dedicated macOS login
+with Accessibility permission and an isolated daemon binary, and must never
+point at the operator's live daemon.
+
 ## Cursor / VS Code Extension UI Contract
 
 - The editor composer uses one native model/effort disclosure. ACP mode metadata owns readiness and model-specific effort options; older bridges use the legacy vocabulary. Keep selected ids intact, retain missing/pinned choices, clear incompatible effort on explicit model changes, and preserve Escape focus restoration. Max must remain supported by settings, the command picker and prompt metadata.
