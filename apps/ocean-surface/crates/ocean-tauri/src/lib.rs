@@ -1353,14 +1353,73 @@ fn spawn_daemon(bin: &Path, initial_model: Option<&str>) -> Result<Child, String
 /// Never inherit the app's project or installation directory as a workspace.
 /// Keep explicitly configured relative paths relative to the launching app.
 fn daemon_process(bin: &Path, cwd: &Path) -> Result<ProcessCommand, String> {
+    let launch_dir =
+        std::env::current_dir().map_err(|e| format!("resolve daemon launch directory: {e}"))?;
+    daemon_process_with_environment(bin, cwd, &launch_dir, |key| std::env::var_os(key))
+}
+
+// Explicit runtime state/auth/input locations are relative to the launching
+// app, not the neutral workspace of its child. Keep this list aligned with the
+// runtime resolvers; never scan arbitrary environment values for path syntax.
+const DAEMON_PATH_OVERRIDES: &[&str] = &[
+    "OCEAN_CONFIG_DIR",
+    "XDG_CONFIG_HOME",
+    "OCEAN_AUTH_FILE",
+    "OCEAN_CODEX_AUTH_FILE",
+    "CLAUDE_CONFIG_DIR",
+    "OCEAN_DB_PATH",
+    "OCEAN_TITLES_DB_PATH",
+    "OCEAN_AGENTS_DIR",
+    "OCEAN_PLUGINS_DIR",
+    "OCEAN_ASSISTANTS_DIR",
+    "OCEAN_SKILLS_DIR",
+    "OCEAN_PROMPT_CAPTURE_DIR",
+];
+
+fn daemon_process_with_environment(
+    bin: &Path,
+    cwd: &Path,
+    launch_dir: &Path,
+    environment: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Result<ProcessCommand, String> {
     let bin = if bin.is_relative() && bin.components().count() > 1 {
-        std::env::current_dir()
-            .map_err(|e| format!("resolve daemon path: {e}"))?
-            .join(bin)
+        launch_dir.join(bin)
     } else {
         bin.to_path_buf()
     };
     let mut command = ProcessCommand::new(bin);
+    for key in DAEMON_PATH_OVERRIDES {
+        let Some(value) = environment(key) else {
+            continue;
+        };
+        // Preserve runtime empty-value sentinels, particularly Claude's explicit
+        // refusal to fall back to the default account when its path is blank.
+        if value.is_empty()
+            || (matches!(*key, "OCEAN_DB_PATH" | "OCEAN_TITLES_DB_PATH") && value == ":memory:")
+            || (*key == "CLAUDE_CONFIG_DIR"
+                && value.to_str().is_some_and(|value| value.trim().is_empty()))
+        {
+            continue;
+        }
+        if matches!(*key, "OCEAN_DB_PATH" | "OCEAN_TITLES_DB_PATH") {
+            if let Some(uri) = value.to_str().filter(|value| value.starts_with("file:")) {
+                preserve_database_uri(uri).map_err(|_| {
+                    format!("{key} requires an absolute file URI or an in-memory database URI")
+                })?;
+                continue;
+            }
+        }
+        let path = PathBuf::from(value);
+        if path.is_relative() {
+            let anchored = launch_dir.join(path);
+            if !anchored.is_absolute() {
+                return Err(format!(
+                    "cannot resolve relative daemon path override {key}"
+                ));
+            }
+            command.env(key, anchored);
+        }
+    }
     command.current_dir(cwd).stdin(Stdio::null());
     #[cfg(windows)]
     {
@@ -1369,6 +1428,34 @@ fn daemon_process(bin: &Path, cwd: &Path) -> Result<ProcessCommand, String> {
         command.creation_flags(0x0800_0000);
     }
     Ok(command)
+}
+
+// SQLite recognizes file: URIs before ordinary paths. Never turn an in-memory
+// database or its query options into a literal filename. Relative disk URIs
+// require an explicit absolute URI because URL joining would change SQLite's
+// URI grammar and query semantics. Keep the original bytes for admitted URIs.
+fn preserve_database_uri(uri: &str) -> Result<(), ()> {
+    let parsed = tauri::Url::parse(uri).map_err(|_| ())?;
+    let raw_path = uri
+        .strip_prefix("file:")
+        .ok_or(())?
+        .split(['?', '#'])
+        .next()
+        .ok_or(())?;
+    let modes: Vec<_> = parsed
+        .query_pairs()
+        .filter(|(key, _)| key == "mode")
+        .map(|(_, value)| value)
+        .collect();
+    if raw_path == ":memory:"
+        || (modes.len() == 1 && modes[0] == "memory")
+        || raw_path.starts_with('/')
+        || Path::new(raw_path).is_absolute()
+    {
+        Ok(())
+    } else {
+        Err(())
+    }
 }
 
 /// Blocking TCP connect probe — `true` when something is accepting on
@@ -1951,6 +2038,153 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    #[test]
+    fn daemon_child_path_overrides_keep_launch_locations() {
+        use std::ffi::OsStr;
+        let launch = tempfile::tempdir().unwrap();
+        let neutral = tempfile::tempdir().unwrap();
+        let absolute = launch.path().join("absolute");
+        for value in [OsStr::new("./state"), absolute.as_os_str(), OsStr::new("")] {
+            let command = daemon_process_with_environment(
+                Path::new("./bin/ocean-daemon"),
+                neutral.path(),
+                launch.path(),
+                |_| Some(value.to_owned()),
+            )
+            .unwrap();
+            assert_eq!(
+                command.get_program(),
+                launch.path().join("./bin/ocean-daemon")
+            );
+            assert_eq!(command.get_current_dir(), Some(neutral.path()));
+            let values: std::collections::BTreeMap<_, _> = command.get_envs().collect();
+            if value == OsStr::new("./state") {
+                for key in DAEMON_PATH_OVERRIDES {
+                    assert_eq!(
+                        values[OsStr::new(key)],
+                        Some(launch.path().join(value).as_os_str())
+                    );
+                }
+                assert_eq!(values.len(), DAEMON_PATH_OVERRIDES.len());
+            } else {
+                // Absolute paths and blank sentinels retain their inherited bytes.
+                assert!(values.is_empty());
+            }
+        }
+        let command = daemon_process_with_environment(
+            Path::new("ocean-daemon"),
+            neutral.path(),
+            launch.path(),
+            |key| (key == "CLAUDE_CONFIG_DIR").then(|| " \t".into()),
+        )
+        .unwrap();
+        assert_eq!(command.get_program(), OsStr::new("ocean-daemon"));
+        assert_eq!(command.get_envs().count(), 0);
+        let command = daemon_process_with_environment(
+            Path::new("ocean-daemon"),
+            neutral.path(),
+            launch.path(),
+            |key| {
+                matches!(key, "OCEAN_DB_PATH" | "OCEAN_TITLES_DB_PATH").then(|| ":memory:".into())
+            },
+        )
+        .unwrap();
+        // SQLite's in-memory filename must never become an on-disk path.
+        assert_eq!(command.get_envs().count(), 0);
+    }
+
+    #[test]
+    fn daemon_child_database_uris_keep_sqlite_semantics() {
+        let launch = tempfile::tempdir().unwrap();
+        let neutral = tempfile::tempdir().unwrap();
+        let absolute_uri = tauri::Url::from_file_path(launch.path().join("rooms.db"))
+            .unwrap()
+            .to_string();
+        for key in ["OCEAN_DB_PATH", "OCEAN_TITLES_DB_PATH"] {
+            for uri in [
+                ":memory:",
+                "file::memory:?cache=shared",
+                "file:named?mode=memory&cache=shared",
+                "file:named?cache=shared&mode=%6Demory",
+                absolute_uri.as_str(),
+            ] {
+                let command = daemon_process_with_environment(
+                    Path::new("ocean-daemon"),
+                    neutral.path(),
+                    launch.path(),
+                    |candidate| (candidate == key).then(|| uri.into()),
+                )
+                .unwrap();
+                assert_eq!(command.get_envs().count(), 0, "{key}: {uri}");
+            }
+            for uri in [
+                "file:relative.db",
+                "file:relative.db?mode=rwc",
+                "file:relative.db?comment=mode%3Dmemory",
+                "file:relative.db?mode=memory&mode=ro",
+            ] {
+                let error = daemon_process_with_environment(
+                    Path::new("ocean-daemon"),
+                    neutral.path(),
+                    launch.path(),
+                    |candidate| (candidate == key).then(|| uri.into()),
+                )
+                .unwrap_err();
+                assert_eq!(
+                    error,
+                    format!("{key} requires an absolute file URI or an in-memory database URI")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn daemon_child_reads_state_from_launch_directory() {
+        const PROBE: &str = "OCEAN_TEST_STARTUP_ENV_PROBE";
+        if std::env::var_os(PROBE).is_some() {
+            let state = PathBuf::from(std::env::var_os("OCEAN_CONFIG_DIR").unwrap());
+            assert_eq!(
+                std::fs::read_to_string(state.join("last_model")).unwrap(),
+                "fixture-model"
+            );
+            assert_ne!(
+                state.parent(),
+                Some(std::env::current_dir().unwrap().as_path())
+            );
+            return;
+        }
+        let launch = tempfile::tempdir().unwrap();
+        let neutral = tempfile::tempdir().unwrap();
+        std::fs::create_dir(launch.path().join("state")).unwrap();
+        std::fs::write(launch.path().join("state/last_model"), "fixture-model").unwrap();
+        let mut command = daemon_process_with_environment(
+            &std::env::current_exe().unwrap(),
+            neutral.path(),
+            launch.path(),
+            |key| (key == "OCEAN_CONFIG_DIR").then(|| "state".into()),
+        )
+        .unwrap();
+        let overrides: Vec<_> = command
+            .get_envs()
+            .map(|(key, value)| (key.to_owned(), value.unwrap().to_owned()))
+            .collect();
+        // Child fixture gets only synthetic paths, never ambient credentials.
+        command.env_clear().envs(overrides).env(PROBE, "1");
+        let output = command
+            .args([
+                "--exact",
+                "tests::daemon_child_reads_state_from_launch_directory",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(!neutral.path().join("state").exists());
     }
 
     // Run a real disposable child so exit tests prove process termination on

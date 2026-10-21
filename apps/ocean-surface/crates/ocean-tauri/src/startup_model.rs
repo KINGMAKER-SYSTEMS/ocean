@@ -120,13 +120,15 @@ fn apply_with_environment(
     explicit: Option<&str>,
     default: Option<&str>,
 ) {
+    // Blank explicit values must not shadow a persisted/default daemon choice,
+    // including when the desktop has no saved selection of its own.
+    if explicit.is_some_and(|value| value.trim().is_empty()) {
+        command.env_remove("OCEAN_MODEL");
+    }
     // This is a fallback only. The daemon's explicit and persisted choices win.
     if let Some(model) = model {
         if default.is_none_or(|value| value.trim().is_empty()) {
             command.env("OCEAN_DEFAULT_MODEL", model);
-        }
-        if explicit.is_some_and(|value| value.trim().is_empty()) {
-            command.env_remove("OCEAN_MODEL");
         }
     }
 }
@@ -152,6 +154,25 @@ mod tests {
             values[std::ffi::OsStr::new("OCEAN_DEFAULT_MODEL")],
             Some(std::ffi::OsStr::new("openai/gpt-4o"))
         );
+    }
+
+    #[test]
+    fn startup_model_without_desktop_selection_preserves_daemon_precedence() {
+        for explicit in [None, Some(""), Some(" \t\n"), Some("openai/gpt-4o")] {
+            for default in [None, Some(""), Some("openai/gpt-4o-mini")] {
+                let mut command = std::process::Command::new("inert-fixture");
+                apply_with_environment(&mut command, None, explicit, default);
+                let values: std::collections::BTreeMap<_, _> = command.get_envs().collect();
+                if explicit.is_some_and(|value| value.trim().is_empty()) {
+                    assert_eq!(values.len(), 1);
+                    assert_eq!(values[std::ffi::OsStr::new("OCEAN_MODEL")], None);
+                } else {
+                    assert!(values.is_empty());
+                }
+                // No desktop choice may manufacture/replace a daemon default.
+                assert!(!values.contains_key(std::ffi::OsStr::new("OCEAN_DEFAULT_MODEL")));
+            }
+        }
     }
 
     #[test]
