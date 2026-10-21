@@ -122,7 +122,10 @@ Native surface direction:
   Children run from the absolute home/profile (or OS temporary directory),
   never the app's inherited workspace; Windows children have no console window.
   Explicit nonempty relative runtime state/auth/input path overrides are anchored
-  to the app's launch directory before changing child cwd; absolute paths and
+  to the app's launch directory before changing child cwd. Resolve that directory
+  lazily, once, only for relative executable/path overrides; unavailable inherited
+  cwd must not reject absolute or PATH launches, and required relative paths fail
+  without a substitute base. Absolute paths and
   blank runtime sentinels retain their meaning. The native host environment and
   operating-system home remain unchanged. The allowlist in `lib.rs` covers Ocean
   and XDG state, Ocean/Codex/Claude auth, room/title databases, agent/plugin/
