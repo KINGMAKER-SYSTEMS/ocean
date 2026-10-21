@@ -118,7 +118,10 @@ Native surface direction:
   blank runtime sentinels retain their meaning. The native host environment and
   operating-system home remain unchanged. The allowlist in `lib.rs` covers Ocean
   and XDG state, Ocean/Codex/Claude auth, room/title databases, agent/plugin/
-  assistant/skill roots and prompt capture. Verify with `cargo test --lib daemon_child`.
+  assistant/skill roots and prompt capture. SQLite `:memory:`, in-memory `file:`
+  URIs (including parsed `mode=memory`) and absolute `file:` URIs retain their
+  original bytes; relative disk `file:` URIs fail before spawn and require an
+  explicit absolute URI. Verify with `cargo test --lib daemon_child`.
   Home/profile also owns native daemon logs. Verify native launch with
   `cargo test --lib daemon_` from `crates/ocean-tauri`.
   A native-process `OCEAN_DAEMON_LOG` may select an absolute log file for

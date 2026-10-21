@@ -1398,6 +1398,14 @@ fn daemon_process_with_environment(
         {
             continue;
         }
+        if matches!(*key, "OCEAN_DB_PATH" | "OCEAN_TITLES_DB_PATH") {
+            if let Some(uri) = value.to_str().filter(|value| value.starts_with("file:")) {
+                preserve_database_uri(uri).map_err(|_| {
+                    format!("{key} requires an absolute file URI or an in-memory database URI")
+                })?;
+                continue;
+            }
+        }
         let path = PathBuf::from(value);
         if path.is_relative() {
             let anchored = launch_dir.join(path);
@@ -1417,6 +1425,34 @@ fn daemon_process_with_environment(
         command.creation_flags(0x0800_0000);
     }
     Ok(command)
+}
+
+// SQLite recognizes file: URIs before ordinary paths. Never turn an in-memory
+// database or its query options into a literal filename. Relative disk URIs
+// require an explicit absolute URI because URL joining would change SQLite's
+// URI grammar and query semantics. Keep the original bytes for admitted URIs.
+fn preserve_database_uri(uri: &str) -> Result<(), ()> {
+    let parsed = tauri::Url::parse(uri).map_err(|_| ())?;
+    let raw_path = uri
+        .strip_prefix("file:")
+        .ok_or(())?
+        .split(['?', '#'])
+        .next()
+        .ok_or(())?;
+    let modes: Vec<_> = parsed
+        .query_pairs()
+        .filter(|(key, _)| key == "mode")
+        .map(|(_, value)| value)
+        .collect();
+    if raw_path == ":memory:"
+        || (modes.len() == 1 && modes[0] == "memory")
+        || raw_path.starts_with('/')
+        || Path::new(raw_path).is_absolute()
+    {
+        Ok(())
+    } else {
+        Err(())
+    }
 }
 
 /// Blocking TCP connect probe — `true` when something is accepting on
@@ -2054,6 +2090,51 @@ mod tests {
         .unwrap();
         // SQLite's in-memory filename must never become an on-disk path.
         assert_eq!(command.get_envs().count(), 0);
+    }
+
+    #[test]
+    fn daemon_child_database_uris_keep_sqlite_semantics() {
+        let launch = tempfile::tempdir().unwrap();
+        let neutral = tempfile::tempdir().unwrap();
+        let absolute_uri = tauri::Url::from_file_path(launch.path().join("rooms.db"))
+            .unwrap()
+            .to_string();
+        for key in ["OCEAN_DB_PATH", "OCEAN_TITLES_DB_PATH"] {
+            for uri in [
+                ":memory:",
+                "file::memory:?cache=shared",
+                "file:named?mode=memory&cache=shared",
+                "file:named?cache=shared&mode=%6Demory",
+                absolute_uri.as_str(),
+            ] {
+                let command = daemon_process_with_environment(
+                    Path::new("ocean-daemon"),
+                    neutral.path(),
+                    launch.path(),
+                    |candidate| (candidate == key).then(|| uri.into()),
+                )
+                .unwrap();
+                assert_eq!(command.get_envs().count(), 0, "{key}: {uri}");
+            }
+            for uri in [
+                "file:relative.db",
+                "file:relative.db?mode=rwc",
+                "file:relative.db?comment=mode%3Dmemory",
+                "file:relative.db?mode=memory&mode=ro",
+            ] {
+                let error = daemon_process_with_environment(
+                    Path::new("ocean-daemon"),
+                    neutral.path(),
+                    launch.path(),
+                    |candidate| (candidate == key).then(|| uri.into()),
+                )
+                .unwrap_err();
+                assert_eq!(
+                    error,
+                    format!("{key} requires an absolute file URI or an in-memory database URI")
+                );
+            }
+        }
     }
 
     #[test]
