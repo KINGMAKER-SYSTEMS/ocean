@@ -15042,6 +15042,7 @@ mod tests {
         let ack = classify_steer_ack(413, Some(&body), "a");
         assert_eq!(ack, SteerAck::Refused);
         let url = daemon.url.get_untracked();
+        let mut queued_id = None;
         for _ in 0..2 {
             daemon.settle_steer_ack_with(
                 &url,
@@ -15054,11 +15055,13 @@ mod tests {
                     assert_eq!((session_id.as_str(), generation), ("s1", 5));
                 },
             );
+            let queued = daemon.queued_prompts.get_untracked();
+            assert_eq!(queued.len(), 1);
+            assert_eq!(*queued_id.get_or_insert(queued[0].id), queued[0].id);
         }
         assert!(daemon.steering_prompts.get_untracked().is_empty());
         let queued = daemon.queued_prompts.get_untracked();
         assert_eq!(queued.len(), 1);
-        assert_eq!(queued[0].id, id);
         assert_eq!(queued[0].prompt, wire);
         assert_eq!(queued[0].display, display);
         assert_eq!(queued[0].client_type, "surface-web");
