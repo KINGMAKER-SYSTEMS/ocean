@@ -1590,7 +1590,7 @@ pub fn App() -> impl IntoView {
             }
             sig.set(Some(s));
             if became_available {
-                reconnect.connect();
+                reconnect.reconnect_session();
                 reconnect.fetch_models();
                 reconnect.fetch_projects();
             }
