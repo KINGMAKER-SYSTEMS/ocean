@@ -74,6 +74,22 @@ fn model_choices(mut models: Vec<ModelInfo>) -> Vec<ModelInfo> {
     models
 }
 
+fn model_option(models: &[ModelInfo], id: &str) -> (bool, String) {
+    let Some(model) = models.iter().find(|model| model.id == id) else {
+        return (true, id.to_owned());
+    };
+    let label = model_label(std::slice::from_ref(model), id);
+    let unavailable = model.ready == Some(false);
+    (
+        unavailable,
+        if unavailable {
+            format!("{label} · connect {}", model.provider)
+        } else {
+            label
+        },
+    )
+}
+
 /// Native startup intent is available before the daemon's model API exists.
 /// Once connected, the ordinary composer control below owns model selection.
 #[component]
@@ -178,7 +194,12 @@ pub fn ModelControl(daemon: Daemon) -> impl IntoView {
             .unwrap_or_else(|| current.get().unwrap_or_default())
     };
     view! {
-        <details class="ocean-model-control" on:keydown=move |event| {
+        <details class="ocean-model-control" on:toggle=move |event: web_sys::Event| {
+            if event.current_target().and_then(|target| target.dyn_into::<web_sys::Element>().ok())
+                .is_some_and(|details| details.has_attribute("open")) {
+                daemon.with_value(|daemon| daemon.fetch_models());
+            }
+        } on:keydown=move |event| {
             if event.key() == "Escape" {
                 if let Some(target) = event.target().and_then(|target| target.dyn_into::<web_sys::Element>().ok()) {
                     if let Ok(Some(details)) = target.closest("details") {
@@ -219,11 +240,11 @@ pub fn ModelControl(daemon: Daemon) -> impl IntoView {
                         </Show>
                         <For each=move || model_choices(models.get()) key=|model| model.id.clone() children=move |model| {
                             let id = model.id.clone();
-                            let label = model_label(std::slice::from_ref(&model), &id);
-                            let unavailable = model.ready == Some(false);
+                            let lookup_id = id.clone();
+                            let option = Memo::new(move |_| model_option(&models.get(), &lookup_id));
                             view! {
-                                <option value=id.clone() disabled=unavailable prop:selected=move || selected.get().is_some_and(|selected| choice_id(&models.get(), &selected) == id)>
-                                    {if unavailable { format!("{label} · connect {}", model.provider) } else { label }}
+                                <option value=id.clone() disabled=move || option.get().0 prop:selected=move || selected.get().is_some_and(|selected| choice_id(&models.get(), &selected) == id)>
+                                    {move || option.get().1}
                                 </option>
                             }
                         } />
@@ -257,6 +278,33 @@ pub fn ModelControl(daemon: Daemon) -> impl IntoView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_readiness_option_reacts_without_replacing_its_identity() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let models = RwSignal::new(vec![
+                serde_json::from_value::<ModelInfo>(serde_json::json!({
+                    "id": "codex/model", "label": "Model", "provider": "codex", "ready": false
+                }))
+                .unwrap(),
+            ]);
+            // This memo is retained by the keyed option when the id stays equal.
+            let option = Memo::new(move |_| model_option(&models.get(), "codex/model"));
+            assert_eq!(option.get(), (true, "Model · connect codex".into()));
+            models.update(|models| {
+                models[0].ready = Some(true);
+                models[0].label = "Connected model".into();
+            });
+            assert_eq!(option.get(), (false, "Connected model".into()));
+            models.update(|models| models[0].ready = Some(false));
+            assert_eq!(
+                option.get(),
+                (true, "Connected model · connect codex".into())
+            );
+        });
+        owner.cleanup();
+    }
 
     #[test]
     fn new_always_thinking_models_do_not_offer_off_or_minimal() {

@@ -224,7 +224,10 @@ token to browser code, bundle it, or cache it in client storage.
   current state. New intent retires older list replies. Reads poll only while a
   login is pending; mutations never retry automatically. Credential availability
   means Connected, not verified provider inference. Model readiness refreshes
-  after projected account changes.
+  after projected account changes and when the model disclosure opens, including
+  after browser login completes with Accounts closed. Opening does not select a
+  provider or continue the closed dialog's poll. Latest model requests share a
+  generation guard and require the same resolved endpoint before publication.
 - Verify native `cargo test --lib provider_accounts`, UI `cargo test -p
   ocean-surface-ui accounts`, the real WASM bundle and rendered native dialog.
 
@@ -272,6 +275,8 @@ token to browser code, bundle it, or cache it in client storage.
   entries, retain compatibility when an older daemon omits readiness, and
   preserve pinned ids while the catalog loads. Readiness proves credentials,
   not provider entitlement or successful inference.
+  Stable-id model options derive readiness and labels reactively from the latest
+  catalog; refreshes leave drafts, model overrides and reasoning effort intact.
 - Use additive daemon `effort_levels` metadata for model-specific choices,
   including max on current models. Older daemons retain the existing fallback
   vocabulary based on the wire model even for qualified saved ids. Explicit
