@@ -2030,6 +2030,8 @@ pub struct Daemon {
     /// so reconnect/switch/new-session calls retire older streams instead of
     /// applying every delta multiple times.
     sse_generation: RwSignal<u64>,
+    /// Latest full-session read, independent of SSE activity and permission-only reads.
+    session_projection_epoch: RwSignal<u64>,
     /// Monotonic session-INTENT generation, distinct from `sse_generation`. It is
     /// bumped whenever the user establishes a new cockpit focus — a New Session or
     /// a switch to another session — but NOT by a session's own `connect()`. A
@@ -2533,6 +2535,8 @@ enum ProjectionOutcome {
     Live,
 }
 
+const SESSION_PROJECTION_RETIRED: &str = "session projection superseded";
+
 const SESSION_PROJECTION_ACTIVITY_CHANGED: &str =
     "session activity changed while loading; retrying authoritative snapshot";
 
@@ -2562,6 +2566,7 @@ impl Daemon {
             livekit_token_path: RwSignal::new(String::new()),
             tldraw_sync_uri: RwSignal::new(String::new()),
             sse_generation: RwSignal::new(0),
+            session_projection_epoch: RwSignal::new(0),
             session_intent_generation: RwSignal::new(0),
             agent_stream_ready: RwSignal::new(None),
             permission_stream_ready: RwSignal::new(None),
@@ -2651,6 +2656,7 @@ impl Daemon {
             livekit_token_path: RwSignal::new(String::new()),
             tldraw_sync_uri: RwSignal::new(String::new()),
             sse_generation: RwSignal::new(0),
+            session_projection_epoch: RwSignal::new(0),
             session_intent_generation: RwSignal::new(0),
             agent_stream_ready: RwSignal::new(None),
             permission_stream_ready: RwSignal::new(None),
@@ -5040,6 +5046,7 @@ impl Daemon {
                         daemon.start_sync_poll(id.clone(), generation);
                         return;
                     }
+                    Err(error) if error == SESSION_PROJECTION_RETIRED => return,
                     Err(error) if error == SESSION_PROJECTION_ACTIVITY_CHANGED && attempt < 3 => {
                         // An admitted lifecycle event raced the HTTP snapshot.
                         // Retry from a fresh revision rather than publishing it.
@@ -5117,15 +5124,68 @@ impl Daemon {
         id: &str,
         generation: u64,
     ) -> Result<ProjectionOutcome, String> {
-        let snapshot_activity_revision = self.activity_revision.get_untracked();
-        // Claim this session-load's permission-projection epoch up front, BEFORE
-        // either fetch. A standalone reconcile that starts later claims a higher
-        // epoch and supersedes us, so our (older) permission publish will be
-        // skipped rather than resurrect a gate the newer reconcile resolved
-        // (codex HOLD on 8b41fee1). The transcript projection commits regardless.
-        let permission_epoch_claim = self.claim_permission_epoch();
-        let url = self.url.get_untracked();
+        self.commit_session_projection_with(
+            id,
+            generation,
+            self.fetch_session_projection(id, generation),
+        )
+        .await
+    }
 
+    /// Claims the complete read before polling either fetch. A newer full-session
+    /// read retires success AND failure, including their caller's poll/status effects.
+    /// Permission-only reads retain their separate epoch and do not retire transcript reads.
+    async fn commit_session_projection_with(
+        &self,
+        id: &str,
+        generation: u64,
+        fetch: impl std::future::Future<Output = Result<(SessionDetail, SnapshotSettle), String>>,
+    ) -> Result<ProjectionOutcome, String> {
+        if admit_session_snapshot(
+            id,
+            generation,
+            self.session_id.get_untracked().as_deref(),
+            self.sse_generation.get_untracked(),
+        ) == SnapshotAdmission::Discard
+        {
+            return Err(SESSION_PROJECTION_RETIRED.into());
+        }
+        self.session_projection_epoch
+            .update(|epoch| *epoch = epoch.wrapping_add(1));
+        let projection_epoch = self.session_projection_epoch.get_untracked();
+        let snapshot_activity_revision = self.activity_revision.get_untracked();
+        let permission_epoch_claim = self.claim_permission_epoch();
+        let result = fetch.await;
+        // Check before inspecting an error or touching ANY projection signal.
+        // No await separates this admission from apply_session_projection.
+        if projection_epoch != self.session_projection_epoch.get_untracked()
+            || admit_session_snapshot(
+                id,
+                generation,
+                self.session_id.get_untracked().as_deref(),
+                self.sse_generation.get_untracked(),
+            ) == SnapshotAdmission::Discard
+        {
+            return Err(SESSION_PROJECTION_RETIRED.into());
+        }
+        let (detail, settle) = result?;
+        apply_session_projection(
+            &self.commit_signals(),
+            id,
+            generation,
+            snapshot_activity_revision,
+            permission_epoch_claim,
+            detail,
+            settle,
+        )
+    }
+
+    async fn fetch_session_projection(
+        &self,
+        id: &str,
+        generation: u64,
+    ) -> Result<(SessionDetail, SnapshotSettle), String> {
+        let url = self.url.get_untracked();
         // 1. Authoritative session snapshot (transcript + atomic live-turn state).
         let get_url = format!(
             "{}/v1/sessions/{}",
@@ -5188,20 +5248,7 @@ impl Daemon {
             log::warn!("session projection permission snapshot degraded for {id}: {reason}");
         }
 
-        // Both HTTP awaits are done; the rest is the synchronous post-fetch
-        // commit (final admission recheck, full transcript rebuild, and
-        // the atomic signal commit incl. the two-state permission publish),
-        // extracted so it is drivable in a native test with injected fetch
-        // results (codex HOLD on c2a1810).
-        apply_session_projection(
-            &self.commit_signals(),
-            id,
-            generation,
-            snapshot_activity_revision,
-            permission_epoch_claim,
-            detail,
-            settle,
-        )
+        Ok((detail, settle))
     }
 
     /// Bundle the live signals `apply_session_projection` reads and writes.
@@ -11765,6 +11812,154 @@ mod tests {
         let epoch = daemon.claim_permission_epoch();
         apply_session_projection(&daemon.commit_signals(), "s1", 5, 0, epoch, detail, settle)
             .expect("admission passes for the focused session")
+    }
+
+    // Drive the same asynchronous claim/fetch/commit boundary used by initial
+    // hydration and SSE reconnect, with no wall-clock timing or live HTTP.
+    #[test]
+    fn projection_epoch_retires_late_success_and_failure_on_same_sse_generation() {
+        for failed in [false, true] {
+            let daemon = wrapper_daemon();
+            let reply = RefCell::new(None);
+            let delayed = std::future::poll_fn(|_| {
+                reply
+                    .borrow_mut()
+                    .take()
+                    .map_or(std::task::Poll::Pending, std::task::Poll::Ready)
+            });
+            let mut old = Box::pin(daemon.commit_session_projection_with("s1", 5, delayed));
+            assert!(old.as_mut().now_or_never().is_none());
+
+            daemon.decision_authority.set(task44_authority(&[
+                ("new-turn", "new-token", "s1"),
+                ("old-turn", "old-token", "s1"),
+            ]));
+            let mut newest =
+                wrapper_detail(vec!["new-gate".into()], vec![user_entry("new transcript")]);
+            newest.title = "new title".into();
+            newest.model = "new/model".into();
+            newest.cwd = Some("/new".into());
+            newest.state = Some(SessionRunState::Running);
+            newest.active_requests = vec!["new-turn".into()];
+            let result = daemon
+                .commit_session_projection_with("s1", 5, async {
+                    Ok((
+                        newest,
+                        SnapshotSettle::Fresh(vec![session_card(
+                            "new-gate",
+                            Some("new-turn"),
+                            "s1",
+                        )]),
+                    ))
+                })
+                .now_or_never()
+                .unwrap();
+            assert_eq!(result, Ok(ProjectionOutcome::Terminal));
+
+            let mut stale = wrapper_detail(vec![], vec![user_entry("old transcript")]);
+            stale.state = Some(SessionRunState::Running);
+            stale.active_requests = vec!["old-turn".into()];
+            *reply.borrow_mut() = Some(if failed {
+                Err("old fetch failed".into())
+            } else {
+                Ok((stale, SnapshotSettle::Fresh(vec![])))
+            });
+            // A retired result cannot enter callers' Terminal/Live cleanup or
+            // activity-retry/error branches, including stopping a newer poll.
+            assert_eq!(
+                old.as_mut().now_or_never().unwrap(),
+                Err(SESSION_PROJECTION_RETIRED.into())
+            );
+            assert_eq!(daemon.sse_generation.get_untracked(), 5);
+            assert_eq!(daemon.activity_revision.get_untracked(), 0);
+            assert_eq!(daemon.session_title.get_untracked(), "new title");
+            assert_eq!(daemon.model.get_untracked().as_deref(), Some("new/model"));
+            assert_eq!(daemon.cwd.get_untracked(), "/new");
+            assert!(matches!(&daemon.turns.get_untracked()[0].blocks[..],
+                [Block::Text(text)] if text == "new transcript"));
+            assert_eq!(
+                daemon.active_turn_id.get_untracked().as_deref(),
+                Some("new-turn")
+            );
+            assert!(daemon.streaming.get_untracked());
+            assert_eq!(
+                ids_of(&daemon.permission_view.get_untracked()),
+                vec!["new-gate".to_string()]
+            );
+            assert!(daemon.permission_view.get_untracked().cards()[0].actionable);
+            assert!(daemon
+                .decision_authority
+                .get_untracked()
+                .contains_key("new-turn"));
+            assert!(!daemon
+                .decision_authority
+                .get_untracked()
+                .contains_key("old-turn"));
+        }
+    }
+
+    #[test]
+    fn projection_epoch_permission_only_read_does_not_retire_transcript() {
+        let daemon = wrapper_daemon();
+        let reply = RefCell::new(None);
+        let delayed = std::future::poll_fn(|_| {
+            reply
+                .borrow_mut()
+                .take()
+                .map_or(std::task::Poll::Pending, std::task::Poll::Ready)
+        });
+        let mut pending = Box::pin(daemon.commit_session_projection_with("s1", 5, delayed));
+        assert!(pending.as_mut().now_or_never().is_none());
+        // A standalone permission reconciliation has a distinct publisher epoch.
+        daemon.claim_permission_epoch();
+        drive_frame(&daemon, &request_frame("new-gate"));
+        *reply.borrow_mut() = Some(Ok((
+            wrapper_detail(vec![], vec![user_entry("hydrated transcript")]),
+            SnapshotSettle::Fresh(vec![]),
+        )));
+        assert_eq!(
+            pending.as_mut().now_or_never().unwrap(),
+            Ok(ProjectionOutcome::Terminal)
+        );
+        assert!(matches!(&daemon.turns.get_untracked()[0].blocks[..],
+            [Block::Text(text)] if text == "hydrated transcript"));
+        assert_eq!(
+            ids_of(&daemon.permission_view.get_untracked()),
+            vec!["new-gate".to_string()]
+        );
+    }
+
+    #[test]
+    fn projection_epoch_preserves_activity_fence_and_rejects_retired_focus_before_claim() {
+        let daemon = wrapper_daemon();
+        let reply = RefCell::new(None);
+        let delayed = std::future::poll_fn(|_| {
+            reply
+                .borrow_mut()
+                .take()
+                .map_or(std::task::Poll::Pending, std::task::Poll::Ready)
+        });
+        let mut pending = Box::pin(daemon.commit_session_projection_with("s1", 5, delayed));
+        assert!(pending.as_mut().now_or_never().is_none());
+        let epoch = daemon.session_projection_epoch.get_untracked();
+        let retired = daemon
+            .commit_session_projection_with("old-session", 4, async {
+                panic!("retired focus must not poll its fetch")
+            })
+            .now_or_never()
+            .unwrap();
+        assert_eq!(retired, Err(SESSION_PROJECTION_RETIRED.into()));
+        assert_eq!(daemon.session_projection_epoch.get_untracked(), epoch);
+        daemon.activity_revision.set(1);
+        *reply.borrow_mut() = Some(Ok((
+            wrapper_detail(vec![], vec![user_entry("stale before activity")]),
+            SnapshotSettle::Fresh(vec![]),
+        )));
+        assert_eq!(
+            pending.as_mut().now_or_never().unwrap(),
+            Err(SESSION_PROJECTION_ACTIVITY_CHANGED.into())
+        );
+        assert!(daemon.turns.get_untracked().is_empty());
     }
 
     #[test]
