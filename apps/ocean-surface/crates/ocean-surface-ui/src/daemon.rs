@@ -18,16 +18,16 @@ use std::rc::Rc;
 #[cfg(target_arch = "wasm32")]
 use std::sync::{Arc, Mutex};
 
-use futures_util::future::{abortable, AbortHandle, LocalBoxFuture};
+use futures_util::future::{AbortHandle, LocalBoxFuture, abortable};
 use futures_util::{FutureExt, StreamExt};
-use gloo_net::eventsource::futures::EventSource;
 use gloo_net::eventsource::State as EventSourceState;
+use gloo_net::eventsource::futures::EventSource;
 use gloo_net::http::Request;
 use leptos::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use send_wrapper::SendWrapper;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 
@@ -2105,6 +2105,7 @@ pub struct Daemon {
     pub default_model: RwSignal<Option<String>>,
     /// The catalogue of selectable models from GET /v1/models.
     pub models: RwSignal<Vec<ModelInfo>>,
+    model_fetch_generation: RwSignal<u64>,
     /// The selected project id, sent as `project_id` on every turn so the daemon
     /// binds to that project's directory. Persisted in localStorage so the
     /// choice survives reload. `None` = no project (turns then need a real cwd).
@@ -2290,6 +2291,24 @@ pub struct ModelInfo {
     pub ready: Option<bool>,
     #[serde(default)]
     pub effort_levels: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+struct CurrentModel {
+    #[serde(default)]
+    model: String,
+    #[serde(default)]
+    route: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ModelsResponse {
+    #[serde(default)]
+    models: Vec<ModelInfo>,
+    #[serde(default)]
+    routes: Option<Vec<ModelInfo>>,
+    #[serde(default)]
+    current: Option<CurrentModel>,
 }
 
 /// Token usage for a turn (or summed for a session), mirrored from the daemon's
@@ -2591,6 +2610,7 @@ impl Daemon {
             model: RwSignal::new(None),
             default_model: RwSignal::new(None),
             models: RwSignal::new(Vec::new()),
+            model_fetch_generation: RwSignal::new(0),
             // Restore the last-selected project from localStorage so the choice
             // survives a reload.
             project: RwSignal::new(load_persisted_project()),
@@ -2680,6 +2700,7 @@ impl Daemon {
             model: RwSignal::new(None),
             default_model: RwSignal::new(None),
             models: RwSignal::new(Vec::new()),
+            model_fetch_generation: RwSignal::new(0),
             project: RwSignal::new(None),
             projects: RwSignal::new(Vec::new()),
             active_turn_id: RwSignal::new(None),
@@ -4409,51 +4430,56 @@ impl Daemon {
         });
     }
 
-    /// Fetch the model catalogue + current selection from the daemon.
+    /// Refresh daemon-owned readiness; newer requests retire older responses.
     pub fn fetch_models(&self) {
-        let url = self.url.get_untracked();
-        let models = self.models;
-        let model = self.model;
-        let default_model = self.default_model;
+        let Some((url, generation)) = self.begin_model_fetch() else {
+            return;
+        };
+        let daemon = self.clone();
         spawn_local(async move {
-            #[derive(Deserialize)]
-            struct Current {
-                #[serde(default)]
-                model: String,
-                #[serde(default)]
-                route: Option<String>,
-            }
-            #[derive(Deserialize)]
-            struct ModelsResponse {
-                #[serde(default)]
-                models: Vec<ModelInfo>,
-                #[serde(default)]
-                routes: Option<Vec<ModelInfo>>,
-                #[serde(default)]
-                current: Option<Current>,
-            }
             let get_url = format!("{}/v1/models", url.trim_end_matches('/'));
             match Request::get(&get_url).send().await {
-                Ok(resp) => match resp.json::<ModelsResponse>().await {
-                    Ok(r) => {
-                        if let Some(cur) = r.current {
-                            if !cur.model.is_empty() {
-                                let default_id = if r.routes.is_some() {
-                                    cur.route.unwrap_or_else(|| cur.model.clone())
-                                } else {
-                                    cur.model.clone()
-                                };
-                                default_model.set(Some(default_id));
-                                model.set(Some(cur.model));
-                            }
-                        }
-                        models.set(r.routes.unwrap_or(r.models));
+                Ok(resp) if resp.ok() => match resp.json::<ModelsResponse>().await {
+                    Ok(response) => {
+                        daemon.apply_models_response(&url, generation, response);
                     }
                     Err(err) => log::warn!("models decode error: {err}"),
                 },
+                Ok(_) => log::warn!("models fetch refused"),
                 Err(err) => log::warn!("models fetch error: {err}"),
             }
         });
+    }
+
+    fn begin_model_fetch(&self) -> Option<(String, u64)> {
+        if !self.endpoint_ready.try_get_untracked().unwrap_or(false) {
+            return None;
+        }
+        let generation = self.model_fetch_generation.get_untracked().wrapping_add(1);
+        self.model_fetch_generation.set(generation);
+        Some((self.url.get_untracked(), generation))
+    }
+
+    fn apply_models_response(&self, url: &str, generation: u64, response: ModelsResponse) -> bool {
+        if self.model_fetch_generation.try_get_untracked() != Some(generation)
+            || self.url.try_get_untracked().as_deref() != Some(url)
+            || self.endpoint_ready.try_get_untracked() != Some(true)
+        {
+            return false;
+        }
+        if let Some(current) = response.current {
+            if !current.model.is_empty() {
+                let default_id = if response.routes.is_some() {
+                    current.route.unwrap_or_else(|| current.model.clone())
+                } else {
+                    current.model.clone()
+                };
+                self.default_model.set(Some(default_id));
+                self.model.set(Some(current.model));
+            }
+        }
+        self.models.set(response.routes.unwrap_or(response.models));
+        true
     }
 
     /// Fetch the project catalogue from the daemon. Like [`fetch_models`], call
@@ -8533,6 +8559,70 @@ pub(crate) fn is_path_prefix(prefix: &str, candidate: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn readiness_response(ready: bool) -> ModelsResponse {
+        serde_json::from_value(json!({
+            "routes": [{"id": "codex/model", "provider": "codex", "ready": ready}],
+            "current": {"model": "model", "route": "codex/model"}
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn model_readiness_refresh_after_closed_login_retires_older_reads_and_keeps_intent() {
+        let daemon = Daemon::dummy();
+        assert!(daemon.begin_model_fetch().is_none());
+        daemon.endpoint_ready.set(true);
+        daemon.model_override.set(Some("operator-choice".into()));
+        daemon.thinking_level.set(Some("high".into()));
+        daemon.queued_prompts.set(vec![QueuedPrompt {
+            id: 1,
+            prompt: "unsent draft".into(),
+            display: "unsent draft".into(),
+            client_type: "surface-tauri",
+            images: Vec::new(),
+        }]);
+        let (url, initial) = daemon.begin_model_fetch().unwrap();
+        assert!(daemon.apply_models_response(&url, initial, readiness_response(false)));
+        // An Accounts request can remain in flight when its dialog closes.
+        let (_, old_account_read) = daemon.begin_model_fetch().unwrap();
+        // External login completes; opening model selection starts a new read.
+        let (_, picker_read) = daemon.clone().begin_model_fetch().unwrap();
+        assert_eq!(daemon.models.get_untracked()[0].ready, Some(false));
+        assert!(daemon.apply_models_response(&url, picker_read, readiness_response(true)));
+        assert!(!daemon.apply_models_response(&url, old_account_read, readiness_response(false)));
+        assert_eq!(daemon.models.get_untracked()[0].ready, Some(true));
+        assert_eq!(
+            daemon.default_model.get_untracked().as_deref(),
+            Some("codex/model")
+        );
+        assert_eq!(
+            daemon.model_override.get_untracked().as_deref(),
+            Some("operator-choice")
+        );
+        assert_eq!(
+            daemon.thinking_level.get_untracked().as_deref(),
+            Some("high")
+        );
+        assert_eq!(
+            daemon.queued_prompts.get_untracked()[0].prompt,
+            "unsent draft"
+        );
+    }
+
+    #[test]
+    fn model_readiness_refresh_refuses_changed_endpoint_and_unresolved_origin() {
+        let daemon = Daemon::dummy();
+        daemon.endpoint_ready.set(true);
+        let (old_url, old_read) = daemon.begin_model_fetch().unwrap();
+        daemon.url.set("http://127.0.0.1:9999".into());
+        assert!(!daemon.apply_models_response(&old_url, old_read, readiness_response(true)));
+        assert!(daemon.models.get_untracked().is_empty());
+        let (url, read) = daemon.begin_model_fetch().unwrap();
+        daemon.endpoint_ready.set(false);
+        assert!(!daemon.apply_models_response(&url, read, readiness_response(true)));
+        assert!(daemon.models.get_untracked().is_empty());
+    }
 
     fn tool_entry(is_error: bool) -> SessionTranscriptEntry {
         SessionTranscriptEntry {
