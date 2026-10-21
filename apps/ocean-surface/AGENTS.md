@@ -109,7 +109,14 @@ Native surface direction:
   session reads claim a separate projection epoch before fetching; only the
   latest read may commit or trigger caller retry/status/poll cleanup, even within
   one SSE generation without a new activity frame. Permission-only reconciliation
-  retains its independent epoch and cannot retire a transcript read. Verify
+  retains its independent epoch and cannot retire a transcript read. Every admitted
+  session metadata, transcript, tool or pinned-component mutation advances the
+  activity fence before changing snapshot-owned state; wrong-session and suppressed
+  frames do not. Initial hydration and SSE recovery share four immediate activity-race
+  retries, then one epoch/focus-guarded recovery waiting for 250ms of quiet before
+  another read. Streaming stays visible, recovery stays pending visibly, and a pause
+  or terminal frame permits convergence without replaying ambiguous deltas. Verify
+  live-content preservation/coalescing with UI `cargo test -p ocean-surface-ui projection_content`,
   ordering with UI `cargo test -p ocean-surface-ui projection_epoch`, and recovery
   with UI `cargo test -p ocean-surface-ui native_reconnect`, native
   `cargo test --lib startup_model`, native daemon tests, and the real WASM build.
