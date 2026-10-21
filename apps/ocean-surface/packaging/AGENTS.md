@@ -44,6 +44,9 @@ Build native Ocean desktop candidates with their matching daemon, MCP bridge and
   expected Apple team, hardened runtime and secure timestamps. Original inputs
   and existing outputs are immutable; only a fully verified signed copy is
   published locally. Its receipt must explicitly say notarization is pending.
+- Disk-image attachment failures reconcile the exact image and unique owned
+  mountpoint before bounded cleanup. Preserve the original attach error and
+  report unconfirmed cleanup; never detach another mount of the same image.
 - Generated tools, staging and outputs stay under ignored component `target/`.
   Completed candidate directories are never overwritten.
 
