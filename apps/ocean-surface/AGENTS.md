@@ -316,6 +316,9 @@ token to browser code, bundle it, or cache it in client storage.
   originating turn to the existing steer route. Pending rows retain exact
   session/turn/steer identity before the POST; identical text never correlates
   delivery. Definitive refusal or an admitted unconsumed receipt queues once.
+  The daemon's exact 413/ok:false/oversized-steering error is a pre-admission
+  refusal: preserve the full attached-context wire prompt and compact display
+  in that once-only queue fallback. Generic/malformed/proxy 413 stays unknown.
   Lost/malformed acknowledgements and missing/restarted/evicted receipt evidence
   retain the existing row as outcome unknown, without resending. Full projection
   admission (focus, SSE generation, projection epoch and activity revision) owns

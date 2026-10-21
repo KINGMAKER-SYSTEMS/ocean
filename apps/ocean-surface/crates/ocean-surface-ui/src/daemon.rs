@@ -6898,13 +6898,18 @@ fn classify_steer_ack(status: u16, body: Option<&Value>, steer_id: &str) -> Stee
         && body.and_then(|v| v.get("steer_id")).and_then(Value::as_str) == Some(steer_id)
     {
         SteerAck::Accepted
-    } else if matches!(
-        (
-            status,
-            body.and_then(|v| v.get("error")).and_then(Value::as_str)
-        ),
-        (409, Some("no_active_turn")) | (429, Some("steering_full"))
-    ) {
+    } else if (status == 413
+        && body.and_then(|v| v.get("ok")).and_then(Value::as_bool) == Some(false)
+        && body.and_then(|v| v.get("error")).and_then(Value::as_str)
+            == Some("message is too long to steer; send it as a new turn"))
+        || matches!(
+            (
+                status,
+                body.and_then(|v| v.get("error")).and_then(Value::as_str)
+            ),
+            (409, Some("no_active_turn")) | (429, Some("steering_full"))
+        )
+    {
         SteerAck::Refused
     } else {
         SteerAck::Unknown
@@ -15015,6 +15020,76 @@ mod tests {
                 SteerAck::Accepted,
                 |_, _, _| panic!("old focus must not recover"),
             );
+        }
+    }
+
+    #[test]
+    fn steering_oversized_attachment_refusal_preserves_wire_prompt_once() {
+        let daemon = wrapper_daemon();
+        let wire = format!(
+            "Review this\n\n--- BEGIN ATTACHED CONTEXT: notes.txt (text/plain) ---\n{}\n--- END ATTACHED CONTEXT: notes.txt ---\n",
+            "x".repeat(64 * 1024)
+        );
+        let display = "Review this · notes.txt";
+        let id = steering_row(&daemon, &wire, Some("a"));
+        daemon
+            .steering_prompts
+            .update(|rows| rows[0].display = display.into());
+        let body = json!({
+            "ok": false,
+            "error": "message is too long to steer; send it as a new turn"
+        });
+        let ack = classify_steer_ack(413, Some(&body), "a");
+        assert_eq!(ack, SteerAck::Refused);
+        let url = daemon.url.get_untracked();
+        for _ in 0..2 {
+            daemon.settle_steer_ack_with(
+                &url,
+                id,
+                "s1",
+                "t1",
+                "a",
+                ack,
+                |_, session_id, generation| {
+                    assert_eq!((session_id.as_str(), generation), ("s1", 5));
+                },
+            );
+        }
+        assert!(daemon.steering_prompts.get_untracked().is_empty());
+        let queued = daemon.queued_prompts.get_untracked();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].id, id);
+        assert_eq!(queued[0].prompt, wire);
+        assert_eq!(queued[0].display, display);
+        assert_eq!(queued[0].client_type, "surface-web");
+        assert!(queued[0].images.is_empty());
+    }
+
+    #[test]
+    fn steering_ambiguous_oversize_response_never_requeues() {
+        let error = "message is too long to steer; send it as a new turn";
+        for (status, body) in [
+            (413, None),
+            (413, Some(json!({"error": error}))),
+            (413, Some(json!({"ok": true, "error": error}))),
+            (413, Some(json!({"ok": "false", "error": error}))),
+            (
+                413,
+                Some(json!({"ok": false, "error": "request too large"})),
+            ),
+            (413, Some(json!({"ok": false, "error": null}))),
+            (413, Some(json!("proxy rejection"))),
+            (400, Some(json!({"ok": false, "error": error}))),
+            (500, Some(json!({"ok": false, "error": error}))),
+        ] {
+            let daemon = wrapper_daemon();
+            let id = steering_row(&daemon, "keep me", Some("a"));
+            let ack = classify_steer_ack(status, body.as_ref(), "a");
+            assert_eq!(ack, SteerAck::Unknown);
+            let url = daemon.url.get_untracked();
+            daemon.settle_steer_ack_with(&url, id, "s1", "t1", "a", ack, |_, _, _| {});
+            assert!(daemon.queued_prompts.get_untracked().is_empty());
+            assert!(daemon.steering_prompts.get_untracked()[0].unresolved);
         }
     }
 
