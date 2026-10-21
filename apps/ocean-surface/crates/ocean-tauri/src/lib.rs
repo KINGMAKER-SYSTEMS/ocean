@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command as ProcessCommand, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -29,7 +29,10 @@ use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut,
 
 mod daemon_transport;
 mod owner_mutation;
+mod provider_accounts;
 mod room_consent;
+mod startup_model;
+mod team_connection;
 
 /// One surfaced filesystem change, serialized to the webview as `path-changed`.
 ///
@@ -818,11 +821,57 @@ const EXECUTING_EXTENSIONS: &[&str] = &[
     "osascript",
 ];
 
-/// True when opening this target would EXECUTE it rather than view it —
-/// either because macOS treats the extension as runnable, or because the
-/// file carries an executable bit (a `#!` script `open(1)` will hand to a
-/// shell).
+/// Windows shell launchers are not document-viewing targets. Keep this guard
+/// independent of the caller's root: both root and path come from the webview.
+#[cfg(any(windows, test))]
+fn windows_launch_target(target: &Path) -> bool {
+    let Some(name) = target.file_name() else {
+        return false;
+    };
+    let name = name.to_string_lossy();
+    // Win32 shell handling can normalize trailing dots/spaces; do not let
+    // that spelling disguise an executable or shortcut suffix.
+    let name = name.trim_end_matches(['.', ' ']);
+    let Some((_, extension)) = name.rsplit_once('.') else {
+        return false;
+    };
+    matches!(
+        extension.to_ascii_lowercase().as_str(),
+        "exe"
+            | "com"
+            | "bat"
+            | "cmd"
+            | "ps1"
+            | "psm1"
+            | "vbs"
+            | "vbe"
+            | "js"
+            | "jse"
+            | "wsf"
+            | "wsh"
+            | "hta"
+            | "scr"
+            | "pif"
+            | "cpl"
+            | "msc"
+            | "msi"
+            | "msp"
+            | "mst"
+            | "reg"
+            | "lnk"
+            | "url"
+            | "application"
+            | "appref-ms"
+    )
+}
+
+/// Refuse known platform launch types and, on Unix, executable file modes
+/// before handing a document to its associated application.
 fn opens_as_executable(target: &Path) -> bool {
+    #[cfg(windows)]
+    if windows_launch_target(target) {
+        return true;
+    }
     if let Some(ext) = target.extension().and_then(|e| e.to_str()) {
         let ext = ext.to_ascii_lowercase();
         if EXECUTING_EXTENSIONS.iter().any(|e| *e == ext) {
@@ -856,7 +905,7 @@ fn opens_as_executable(target: &Path) -> bool {
 /// session workspace, which it does not today.
 ///
 /// So the real gate is the consequence, not the location: this refuses to
-/// open anything macOS would EXECUTE (`opens_as_executable`). That closes
+/// open known launch targets (`opens_as_executable`). That closes
 /// the primitive that matters here — the daemon runs tools ungated, so it
 /// can already write a payload and mark it executable; without this check
 /// `open_file` was the launcher. Viewing a document in its default app,
@@ -1011,14 +1060,14 @@ struct DaemonStatusDto {
 
 /// Supervised ocean-daemon process + liveness tracking. Shared between the
 /// command handlers and the background poller via `Arc` (cloned into the
-/// poller thread; the original lives in [`AppState`]). Every method acquires
-/// at most one inner mutex at a time, so there is no lock-ordering hazard
-/// across `probe` / `snapshot` / `start` / `stop`.
+/// poller thread; the original lives in [`AppState`]). Start and probe hold the
+/// child lock before publishing status. No method takes these locks in reverse.
 struct DaemonSup {
+    startup_path: OnceLock<PathBuf>,
     /// The child we spawned. `std::process::Child` does NOT kill on drop, so
     /// the daemon survives a shell crash — supervision is explicit
-    /// (start/stop/restart), never `kill_on_drop`.
-    child: Mutex<Option<Child>>,
+    /// (start/stop/restart/quit), never `kill_on_drop`.
+    child: Mutex<DaemonChild>,
     /// Last state computed by the poller; `daemon_status` reads this so the
     /// command stays non-blocking (the poller is the freshness mechanism).
     last: Mutex<DaemonState>,
@@ -1031,10 +1080,28 @@ struct DaemonSup {
     port: u16,
 }
 
+#[derive(Default)]
+struct DaemonChild {
+    process: Option<Child>,
+    /// Guarded by the same lock as process admission: queued IPC cannot spawn
+    /// another child after the exit callback has reaped this one.
+    exiting: bool,
+}
+
+impl DaemonChild {
+    fn reap(&mut self) {
+        if let Some(mut child) = self.process.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
 impl DaemonSup {
     fn new(host: String, port: u16) -> Self {
         Self {
-            child: Mutex::new(None),
+            startup_path: OnceLock::new(),
+            child: Mutex::new(DaemonChild::default()),
             last: Mutex::new(DaemonState::Stopped),
             reachable_ever: Mutex::new(false),
             host,
@@ -1044,26 +1111,23 @@ impl DaemonSup {
 
     /// pid of the owned child, if any (`Child::id`).
     fn pid(&self) -> Option<u32> {
-        self.child.lock().as_ref().map(|c| c.id())
-    }
-
-    /// True iff we own a child that has not yet exited — `try_wait` returns
-    /// `Ok(None)` while the process is still running.
-    fn child_alive(&self) -> bool {
-        self.child
-            .lock()
-            .as_mut()
-            .map(|c| c.try_wait().ok().flatten().is_none())
-            .unwrap_or(false)
+        self.child.lock().process.as_ref().map(|c| c.id())
     }
 
     /// Kill + reap the owned child if any, then clear the slot. `kill` errors
     /// (already-exited) are ignored; `wait` reaps any zombie so the OS does
     /// not retain it. Blocking — call only on an explicit stop/restart.
     fn reap_child(&self) {
-        if let Some(mut child) = self.child.lock().take() {
-            let _ = child.kill();
-            let _ = child.wait();
+        self.child.lock().reap();
+    }
+
+    /// Only a committed app exit ends child ownership. A close-to-tray event,
+    /// cancelled exit request, or shell crash must not stop background work.
+    fn on_run_event(&self, event: &tauri::RunEvent) {
+        if matches!(event, tauri::RunEvent::Exit) {
+            let mut slot = self.child.lock();
+            slot.exiting = true;
+            slot.reap();
         }
     }
 
@@ -1076,17 +1140,44 @@ impl DaemonSup {
     /// Start the daemon unless we already own a live child or the port is
     /// already served — a graceful no-op in both cases so we never spawn a
     /// second daemon that would fail to bind.
-    fn start(&self, bin: &str) -> Result<(), String> {
-        if self.child_alive() {
-            return Ok(());
+    fn start(&self, bin: &Path) -> Result<(), String> {
+        self.start_with_model(bin, None)
+    }
+
+    fn start_with_model(&self, bin: &Path, initial_model: Option<&str>) -> Result<(), String> {
+        if let Some(model) = initial_model {
+            startup_model::validate(model)?;
+        }
+        // Keep admission and publication under one lock so double-clicks cannot
+        // start two children or persist two competing startup choices.
+        let mut slot = self.child.lock();
+        if slot.exiting {
+            return Err("Ocean is quitting.".into());
+        }
+        if let Some(child) = slot.process.as_mut() {
+            if child
+                .try_wait()
+                .map_err(|_| "Couldn't check Ocean's process.")?
+                .is_none()
+            {
+                return Ok(());
+            }
         }
         if self.reachable() {
             // An external daemon is already serving — don't spawn a rival.
             return Ok(());
         }
-        self.reap_child();
-        let child = spawn_daemon(bin)?;
-        *self.child.lock() = Some(child);
+        let path = self
+            .startup_path
+            .get()
+            .ok_or("Ocean is still opening. Try again.")?;
+        if let Some(model) = initial_model {
+            startup_model::save(path, model)?;
+        }
+        let model = startup_model::load(path)?;
+        // Any previous child has already exited (try_wait above also reaps it).
+        slot.process = Some(spawn_daemon(bin, model.as_deref())?);
+        *self.last.lock() = DaemonState::Starting;
         Ok(())
     }
 
@@ -1097,7 +1188,7 @@ impl DaemonSup {
 
     /// Restart the shell-owned daemon (stop + start). On an external daemon
     /// this reduces to a start that no-ops because the port is served.
-    fn restart(&self, bin: &str) -> Result<(), String> {
+    fn restart(&self, bin: &Path) -> Result<(), String> {
         self.stop();
         self.start(bin)
     }
@@ -1106,15 +1197,18 @@ impl DaemonSup {
     /// result as `last`. Blocking — poller-thread only.
     fn probe(&self) -> DaemonState {
         let reachable = self.reachable();
-        let alive = self.child_alive();
+        let mut slot = self.child.lock();
+        let alive = slot.process.as_mut().is_some_and(|child| {
+            // A failed observation is not proof that a process has stopped.
+            !matches!(child.try_wait(), Ok(Some(_)))
+        });
+        if !alive {
+            slot.process.take();
+        }
         let ever = *self.reachable_ever.lock();
         let state = decide_daemon_state(reachable, alive, ever);
         if reachable {
             *self.reachable_ever.lock() = true;
-        }
-        if !alive {
-            // Reap a dead slot so a subsequent start() doesn't see a zombie.
-            self.reap_child();
         }
         *self.last.lock() = state;
         state
@@ -1136,7 +1230,7 @@ fn daemon_url_from_env() -> String {
 }
 
 /// Binary resolution order (testable via [`resolve_daemon_bin_with`]):
-/// `OCEAN_DAEMON_BIN` env → `ocean-daemon` on PATH.
+/// `OCEAN_DAEMON_BIN` env → executable sibling → platform binary on PATH.
 ///
 /// TASK-78: there is deliberately NO caller-supplied override. `daemon_start`
 /// and `daemon_restart` used to accept an optional binary-path argument
@@ -1146,17 +1240,49 @@ fn daemon_url_from_env() -> String {
 /// registered through `generate_handler!` (it gates plugin/`core:` commands),
 /// so the crate's otherwise-minimal capability set gave no protection there.
 /// The env var is a trusted operator-set channel; an IPC argument is not.
-fn resolve_daemon_bin() -> String {
-    resolve_daemon_bin_with(std::env::var("OCEAN_DAEMON_BIN").ok().as_deref())
+fn resolve_daemon_bin() -> PathBuf {
+    resolve_daemon_bin_with(
+        std::env::var("OCEAN_DAEMON_BIN").ok().as_deref(),
+        std::env::current_exe().ok().as_deref(),
+    )
 }
 
-/// Pure core of [`resolve_daemon_bin`] — takes the env value as a parameter
-/// so the resolution order is unit-testable without mutating process env.
-fn resolve_daemon_bin_with(env_bin: Option<&str>) -> String {
+/// Resolve only from native process state, never a webview-supplied path.
+fn resolve_daemon_bin_with(env_bin: Option<&str>, executable: Option<&Path>) -> PathBuf {
     if let Some(bin) = env_bin.map(str::trim).filter(|s| !s.is_empty()) {
-        return bin.to_string();
+        return PathBuf::from(bin);
     }
-    "ocean-daemon".to_string()
+    let name = format!("ocean-daemon{}", std::env::consts::EXE_SUFFIX);
+    if let Some(parent) = executable.and_then(Path::parent) {
+        let sibling = parent.join(&name);
+        if sibling.is_absolute() && daemon_binary_file(&sibling) {
+            return sibling;
+        }
+    }
+    PathBuf::from(name)
+}
+
+fn daemon_binary_file(path: &Path) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+fn daemon_home() -> Option<PathBuf> {
+    daemon_transport::profile_home(std::env::var_os("HOME"), std::env::var_os("USERPROFILE"))
+        .filter(|home| home.is_absolute() && home.is_dir())
 }
 
 /// Parse a `http://host:port[/…]` URL into `(host, port)`. IPv6 brackets are
@@ -1184,12 +1310,18 @@ fn parse_host_port(url: &str) -> Option<(String, u16)> {
 /// `~/.local/state/ocean/ocean-daemon.log`; falls back to the OS temp dir so
 /// a missing `$HOME` or an unwritable state dir never blocks the spawn.
 fn daemon_log_path() -> PathBuf {
-    if let Ok(home) = std::env::var("HOME") {
-        if !home.is_empty() {
-            let dir = PathBuf::from(home).join(".local/state/ocean");
-            if std::fs::create_dir_all(&dir).is_ok() {
-                return dir.join("ocean-daemon.log");
-            }
+    // Native-process configuration only; useful for isolated desktop acceptance.
+    // No webview argument can redirect the log or select an executable.
+    if let Some(path) = std::env::var_os("OCEAN_DAEMON_LOG")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+    {
+        return path;
+    }
+    if let Some(home) = daemon_home() {
+        let dir = home.join(".local/state/ocean");
+        if std::fs::create_dir_all(&dir).is_ok() {
+            return dir.join("ocean-daemon.log");
         }
     }
     std::env::temp_dir().join("ocean-daemon.log")
@@ -1198,7 +1330,7 @@ fn daemon_log_path() -> PathBuf {
 /// Spawn the daemon binary detached: stdin null, stdout+stderr appended to
 /// the log file. The returned `Child` is NOT `kill_on_drop`, so it outlives
 /// the shell if the shell crashes — supervision stays explicit.
-fn spawn_daemon(bin: &str) -> Result<Child, String> {
+fn spawn_daemon(bin: &Path, initial_model: Option<&str>) -> Result<Child, String> {
     let log_path = daemon_log_path();
     let log = std::fs::OpenOptions::new()
         .create(true)
@@ -1208,12 +1340,35 @@ fn spawn_daemon(bin: &str) -> Result<Child, String> {
     let stderr = log
         .try_clone()
         .map_err(|e| format!("dup daemon log: {e}"))?;
-    ProcessCommand::new(bin)
-        .stdin(Stdio::null())
+    let cwd = daemon_home().unwrap_or_else(std::env::temp_dir);
+    let mut command = daemon_process(bin, &cwd)?;
+    startup_model::apply(&mut command, initial_model);
+    command
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(stderr))
         .spawn()
-        .map_err(|e| format!("spawn {bin}: {e}"))
+        .map_err(|e| format!("spawn {}: {e}", bin.display()))
+}
+
+/// Never inherit the app's project or installation directory as a workspace.
+/// Keep explicitly configured relative paths relative to the launching app.
+fn daemon_process(bin: &Path, cwd: &Path) -> Result<ProcessCommand, String> {
+    let bin = if bin.is_relative() && bin.components().count() > 1 {
+        std::env::current_dir()
+            .map_err(|e| format!("resolve daemon path: {e}"))?
+            .join(bin)
+    } else {
+        bin.to_path_buf()
+    };
+    let mut command = ProcessCommand::new(bin);
+    command.current_dir(cwd).stdin(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW: the desktop app owns this background process.
+        command.creation_flags(0x0800_0000);
+    }
+    Ok(command)
 }
 
 /// Blocking TCP connect probe — `true` when something is accepting on
@@ -1257,20 +1412,39 @@ async fn daemon_status(state: State<'_, AppState>) -> Result<DaemonStatusDto, St
     Ok(state.daemon.snapshot())
 }
 
-/// Start the supervised ocean-daemon. `bin` overrides `OCEAN_DAEMON_BIN` →
-/// PATH. A graceful no-op when the shell already owns a live child or the
-/// port is already served. Emits a `daemon-status` event immediately so the
+/// Start the supervised ocean-daemon from the native environment or install.
+/// A graceful no-op when the shell already owns a live child or the port is
+/// already served. Emits a `daemon-status` event immediately so the
 /// UI flips without waiting for the next poll.
 #[tauri::command]
 async fn daemon_start(
+    window: tauri::WebviewWindow,
     state: State<'_, AppState>,
     app: AppHandle,
+    initial_model: Option<String>,
 ) -> Result<DaemonStatusDto, String> {
+    daemon_transport::require_main_window(window.label(), "Start Ocean from the main window.")?;
     // TASK-78: no caller-supplied binary path — see `resolve_daemon_bin`.
-    state.daemon.start(&resolve_daemon_bin())?;
+    state
+        .daemon
+        .start_with_model(&resolve_daemon_bin(), initial_model.as_deref())?;
     let snap = state.daemon.snapshot();
     let _ = app.emit("daemon-status", snap.clone());
     Ok(snap)
+}
+
+#[tauri::command]
+async fn daemon_setup(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+) -> Result<startup_model::Setup, String> {
+    daemon_transport::require_main_window(window.label(), "Open Ocean in the main window.")?;
+    let path = state
+        .daemon
+        .startup_path
+        .get()
+        .ok_or("Ocean is still opening. Try again.")?;
+    startup_model::setup(path)
 }
 
 /// Stop the daemon the shell owns (never an external one). Emits a final
@@ -1578,6 +1752,72 @@ mod tests {
         assert!(parse_host_port("http://").is_none());
     }
 
+    #[test]
+    fn windows_document_open_refuses_launchers_and_disguised_suffixes() {
+        for name in [
+            "payload.exe",
+            "payload.COM",
+            "run.bat",
+            "run.CMD",
+            "run.ps1",
+            "module.psm1",
+            "script.vbs",
+            "encoded.vbe",
+            "script.js",
+            "encoded.jse",
+            "script.wsf",
+            "script.wsh",
+            "page.hta",
+            "screen.scr",
+            "old.pif",
+            "panel.cpl",
+            "console.msc",
+            "setup.msi",
+            "patch.msp",
+            "transform.mst",
+            "settings.reg",
+            "document.pdf.lnk",
+            "website.url",
+            "setup.application",
+            "app.appref-ms",
+            "payload.ExE. ",
+            "link.LNK...",
+            "settings.REG ",
+        ] {
+            assert!(windows_launch_target(Path::new(name)), "{name}");
+        }
+        for name in [
+            "notes.md",
+            "report.pdf",
+            "image.png",
+            "data.json",
+            "LICENSE",
+            "source.rs",
+            "example.exe.txt",
+            "not-a-launcher.exe.notes.md",
+        ] {
+            assert!(!windows_launch_target(Path::new(name)), "{name}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_document_command_refuses_before_launching() {
+        let root = tempfile::tempdir().unwrap();
+        for name in ["payload.exe", "shortcut.LNK", "script.CMD", "script.ps1"] {
+            let target = root.path().join(name);
+            std::fs::write(&target, b"inert fixture, never execute").unwrap();
+            assert_eq!(
+                open_file(
+                    root.path().display().to_string(),
+                    target.display().to_string()
+                ),
+                Err("refusing to open an executable file".into()),
+                "{name}"
+            );
+        }
+    }
+
     /// TASK-78: the resolver takes ONLY the env value. There is no
     /// caller-supplied override, because that argument was reachable from the
     /// webview and ended in `ProcessCommand::spawn`. If someone re-adds an
@@ -1639,14 +1879,202 @@ mod tests {
 
     #[test]
     fn resolve_daemon_bin_env_wins_over_path_default() {
-        assert_eq!(resolve_daemon_bin_with(Some("/env/od")), "/env/od");
+        assert_eq!(
+            resolve_daemon_bin_with(Some("/env/od"), None),
+            Path::new("/env/od")
+        );
         // Whitespace-only env falls through to the PATH default.
-        assert_eq!(resolve_daemon_bin_with(Some("  ")), "ocean-daemon");
+        assert_eq!(
+            resolve_daemon_bin_with(Some("  "), None),
+            PathBuf::from(format!("ocean-daemon{}", std::env::consts::EXE_SUFFIX))
+        );
     }
 
     #[test]
     fn resolve_daemon_bin_path_default_when_nothing_set() {
-        assert_eq!(resolve_daemon_bin_with(None), "ocean-daemon");
+        assert_eq!(
+            resolve_daemon_bin_with(None, None),
+            PathBuf::from(format!("ocean-daemon{}", std::env::consts::EXE_SUFFIX))
+        );
+    }
+
+    #[test]
+    fn daemon_resolution_prefers_installed_sibling_and_keeps_env_override() {
+        let install = tempfile::tempdir().unwrap();
+        let executable = install.path().join("Ocean");
+        let sibling = install
+            .path()
+            .join(format!("ocean-daemon{}", std::env::consts::EXE_SUFFIX));
+        let fallback = PathBuf::from(format!("ocean-daemon{}", std::env::consts::EXE_SUFFIX));
+        assert_eq!(resolve_daemon_bin_with(None, Some(&executable)), fallback);
+        std::fs::create_dir(&sibling).unwrap();
+        assert_eq!(resolve_daemon_bin_with(None, Some(&executable)), fallback);
+        std::fs::remove_dir(&sibling).unwrap();
+        std::fs::write(&sibling, b"inert discovery fixture").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&sibling, std::fs::Permissions::from_mode(0o600)).unwrap();
+            assert_eq!(resolve_daemon_bin_with(None, Some(&executable)), fallback);
+            std::fs::set_permissions(&sibling, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        assert_eq!(resolve_daemon_bin_with(None, Some(&executable)), sibling);
+        assert_eq!(
+            resolve_daemon_bin_with(Some("custom-daemon"), Some(&executable)),
+            Path::new("custom-daemon")
+        );
+    }
+
+    #[test]
+    fn daemon_child_uses_neutral_directory() {
+        const PROBE_HOME: &str = "OCEAN_SURFACE_TEST_CHILD_CWD";
+        if let Some(expected) = std::env::var_os(PROBE_HOME) {
+            assert_eq!(
+                std::env::current_dir().unwrap().canonicalize().unwrap(),
+                PathBuf::from(expected).canonicalize().unwrap()
+            );
+            return;
+        }
+        let home = tempfile::tempdir().unwrap();
+        let output = daemon_process(&std::env::current_exe().unwrap(), home.path())
+            .unwrap()
+            .args([
+                "--exact",
+                "tests::daemon_child_uses_neutral_directory",
+                "--nocapture",
+            ])
+            .env(PROBE_HOME, home.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    // Run a real disposable child so exit tests prove process termination on
+    // both macOS and Windows, without a daemon install or provider credentials.
+    #[test]
+    fn daemon_exit_child() {
+        let Some(ready) = std::env::var_os("OCEAN_TEST_DAEMON_EXIT_READY") else {
+            return;
+        };
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        std::fs::write(ready, listener.local_addr().unwrap().to_string()).unwrap();
+        for connection in listener.incoming() {
+            drop(connection.unwrap());
+        }
+    }
+
+    struct DaemonExitFixture {
+        daemon: DaemonSup,
+        external: Option<Child>,
+        _directory: tempfile::TempDir,
+    }
+
+    impl DaemonExitFixture {
+        fn new(owned: bool) -> Self {
+            let directory = tempfile::tempdir().unwrap();
+            let ready = directory.path().join("ready");
+            let child = ProcessCommand::new(std::env::current_exe().unwrap())
+                .args(["--exact", "tests::daemon_exit_child"])
+                .env("OCEAN_TEST_DAEMON_EXIT_READY", &ready)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            // Install cleanup before any assertion can fail.
+            let mut fixture = Self {
+                daemon: DaemonSup::new("127.0.0.1".into(), 0),
+                external: Some(child),
+                _directory: directory,
+            };
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                if let Ok(address) = std::fs::read_to_string(&ready) {
+                    if let Ok(address) = address.parse::<std::net::SocketAddr>() {
+                        fixture.daemon.port = address.port();
+                        break;
+                    }
+                }
+                assert!(std::time::Instant::now() < deadline, "child never listened");
+                assert!(fixture
+                    .external
+                    .as_mut()
+                    .unwrap()
+                    .try_wait()
+                    .unwrap()
+                    .is_none());
+                thread::sleep(Duration::from_millis(10));
+            }
+            if owned {
+                fixture.daemon.child.lock().process = fixture.external.take();
+            }
+            assert!(fixture.daemon.reachable());
+            fixture
+        }
+    }
+
+    impl Drop for DaemonExitFixture {
+        fn drop(&mut self) {
+            self.daemon.stop();
+            if let Some(child) = self.external.as_mut() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    #[test]
+    fn daemon_exit_reaps_owned_child_and_refuses_late_restart() {
+        let fixture = DaemonExitFixture::new(true);
+        let daemon = &fixture.daemon;
+        assert!(daemon.pid().is_some());
+        daemon.on_run_event(&tauri::RunEvent::Exit);
+        assert_eq!(daemon.pid(), None);
+        assert!(!daemon.reachable(), "owned process survived Quit");
+        assert_eq!(
+            daemon.restart(Path::new("must-not-spawn")),
+            Err("Ocean is quitting.".into())
+        );
+        // Repeated exit delivery is harmless and never reopens admission.
+        daemon.on_run_event(&tauri::RunEvent::Exit);
+        assert_eq!(
+            daemon.start(Path::new("must-not-spawn")),
+            Err("Ocean is quitting.".into())
+        );
+    }
+
+    #[test]
+    fn daemon_exit_never_adopts_or_stops_external_process() {
+        let mut fixture = DaemonExitFixture::new(false);
+        let daemon = &fixture.daemon;
+        daemon.start(Path::new("must-not-spawn")).unwrap();
+        assert_eq!(daemon.pid(), None);
+        daemon.on_run_event(&tauri::RunEvent::Exit);
+        assert!(daemon.reachable(), "external process was stopped");
+        assert!(fixture
+            .external
+            .as_mut()
+            .unwrap()
+            .try_wait()
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn daemon_exit_keeps_child_alive_for_ready_and_resume_events() {
+        let fixture = DaemonExitFixture::new(true);
+        let daemon = &fixture.daemon;
+        let pid = daemon.pid();
+        for event in [tauri::RunEvent::Ready, tauri::RunEvent::Resumed] {
+            daemon.on_run_event(&event);
+            assert_eq!(daemon.pid(), pid);
+            assert!(daemon.reachable());
+        }
+        daemon.start(Path::new("must-not-spawn")).unwrap();
     }
 
     /// The IPC commands must expose no path parameter at all. Source-pinned
@@ -1864,6 +2292,8 @@ pub fn run() {
         // Operator-gated Room requests (owner mutations, agent consent) share
         // one numeric-loopback transport; an untrusted OCEAN_DAEMON_URL
         // (including `localhost`) leaves every one of them unsent.
+        .manage(provider_accounts::AccountState(operator_transport.clone()))
+        .manage(team_connection::ConnectionState(operator_transport.clone()))
         .manage(owner_mutation::OwnerMutationState(
             operator_transport.clone(),
         ))
@@ -1884,6 +2314,12 @@ pub fn run() {
             }),
         })
         .setup(|app| {
+            let startup_path = app.path().app_config_dir()?.join("startup-model");
+            let _ = app
+                .state::<AppState>()
+                .daemon
+                .startup_path
+                .set(startup_path);
             // Background daemon-supervision liveness poller: probes the daemon
             // port every ~5s and emits `daemon-status` to the webview ON CHANGE
             // ONLY. Spawned first so the first event fires within one probe of
@@ -2212,6 +2648,7 @@ pub fn run() {
             set_badge,
             open_file,
             daemon_status,
+            daemon_setup,
             daemon_start,
             daemon_stop,
             daemon_restart,
@@ -2220,12 +2657,15 @@ pub fn run() {
             ui_debug_resize,
             open_external_url,
             owner_mutation::room_owner_mutation,
+            provider_accounts::provider_accounts,
+            team_connection::team_connection,
             room_consent::room_consent_preview,
             room_consent::room_consent_authorize,
             room_consent::room_consent_cancel,
             room_consent::room_agent_revoke,
             room_consent::room_agent_bootstrap
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running ocean-tauri");
+        .build(tauri::generate_context!())
+        .expect("error while building ocean-tauri")
+        .run(|app, event| app.state::<AppState>().daemon.on_run_event(&event));
 }

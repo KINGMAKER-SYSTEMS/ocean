@@ -1,0 +1,12 @@
+Surface asset notices
+
+Poppins fonts: Copyright 2020 The Poppins Project Authors.
+SIL Open Font License 1.1; full license accompanies the fonts in public/fonts/OFL.txt.
+License source: https://github.com/google/fonts/blob/7dc16b7de42db624b902f2292b68ed9e489e5053/ofl/poppins/OFL.txt
+
+The inline Google Maps bootstrap loader in index.html is adapted from Google's
+Maps JavaScript API loading example. Code samples on that page are licensed
+under Apache License 2.0; the full license is included as GOOGLE-CODE-APACHE.txt.
+Source: https://developers.google.com/maps/documentation/javascript/load-maps-js-api
+
+Ocean names and brand assets retain the restrictions in ocean-os/TRADEMARKS.md.

@@ -77,11 +77,51 @@ Native surface direction:
 
 - Tauri 2.x shell (`crates/ocean-tauri`) loads `dist/` as `frontendDist` — the
   same Trunk-built Leptos WASM bundle the browser PWA ships.
+  Windows release builds use the GUI subsystem so app launch opens no console;
+  the native probe checks that setting in the built PE executable.
 - Rust commands in the Tauri backend replace the GPUI crate's `rfd` (folder
   dialogs) and `notify` (path watcher) native bits.
 - Native LiveKit Rust client is a later phase behind a feature flag, not part
   of this batch.
 - Ocean daemon stays the session/runtime authority.
+- Native Git inspection uses vendored libgit2 without SSH/HTTPS transports.
+  It reads local repository state; desktop startup must not require Homebrew
+  OpenSSL or other developer-installed libraries.
+- The native `.gitattributes` pins `Cargo.toml` to LF. Tauri serializes it with
+  LF on every host; Windows checkout conversion must not dirty packaged source.
+- Native first-run setup is collected through `host.rs` and the main-window-only
+  `daemon_setup`/`daemon_start` commands. `startup_model.rs` shares only the
+  runtime provider catalog's metadata; no credential or provider call enters
+  Surface. A user-selected catalog route is stored under the desktop app's
+  own config directory and supplied only as `OCEAN_DEFAULT_MODEL` to its child.
+  Existing environment defaults and daemon-persisted model choices take
+  precedence. The desktop never writes daemon configuration or picks a model
+  silently. Corrupt/nonregular desktop settings fail visibly without replacement.
+  The startup form exists only while native supervision is offline. Initial
+  native status must resolve before mounting Rooms; a later disconnect preserves
+  the conversation and unsent draft, refuses direct-chat submission, and shows
+  a compact restart action. Offline headers expose
+  no ready indicators. Ordinary connected model/effort controls remain unchanged.
+  Successful startup refreshes
+  model/project state and reconnects the focused session. Verify with native
+  `cargo test --lib startup_model`, native daemon tests, and the real WASM build.
+- Native daemon start resolves the operator's `OCEAN_DAEMON_BIN`, then the
+  installed executable sibling, then the platform binary on PATH. No IPC
+  argument may select an executable. Explicit start/restart remains unchanged.
+  Children run from the absolute home/profile (or OS temporary directory),
+  never the app's inherited workspace; Windows children have no console window.
+  Home/profile also owns native daemon logs. Verify native launch with
+  `cargo test --lib daemon_` from `crates/ocean-tauri`.
+  A native-process `OCEAN_DAEMON_LOG` may select an absolute log file for
+  diagnostics; no webview argument controls that path. Isolated startup
+  acceptance keeps config, auth, Claude fallback and logs in disposable paths
+  while preserving the operating-system home and the live daemon.
+- Explicit app Quit reaps only its owned daemon before exit, releasing the
+  bundled executable for updates. Committed exit closes process admission under
+  the child lock so queued starts/restarts cannot orphan a replacement. Closing
+  the window still hides to the tray; external daemons and shell-crash survival
+  are unchanged. Verify with native `cargo test --lib daemon_exit` and an isolated
+  native close/reopen/Quit check; never use the operator's live daemon as a fixture.
 - Canvas ledger/state injected into turns as surface context; the Leptos canvas
   already lives at `crates/ocean-surface-ui/src/canvas.rs`.
 - `docs/OCEAN_GPUI_CANVAS_LIVEKIT_SPEC.md` is retained as a historical reference
@@ -128,9 +168,71 @@ or a skipped event reads as incomplete; a replay the daemon cannot serve reads
 as "replay unavailable", never as offline. Animation is truthful:
 typing/blink/wave and screen activity render recorded phases, the one-shot
 walk-in visualizes a live admission event, and reduced motion stops the loop.
-The web proxy reads the daemon-minted mode-0600 observer token immediately
+The web proxy reads the daemon-minted private observer token immediately
 before each upstream request and injects it server-side. Never expose that
 token to browser code, bundle it, or cache it in client storage.
+
+## Windows proxy files
+
+- The Windows proxy uses `ocean_observatory::auth::windows_file` from the public
+  runtime component for session-secret creation and observer/operator reads.
+  This target-only dependency shares file validation, not execution authority.
+  It requires a protected current-user-only ACL and refuses reparse points,
+  nonregular files and extra hard links without repairing existing files.
+  Unix mode-0600/no-follow behavior remains unchanged.
+- Default state and session-secret paths use absolute HOME or USERPROFILE on
+  Windows, preserving explicit config/key/secret overrides and Unix HOME rules.
+- The session gate and exact owner-mutation route allowlist apply on both
+  platforms. No operator credential is exposed to the browser or attached
+  when proxy login is disabled. Native Room consent remains Tauri-only.
+- Verify the full proxy suite on Windows with `cargo test --locked -p
+  ocean-surface-proxy`; the manual Windows probe owns this check. Compilation
+  and synthetic transport fixtures do not establish packaged/client acceptance.
+
+## Desktop Accounts
+
+- `src/accounts.rs` owns the native Accounts dialog, reached through the existing
+  header overflow. Native dialog focus trapping, Escape and return focus apply.
+  Provider rows keep stable identity; pending actions retain keyboard focus with
+  `aria-disabled` plus handler admission guards. Restore menu focus after unmount.
+  No credential forms, provider calls, login URLs or tokens enter the webview.
+- `src/host.rs` calls the main-window-only `provider_accounts` command.
+  `crates/ocean-tauri/src/provider_accounts.rs` admits only List, Login and Cancel
+  for Claude, Codex and ChatGPT. Cancel carries the exact daemon attempt id;
+  no caller chooses a URL, method, path, credential or executable.
+- The existing shared native transport attaches the owner-only operator key to
+  numeric loopback only. Room owner-mutation routes remain unchanged. Responses
+  project only provider/status/attempt fields. Login opens only that provider's
+  fixed HTTPS authorization endpoint in the system browser, never in the app.
+- The daemon owns callback listeners, credential publication and cancellation.
+  Closing Accounts retires reads, not the browser login; reopening reads its
+  current state. New intent retires older list replies. Reads poll only while a
+  login is pending; mutations never retry automatically. Credential availability
+  means Connected, not verified provider inference. Model readiness refreshes
+  after projected account changes.
+- Verify native `cargo test --lib provider_accounts`, UI `cargo test -p
+  ocean-surface-ui accounts`, the real WASM bundle and rendered native dialog.
+
+## Desktop Team Connection
+
+- `src/team_connection.rs` owns the native Team dialog in the existing header
+  overflow. Use the Accounts dialog vocabulary, native focus trap and Escape;
+  return focus to the menu on close. No permanent header setup controls.
+- `host.rs` calls main-window-only `team_connection` with Read or Save intent.
+  The native broker uses the shared operator transport for exactly GET/PUT
+  `/v1/rooms/connection`; URL validation and first-write custody stay in the
+  daemon. No credentials, arbitrary routes or raw errors reach the page.
+- Saving only selects the initial server. Show Configured only from the daemon's
+  startup projection; it proves neither reachability nor membership. Never
+  replace an existing team destination or retry a save automatically. Lost
+  acknowledgements require a read before another save; drafts survive failures.
+- Restart is explicit and offered only for a shell-owned child. Recheck ownership
+  before invoking restart and read back configuration afterward. External
+  services retain their restart requirement. Close/new intent retires reads and
+  delayed actions; committed saves are not undone by closing the dialog.
+- Verify native `cargo test --lib team_connection`, UI `cargo test -p
+  ocean-surface-ui team_connection`, the real WASM bundle and rendered native
+  setup. Hosted Windows checks remain separate from local Mac acceptance.
 
 ## Empty Session Surface
 
@@ -757,7 +859,9 @@ ships today and are updated slice by slice.
   command and its `OwnerMutationState`) and `room_consent.rs` (`Intent`s),
   and their `lib.rs` wiring (one `DaemonTransport` built from
   `daemon_url_from_env()` + `operator_key_path()`, cloned into
-  `OwnerMutationState` and `ConsentBroker`). Callers keep typed intent enums
+  `OwnerMutationState`, `ConsentBroker`, `provider_accounts::AccountState` and
+  `team_connection::ConnectionState`).
+  Account intent is governed by Desktop Accounts above. Callers keep typed intent enums
   on top; JS never supplies a method, path or header.
 - Rules (strictest of the two former transports): daemon address from
   `OCEAN_DAEMON_URL` restricted to `http://<numeric loopback>[:port][/]`
@@ -789,12 +893,32 @@ ships today and are updated slice by slice.
   daemon's owner routes always answer JSON objects. Error strings are now
   fixed codes. The command refuses any webview other than `main`
   (`owner_mutation_window_refused`).
+- Windows native transport uses the daemon's `ocean_observatory::auth::windows_file`
+  reader: protected current-user-only ACL, regular single-link file, no reparse
+  points, bounded read and the same header-safe token predicate. It never repairs
+  unsafe files. Default config uses absolute HOME or USERPROFILE; explicit config
+  and key paths retain precedence. Unix ownership/mode behavior is unchanged.
+  The target-only dependency shares file validation, not runtime policy.
+- The transport, owner-mutation and consent fixtures run on Windows and Unix;
+  Windows fixtures create protected files or deliberately inherited ACLs. The
+  manual native workflow builds the real UI and shell; no test bypasses the
+  existing native confirmation, frozen preview or main-window gates.
 - Verification: `cd crates/ocean-tauri && cargo test daemon_transport`
   (loopback refusal, key-file refusal incl. foreign owner, redirect,
   oversize/invalid reply, lost-ack → unknown), `cargo test owner_mutation`,
   `cargo test room_consent`, `cargo clippy --all-targets -- -D warnings`.
 
 ## Workspace Files lifecycle
+
+- Native Open Externally is a document action. On Windows it refuses known
+  executable, script-host, installer, registry, shortcut and application-link
+  suffixes, case-insensitively and after trailing dot/space normalization.
+  The canonical target is checked before the OS opener; caller-supplied root
+  containment is not an execution permission. Unix executable-bit/Mac suffix
+  behavior is unchanged. This is a known-launcher guard, not an audit of every
+  user-customized file association. Verify with `cargo test --lib document_open`
+  and `cargo test --lib open_file_refuses_targets_that_would_execute` in Tauri.
+
 
 - Native empty Files exposes the host folder picker as pane-local browsing; picking never rewrites daemon session cwd. Session/cwd intent changes retire picked roots, previews, tree caches and asynchronous results synchronously, including A-B-A; disposal rejects late picker/watch/read completions.
 - Files acquires one native root lease per generation and drops only that lease on change or cleanup. `watch_paths`/`unwatch_paths` accept an optional owner token scoped by the injected native window label; scoped canonical maps are independent of legacy Repo watchers and other consumers/windows. Page-load Started and window destruction retire only that window’s scoped leases; a native page generation rejects pending old-page admissions, while Finished leaves new watches intact. Events carry the lease owner and canonical paths map back to the requested alias. Never clear the legacy canonical map for Files cleanup.
@@ -974,3 +1098,9 @@ cwd-authoritative rule.
 ocean-surface-ui --target wasm32-unknown-unknown`, `cargo check -p
 ocean-surface-proxy`, `cargo test -p ocean-surface-ui --target
 wasm32-unknown-unknown --no-run`, `cargo test -p ocean-surface-ui`.
+
+
+## Child devlog Index
+
+- `packaging/` — native desktop candidates, bundled daemon/MCP bridge and legal payload →
+  `packaging/AGENTS.md`. Existing proxy deployment remains owned by this parent.
