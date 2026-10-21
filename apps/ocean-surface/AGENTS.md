@@ -108,7 +108,12 @@ Native surface direction:
   Successful startup refreshes model/project state and reconnects the focused
   session with a fresh authoritative projection on the replacement SSE generation.
   Retire prior sync polling without switching focus or clearing the unsent draft;
-  an old restoration/recovery reply must not replace the new projection. Verify
+  an old restoration/recovery reply must not replace the new projection. Full
+  session reads claim a separate projection epoch before fetching; only the
+  latest read may commit or trigger caller retry/status/poll cleanup, even within
+  one SSE generation without a new activity frame. Permission-only reconciliation
+  retains its independent epoch and cannot retire a transcript read. Verify
+  ordering with UI `cargo test -p ocean-surface-ui projection_epoch`, and recovery
   with UI `cargo test -p ocean-surface-ui native_reconnect`, native
   `cargo test --lib startup_model`, native daemon tests, and the real WASM build.
 - Native daemon start resolves the operator's `OCEAN_DAEMON_BIN`, then the
