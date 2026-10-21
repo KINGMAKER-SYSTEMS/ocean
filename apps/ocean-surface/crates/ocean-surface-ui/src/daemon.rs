@@ -9228,6 +9228,7 @@ pub(crate) fn is_path_prefix(prefix: &str, candidate: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
     fn readiness_response(ready: bool) -> ModelsResponse {
         serde_json::from_value(json!({
