@@ -27,7 +27,17 @@ async fn actual_server_handshake_health_and_tool_errors() {
         "ocean"
     );
     let tools = client.list_tools().await.unwrap();
-    assert_eq!(tools.len(), 10);
+    assert_eq!(tools.len(), 9);
+    assert!(tools.iter().all(|tool| tool.name != "ocean_prompt"));
+    let prompt = client
+        .call_tool("ocean_prompt", json!({"prompt":"write a file","yolo":true}))
+        .await
+        .unwrap();
+    assert!(prompt.is_error);
+    assert!(
+        matches!(&prompt.content[0], Content::Text { text } if text.contains("Direct prompts are unavailable"))
+    );
+    // A refused stale call leaves this same connection usable.
     let health = client.call_tool("ocean_health", json!({})).await.unwrap();
     assert!(!health.is_error);
     assert!(matches!(&health.content[0], Content::Text { text } if text.contains("test-revision")));

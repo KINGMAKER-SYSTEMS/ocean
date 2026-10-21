@@ -27,11 +27,12 @@ Connect Ocean to external MCP servers, and expose the local daemon to MCP hosts.
   Reject the older bridge's unsupported `before_seq`; do not label a prefix as
   the newest messages. Preserve thread/session links and room/session cursors.
 - Bound stdio frames, HTTP replies and tool output; an oversized page is an error,
-  never silently truncated JSON. Large prompt output is an explicitly marked
-  excerpt that retains the completed turn's session, request and outcome. Only
-  allowed metadata crosses projections.
-- Prompt execution remains daemon-owned, with `yolo` false unless explicitly
-  requested. Never auto-join, post, retry or change credentials after an error.
+  never silently truncated JSON. Only allowed metadata crosses projections.
+- Direct prompt execution is unavailable through MCP: omit `ocean_prompt` from
+  discovery and refuse direct calls before any daemon request. Reintroducing it
+  requires bounded submitter-owned permission decisions, cancellation and outcome
+  handling; never use the daemon's legacy unbound permission exception.
+- Never auto-join, post, retry or change credentials after an error.
 
 ## Work Guidance
 

@@ -2889,6 +2889,30 @@ impl Daemon {
         });
     }
 
+    /// Native availability is a recovery of the current focus, not a session
+    /// switch. Opening new streams retires old snapshots, so always pair their
+    /// new generation with a fresh projection without clearing local intent.
+    pub fn reconnect_session(&self) {
+        self.reconnect_session_with(
+            |daemon| daemon.connect(),
+            |daemon, id, generation| daemon.spawn_session_projection(id, generation),
+        );
+    }
+
+    // Inject only the browser/network effects so recovery ordering and retained
+    // state can be exercised without a live daemon or a webview.
+    fn reconnect_session_with(
+        &self,
+        open_streams: impl FnOnce(&Self),
+        hydrate: impl FnOnce(&Self, String, u64),
+    ) {
+        self.stop_sync_poll();
+        open_streams(self);
+        if let Some(id) = self.session_id.get_untracked() {
+            hydrate(self, id, self.sse_generation.get_untracked());
+        }
+    }
+
     /// Open the SSE stream and pipe events into the turns signal. Reconnects
     /// on disconnect with a small backoff. Spawned once per session.
     pub fn connect(&self) {
@@ -9286,6 +9310,131 @@ mod tests {
             admit_session_snapshot("session-a", 5, Some("session-a"), 5),
             SnapshotAdmission::Commit
         );
+    }
+
+    #[test]
+    fn native_reconnect_replaces_retired_snapshot_without_switching_focus() {
+        let daemon = Daemon::dummy();
+        daemon.session_id.set(Some("session-a".into()));
+        daemon.session_title.set("Existing conversation".into());
+        daemon.streaming.set(true);
+        daemon.active_turn_id.set(Some("request-live".into()));
+        daemon.pending_images.set(vec![TurnImage {
+            mime_type: "image/png".into(),
+            data: "AAAA".into(),
+        }]);
+        daemon.enqueue_prompt(
+            "queued draft".into(),
+            "queued draft".into(),
+            "surface-tauri",
+        );
+        daemon.pending_images.set(vec![TurnImage {
+            mime_type: "image/png".into(),
+            data: "BBBB".into(),
+        }]);
+        daemon
+            .active_decision_token
+            .set(Some("decision-token".into()));
+        daemon.decision_authority.set(task44_authority(&[(
+            "request-live",
+            "decision-token",
+            "session-a",
+        )]));
+        let queued = daemon.queued_prompts.get_untracked();
+        let images = daemon.pending_images.get_untracked();
+        let authority = daemon.decision_authority.get_untracked();
+        daemon.sse_generation.set(7);
+        daemon.sync_pending.set(true);
+        let intent = daemon.session_intent_generation.get_untracked();
+        let cycle = daemon.sync_cycle.get_untracked();
+        let mut hydration = None;
+
+        daemon.reconnect_session_with(
+            |daemon| {
+                // The production connect effect advances generation before
+                // launching streams. Old recovery polling must already be retired.
+                assert!(!daemon.sync_pending.get_untracked());
+                assert_eq!(daemon.sync_cycle.get_untracked(), cycle.wrapping_add(1));
+                daemon.sse_generation.update(|value| *value += 1);
+            },
+            |_, id, generation| hydration = Some((id, generation)),
+        );
+
+        assert_eq!(hydration, Some(("session-a".into(), 8)));
+        assert_eq!(
+            admit_session_snapshot("session-a", 7, Some("session-a"), 8),
+            SnapshotAdmission::Discard
+        );
+        let (id, generation) = hydration.unwrap();
+        assert_eq!(
+            admit_session_snapshot(
+                &id,
+                generation,
+                daemon.session_id.get_untracked().as_deref(),
+                daemon.sse_generation.get_untracked()
+            ),
+            SnapshotAdmission::Commit
+        );
+        assert_eq!(
+            daemon.session_title.get_untracked(),
+            "Existing conversation"
+        );
+        assert_eq!(daemon.session_intent_generation.get_untracked(), intent);
+        assert!(daemon.streaming.get_untracked());
+        assert_eq!(
+            daemon.active_turn_id.get_untracked().as_deref(),
+            Some("request-live")
+        );
+
+        assert_eq!(daemon.queued_prompts.get_untracked(), queued);
+        assert_eq!(daemon.pending_images.get_untracked(), images);
+        assert_eq!(
+            daemon.active_decision_token.get_untracked().as_deref(),
+            Some("decision-token")
+        );
+        assert_eq!(daemon.decision_authority.get_untracked(), authority);
+
+        // A second availability transition replaces recovery on the newest
+        // generation rather than reusing either prior snapshot's authority.
+        let mut newest = None;
+        daemon.reconnect_session_with(
+            |daemon| daemon.sse_generation.update(|value| *value += 1),
+            |_, id, generation| newest = Some((id, generation)),
+        );
+        assert_eq!(newest, Some(("session-a".into(), 9)));
+        assert_eq!(
+            admit_session_snapshot(
+                &id,
+                generation,
+                daemon.session_id.get_untracked().as_deref(),
+                daemon.sse_generation.get_untracked()
+            ),
+            SnapshotAdmission::Discard
+        );
+
+        // A subsequent focus change still retires this replacement snapshot.
+        daemon.select_session_state("session-b", "Other conversation".into());
+        assert_eq!(
+            admit_session_snapshot(
+                &id,
+                generation,
+                daemon.session_id.get_untracked().as_deref(),
+                daemon.sse_generation.get_untracked()
+            ),
+            SnapshotAdmission::Discard
+        );
+    }
+
+    #[test]
+    fn native_reconnect_without_focus_never_creates_or_hydrates_a_session() {
+        let daemon = Daemon::dummy();
+        let intent = daemon.session_intent_generation.get_untracked();
+        daemon.reconnect_session_with(
+            |daemon| daemon.sse_generation.update(|value| *value += 1),
+            |_, _, _| panic!("no focused session to hydrate"),
+        );
+        assert!(daemon.session_id.get_untracked().is_none());
+        assert_eq!(daemon.session_intent_generation.get_untracked(), intent);
     }
 
     // 5. An old-generation snapshot settling after a newer reconnect is discarded
