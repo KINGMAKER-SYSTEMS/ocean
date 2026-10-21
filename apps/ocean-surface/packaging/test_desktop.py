@@ -22,6 +22,87 @@ class DesktopArtifactTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             desktop.verify_windows_runtime('invalid executable')
 
+    def test_ambiguous_attach_cleans_only_matching_image_and_owned_mount(self):
+        image = Path('/fixture/candidate.dmg')
+        for error in (subprocess.TimeoutExpired('hdiutil attach', 60),
+                      subprocess.CalledProcessError(1, 'hdiutil attach')):
+            for state in ('owned', 'absent', 'same-image-elsewhere', 'different-image'):
+                with self.subTest(error=type(error).__name__, state=state), tempfile.TemporaryDirectory() as directory:
+                    temporary = Path(directory)
+                    mount = temporary / 'mounted'
+                    images = [] if state == 'absent' else [{
+                        'image-path': str(image if state != 'different-image' else Path('/other/image.dmg')),
+                        'system-entities': [{'dev-entry': '/dev/disk-fixture'}, {
+                            'mount-point': str(mount if state != 'same-image-elsewhere' else Path('/other/mount')),
+                        }],
+                    }]
+                    info = plistlib.dumps({'images': images}).decode()
+                    with patch.object(desktop, 'run', side_effect=[error, info, None]) as run:
+                        with self.assertRaises(type(error)) as caught:
+                            with desktop.mount_image(image, temporary):
+                                self.fail('An attach failure must not yield the application')
+                        self.assertIs(caught.exception, error)
+                        commands = [call.args[0] for call in run.call_args_list]
+                        expected = [
+                            ['hdiutil', 'attach', image, '-readonly', '-nobrowse', '-mountpoint', mount],
+                            ['hdiutil', 'info', '-plist'],
+                        ]
+                        if state == 'owned':
+                            expected.append(['hdiutil', 'detach', mount])
+                        self.assertEqual(commands, expected)
+                        self.assertEqual(run.call_args_list[0].kwargs['timeout'], 60)
+                        self.assertEqual(run.call_args_list[1].kwargs['timeout'], 15)
+
+    def test_attach_error_survives_failed_reconciliation_or_cleanup(self):
+        image = Path('/fixture/candidate.dmg')
+        for failure in ('inspection-timeout', 'malformed-info', 'malformed-entities', 'detach-failure'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                temporary = Path(directory)
+                mount = temporary / 'mounted'
+                error = subprocess.TimeoutExpired('hdiutil attach', 60)
+                owned = plistlib.dumps({'images': [{
+                    'image-path': str(image), 'system-entities': [{'mount-point': str(mount)}],
+                }]}).decode()
+                info = {'inspection-timeout': subprocess.TimeoutExpired('hdiutil info', 15),
+                        'malformed-info': 'not a plist',
+                        'malformed-entities': plistlib.dumps({'images': [{'image-path': str(image)}]}).decode(),
+                        'detach-failure': owned}[failure]
+                with patch.object(desktop, 'run', side_effect=[error, info]) as run, patch.object(desktop, 'detach_image', side_effect=RuntimeError('still attached')) as detach:
+                    with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                        with desktop.mount_image(image, temporary):
+                            self.fail('An attach failure must not yield the application')
+                    self.assertIs(caught.exception, error)
+                    self.assertIn('Disk-image cleanup could not be confirmed', error.__notes__[0])
+                    self.assertEqual(detach.call_count, int(failure == 'detach-failure'))
+                    self.assertEqual(run.call_count, 2)
+
+    def test_successful_attach_cleans_up_after_use_or_body_failure(self):
+        image = Path('/fixture/candidate.dmg')
+        for fail_body in (False, True):
+            with self.subTest(fail_body=fail_body), tempfile.TemporaryDirectory() as directory:
+                temporary = Path(directory)
+                mount = temporary / 'mounted'
+                error = RuntimeError('fixture body failed')
+                with patch.object(desktop, 'run', return_value=None) as run:
+                    try:
+                        with desktop.mount_image(image, temporary) as app:
+                            self.assertEqual(app, mount / 'Ocean.app')
+                            if fail_body:
+                                raise error
+                    except RuntimeError as caught:
+                        self.assertTrue(fail_body)
+                        self.assertIs(caught, error)
+                    self.assertEqual(run.call_count, 2)
+                    self.assertEqual(run.call_args.args[0], ['hdiutil', 'detach', mount])
+
+    def test_detach_retry_does_not_follow_same_image_elsewhere(self):
+        image = Path('/fixture/candidate.dmg')
+        info = plistlib.dumps({'images': [{'image-path': str(image),
+            'system-entities': [{'mount-point': '/other/mount'}]}]}).decode()
+        with patch.object(desktop, 'run', side_effect=[subprocess.TimeoutExpired('hdiutil detach', 15), info]) as run:
+            desktop.detach_image(Path('/owned/mount'), image)
+            self.assertEqual(run.call_count, 2)
+
     def test_busy_owned_image_is_retried_before_force(self):
         busy = subprocess.CalledProcessError(16, 'hdiutil')
         with patch.object(desktop, 'image_attached', return_value=True), patch.object(desktop, 'run', side_effect=[busy, None]) as run, patch.object(desktop.time, 'sleep'):
