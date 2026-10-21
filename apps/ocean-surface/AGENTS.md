@@ -95,7 +95,10 @@ Native surface direction:
   Surface. A user-selected catalog route is stored under the desktop app's
   own config directory and supplied only as `OCEAN_DEFAULT_MODEL` to its child.
   Existing environment defaults and daemon-persisted model choices take
-  precedence. The desktop never writes daemon configuration or picks a model
+  precedence. Blank `OCEAN_MODEL` is removed from the child even without a
+  desktop selection, allowing the daemon's persisted/default model to resolve.
+  Nonblank explicit choices and existing defaults remain authoritative.
+  The desktop never writes daemon configuration or picks a model
   silently. Corrupt/nonregular desktop settings fail visibly without replacement.
   The startup form exists only while native supervision is offline. Initial
   native status must resolve before mounting Rooms; a later disconnect preserves
@@ -110,6 +113,12 @@ Native surface direction:
   argument may select an executable. Explicit start/restart remains unchanged.
   Children run from the absolute home/profile (or OS temporary directory),
   never the app's inherited workspace; Windows children have no console window.
+  Explicit nonempty relative runtime state/auth/input path overrides are anchored
+  to the app's launch directory before changing child cwd; absolute paths and
+  blank runtime sentinels retain their meaning. The native host environment and
+  operating-system home remain unchanged. The allowlist in `lib.rs` covers Ocean
+  and XDG state, Ocean/Codex/Claude auth, room/title databases, agent/plugin/
+  assistant/skill roots and prompt capture. Verify with `cargo test --lib daemon_child`.
   Home/profile also owns native daemon logs. Verify native launch with
   `cargo test --lib daemon_` from `crates/ocean-tauri`.
   A native-process `OCEAN_DAEMON_LOG` may select an absolute log file for
