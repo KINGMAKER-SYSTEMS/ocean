@@ -2201,10 +2201,9 @@ pub struct Daemon {
     /// Checked BEFORE the `in_flight` guard so a hung fetch cannot block the
     /// timeout from being observed.
     pub sync_deadline: RwSignal<Option<f64>>,
-    /// Monotonic activity revision bumped by admitted `TurnStarted` and
-    /// `TurnFinished`. Captured at projection start; mismatch at commit
-    /// → `ProjectionOutcome::Live` (re-quarantine). Covers both directions:
-    /// live-detail-stale-when-terminal AND terminal-detail-stale-when-new-turn.
+    /// Monotonic revision of admitted session metadata, transcript, pinned content
+    /// and turn lifecycle mutations. A full snapshot cannot overwrite any frame
+    /// admitted after its read began; recovery retries after a quiet window.
     activity_revision: RwSignal<u64>,
     /// Edge-safe kick counter for the sync poll. Bumped by `TurnFinished` during
     /// sync_pending so the live SSE frame triggers an immediate detail refetch
@@ -3083,7 +3082,7 @@ impl Daemon {
                 // Tauri/web split it reproduces).
                 if connected_once {
                     match daemon
-                        .commit_session_projection(&active_session_id, generation)
+                        .recover_session_projection(&active_session_id, generation)
                         .await
                     {
                         Ok(ProjectionOutcome::Terminal) => {
@@ -3775,6 +3774,11 @@ impl Daemon {
         let display = row
             .map(|row| row.display)
             .unwrap_or_else(|| text.to_string());
+        // The stream already checked event identity and session/generation before
+        // dispatching this delivery. It bypasses apply_event, so fence the actual
+        // transcript mutation here against snapshots started before delivery.
+        self.activity_revision
+            .update(|revision| *revision = revision.wrapping_add(1));
         self.turns.update(|t| t.push(Turn::user(display)));
         self.status.set("steering delivered".into());
         self.status_detail.set(None);
@@ -5332,38 +5336,22 @@ impl Daemon {
     fn spawn_session_projection(&self, id: String, generation: u64) {
         let daemon = self.clone();
         spawn_local(async move {
-            for attempt in 0..4 {
-                match daemon.commit_session_projection(&id, generation).await {
-                    Ok(ProjectionOutcome::Terminal) => {
-                        // Turn is terminal — projection already committed, nothing to sync.
-                        daemon.stop_sync_poll();
-                        return;
-                    }
-                    Ok(ProjectionOutcome::Live) => {
-                        // Turn is live — enter sync_pending mode.
-                        daemon.start_sync_poll(id.clone(), generation);
-                        return;
-                    }
-                    Err(error) if error == SESSION_PROJECTION_RETIRED => return,
-                    Err(error) if error == SESSION_PROJECTION_ACTIVITY_CHANGED && attempt < 3 => {
-                        // An admitted lifecycle event raced the HTTP snapshot.
-                        // Retry from a fresh revision rather than publishing it.
-                        continue;
-                    }
-                    Err(error) => {
-                        log::warn!("session projection commit skipped: {error}");
-                        if admit_session_snapshot(
-                            &id,
-                            generation,
-                            daemon.session_id.get_untracked().as_deref(),
-                            daemon.sse_generation.get_untracked(),
-                        ) == SnapshotAdmission::Commit
-                        {
-                            daemon
-                                .status
-                                .set(format!("session load failed: {}", concise_error(&error)));
-                        }
-                        return;
+            match daemon.recover_session_projection(&id, generation).await {
+                Ok(ProjectionOutcome::Terminal) => daemon.stop_sync_poll(),
+                Ok(ProjectionOutcome::Live) => daemon.start_sync_poll(id.clone(), generation),
+                Err(error) if error == SESSION_PROJECTION_RETIRED => {}
+                Err(error) => {
+                    log::warn!("session projection commit skipped: {error}");
+                    if admit_session_snapshot(
+                        &id,
+                        generation,
+                        daemon.session_id.get_untracked().as_deref(),
+                        daemon.sse_generation.get_untracked(),
+                    ) == SnapshotAdmission::Commit
+                    {
+                        daemon
+                            .status
+                            .set(format!("session load failed: {}", concise_error(&error)));
                     }
                 }
             }
@@ -5417,17 +5405,71 @@ impl Daemon {
     /// persisted transcript immediately while preserving the daemon-owned live
     /// Stop state. Session switching never enters a client-side detail
     /// quarantine or requires a manual refresh.
-    async fn commit_session_projection(
+    async fn recover_session_projection(
         &self,
         id: &str,
         generation: u64,
     ) -> Result<ProjectionOutcome, String> {
-        self.commit_session_projection_with(
+        self.recover_session_projection_with(
             id,
             generation,
-            self.fetch_session_projection(id, generation),
+            || self.fetch_session_projection(id, generation),
+            || gloo_timers::future::TimeoutFuture::new(250),
         )
         .await
+    }
+
+    /// Four immediate attempts handle brief races. Further collisions coalesce
+    /// behind a quiet activity window: live streaming keeps rendering, with no
+    /// repeated HTTP reads until it pauses or finishes. New full reads/focus retire
+    /// this waiter, so an old recovery cannot reclaim ownership after a delay.
+    async fn recover_session_projection_with<F, Fetch, W, Wait>(
+        &self,
+        id: &str,
+        generation: u64,
+        mut fetch: F,
+        mut quiet_tick: W,
+    ) -> Result<ProjectionOutcome, String>
+    where
+        F: FnMut() -> Fetch,
+        Fetch: std::future::Future<Output = Result<(SessionDetail, SnapshotSettle), String>>,
+        W: FnMut() -> Wait,
+        Wait: std::future::Future<Output = ()>,
+    {
+        let mut collisions = 0u8;
+        loop {
+            let result = self
+                .commit_session_projection_with(id, generation, fetch())
+                .await;
+            if result.as_ref().err().map(String::as_str)
+                != Some(SESSION_PROJECTION_ACTIVITY_CHANGED)
+            {
+                return result;
+            }
+            collisions = collisions.saturating_add(1);
+            if collisions < 4 {
+                continue;
+            }
+            let epoch = self.session_projection_epoch.get_untracked();
+            self.status.set("session recovering".into());
+            loop {
+                let revision = self.activity_revision.get_untracked();
+                quiet_tick().await;
+                if self.session_projection_epoch.get_untracked() != epoch
+                    || admit_session_snapshot(
+                        id,
+                        generation,
+                        self.session_id.get_untracked().as_deref(),
+                        self.sse_generation.get_untracked(),
+                    ) == SnapshotAdmission::Discard
+                {
+                    return Err(SESSION_PROJECTION_RETIRED.into());
+                }
+                if self.activity_revision.get_untracked() == revision {
+                    break;
+                }
+            }
+        }
     }
 
     /// Claims the complete read before polling either fetch. A newer full-session
@@ -6704,7 +6746,7 @@ fn publish_permission_view(
 }
 
 /// The live signals `apply_session_projection` reads and writes — the signal half
-/// of `commit_session_projection`. Grouped so the post-fetch commit body can be a
+/// of `commit_session_projection_with`. Grouped so the post-fetch commit body can be a
 /// free function driven in a native test over a `Daemon::dummy()` (via
 /// `Daemon::commit_signals`) with injected fetch results (codex HOLD on c2a1810:
 /// the regressions must drive the production wrapper). `RwSignal` is `Copy`, so
@@ -6734,7 +6776,7 @@ struct SessionCommitSignals {
 /// two-state permission publish. `detail` and `settle` are the two fetch RESULTS,
 /// injected so this whole wrapper runs in a native test (codex HOLD on c2a1810:
 /// the regressions must drive the production wrapper — transcript + admission +
-/// permission — not just the permission helper). `commit_session_projection`
+/// permission — not just the permission helper). `commit_session_projection_with`
 /// performs the two HTTP awaits, then calls this.
 fn apply_session_projection(
     sig: &SessionCommitSignals,
@@ -6890,9 +6932,8 @@ fn apply_event(
     // TASK-46: kicked by TurnFinished during sync_pending so the poll fires an
     // immediate detail refetch.
     sync_poll_kick: RwSignal<u64>,
-    // TASK-46: bumped by admitted TurnStarted and TurnFinished; captured at
-    // projection start so stale terminal detail cannot clear a new live turn
-    // and stale live detail cannot clear a just-finished Stop target.
+    // Captured at projection start; bumped by every admitted mutation of fields
+    // that a session snapshot replaces, including live transcript and pinned content.
     activity_revision: RwSignal<u64>,
     // Header-bound session identity (OCEAN-236). A `session_created` frame is the
     // authoritative source for the live session's title and working directory; the
@@ -6930,6 +6971,23 @@ fn apply_event(
             // State events still flow through.
             _ => {}
         }
+    }
+
+    // Only admitted, unsuppressed mutations invalidate a full-session read.
+    // Lifecycle arms below already advance this revision. Permission frames have
+    // their own revision/epoch and SurfacePatch is not replaced by this snapshot.
+    if matches!(
+        event,
+        AgentEvent::SessionCreated { .. }
+            | AgentEvent::AssistantTextDelta { .. }
+            | AgentEvent::ThinkingDelta { .. }
+            | AgentEvent::ToolCallStarted { .. }
+            | AgentEvent::ToolCallChunk { .. }
+            | AgentEvent::ToolCallFinished { .. }
+            | AgentEvent::ComponentRender { .. }
+            | AgentEvent::ComponentUnmount { .. }
+    ) {
+        activity_revision.update(|revision| *revision = revision.wrapping_add(1));
     }
 
     match event {
@@ -12326,6 +12384,315 @@ mod tests {
             pending.as_mut().now_or_never().unwrap(),
             Err(SESSION_PROJECTION_ACTIVITY_CHANGED.into())
         );
+        assert!(daemon.turns.get_untracked().is_empty());
+    }
+
+    #[test]
+    fn projection_content_race_preserves_every_admitted_content_frame() {
+        let frames = serde_json::json!([
+            {"type":"session_created","session_id":"s1","title":"live title","cwd":"/live"},
+            {"type":"assistant_text_delta","session_id":"s1","turn_id":"t1","delta":"D"},
+            {"type":"thinking_delta","session_id":"s1","turn_id":"t1","delta":"thought"},
+            {"type":"tool_call_started","session_id":"s1","turn_id":"t1",
+             "call":{"id":"c2","name":"bash","args_json":{}}},
+            {"type":"tool_call_chunk","session_id":"s1","turn_id":"t1","call_id":"c1","chunk":"chunk"},
+            {"type":"tool_call_finished","session_id":"s1","turn_id":"t1","call_id":"c1",
+             "result":{"ok":true,"output":"finished"}},
+            {"type":"component_render","session_id":"s1","component_id":"card","kind":"text",
+             "props":{"text":"new"},"replace":true},
+            {"type":"component_render","session_id":"s1","component_id":"pinned","kind":"text",
+             "props":{"placement":"pinned","text":"new"},"replace":true},
+            {"type":"component_unmount","session_id":"s1","component_id":"pinned"}
+        ]);
+        for frame in serde_json::from_value::<Vec<AgentEvent>>(frames).unwrap() {
+            let daemon = wrapper_daemon();
+            daemon.streaming.set(true);
+            daemon.active_turn_id.set(Some("t1".into()));
+            apply_test_event(
+                &daemon,
+                AgentEvent::AssistantTextDelta {
+                    session_id: "s1".into(),
+                    turn_id: "t1".into(),
+                    delta: "T".into(),
+                },
+            );
+            apply_test_event(
+                &daemon,
+                AgentEvent::ToolCallStarted {
+                    session_id: "s1".into(),
+                    turn_id: "t1".into(),
+                    call: ToolCallSummary {
+                        id: "c1".into(),
+                        name: "bash".into(),
+                        args_json: serde_json::json!({}),
+                    },
+                },
+            );
+            daemon.pinned_widgets.set(vec![PinnedWidget {
+                component_id: "pinned".into(),
+                kind: "text".into(),
+                props: serde_json::json!({"placement":"pinned","text":"old"}),
+            }]);
+            daemon
+                .decision_authority
+                .set(task44_authority(&[("t1", "token", "s1")]));
+            drive_frame(&daemon, &request_frame("gate"));
+            let reply = RefCell::new(None);
+            let delayed = std::future::poll_fn(|_| {
+                reply
+                    .borrow_mut()
+                    .take()
+                    .map_or(std::task::Poll::Pending, std::task::Poll::Ready)
+            });
+            let mut read = Box::pin(daemon.commit_session_projection_with("s1", 5, delayed));
+            assert!(read.as_mut().now_or_never().is_none());
+            let revision = daemon.activity_revision.get_untracked();
+            apply_test_event(&daemon, frame.clone());
+            assert!(
+                daemon.activity_revision.get_untracked() > revision,
+                "{frame:?}"
+            );
+            let live_turns = format!("{:?}", daemon.turns.get_untracked());
+            let live_pinned = format!("{:?}", daemon.pinned_widgets.get_untracked());
+            let live_title = daemon.session_title.get_untracked();
+            let live_cwd = daemon.cwd.get_untracked();
+            *reply.borrow_mut() = Some(Ok((
+                wrapper_detail(vec![], vec![user_entry("stale snapshot T")]),
+                SnapshotSettle::Fresh(vec![]),
+            )));
+            assert_eq!(
+                read.as_mut().now_or_never().unwrap(),
+                Err(SESSION_PROJECTION_ACTIVITY_CHANGED.into()),
+                "{frame:?}"
+            );
+            assert_eq!(format!("{:?}", daemon.turns.get_untracked()), live_turns);
+            assert_eq!(
+                format!("{:?}", daemon.pinned_widgets.get_untracked()),
+                live_pinned
+            );
+            assert_eq!(daemon.session_title.get_untracked(), live_title);
+            assert_eq!(daemon.cwd.get_untracked(), live_cwd);
+            assert!(daemon.streaming.get_untracked());
+            assert_eq!(daemon.active_turn_id.get_untracked().as_deref(), Some("t1"));
+            assert_eq!(
+                ids_of(&daemon.permission_view.get_untracked()),
+                vec!["gate".to_string()]
+            );
+            assert!(daemon.decision_authority.get_untracked().contains_key("t1"));
+        }
+    }
+
+    #[test]
+    fn projection_content_recovery_coalesces_streaming_then_converges_when_quiet() {
+        let daemon = wrapper_daemon();
+        let reads = std::cell::Cell::new(0);
+        let ticks = std::cell::Cell::new(0);
+        let result = daemon
+            .recover_session_projection_with(
+                "s1",
+                5,
+                || async {
+                    reads.set(reads.get() + 1);
+                    if reads.get() <= 4 {
+                        apply_test_event(
+                            &daemon,
+                            AgentEvent::AssistantTextDelta {
+                                session_id: "s1".into(),
+                                turn_id: "t1".into(),
+                                delta: "D".into(),
+                            },
+                        );
+                    }
+                    Ok((
+                        wrapper_detail(vec![], vec![assistant_entry("authoritative T+D")]),
+                        SnapshotSettle::Fresh(vec![]),
+                    ))
+                },
+                || async {
+                    ticks.set(ticks.get() + 1);
+                    assert_eq!(
+                        reads.get(),
+                        4,
+                        "continuous streaming must not issue more HTTP reads"
+                    );
+                    assert_eq!(daemon.status.get_untracked(), "session recovering");
+                    if ticks.get() <= 3 {
+                        apply_test_event(
+                            &daemon,
+                            AgentEvent::AssistantTextDelta {
+                                session_id: "s1".into(),
+                                turn_id: "t1".into(),
+                                delta: "more".into(),
+                            },
+                        );
+                    }
+                },
+            )
+            .now_or_never()
+            .unwrap();
+        assert_eq!(result, Ok(ProjectionOutcome::Terminal));
+        assert_eq!(reads.get(), 5);
+        assert_eq!(ticks.get(), 4);
+        assert!(matches!(&daemon.turns.get_untracked()[0].blocks[..],
+            [Block::Text(text)] if text == "authoritative T+D"));
+        assert_eq!(daemon.status.get_untracked(), "session loaded");
+    }
+
+    #[test]
+    fn projection_content_steering_delivery_survives_stale_read_and_recovers() {
+        for local in [false, true] {
+            let daemon = wrapper_daemon();
+            daemon.streaming.set(true);
+            daemon.active_turn_id.set(Some("t1".into()));
+            daemon
+                .turns
+                .set(vec![Turn::user("start"), Turn::assistant("t1".into())]);
+            daemon.enqueue_prompt("queued next".into(), "queued next".into(), "surface-web");
+            steering_row(&daemon, "unrelated pending", Some("other-steer"));
+            if local {
+                steering_row(&daemon, "use tabs", Some("delivered-steer"));
+            }
+            let reply = RefCell::new(None);
+            let reads = std::cell::Cell::new(0);
+            let live_turns = RefCell::new(String::new());
+            let mut recovery = Box::pin(daemon.recover_session_projection_with(
+                "s1",
+                5,
+                || async {
+                    reads.set(reads.get() + 1);
+                    if reads.get() == 1 {
+                        return std::future::poll_fn(|_| {
+                            reply
+                                .borrow_mut()
+                                .take()
+                                .map_or(std::task::Poll::Pending, std::task::Poll::Ready)
+                        })
+                        .await;
+                    }
+                    // Reaching a second read proves the stale reply was refused
+                    // through the real recovery seam, before overwriting content.
+                    assert_eq!(reads.get(), 2);
+                    assert_eq!(
+                        format!("{:?}", daemon.turns.get_untracked()),
+                        *live_turns.borrow()
+                    );
+                    assert!(daemon.streaming.get_untracked());
+                    assert_eq!(daemon.active_turn_id.get_untracked().as_deref(), Some("t1"));
+                    assert_eq!(
+                        daemon.queued_prompts.get_untracked()[0].prompt,
+                        "queued next"
+                    );
+                    assert_eq!(daemon.steering_prompts.get_untracked().len(), 1);
+                    let mut fresh =
+                        wrapper_detail(vec![], vec![user_entry("start"), user_entry("use tabs")]);
+                    fresh.state = Some(SessionRunState::Running);
+                    fresh.active_requests = vec!["t1".into()];
+                    Ok((fresh, SnapshotSettle::Fresh(vec![])))
+                },
+                || async { panic!("one collision must retry without entering the quiet window") },
+            ));
+            assert!(recovery.as_mut().now_or_never().is_none());
+            let revision = daemon.activity_revision.get_untracked();
+            // This is the production stream's post-admission delivery seam;
+            // another client's steer has no matching local pending row.
+            daemon.deliver_steering("delivered-steer", "use tabs");
+            assert_eq!(
+                daemon.activity_revision.get_untracked(),
+                revision.wrapping_add(1)
+            );
+            let display = if local { "shown: use tabs" } else { "use tabs" };
+            assert!(
+                matches!(&daemon.turns.get_untracked().last().unwrap().blocks[..],
+                [Block::Text(text)] if text == display)
+            );
+            *live_turns.borrow_mut() = format!("{:?}", daemon.turns.get_untracked());
+            *reply.borrow_mut() = Some(Ok((
+                wrapper_detail(vec![], vec![user_entry("stale before delivery")]),
+                SnapshotSettle::Fresh(vec![]),
+            )));
+            assert_eq!(
+                recovery.as_mut().now_or_never().unwrap(),
+                Ok(ProjectionOutcome::Terminal)
+            );
+            assert_eq!(reads.get(), 2);
+            let turns = daemon.turns.get_untracked();
+            assert_eq!(turns.len(), 2);
+            assert!(matches!(&turns[1].blocks[..], [Block::Text(text)] if text == "use tabs"));
+            assert!(daemon.streaming.get_untracked());
+            assert_eq!(daemon.active_turn_id.get_untracked().as_deref(), Some("t1"));
+            assert_eq!(daemon.queued_prompts.get_untracked().len(), 1);
+            let pending = daemon.steering_prompts.get_untracked();
+            assert_eq!(pending.len(), 1);
+            assert_eq!(pending[0].steer_id.as_deref(), Some("other-steer"));
+        }
+    }
+
+    #[test]
+    fn projection_content_quiet_wait_retires_when_newer_read_takes_ownership() {
+        let daemon = wrapper_daemon();
+        let reads = std::cell::Cell::new(0);
+        let result = daemon
+            .recover_session_projection_with(
+                "s1",
+                5,
+                || async {
+                    reads.set(reads.get() + 1);
+                    apply_test_event(
+                        &daemon,
+                        AgentEvent::AssistantTextDelta {
+                            session_id: "s1".into(),
+                            turn_id: "t1".into(),
+                            delta: "D".into(),
+                        },
+                    );
+                    Ok((
+                        wrapper_detail(vec![], vec![user_entry("old")]),
+                        SnapshotSettle::Fresh(vec![]),
+                    ))
+                },
+                || async {
+                    let newer = daemon
+                        .commit_session_projection_with("s1", 5, async {
+                            Ok((
+                                wrapper_detail(vec![], vec![user_entry("new owner")]),
+                                SnapshotSettle::Fresh(vec![]),
+                            ))
+                        })
+                        .await;
+                    assert_eq!(newer, Ok(ProjectionOutcome::Terminal));
+                },
+            )
+            .now_or_never()
+            .unwrap();
+        assert_eq!(result, Err(SESSION_PROJECTION_RETIRED.into()));
+        assert_eq!(reads.get(), 4);
+        assert!(matches!(&daemon.turns.get_untracked()[0].blocks[..],
+            [Block::Text(text)] if text == "new owner"));
+        assert_eq!(daemon.status.get_untracked(), "session loaded");
+    }
+
+    #[test]
+    fn projection_content_fence_ignores_wrong_session_and_legacy_suppressed_frames() {
+        let daemon = wrapper_daemon();
+        apply_test_event(
+            &daemon,
+            AgentEvent::AssistantTextDelta {
+                session_id: "other".into(),
+                turn_id: "t1".into(),
+                delta: "wrong".into(),
+            },
+        );
+        assert_eq!(daemon.activity_revision.get_untracked(), 0);
+        daemon.sync_pending.set(true);
+        apply_test_event(
+            &daemon,
+            AgentEvent::AssistantTextDelta {
+                session_id: "s1".into(),
+                turn_id: "t1".into(),
+                delta: "suppressed".into(),
+            },
+        );
+        assert_eq!(daemon.activity_revision.get_untracked(), 0);
         assert!(daemon.turns.get_untracked().is_empty());
     }
 
