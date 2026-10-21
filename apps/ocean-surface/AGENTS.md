@@ -312,17 +312,25 @@ token to browser code, bundle it, or cache it in client storage.
   active-turn action. Its model panel is anchored to the compact composer.
   Browser float mode uses Ocean's background; native overlay transparency is
   gated through the existing `host::running_in_tauri` seam.
-- Enter while one of this surface's turns is streaming steers it: the text
-  goes to `POST /v1/agent/sessions/{id}/steer` and shows as a
-  `turn--steering` row ("Steering · next step", no remove control) until the
-  daemon's `steering_delivered` frame, when it becomes a user turn at the
-  point it landed and the next round renders below it. A refusal (409/429/
-  network) sends it to the queue; an accepted steer still pending when the
-  active turn's `turn_finished` arrives goes to the FRONT of the queue and runs
-  as the next turn. Delivery matches by `steer_id`, or by text for a row whose
-  POST answer has not arrived yet. Messages with staged images, voice
-  prompts, and sends with no acknowledged turn take the queue instead. Stop,
-  New Session and a session switch clear pending steers with the queue.
+- Enter during a steerable turn sends text with a CSPRNG UUID and the captured
+  originating turn to the existing steer route. Pending rows retain exact
+  session/turn/steer identity before the POST; identical text never correlates
+  delivery. Definitive refusal or an admitted unconsumed receipt queues once.
+  Lost/malformed acknowledgements and missing/restarted/evicted receipt evidence
+  retain the existing row as outcome unknown, without resending. Full projection
+  admission (focus, SSE generation, projection epoch and activity revision) owns
+  reconciliation: delivered receipts remove rows without adding transcript text,
+  pending stays pending, and matching ended-turn proof clears only that old Stop
+  target. Bounded delivered IDs suppress late SSE already represented by a snapshot.
+  Ambiguous deliveries after hydration refresh the authoritative transcript instead
+  of appending; durable observed-event IDs settle only after the admitted post-event
+  read. ACK, finish and delayed-delivery recovery use the shared owning projection
+  caller. Typed snapshot churn retries four times with guarded delays, then exposes
+  failure and unresolved rows; retired callers never publish or retry.
+  Turn finish requests receipt reconciliation, never blind requeue. New Session,
+  session switch and explicit Stop keep their existing local queue-clear behavior.
+  Verify with UI cargo test -p ocean-surface-ui steering_ and the real WASM bundle.
+
 - The main composer never refuses a send because a turn is running. A prompt
   that cannot steer (see above), sent while earlier prompts are queued, or
   while the head of the queue is waiting out a busy daemon goes into

@@ -288,16 +288,26 @@ pub enum SteerRefusal {
     Closed,
     /// [`SteeringInbox::MAX_PENDING`] messages are already waiting.
     Full,
+    /// An id was reused with different text, or an oversized identity payload.
+    Conflict,
+    /// The requested originating turn is unavailable; its outcome is unknown.
+    WrongTurn,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SteeringOutcome {
+    Pending,
+    InFlight,
+    Delivered,
+    Unconsumed,
 }
 
 /// Mid-turn steering mailbox shared between whoever accepts operator messages
 /// (the daemon's steer route) and the agent loop that delivers them.
 ///
-/// The one guarantee: a message `push` accepts is either delivered to the
-/// model or handed back by [`SteeringInbox::close`], never silently lost. The
-/// loop closes the inbox only through [`SteeringInbox::close_if_idle`], which
-/// checks for waiting messages and closes under the same lock, so there is no
-/// window where a push is accepted after the loop decided it was done.
+/// Intake, consumption and closure share custody. Only still-pending messages
+/// become unconsumed on close; consumed messages remain unknown until the
+/// persistence owner acknowledges their exact successfully saved checkpoint.
 #[derive(Debug, Default)]
 pub struct SteeringInbox {
     state: std::sync::Mutex<SteeringState>,
@@ -307,12 +317,16 @@ pub struct SteeringInbox {
 struct SteeringState {
     closed: bool,
     pending: std::collections::VecDeque<SteeringMessage>,
+    receipts: Vec<(SteeringMessage, SteeringOutcome)>,
 }
 
 impl SteeringInbox {
     /// Upper bound on undelivered messages, so a stuck run cannot accumulate
     /// an unbounded backlog.
     pub const MAX_PENDING: usize = 16;
+    /// Active identities are never evicted: refuse new admissions at capacity.
+    pub const MAX_RECEIPTS: usize = 64;
+    pub const MAX_TEXT_BYTES: usize = 32 * 1024;
 
     pub fn new() -> Self {
         Self::default()
@@ -329,19 +343,43 @@ impl SteeringInbox {
     /// Queue `message` for delivery at the run's next tool boundary.
     pub fn push(&self, message: SteeringMessage) -> Result<(), SteerRefusal> {
         let mut state = self.lock();
+        if let Some((prior, _)) = state
+            .receipts
+            .iter()
+            .find(|(prior, _)| prior.id == message.id)
+        {
+            return if prior.text == message.text {
+                Ok(())
+            } else {
+                Err(SteerRefusal::Conflict)
+            };
+        }
+        if message.id.len() > 128 || message.text.len() > Self::MAX_TEXT_BYTES {
+            return Err(SteerRefusal::Conflict);
+        }
         if state.closed {
             return Err(SteerRefusal::Closed);
         }
-        if state.pending.len() >= Self::MAX_PENDING {
+        if state.pending.len() >= Self::MAX_PENDING || state.receipts.len() >= Self::MAX_RECEIPTS {
             return Err(SteerRefusal::Full);
         }
+        state
+            .receipts
+            .push((message.clone(), SteeringOutcome::Pending));
         state.pending.push_back(message);
         Ok(())
     }
 
     /// Take everything waiting, oldest first, leaving the inbox open.
     pub fn take_pending(&self) -> Vec<SteeringMessage> {
-        self.lock().pending.drain(..).collect()
+        let mut state = self.lock();
+        let messages: Vec<_> = state.pending.drain(..).collect();
+        for (message, outcome) in &mut state.receipts {
+            if messages.iter().any(|pending| pending.id == message.id) {
+                *outcome = SteeringOutcome::InFlight;
+            }
+        }
+        messages
     }
 
     /// Close the inbox if nothing is waiting and report whether it is now
@@ -359,7 +397,48 @@ impl SteeringInbox {
     pub fn close(&self) -> Vec<SteeringMessage> {
         let mut state = self.lock();
         state.closed = true;
+        for (_, outcome) in &mut state.receipts {
+            if *outcome == SteeringOutcome::Pending {
+                *outcome = SteeringOutcome::Unconsumed;
+            }
+        }
         state.pending.drain(..).collect()
+    }
+
+    /// Called only by the persistence owner after the checkpoint containing
+    /// these exact ordered delivery events has successfully saved.
+    pub fn acknowledge_saved(&self, ids: &[String]) {
+        let mut state = self.lock();
+        for (message, outcome) in &mut state.receipts {
+            if *outcome == SteeringOutcome::InFlight && ids.contains(&message.id) {
+                *outcome = SteeringOutcome::Delivered;
+            }
+        }
+    }
+
+    /// Keep durable publication and its receipt transition indivisible to
+    /// snapshot readers. The callback is synchronous and must not reenter this inbox.
+    pub fn save_and_acknowledge<E>(
+        &self,
+        ids: &[String],
+        save: impl FnOnce() -> Result<(), E>,
+    ) -> Result<(), E> {
+        let mut state = self.lock();
+        save()?;
+        for (message, outcome) in &mut state.receipts {
+            if *outcome == SteeringOutcome::InFlight && ids.contains(&message.id) {
+                *outcome = SteeringOutcome::Delivered;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn receipts(&self) -> Vec<(String, SteeringOutcome)> {
+        self.lock()
+            .receipts
+            .iter()
+            .map(|(message, outcome)| (message.id.clone(), *outcome))
+            .collect()
     }
 
     pub fn is_closed(&self) -> bool {

@@ -43,14 +43,18 @@ transcripts by session id.
   bounds each call to 45 seconds, and prints fixed error classes and token counts.
   It never refreshes credentials or constructs sessions/stores. Configured
   credentials alone do not prove entitlement or completed inference.
-- Mid-turn steering is owned per operator turn: `AgentRuntime::open_steering`
-  registers one `SteeringInbox` per session and returns a
-  `SteeringRegistration` whose drop closes and unregisters it (only its own
-  entry, by pointer). `PromptControl::steering` carries the inbox into every
-  attempt of the turn, so a pre-stream failover retry delivers what the failed
-  attempt never read. `AgentRuntime::steer` refuses with `Closed` when no
-  steerable turn runs on the session. Room, subagent and direct turns carry no
-  inbox and cannot be steered.
+- Operator steering registrations bind an immutable originating turn. Expected-turn
+  lookup and inbox admission share registry custody; legacy callers retain current-turn
+  admission. Same ID/text retries acknowledge without enqueueing; conflicting reuse
+  refuses. Keep at most 16 closed turns of boot-local receipt evidence; absent/evicted/
+  restarted evidence is unknown. Registration drop closes/archive before terminal proof,
+  never removing a successor. The checkpoint owner defers delivery SSE until synchronous
+  session::save succeeds and acknowledges only ordered delivery IDs covered by that
+  checkpoint, under inbox custody. Failed saves leave consumed messages unknown.
+  Full session detail brackets disk reads with receipt snapshots and retries up to four
+  times on change; refuse incoherent reads with typed SteeringSnapshotChanged. No transcript schema migration or provider
+  call is involved. Verify cargo test -p ocean-agent steering_ --locked.
+
 - A failed, cancelled or timed-out turn reports the usage of the rounds it
   completed, read from the checkpointed assistant messages, with the last
   completed round's request as its context measurement. Those rounds were
