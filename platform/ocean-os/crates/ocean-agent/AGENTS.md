@@ -52,7 +52,7 @@ transcripts by session id.
   session::save succeeds and acknowledges only ordered delivery IDs covered by that
   checkpoint, under inbox custody. Failed saves leave consumed messages unknown.
   Full session detail brackets disk reads with receipt snapshots and retries up to four
-  times on change; refuse incoherent reads with typed SteeringSnapshotChanged. No transcript schema migration or provider
+  times on change; refuse incoherent reads with typed SteeringSnapshotChanged. Required detail maps only genuine optional-loader absence to typed NotFound; corrupt/unreadable storage stays an error. No transcript schema migration or provider
   call is involved. Verify cargo test -p ocean-agent steering_ --locked.
 
 - A failed, cancelled or timed-out turn reports the usage of the rounds it

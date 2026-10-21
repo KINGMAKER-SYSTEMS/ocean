@@ -3767,17 +3767,42 @@ impl Daemon {
                 },
                 Err(_) => SteerAck::Refused,
             };
-            if daemon.url.get_untracked() != url {
-                return;
-            }
-            daemon.settle_steer(id, &session_id, &turn_id, &steer_id, ack);
-            if daemon.session_id.get_untracked().as_deref() == Some(session_id.as_str()) {
-                let generation = daemon.sse_generation.get_untracked();
-                let _ = daemon
-                    .recover_session_projection(&session_id, generation)
-                    .await;
-            }
+            daemon.settle_steer_ack_with(
+                &url,
+                id,
+                &session_id,
+                &turn_id,
+                &steer_id,
+                ack,
+                |daemon, session_id, generation| {
+                    daemon.spawn_session_projection(session_id, generation)
+                },
+            );
         });
+    }
+
+    // POST completion uses the same owning recovery rail as reconnect and finish.
+    fn settle_steer_ack_with(
+        &self,
+        url: &str,
+        id: u64,
+        session_id: &str,
+        turn_id: &str,
+        steer_id: &str,
+        ack: SteerAck,
+        dispatch: impl FnOnce(&Self, String, u64),
+    ) {
+        if self.url.get_untracked() != url {
+            return;
+        }
+        self.settle_steer(id, session_id, turn_id, steer_id, ack);
+        if self.session_id.get_untracked().as_deref() == Some(session_id) {
+            dispatch(
+                self,
+                session_id.to_string(),
+                self.sse_generation.get_untracked(),
+            );
+        }
     }
 
     fn settle_steer(
@@ -14939,6 +14964,57 @@ mod tests {
         assert_eq!(retired, Err(SESSION_PROJECTION_RETIRED.into()));
         daemon.finish_session_projection("s1", 5, retired);
         assert_eq!(daemon.status.get_untracked(), "session loaded");
+    }
+
+    #[test]
+    fn steering_ack_completion_owns_recovery_failure_and_retires_stale_context() {
+        for error in ["session_snapshot_changed", "network unavailable"] {
+            let daemon = wrapper_daemon();
+            steering_row(&daemon, "pending", Some("a"));
+            let id = daemon.steering_prompts.get_untracked()[0].id;
+            let url = daemon.url.get_untracked();
+            let calls = Cell::new(0);
+            daemon.settle_steer_ack_with(
+                &url,
+                id,
+                "s1",
+                "t1",
+                "a",
+                SteerAck::Accepted,
+                |daemon, session_id, generation| {
+                    calls.set(calls.get() + 1);
+                    assert_eq!((session_id.as_str(), generation), ("s1", 5));
+                    daemon.finish_session_projection(&session_id, generation, Err(error.into()));
+                },
+            );
+            assert_eq!(calls.get(), 1);
+            assert!(daemon
+                .status
+                .get_untracked()
+                .starts_with("session load failed:"));
+            assert!(daemon.steering_prompts.get_untracked()[0].unresolved);
+            assert!(daemon.queued_prompts.get_untracked().is_empty());
+            daemon.settle_steer_ack_with(
+                "different endpoint",
+                id,
+                "s1",
+                "t1",
+                "a",
+                SteerAck::Refused,
+                |_, _, _| panic!("old endpoint must not recover"),
+            );
+            assert!(daemon.queued_prompts.get_untracked().is_empty());
+            daemon.session_id.set(Some("s2".into()));
+            daemon.settle_steer_ack_with(
+                &url,
+                id,
+                "s1",
+                "t1",
+                "a",
+                SteerAck::Accepted,
+                |_, _, _| panic!("old focus must not recover"),
+            );
+        }
     }
 
     #[test]

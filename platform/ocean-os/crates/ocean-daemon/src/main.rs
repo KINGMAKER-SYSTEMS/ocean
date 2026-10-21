@@ -15437,6 +15437,40 @@ mod tests {
         assert_eq!(detail.state, SessionRunState::Running);
     }
 
+    #[tokio::test]
+    async fn steering_session_handlers_preserve_real_missing_and_corrupt_storage() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = permission_test_state();
+        state.runtime = Arc::new(AgentRuntime::with_config_dir(tmp.path().to_path_buf()).unwrap());
+        let id = AgentSessionId::new_v4();
+        for corrupt in [false, true] {
+            if corrupt {
+                std::fs::create_dir_all(tmp.path().join("sessions")).unwrap();
+                std::fs::write(
+                    tmp.path().join("sessions").join(format!("{id}.json")),
+                    b"not json",
+                )
+                .unwrap();
+            }
+            let expected = if corrupt {
+                StatusCode::INTERNAL_SERVER_ERROR
+            } else {
+                StatusCode::NOT_FOUND
+            };
+            let (status, Json(body)) = agent_session(
+                State(state.clone()),
+                Path(id),
+                Query(SessionDetailQuery::default()),
+            )
+            .await;
+            assert_eq!(status, expected);
+            assert!(!body.ok);
+            let (status, Json(body)) = session(State(state.clone()), Path(core_sid(id))).await;
+            assert_eq!(status, expected);
+            assert!(!body.ok);
+        }
+    }
+
     #[test]
     fn steering_snapshot_read_failure_is_not_reported_as_session_deletion() {
         let missing = anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::NotFound));

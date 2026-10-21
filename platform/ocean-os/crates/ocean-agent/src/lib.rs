@@ -2049,8 +2049,9 @@ impl AgentRuntime {
     }
 
     pub fn session_detail(&self, id: SessionId) -> anyhow::Result<SessionDetail> {
-        self.session_detail_with_steering(id, || session::detail(&self.config_dir, id).map(Some))?
-            .ok_or_else(|| anyhow::anyhow!("session not found"))
+        self.session_detail_optional(id)?.ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "session not found").into()
+        })
     }
 
     /// Receipts bracket the persisted transcript read. Save and receipt update
