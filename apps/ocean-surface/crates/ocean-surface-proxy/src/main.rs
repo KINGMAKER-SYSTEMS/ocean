@@ -2389,6 +2389,10 @@ mod tests {
     use base64::Engine;
     use tower::ServiceExt; // for `oneshot`
 
+    // `POST .../close` through the proxy (Rooms DoD 4.3): its own file, so the
+    // many open slices on this module do not collide with it.
+    mod room_close_route;
+
     /// Build a router that returns a tiny body for any path, wrapped in the
     /// `wasm_headers` layer, so we can assert the layer's header rewriting per
     /// request path without touching the real ServeDir.

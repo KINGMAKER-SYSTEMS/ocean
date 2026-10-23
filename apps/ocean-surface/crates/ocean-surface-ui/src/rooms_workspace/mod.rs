@@ -169,6 +169,11 @@ pub fn RoomsWorkspace(
     let search_open = RwSignal::new(false);
     let members_open = RwSignal::new(false);
     let overflow_ref: NodeRef<leptos::html::Button> = NodeRef::new();
+    // The close confirmation's state (DoD 4.3) lives here, not in the header
+    // closure below: that closure is rebuilt on every `open_room` write, and an
+    // in-flight flag rebuilt by one would re-enable the button during its own
+    // close. The dialog mounts at this scope for the same reason.
+    let close_control = crate::room_close::RoomCloseState::new(overflow_ref);
     let right_close_ref: NodeRef<leptos::html::Button> = NodeRef::new();
     let right_return_focus =
         StoredValue::new(send_wrapper::SendWrapper::new(None::<web_sys::HtmlElement>));
@@ -743,6 +748,10 @@ pub fn RoomsWorkspace(
             // ═══ CENTER RAIL — header + transcript + composer ═══════════
             <div class="rooms-workspace__center">
                 <PendingInviteBanner rooms=rooms />
+                // Armed only by the overflow's `Close room…` item; empty
+                // otherwise. Outside the header closure so a roster write
+                // cannot unmount a close in flight.
+                <crate::room_close::RoomCloseDialog rooms=rooms state=close_control />
                 {move || {
                     let open = rooms.open_room.get();
                     match open {
@@ -804,6 +813,7 @@ pub fn RoomsWorkspace(
                                             rooms=rooms
                                             joined=joined
                                             trigger_ref=overflow_ref
+                                            close=close_control
                                             on_members=Callback::new(move |()| {
                                                 // The menu item is removed on selection; return
                                                 // to the persistent Room options trigger instead.
