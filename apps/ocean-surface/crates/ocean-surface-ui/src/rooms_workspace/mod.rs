@@ -295,6 +295,12 @@ pub fn RoomsWorkspace(
     // this is not read-cursor "unread" state).
     let transcript = rooms.transcript;
     let new_below = RwSignal::new(false);
+    // Scroll intent captured by the reader's own scroll events BEFORE a render
+    // changes `scroll_height`. Post-render geometry alone misclassifies a
+    // reader who was pinned when a tall or batched append lands more than the
+    // 120px threshold below the old viewport, and would raise the jump instead
+    // of following.
+    let transcript_follow_pinned = RwSignal::new(true);
     let pending_read_advance = RwSignal::new(None::<ReadAdvanceRequest>);
     let refresh_handle = RwSignal::new(None::<IntervalHandle>);
     Effect::new(move |prev: Option<usize>| {
@@ -315,16 +321,18 @@ pub fn RoomsWorkspace(
         let metrics = el
             .as_ref()
             .map(|el| (el.scroll_height(), el.scroll_top(), el.client_height()));
-        let near_bottom = metrics.is_some_and(|(scroll_height, scroll_top, client_height)| {
-            transcript_is_near_bottom(scroll_height, scroll_top, client_height, 120)
-        });
-        match transcript_pass_action(len, prev_len, el.is_some(), near_bottom) {
+        // Untracked: the arms below write this signal, and tracking what the
+        // pass writes would re-enter the pass.
+        let follow_pinned = transcript_follow_pinned.get_untracked();
+        match transcript_pass_action(len, prev_len, el.is_some(), follow_pinned) {
             TranscriptPassAction::Reset => {
                 // Generation reset / room switch: nothing below.
+                transcript_follow_pinned.set(true);
                 new_below.set(false);
                 pending_read_advance.set(None);
             }
             TranscriptPassAction::PinAndQueue => {
+                transcript_follow_pinned.set(true);
                 let (scroll_height, _, client_height) = metrics.unwrap_or_default();
                 if let Some(el) = el.clone() {
                     request_animation_frame(move || el.set_scroll_top(el.scroll_height()));
@@ -337,7 +345,7 @@ pub fn RoomsWorkspace(
                     // pin above produces; a transcript that fits its measured
                     // viewport never fires one and marks read here instead.
                     transcript_read_hydrated(first_fill, scroll_height, client_height),
-                    near_bottom,
+                    follow_pinned,
                     rooms.open_room.get().is_some(),
                     &rooms.transcript.get_untracked(),
                     access.as_ref(),
@@ -845,12 +853,14 @@ pub fn RoomsWorkspace(
                                     node_ref=list_ref
                                     on:scroll=move |_| {
                                         if let Some(el) = list_ref.get() {
-                                            if transcript_is_near_bottom(
+                                            let at_bottom = transcript_is_near_bottom(
                                                 el.scroll_height(),
                                                 el.scroll_top(),
                                                 el.client_height(),
                                                 120,
-                                            ) {
+                                            );
+                                            transcript_follow_pinned.set(at_bottom);
+                                            if at_bottom {
                                                 new_below.set(false);
                                                 queue_bottom_read_advance();
                                             }
@@ -1060,6 +1070,7 @@ pub fn RoomsWorkspace(
                                             if let Some(el) = list_ref.get() {
                                                 el.set_scroll_top(el.scroll_height());
                                             }
+                                            transcript_follow_pinned.set(true);
                                             new_below.set(false);
                                             queue_bottom_read_advance();
                                         }

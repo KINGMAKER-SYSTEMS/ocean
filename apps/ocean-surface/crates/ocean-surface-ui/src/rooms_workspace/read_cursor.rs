@@ -213,11 +213,16 @@ pub(super) enum TranscriptPassAction {
 /// `measured` is whether the transcript element exists *and* reports a real
 /// viewport; an unmeasured pass holds so the fill state stays intact for the
 /// first pass that can actually measure.
+///
+/// `follow_pinned` is the reader's scroll intent as their own scroll events
+/// last left it, captured BEFORE this render changed `scroll_height`. It is not
+/// re-measured here: a tall or batched append can push the post-render bottom
+/// past the 120px threshold under a reader who was pinned a moment earlier.
 pub(super) fn transcript_pass_action(
     len: usize,
     prev_len: usize,
     measured: bool,
-    near_bottom: bool,
+    follow_pinned: bool,
 ) -> TranscriptPassAction {
     if len == 0 {
         return TranscriptPassAction::Reset;
@@ -225,7 +230,7 @@ pub(super) fn transcript_pass_action(
     if !measured {
         return TranscriptPassAction::Hold;
     }
-    if prev_len == 0 || near_bottom {
+    if prev_len == 0 || follow_pinned {
         return TranscriptPassAction::PinAndQueue;
     }
     if len > prev_len {
@@ -439,6 +444,64 @@ mod tests {
         assert_eq!(
             transcript_pass_action(5, 0, false, true),
             TranscriptPassAction::Hold
+        );
+    }
+
+    /// A tall or batched append can move the post-render bottom farther than
+    /// the 120px threshold even though the reader was pinned immediately
+    /// before it. The pass follows captured intent, not geometry the append
+    /// already changed; a reader whose scroll event captured `false` still
+    /// gets the jump.
+    #[test]
+    fn tall_append_preserves_pre_append_follow_intent() {
+        assert!(transcript_is_near_bottom(1_000, 500, 500, 120));
+        assert!(!transcript_is_near_bottom(1_500, 500, 500, 120));
+        assert_eq!(
+            transcript_pass_action(6, 5, true, true),
+            TranscriptPassAction::PinAndQueue,
+            "the reader was pinned before the 500px append changed scroll_height",
+        );
+        assert_eq!(
+            transcript_pass_action(6, 5, true, false),
+            TranscriptPassAction::RaiseJump,
+            "a reader already scrolled up must never be yanked",
+        );
+    }
+
+    /// DoD 1.5 as one sequence: a reader at the newest row follows appends, a
+    /// reader who scrolls up gets the jump and keeps their position however
+    /// many rows land, and returning to the latest re-pins the next append.
+    #[test]
+    fn a_scrolled_reader_is_never_yanked_and_return_to_latest_re_pins() {
+        // Open: the first fill pins regardless of captured intent.
+        assert_eq!(
+            transcript_pass_action(3, 0, true, false),
+            TranscriptPassAction::PinAndQueue
+        );
+        // Pinned reader: an append follows.
+        assert_eq!(
+            transcript_pass_action(4, 3, true, true),
+            TranscriptPassAction::PinAndQueue
+        );
+        // The reader scrolls up (scroll event captures `false`). Every
+        // further append raises the jump; none pins.
+        for (len, prev) in [(5, 4), (6, 5), (9, 6)] {
+            assert_eq!(
+                transcript_pass_action(len, prev, true, false),
+                TranscriptPassAction::RaiseJump,
+                "append {prev} -> {len} below a scrolled reader must not pin",
+            );
+        }
+        // A non-append re-run while scrolled up does nothing.
+        assert_eq!(
+            transcript_pass_action(9, 9, true, false),
+            TranscriptPassAction::Hold
+        );
+        // Return to latest (jump press or scroll to bottom captures `true`):
+        // the next append follows again.
+        assert_eq!(
+            transcript_pass_action(10, 9, true, true),
+            TranscriptPassAction::PinAndQueue
         );
     }
 

@@ -393,6 +393,12 @@ ships today and are updated slice by slice.
   both `room_message` and `room_access` immediately: messages alone advance the
   room sequence cursor; access projections replace state without a sequence.
   Do not restore transcript polling or consume the global agent-event stream.
+  The tail is the sole forward-ingest path: join, leave, agent add and post
+  responses never re-read `/transcript` (`tests/room_history_follow.rs`).
+- Room live-follow consumes scroll intent captured by the transcript's own
+  scroll events (`transcript_follow_pinned`), not post-render geometry, so a
+  tall append still follows a pinned reader and never yanks a scrolled one.
+  Only the pin and the "New messages" jump write `scroll_top`.
 - Decoded room-tail frames mutate state only after one shared generation+room
   admission check. Opening and closing a room share one synchronous reset path
   so stale transcript, access, and tail state cannot leak across room identity.

@@ -425,14 +425,6 @@ struct RoomMutateResponse {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct TranscriptResponse {
-    #[serde(default)]
-    ok: bool,
-    #[serde(default)]
-    transcript: Vec<RoomMessage>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
 struct RedeemInviteResponse {
     room_key: String,
 }
@@ -1510,7 +1502,6 @@ impl Rooms {
                 Ok(room) => {
                     me.open_room.set(room);
                     me.status.set("joined".into());
-                    me.refresh_open_transcript(&key, generation_id);
                 }
                 Err(error) => me.status.set(error),
             }
@@ -1591,7 +1582,6 @@ impl Rooms {
                     me.open_room.set(room);
                     me.status
                         .set(format!("agent '{agent_id}' added — mention @{agent_id}"));
-                    me.refresh_open_transcript(&key, generation_id);
                 }
                 Err(error) => me.status.set(error),
             }
@@ -2015,7 +2005,6 @@ impl Rooms {
                 Ok(room) => {
                     me.open_room.set(room);
                     me.status.set("left".into());
-                    me.refresh_open_transcript(&key, generation_id);
                 }
                 Err(error) => me.status.set(error),
             }
@@ -2062,9 +2051,10 @@ impl Rooms {
             if !me.room_is_current(generation_id, &key) {
                 return;
             }
-            match result {
-                Ok(()) => me.refresh_open_transcript(&key, generation_id),
-                Err(error) => me.status.set(error),
+            // The live tail delivers the posted row; the response starts no
+            // competing forward read of `/transcript`.
+            if let Err(error) = result {
+                me.status.set(error);
             }
         });
     }
@@ -2127,41 +2117,16 @@ impl Rooms {
         });
     }
 
-    /// Re-fetch the open room's transcript tail and append only new entries.
-    fn refresh_open_transcript(&self, key: &str, generation_id: u64) {
-        let base = self.base();
-        let me = *self;
-        let key = key.to_string();
-        spawn_local(async move {
-            if !me.room_is_current(generation_id, &key) {
-                return;
-            }
-            let after = last_transcript_seq(&me.transcript.get_untracked());
-            let get_url = format!(
-                "{base}/v1/rooms/persistent/{}/transcript?after_seq={after}",
-                encode(&key)
-            );
-            if let Ok(resp) = Request::get(&get_url).send().await {
-                if let Ok(r) = resp.json::<TranscriptResponse>().await {
-                    if r.ok && !r.transcript.is_empty() && me.room_is_current(generation_id, &key) {
-                        me.transcript.update(|transcript| {
-                            for message in r.transcript {
-                                if transcript.last().map(|last| last.seq).unwrap_or(0) < message.seq
-                                {
-                                    transcript.push(message);
-                                }
-                            }
-                        });
-                    }
-                }
-            }
-        });
-    }
-
     /// Start the live tail for `key` at `generation_id`: room-scoped SSE
     /// (`GET /v1/rooms/persistent/{key}/events`) with `?after_seq=` resume for
     /// newly constructed browser connections (TASK-10/TASK-11). Replaces the
     /// 2.5s poll workaround.
+    ///
+    /// This tail is the room's SOLE forward-ingest path. Join, leave, agent add
+    /// and message post responses do not re-read `/transcript`: a request-time
+    /// read races this ordered stream for the same rows, and the tail already
+    /// delivers each mutation's row and resumes from its own `after_seq` after
+    /// a reconnect.
     fn start_live_tail(&self, key: String, generation_id: u64) {
         let me = *self;
         let base = self.base();
