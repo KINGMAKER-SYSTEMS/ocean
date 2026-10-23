@@ -877,6 +877,50 @@ ships today and are updated slice by slice.
   oversize/invalid reply, lost-ack → unknown), `cargo test owner_mutation`,
   `cargo test room_consent`, `cargo clippy --all-targets -- -D warnings`.
 
+### Coding plans (web identity M3)
+
+- `src/coding_plans.rs` is the panel for this daemon's Claude/Codex/ChatGPT
+  plan logins over the daemon's five operator-gated routes
+  (`platform/ocean-os/crates/ocean-daemon/src/provider_auth.rs`:
+  `GET /v1/auth/providers`, `POST …/{provider}/login`,
+  `GET|DELETE …/{provider}/login/{attempt_id}`, `POST …/{provider}/logout`).
+  It renders what the daemon reports (status, `source` hint, expiry only
+  once passed, a pending `login` adopted on open) and collects intent; it
+  never holds a token. The monorepo proxy fronts one daemon, so sentences
+  name "the machine running this Ocean" rather than a picked device. Reached
+  from the header `⋯` overflow row and the ⌘K `coding-plans` command, both
+  calling `CodingPlansState::show`; `tests/unheld_coding_plans_controls.rs`
+  pins the overflow row (the phone's only door) and the `supported` gate.
+- Transport is the one seam `call`, mirroring the Room owner mutations:
+  web/PWA sends a same-origin fetch and the proxy attaches the operator key
+  (`crates/ocean-surface-proxy/src/coding_plans.rs`: exact five shapes,
+  dot-segment refusal, 4 KiB body cap, key via `owner_operator_key` so
+  `OCEAN_SURFACE_AUTH=off` attaches nothing and the daemon keeps refusing;
+  upstream built fresh so Cookie/Origin/Referer/forged operator headers never
+  pass); Tauri calls `host::coding_plan_request(kind, provider, attempt)` with
+  a fixed `kind` (`list`, `login_start`, `login_poll`, `login_cancel`,
+  `logout`) and the shell (`crates/ocean-tauri/src/coding_plans.rs`) builds
+  the method and path itself over the shared `daemon_transport.rs`
+  (`Method::Delete` added for cancel; ids restricted to `[A-Za-z0-9_-]{1,64}`).
+  The Chrome extension has neither, so `coding_plans::supported()` hides the
+  command, the overflow row and the panel there.
+- Sign-in opens a blank tab synchronously in the click (popup-blocker safe,
+  `opener` severed) and points it at `authorize_url` once the daemon
+  answers; on Tauri `host::open_external_url` hands the URL to the OS
+  browser. The panel then polls the attempt every 2 s, bounded by 300 polls
+  or 5 consecutive transport failures; attempts retired on those bounds are
+  never re-adopted from the list. Closing, cancelling or a newer intent
+  retires the loop by generation; a list reply publishes only for the newest
+  refresh ticket. Sign-out is confirmed in place and hidden for
+  environment-sourced credentials. Every refusal code (`login_unavailable`,
+  `operator_credential_unavailable`/`_missing`, `unknown_attempt`,
+  `unknown_provider`, `logout_failed`, the proxy's 502) and every attempt
+  failure classification renders as a sentence, never the code. The
+  same-machine caveat is stated once per attempt: the provider redirects to
+  the daemon machine's localhost, so a browser elsewhere cannot finish it.
+- Verification: `cargo test -p ocean-surface-ui coding_plans`, the proxy's
+  `cargo test coding_plan`, `cd crates/ocean-tauri && cargo test coding_plan`.
+
 ## Workspace Files lifecycle
 
 - Native empty Files exposes the host folder picker as pane-local browsing; picking never rewrites daemon session cwd. Session/cwd intent changes retire picked roots, previews, tree caches and asynchronous results synchronously, including A-B-A; disposal rejects late picker/watch/read completions.
@@ -937,6 +981,75 @@ commit an organization-owned browser key or restore a compiled-in default.
   arrives before the upstream stream closes, input method/body/status
   passthrough, and refusal of both routes before upstream access without a
   valid existing proxy session. Do not use live daemon/browser state.
+
+### Upstream paths and the auth-off cross-site gate (ocean-surface#230 port)
+
+What the client sends is what the daemon gets, or nothing. The daemon behind
+the proxy has no auth of its own for most routes, so the proxy's route table
+and these checks are the real allow-list of browser-reachable authority.
+
+- Every forward builds its upstream URL with `upstream_url(daemon_url, path,
+  query)`, which parses the URL and refuses (`400
+  {"ok":false,"error":"upstream_path_rewritten"}`) unless the parsed path is
+  byte-for-byte the path the proxy decided to forward. The `url` crate
+  normalises on parse (dot segments collapse, `\` becomes `/`, tab/newline
+  vanish), and each of those once let an approved path arrive upstream as a
+  different route. Callers hand the returned `reqwest::Url` to the client, so
+  the value checked is the value sent. Never add a forwarder that formats a
+  `String` URL and passes `&url` to reqwest. In `proxy_send_json_as` and
+  `proxy_rooms_persistent` the check runs before the operator key is
+  attached, so a refused path never carries the credential.
+- `has_dot_segment` refuses, per `/`-segment and after one percent-decode,
+  `.`, `..`, and any backslash (raw `\`, `%5C`, `%5c`). Answer: `400` plain
+  text `invalid path`. hyper accepts a raw `\` in the request target, and the
+  segment split did not see it as a separator while the URL parser did:
+  `GET /v1/rooms/persistent/team\..\..\..\agent\sessions` reached
+  `/v1/agent/sessions`. It runs on the raw wildcard paths (rooms-persistent,
+  longhouse), on every captured `{id}`, and on the GitHub template captures.
+- A captured `{id}` is percent-DECODED by axum, so it is rebuilt with
+  `daemon_path_with_segment(prefix, id, suffix)`: dot-checked, then
+  re-encoded into exactly one segment (sessions, agent sessions, projects,
+  session messages and steer, permission decision, request cancel, LiveKit
+  room id). Formatting a capture raw let `%2F` become a second segment and
+  `%3F` start a query.
+- Wildcard families forward the RAW request path (`req.uri().path()`), never
+  the decoded `{*rest}` capture.
+- Both halves are needed and each is tested alone
+  (`src/tests/path_csrf.rs`): `%5C` is not rewritten by the parser (only the
+  dot guard stops it), and a future normalisation rule is stopped only by the
+  parse-and-compare. The tests drive the production router over `oneshot`
+  AND a real TCP socket against a recording upstream, so "refused" means an
+  empty upstream log.
+- Legitimate clients are unaffected: the Surface bundle percent-encodes ids
+  and room keys with the unreserved alphabet (`rooms::encode`,
+  `daemon::encode_path_segment`) and query values with `encodeURIComponent`,
+  so its paths parse back to themselves. Tauri, the VS Code extension and the
+  Chrome extension reach the daemon directly and never cross this proxy.
+  Fail-closed side effects: a hand-built request target carrying bytes the
+  parser re-encodes (non-ASCII, spaces) is refused rather than forwarded
+  re-encoded, and a room key or id containing a backslash is unreachable.
+- Auth-off (`OCEAN_SURFACE_AUTH=off`, loopback-only by contract):
+  `auth_off_cross_site_gate`, layered inside the session gate, runs
+  `auth_off_mutation_source_allowed` on EVERY non-GET/HEAD request under
+  `/v1/` and `/api/`. Every supplied Origin/Referer must be `http(s)` and
+  name the exact loopback Host that received the request (case-insensitive;
+  another loopback spelling or another port is a different origin); a
+  request with neither header is admitted (local scripts/CLIs). Refusal:
+  `403 {"ok":false,"error":"cross_site_mutation_refused"}`. Why all of them:
+  every proxied POST is reachable without a CORS preflight (a `<form>` or
+  `no-cors` fetch), the forwarders stamp `application/json` on whatever body
+  arrives, and close needs no body at all. `/csp-report`, `/login`, `/logout`
+  are outside it. Reads are never gated.
+- Auth-on: no Origin check. The session cookie is `SameSite=Strict`, so a
+  cross-site request arrives unauthenticated and the auth gate answers 401;
+  keep it Strict. A tunnel or tailnet name is how auth-on is legitimately
+  reached, so Host is not a gate there.
+- Not ported from ocean-surface#230: the session-actor binding and room-owner
+  gate (a multi-device, roster-user proxy model this proxy does not have), the
+  JSON content-type lane, and the auth-off every-request loopback-Host
+  (DNS-rebinding) refusal, which is a reads-side defence separate from the
+  CSRF gate and would turn any non-loopback auth-off reach into a 403 outage.
+- Verify: `cargo test -p ocean-surface-proxy path_csrf`.
 
 ## Build / Check
 
