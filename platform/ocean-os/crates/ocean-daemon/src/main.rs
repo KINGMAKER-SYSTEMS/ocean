@@ -26912,6 +26912,16 @@ mod tests {
     /// is ignored because it is not a table row, and the header/separator rows
     /// are ignored because `Method` and `---` are not wire methods.
     fn contract_room_route_table() -> Vec<String> {
+        contract_room_route_table_with_auth()
+            .into_iter()
+            .map(|(route, _auth)| route)
+            .collect()
+    }
+
+    /// The same rows as [`contract_room_route_table`], each paired with its
+    /// Auth cell (the fourth column, backticks kept) so a test can hold the
+    /// row's auth CLAIM against the handler's behaviour.
+    fn contract_room_route_table_with_auth() -> Vec<(String, String)> {
         let contract = include_str!("../../../docs/OCEAN_ECOSYSTEM_CONTRACT.md");
         contract
             .lines()
@@ -26919,12 +26929,71 @@ mod tests {
                 let mut cells = line.trim().strip_prefix('|')?.split('|').map(str::trim);
                 let method = cells.next()?.trim_matches('`');
                 let path = cells.next()?.trim_matches('`');
-                (matches!(method, "GET" | "POST" | "PUT" | "PATCH" | "DELETE")
+                if !(matches!(method, "GET" | "POST" | "PUT" | "PATCH" | "DELETE")
                     && is_room_path(path))
-                .then(|| format!("{method} {path}"))
+                {
+                    return None;
+                }
+                let _purpose = cells.next()?;
+                let auth = cells.next()?;
+                Some((format!("{method} {path}"), auth.to_string()))
             })
             .collect()
     }
+
+    /// Whether a room-route table row claims the header-only Room operator as
+    /// the route's ONLY authority, so a request without the header must be the
+    /// 503 `operator_credential_missing` refusal. The close route's cell starts
+    /// with the operator too but only "when the header is present" (an absent
+    /// header selects its roster-asserted member lane), so it does not count.
+    fn table_row_claims_operator_only(auth: &str) -> bool {
+        auth.starts_with("`X-Ocean-Operator`") && !auth.contains("when the header is present")
+    }
+
+    /// Marker the contract puts in the Auth cell of the per-reader room-state
+    /// rows (read cursor, prefs): loopback trust by design, no operator gate.
+    const PER_READER_ROOM_STATE_MARKER: &str = "per-reader room state";
+
+    /// The `/v1/rooms` mutations that answer a request carrying no
+    /// `X-Ocean-Operator` header with something other than the operator
+    /// refusal, in `room_routes()` registration order. Every entry's authority
+    /// is named by its contract row (roster-asserted identity, the daemon-held
+    /// room bearer, the invite code, the LiveKit publish token, or loopback
+    /// trust), and the two per-reader rows are the by-design ungated room
+    /// state. A mutation added to the router without the operator gate must be
+    /// added here AND to the table with its real auth rule, or
+    /// `router_contract_operator_gates_match_the_room_route_table` fails.
+    const OPERATOR_UNGATED_ROOM_MUTATIONS: &[&str] = &[
+        "POST /v1/rooms/persistent",
+        "PATCH /v1/rooms/persistent/{key}",
+        "POST /v1/rooms/persistent/{key}/close",
+        "POST /v1/rooms/persistent/{key}/agents/{agent_member_id}/invoke",
+        "POST /v1/rooms/persistent/{key}/participants",
+        "DELETE /v1/rooms/persistent/{key}/participants/{participant_id}",
+        "POST /v1/rooms/persistent/{key}/attachments",
+        "DELETE /v1/rooms/persistent/{key}/attachments/{attachment_id}",
+        "POST /v1/rooms/persistent/{key}/summarize",
+        "POST /v1/rooms/persistent/{key}/messages",
+        "POST /v1/rooms/persistent/{key}/invites",
+        "POST /v1/rooms/persistent/invites/redeem",
+        "POST /v1/rooms/persistent/{key}/members/agents",
+        "POST /v1/rooms/persistent/{key}/artifacts",
+        "POST /v1/rooms/persistent/{key}/artifacts/{artifact_id}/amend",
+        "PUT /v1/rooms/persistent/{key}/prefs",
+        "PATCH /v1/rooms/persistent/{key}/read-cursor",
+        "POST /v1/rooms/persistent/{key}/outbox/retry",
+        "POST /v1/rooms/{room_id}/livekit-token",
+    ];
+
+    /// The per-reader room-state routes: state that belongs to the local
+    /// reader alone (what they have read, whether the room is muted for them),
+    /// never to the room, so by design they carry no operator gate.
+    const PER_READER_ROOM_STATE_ROUTES: &[&str] = &[
+        "GET /v1/rooms/persistent/{key}/prefs",
+        "PUT /v1/rooms/persistent/{key}/prefs",
+        "GET /v1/rooms/persistent/{key}/read-cursor",
+        "PATCH /v1/rooms/persistent/{key}/read-cursor",
+    ];
 
     /// The decimal number immediately following `marker` in `sentence`. Anchored
     /// on the surrounding words rather than "the first number in the line" so
@@ -27298,6 +27367,126 @@ mod tests {
                 "the Tauri webview must be able to read the PUT {path} response"
             );
         }
+    }
+
+    /// The room-route table's operator claims are the router's behaviour, and
+    /// the set of operator-ungated room mutations is pinned.
+    ///
+    /// Every `/v1/rooms` mutation is sent through the production router with
+    /// no `X-Ocean-Operator` header (and no cookie or origin, so nothing else
+    /// can refuse it on shape) against a configured operator key. A row whose
+    /// Auth cell claims the operator as its only authority must answer the
+    /// 503 `operator_credential_missing` refusal before anything else is read
+    /// or looked up; no other row may answer with an operator refusal. The
+    /// mutations that are NOT operator-refused must then be exactly
+    /// `OPERATOR_UNGATED_ROOM_MUTATIONS`, so a mutation registered without the
+    /// gate fails here until it is added to that list and to the table with
+    /// its real auth rule, and the rows the table marks as per-reader room
+    /// state are exactly the read-cursor and prefs routes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn router_contract_operator_gates_match_the_room_route_table() {
+        use axum::{body::Body, http::Request};
+        use tower::ServiceExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let state = route_contract_state(&tmp).await;
+        assert!(
+            state.room_operator.is_configured(),
+            "the probe must run against a configured operator key so a missing header \
+             is the 503 refusal rather than operator_identity_unavailable"
+        );
+        let app = app_router(BrowserOrigins::default(), AllowedHosts::default()).with_state(state);
+
+        let table = contract_room_route_table_with_auth();
+        assert_eq!(
+            table
+                .iter()
+                .map(|(route, _)| route.clone())
+                .collect::<Vec<_>>(),
+            registered_room_routes_in_order(),
+            "the auth-bearing parse must see the same rows as the parity test"
+        );
+
+        let per_reader: Vec<&str> = table
+            .iter()
+            .filter(|(_, auth)| auth.contains(PER_READER_ROOM_STATE_MARKER))
+            .map(|(route, _)| route.as_str())
+            .collect();
+        assert_eq!(
+            per_reader, PER_READER_ROOM_STATE_ROUTES,
+            "the contract marks exactly the read-cursor and prefs routes as per-reader room state"
+        );
+        for route in PER_READER_ROOM_STATE_ROUTES {
+            assert!(
+                !route.starts_with("GET ") || !OPERATOR_UNGATED_ROOM_MUTATIONS.contains(route),
+                "{route}: reads are not mutations"
+            );
+            assert!(
+                route.starts_with("GET ") || OPERATOR_UNGATED_ROOM_MUTATIONS.contains(route),
+                "{route}: a per-reader mutation is by design operator-ungated"
+            );
+        }
+
+        let mut operator_refused = Vec::new();
+        let mut ungated = Vec::new();
+        let mut mismatches = Vec::new();
+        for (route, auth) in &table {
+            let (method, path) = route.split_once(' ').expect("well-formed table route");
+            if method == "GET" {
+                continue;
+            }
+            let request = Request::builder()
+                .method(method)
+                .uri(materialize_route_path(path))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .unwrap();
+            let response = app.clone().oneshot(request).await.unwrap();
+            let status = response.status();
+            let body: serde_json::Value = serde_json::from_slice(
+                &axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap_or(serde_json::Value::Null);
+            let code = body["error"]
+                .as_str()
+                .or_else(|| body["code"].as_str())
+                .unwrap_or_default();
+            let refused = status == StatusCode::SERVICE_UNAVAILABLE
+                && code == room_operator::OperatorAuthError::Missing.code();
+            assert_ne!(
+                status,
+                StatusCode::METHOD_NOT_ALLOWED,
+                "{route}: the table row must be a served method"
+            );
+            if refused {
+                operator_refused.push(route.as_str());
+            } else {
+                ungated.push(route.as_str());
+            }
+            if refused != table_row_claims_operator_only(auth) {
+                mismatches.push(format!("{route}: {status} {code:?} vs auth cell {auth:?}"));
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "every row claiming `X-Ocean-Operator` as its only authority must refuse a \
+             header-less request with 503 operator_credential_missing, and no other row may \
+             answer with that refusal:\n{}",
+            mismatches.join("\n")
+        );
+        assert!(
+            operator_refused.contains(&"PUT /v1/rooms/persistent/{key}/agents/{agent_id}/settings"),
+            "the probe must observe at least the P4 settings gate: {operator_refused:?}"
+        );
+        assert_eq!(
+            ungated, OPERATOR_UNGATED_ROOM_MUTATIONS,
+            "the operator-ungated room mutations are pinned: a new mutation without the \
+             operator gate must be added here and to the contract table with its real auth \
+             rule (per-reader room state, a roster-asserted identity, the daemon-held room \
+             bearer, the invite code, the publish token or loopback trust)"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
