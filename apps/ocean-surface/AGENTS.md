@@ -512,8 +512,9 @@ ships today and are updated slice by slice.
   offered is not sent. `CreateRoomBody.workspace_root` is omitted when unset.
   The daemon binds it once (absolute existing directory, canonicalized;
   otherwise 400 `invalid_workspace_root`, shown as "create failed: workspace
-  folder not found on this Ocean" with the draft kept) and has no route to
-  change it. `Room.workspace_root` decodes as absent for unbound rooms and
+  folder not found on this Ocean" with the draft kept); the daemon's
+  `PATCH /v1/rooms/persistent/{key}` can rebind or unbind it later, but this
+  surface does not call it. `Room.workspace_root` decodes as absent for unbound rooms and
   older daemons; when set, the header shows its folder name read-only
   (`title` = full root). A room turn's folder is agent folder, then room
   folder, then `workspace_root`, else `workspace_unavailable`.

@@ -43,10 +43,11 @@ That is `CreateRoomBody` in `rooms.rs`; `trigger_policy` and `workspace_root`
 are omitted when unset. The `key` is derived from the name (`slugify`:
 lower-kebab); the daemon keys rooms by it and refuses a duplicate.
 `workspace_root` is optional — when set, agent turns in this room resolve their
-project and `cwd` from it. It is resolved on the machine running the daemon,
-bound once (an absolute existing directory, else 400 `invalid_workspace_root`),
-and no route changes it afterwards. This surface sends no `trigger_policy`
-(see "Agent Wake Policy").
+project and `cwd` from it. It is resolved on the machine running the daemon
+(an absolute existing directory, else 400 `invalid_workspace_root`). The daemon
+can rebind or unbind it later through `PATCH /v1/rooms/persistent/{key}`
+(`workspace_root`; `null` unbinds), which this surface does not call. This
+surface sends no `trigger_policy` (see "Agent Wake Policy").
 
 Creating does not join: the roster starts empty, the surface opens the new
 room, and the header's Join action is the next step.
@@ -243,10 +244,12 @@ daemon produces those events. In a federated room, mentions arrive as claimed
 trigger targets on the Bedrock ledger and are admitted against the binding's
 activation policy rather than this policy.
 
-The policy is set only in the create body; there is no route to change it
-later, and this surface sends none, so rooms created here carry no policy and
-their agents run only through the explicit invoke below. The surface's
-`RoomTriggerPolicy` mirror in `rooms.rs` still lacks the two failure flags.
+The policy is set in the create body or edited through
+`PATCH /v1/rooms/persistent/{key} { "trigger_policy": … }` (`null` clears it;
+`on_ci_failure` is refused the same way). This surface sends neither, so rooms
+created here carry no policy and their agents run only through the explicit
+invoke below. The surface's `RoomTriggerPolicy` mirror in `rooms.rs` still
+lacks the two failure flags.
 
 ### Agent Turns in Rooms
 
@@ -442,10 +445,10 @@ An agent identity already registered with the daemon (visible in
 
 ### Configuring Agent Wake Behavior
 
-There is no wake-policy control in this surface and no daemon route to edit a
-room's policy after create. A policy exists only when the create body carried
-one, and this surface's create sends none. Agents in rooms created here are
-woken by the explicit invoke on a message, not by mentions.
+There is no wake-policy control in this surface. The daemon takes a policy in
+the create body or on `PATCH /v1/rooms/persistent/{key}`; this surface sends
+neither, so agents in rooms created here are woken by the explicit invoke on a
+message, not by mentions.
 
 ### Agent's First Turn in a Room
 
