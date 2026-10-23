@@ -276,6 +276,18 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   Existing `room_create` canonicalizes supplied directory roots before persistence
   through original private `canonical_submitted_workspace_root` and typed
   `invalid_workspace_root_response`; omitted/null roots stay unbound.
+  `PATCH /v1/rooms/persistent/{key}` (`room_update`, ported from
+  ocean-os#443) edits `name`/`trigger_policy`/`workspace_root` on the store's
+  absent-vs-`null` double-Option contract: an absent field is unchanged, `null`
+  clears the policy or unbinds the workspace, a string rebinds through the same
+  `canonical_submitted_workspace_root` and frozen `invalid_workspace_root` 400,
+  an unknown field is a typed `invalid_request` 400, and a policy enabling
+  `on_ci_failure` is refused by the same `ci_trigger_unwired_response` create
+  uses. Open rooms only (404 otherwise). The stored binding is what
+  `resolve_turn_cwd` falls back to, so binding an unbound room admits the
+  invocation it refused with `workspace_unavailable` and unbinding refuses it
+  again. The legacy thread-reply federation transition rule is not on this
+  daemon and is not ported.
   Registry settlement owns the single terminal result; cancelled work cannot
   publish reply/failure content. New capability scheduling rechecks authority,
   including memory. Admission, issued callbacks and request registration share
