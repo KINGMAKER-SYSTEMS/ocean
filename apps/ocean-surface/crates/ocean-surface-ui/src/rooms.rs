@@ -300,23 +300,55 @@ struct ReadCursorRequest {
     read_seq: u64,
 }
 
-/// How a room's agents are auto-woken. Mirrors `ocean_core::RoomTriggerPolicy`.
-/// All flags default off; the daemon reads this on `room_create` and evaluates
-/// it on every non-agent-authored message (OCEAN-65 / OCEAN-111).
+/// How a room's agents are auto-woken. Mirrors `ocean_core::RoomTriggerPolicy`
+/// flag for flag. Every flag is off on the wire unless set; the daemon stores
+/// what `room_create` receives and evaluates it on every non-agent-authored
+/// message (OCEAN-65 / OCEAN-111). Rooms this surface creates always carry
+/// [`RoomTriggerPolicy::create_default`].
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct RoomTriggerPolicy {
     /// Wake an agent when it is @-mentioned in the transcript (the common case).
     #[serde(default)]
     pub on_mention: bool,
-    /// Wake an agent when someone replies in a thread it participates in.
+    /// Wake an agent when someone replies in a thread it rooted.
     #[serde(default)]
     pub on_thread_reply: bool,
     /// Wake an agent when a rendered component emits an interaction event.
     #[serde(default)]
     pub on_component_event: bool,
+    /// Wake the room's agents when a workspace build fails.
+    #[serde(default)]
+    pub on_build_failure: bool,
+    /// Wake the room's agents when workspace CI comes back red. The daemon
+    /// refuses a create or update that enables it (400 `trigger_policy_unwired`).
+    #[serde(default)]
+    pub on_ci_failure: bool,
     /// Optional cron expression for scheduled wake-ups. `None`/empty = no schedule.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_schedule: Option<String>,
+}
+
+impl RoomTriggerPolicy {
+    /// The wake policy every room created from this surface carries.
+    ///
+    /// `on_mention` and `on_thread_reply` on, every other flag off, no
+    /// schedule: the create-dialog policy fixed by
+    /// `docs/OCEAN_ROOMS_DESIGN_DIRECTION.md` (Sidebar, "+ New room") and the
+    /// Gate 1 create flow (`trigger_policy: { on_mention: true }`). ocean-core
+    /// never convenes on an absent policy ("no trigger policy configured"), so
+    /// a create without this makes every room here invoke-only, against the
+    /// documented "mention an agent to wake it" expectation. `on_ci_failure`
+    /// stays off: the daemon refuses a policy that enables it.
+    pub fn create_default() -> Self {
+        Self {
+            on_mention: true,
+            on_thread_reply: true,
+            on_component_event: false,
+            on_build_failure: false,
+            on_ci_failure: false,
+            on_schedule: None,
+        }
+    }
 }
 
 /// A persistent room. Mirrors `ocean_core::Room` (we read only the fields the
@@ -468,14 +500,27 @@ struct RedeemInviteResponse {
 struct CreateRoomBody<'a> {
     key: &'a str,
     name: &'a str,
-    /// Optional trigger policy. Skipped when `None` so the daemon's `#[serde(default)]`
-    /// (no triggers) applies; otherwise the daemon stores it verbatim.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    trigger_policy: Option<RoomTriggerPolicy>,
+    /// Never omitted. The daemon's `#[serde(default)]` for an absent field is
+    /// no policy at all, and ocean-core never convenes on `None`, so every room
+    /// this surface creates carries [`RoomTriggerPolicy::create_default`].
+    trigger_policy: RoomTriggerPolicy,
     /// Absolute workspace directory chosen explicitly by the creator. Omitted
     /// when `None`: the room stays unbound, never inheriting a session cwd.
     #[serde(skip_serializing_if = "Option::is_none")]
     workspace_root: Option<&'a str>,
+}
+
+impl<'a> CreateRoomBody<'a> {
+    /// The one create body this surface sends. The canonical wake policy is
+    /// attached here, not by callers, so no create path can drop it.
+    fn new(key: &'a str, name: &'a str, workspace_root: Option<&'a str>) -> Self {
+        Self {
+            key,
+            name,
+            trigger_policy: RoomTriggerPolicy::create_default(),
+            workspace_root,
+        }
+    }
 }
 
 /// Status line for a failed create. Daemon error codes the creator can fix
@@ -1175,9 +1220,10 @@ impl Rooms {
         });
     }
 
-    /// Create a room (`POST /v1/rooms/persistent`) with an optional auto-convene
-    /// `trigger_policy`, then select it. The daemon keys rooms by `key`; we
-    /// derive a url-safe key from the name but keep the human name intact.
+    /// Create a room (`POST /v1/rooms/persistent`) carrying the canonical wake
+    /// policy ([`RoomTriggerPolicy::create_default`], attached by
+    /// `CreateRoomBody::new`), then select it. The daemon keys rooms by `key`;
+    /// we derive a url-safe key from the name but keep the human name intact.
     /// Atomically dispatch a create-room request, returning the op_id the
     /// caller should snapshot. When the request resolves, `create_op` carries
     /// a typed outcome tagged with that id — surfaces gate only on their own
@@ -1194,12 +1240,7 @@ impl Rooms {
     /// `workspace_root` is only an explicit creator choice; the daemon binds it
     /// once (absolute existing directory, else 400 `invalid_workspace_root`)
     /// and offers no route to change it later.
-    pub fn create_room(
-        &self,
-        name: String,
-        policy: Option<RoomTriggerPolicy>,
-        workspace_root: Option<String>,
-    ) -> u64 {
+    pub fn create_room(&self, name: String, workspace_root: Option<String>) -> u64 {
         let name = name.trim().to_string();
         if name.is_empty() {
             return 0;
@@ -1222,12 +1263,7 @@ impl Rooms {
         // observe a stale-success resolution from a prior request.
         signal.set((op_id, None));
         spawn_local(async move {
-            let body = CreateRoomBody {
-                key: &key,
-                name: &name,
-                trigger_policy: policy,
-                workspace_root: workspace_root.as_deref(),
-            };
+            let body = CreateRoomBody::new(&key, &name, workspace_root.as_deref());
             let post_url = format!("{base}/v1/rooms/persistent");
             let res = Request::post(&post_url)
                 .header("content-type", "application/json")
@@ -4775,36 +4811,90 @@ mod tests {
         }
     }
 
+    /// The wire object every create carries, kept literal so the contract is
+    /// visible here: every flag present, `on_schedule` absent.
+    fn canonical_wake_policy_json() -> serde_json::Value {
+        serde_json::json!({
+            "on_mention": true,
+            "on_thread_reply": true,
+            "on_component_event": false,
+            "on_build_failure": false,
+            "on_ci_failure": false,
+        })
+    }
+
     #[test]
-    fn create_body_omits_workspace_root_when_none() {
-        let body = CreateRoomBody {
-            key: "ops",
-            name: "Ops",
-            trigger_policy: None,
-            workspace_root: None,
-        };
-        assert_eq!(
-            serde_json::to_value(&body).unwrap(),
-            serde_json::json!({"key": "ops", "name": "Ops"})
+    fn create_default_wake_policy_wakes_on_mention_and_thread_reply_only() {
+        let policy = RoomTriggerPolicy::create_default();
+        assert!(policy.on_mention, "an @id mention must wake a bound agent");
+        assert!(policy.on_thread_reply);
+        assert!(!policy.on_component_event);
+        assert!(!policy.on_build_failure);
+        assert!(
+            !policy.on_ci_failure,
+            "the daemon refuses a create enabling on_ci_failure (400 trigger_policy_unwired)"
+        );
+        assert_eq!(policy.on_schedule, None);
+        assert_ne!(
+            policy,
+            RoomTriggerPolicy::default(),
+            "an all-off policy wakes nobody; the default must not collapse into it"
         );
     }
 
     #[test]
-    fn create_body_carries_explicit_workspace_root() {
-        let body = CreateRoomBody {
-            key: "ops",
-            name: "Ops",
-            trigger_policy: None,
-            workspace_root: Some("/Users/me/dev/ocean"),
-        };
+    fn create_body_always_carries_the_canonical_wake_policy() {
+        // Before this body owned the policy, the rail passed `None`, the field
+        // was skipped, and ocean-core answered every mention with "no trigger
+        // policy configured": Surface rooms were invoke-only.
+        let body = CreateRoomBody::new("ops", "Ops", None);
         assert_eq!(
             serde_json::to_value(&body).unwrap(),
             serde_json::json!({
                 "key": "ops",
                 "name": "Ops",
+                "trigger_policy": canonical_wake_policy_json(),
+            })
+        );
+    }
+
+    #[test]
+    fn create_body_carries_explicit_workspace_root_beside_the_policy() {
+        let body = CreateRoomBody::new("ops", "Ops", Some("/Users/me/dev/ocean"));
+        assert_eq!(
+            serde_json::to_value(&body).unwrap(),
+            serde_json::json!({
+                "key": "ops",
+                "name": "Ops",
+                "trigger_policy": canonical_wake_policy_json(),
                 "workspace_root": "/Users/me/dev/ocean",
             })
         );
+    }
+
+    #[test]
+    fn room_decodes_the_daemon_s_full_trigger_policy() {
+        // The daemon echoes the stored policy with the two failure flags; a
+        // policy stored before they existed decodes with both off.
+        let room: Room = serde_json::from_value(serde_json::json!({
+            "id": "ops",
+            "name": "Ops",
+            "trigger_policy": canonical_wake_policy_json(),
+        }))
+        .unwrap();
+        assert_eq!(
+            room.trigger_policy,
+            Some(RoomTriggerPolicy::create_default())
+        );
+        let legacy: Room = serde_json::from_value(serde_json::json!({
+            "id": "ops",
+            "name": "Ops",
+            "trigger_policy": {"on_mention": true},
+        }))
+        .unwrap();
+        let policy = legacy.trigger_policy.expect("policy decodes");
+        assert!(policy.on_mention);
+        assert!(!policy.on_thread_reply && !policy.on_build_failure && !policy.on_ci_failure);
     }
 
     #[test]

@@ -370,7 +370,10 @@ pub(super) fn RoomListRail(
         let workspace_root = workspace_choice.get_untracked().filter(|root| {
             workspace_choices.with_untracked(|options| options.iter().any(|o| &o.root == root))
         });
-        let op_id = rooms.create_room(name.clone(), None, workspace_root);
+        // The create body attaches the canonical wake policy itself
+        // (`RoomTriggerPolicy::create_default`); the rail chooses only the
+        // name and the folder.
+        let op_id = rooms.create_room(name.clone(), workspace_root);
         if op_id == 0 {
             // Synchronous rejection — empty name or slug. Don't set
             // pending; the name field already shows the error via status.
