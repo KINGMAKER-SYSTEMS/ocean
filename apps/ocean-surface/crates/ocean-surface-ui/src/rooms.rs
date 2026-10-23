@@ -616,6 +616,14 @@ pub struct Rooms {
     pub read_summaries: RwSignal<HashMap<String, RoomReadSummary>>,
     /// Durable read cursor for the currently open room.
     pub open_read_cursor: RwSignal<Option<RoomReadCursorProjection>>,
+    /// Where the reader left off in the open room, as `(room_key, read_seq)`,
+    /// for the transcript's "new messages" divider.
+    ///
+    /// Captured by [`Rooms::open_room`] before the open marks the room read and
+    /// cleared by [`Rooms::close_room`]. It lives on this store, not in the
+    /// workspace, because the workspace can remount while `open_key` survives;
+    /// a floor re-derived on remount would sit past every message by then.
+    pub unread_baseline: RwSignal<Option<(String, Option<u64>)>>,
     /// The latest PATCH /read-cursor, including ownership of its completion.
     read_cursor_in_flight: RwSignal<Option<ReadCursorRequest>>,
     read_cursor_request_ticket: RwSignal<u64>,
@@ -704,6 +712,7 @@ impl Rooms {
             access: RwSignal::new(None),
             read_summaries: RwSignal::new(HashMap::new()),
             open_read_cursor: RwSignal::new(None),
+            unread_baseline: RwSignal::new(None),
             read_cursor_in_flight: RwSignal::new(None),
             read_cursor_request_ticket: RwSignal::new(0),
             create_op: RwSignal::new((0, None)),
@@ -1382,6 +1391,17 @@ impl Rooms {
         let me = *self;
         let generation_id = self.generation.get_untracked().wrapping_add(1);
         self.generation.set(generation_id);
+        // Snapshot the reader's left-off point before the open resets the
+        // cursor and marks the room read: right now the room-list summary
+        // still holds the pre-open floor; a moment later it is advanced.
+        let read_seq_at_open = self
+            .read_summaries
+            .with_untracked(|summaries| summaries.get(&key).and_then(|s| s.read_seq));
+        self.unread_baseline.set(next_unread_baseline(
+            self.unread_baseline.get_untracked().as_ref(),
+            Some(key.as_str()),
+            read_seq_at_open,
+        ));
         self.open_key.set(Some(key.clone()));
         self.reset_room_state();
         self.status.set("loading room…".into());
@@ -1437,6 +1457,7 @@ impl Rooms {
     pub fn close_room(&self) {
         self.generation.update(|g| *g = g.wrapping_add(1));
         self.open_key.set(None);
+        self.unread_baseline.set(None);
         self.reset_room_state();
     }
 
@@ -3004,6 +3025,28 @@ fn applied_open_read_seq(summary_read_seq: Option<u64>, durable_read_seq: Option
     max_optional_u64(summary_read_seq, durable_read_seq).unwrap_or(0)
 }
 
+/// Lock-on-key-change for the unread divider baseline.
+///
+/// The baseline is captured once per opened room and never revised while that
+/// room stays open: opening auto-marks the room read, so re-reading a live
+/// cursor afterwards would lock onto the advanced value and the divider would
+/// never render. `read_seq_at_open` must come from `read_summaries` at the
+/// instant of the open, never from `open_read_cursor`. A never-read room locks
+/// a `None` floor rather than staying unlocked.
+pub(crate) fn next_unread_baseline(
+    current: Option<&(String, Option<u64>)>,
+    open_key: Option<&str>,
+    read_seq_at_open: Option<u64>,
+) -> Option<(String, Option<u64>)> {
+    let key = open_key?;
+    if let Some((locked_key, locked_seq)) = current {
+        if locked_key == key {
+            return Some((locked_key.clone(), *locked_seq));
+        }
+    }
+    Some((key.to_string(), read_seq_at_open))
+}
+
 fn latest_summary_seq_for_open_room(
     transcript: &[RoomMessage],
     access: Option<&RoomAccessProjection>,
@@ -3967,6 +4010,55 @@ pub(crate) fn livekit_token_path_for_room(key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unread_baseline_survives_the_read_advance_that_opening_a_room_triggers() {
+        let opened = next_unread_baseline(None, Some("room-a"), Some(5));
+        assert_eq!(opened, Some(("room-a".to_string(), Some(5))));
+        let advanced = next_unread_baseline(opened.as_ref(), Some("room-a"), Some(9));
+        assert_eq!(advanced, Some(("room-a".to_string(), Some(5))));
+        let further = next_unread_baseline(advanced.as_ref(), Some("room-a"), Some(42));
+        assert_eq!(further, Some(("room-a".to_string(), Some(5))));
+    }
+
+    #[test]
+    fn unread_baseline_relocks_on_room_change_and_clears_on_close() {
+        let a = next_unread_baseline(None, Some("room-a"), Some(5));
+        let b = next_unread_baseline(a.as_ref(), Some("room-b"), Some(2));
+        assert_eq!(b, Some(("room-b".to_string(), Some(2))));
+        let back = next_unread_baseline(b.as_ref(), Some("room-a"), Some(9));
+        assert_eq!(back, Some(("room-a".to_string(), Some(9))));
+        assert_eq!(next_unread_baseline(back.as_ref(), None, None), None);
+    }
+
+    #[test]
+    fn unread_baseline_locks_none_for_a_never_read_room() {
+        let opened = next_unread_baseline(None, Some("room-a"), None);
+        assert_eq!(opened, Some(("room-a".to_string(), None)));
+        let advanced = next_unread_baseline(opened.as_ref(), Some("room-a"), Some(7));
+        assert_eq!(advanced, Some(("room-a".to_string(), None)));
+    }
+
+    /// Source guard: `open_room` captures the baseline from the room-list
+    /// summaries before it resets or touches the live read cursor. Needles are
+    /// built at runtime so they cannot match their own literals.
+    #[test]
+    fn open_room_captures_the_unread_baseline_before_touching_the_cursor() {
+        let store = include_str!("rooms.rs");
+        let open_fn = store
+            .find(&["pub fn open_room", "(&self, key: String) {"].concat())
+            .expect("open_room must exist");
+        let open_src = &store[open_fn..];
+        let capture = ["self.unread_baseline", ".set("].concat();
+        let capture_at = open_src
+            .find(&capture)
+            .expect("open_room must capture the baseline");
+        let before = &open_src[..capture_at];
+        assert!(before.contains("read_summaries"));
+        assert!(!before.contains(&["open_read", "_cursor"].concat()));
+        assert!(!before.contains(&["reset_room", "_state()"].concat()));
+        assert!(!before.contains(&["spawn", "_local"].concat()));
+    }
 
     #[test]
     fn owner_routes_map_to_the_shell_kinds_and_the_daemon_paths() {

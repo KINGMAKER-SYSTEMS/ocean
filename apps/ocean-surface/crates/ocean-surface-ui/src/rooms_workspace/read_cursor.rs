@@ -66,6 +66,68 @@ pub(super) fn durable_read_candidate(
     }
 }
 
+/// Which numbering a room's durable read cursor is recorded in.
+///
+/// [`durable_read_candidate`] PATCHes `last_confirmed_global_sequence` for a
+/// `Live` room and `RoomMessage::seq` for a `Local` one, and the daemon hands
+/// that value back as `RoomReadSummary::read_seq` — the source of the divider
+/// baseline. The two counters are unrelated: the federated ledger also carries
+/// other rooms' events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReadSequenceSpace {
+    /// `RoomMessage::seq` — this room's own transcript numbering.
+    Transcript,
+    /// `FederatedMessageMeta::global_sequence` — the federated ledger's.
+    Global,
+}
+
+/// The space the open room's read cursor is recorded in, on the same
+/// `Local`/`Live` split as [`durable_read_candidate`]. Any other access state
+/// pins no space: the stored cursor could be in either, so the answer is
+/// `None` rather than a guess.
+pub(super) fn read_sequence_space(
+    access: Option<&RoomAccessProjection>,
+) -> Option<ReadSequenceSpace> {
+    match access.map(|projection| projection.state) {
+        Some(RoomAccessState::Live) => Some(ReadSequenceSpace::Global),
+        Some(RoomAccessState::Local) => Some(ReadSequenceSpace::Transcript),
+        _ => None,
+    }
+}
+
+/// Transcript `seq` of the first root row the reader has not seen — where the
+/// "new messages" divider belongs.
+///
+/// `baseline_read_seq` is the floor snapshotted when the room opened (see
+/// `Rooms::unread_baseline`), so the divider marks where the reader left off
+/// instead of chasing the live cursor. It is compared in the room's own read
+/// space; the returned value is always a transcript `seq` because that is the
+/// row identity the timeline renders against.
+///
+/// `None` when there is no baseline (a never-read room has no left-off point),
+/// when the read space is unknown, or when no row has a comparable position
+/// past the baseline. In a `Live` room a row without federated metadata is
+/// local-era history (`LedgerMark::Unmarked`), not an in-flight send, so it is
+/// skipped rather than counted as unread.
+pub(super) fn first_unread_root_seq(
+    roots: &[RoomMessage],
+    baseline_read_seq: Option<u64>,
+    access: Option<&RoomAccessProjection>,
+) -> Option<u64> {
+    let baseline = baseline_read_seq?;
+    let space = read_sequence_space(access)?;
+    roots
+        .iter()
+        .find(|message| match space {
+            ReadSequenceSpace::Transcript => message.seq > baseline,
+            ReadSequenceSpace::Global => message
+                .federated
+                .as_ref()
+                .is_some_and(|meta| meta.global_sequence > baseline),
+        })
+        .map(|message| message.seq)
+}
+
 /// The single evaluation point for "may this state advance the durable read
 /// cursor, and to which sequence?". [`read_advance_request`] derives from it,
 /// so readiness and the candidate can never disagree and no caller needs an
@@ -888,5 +950,190 @@ mod tests {
             ),
             None
         );
+    }
+
+    // ── Unread divider ───────────────────────────────────────────────
+
+    fn federated_msg(seq: u64, global_sequence: u64) -> RoomMessage {
+        let mut message = test_msg(seq, "federated", None);
+        message.federated = Some(crate::rooms::FederatedMessageMeta {
+            ledger_event_id: format!("evt-{global_sequence}"),
+            global_sequence,
+            source_id: "source".into(),
+            source_sequence: seq,
+            client_event_id: format!("client-{seq}"),
+            origin_principal_id: "principal".into(),
+            origin_member_id: "member".into(),
+        });
+        message
+    }
+
+    #[test]
+    fn first_unread_is_the_first_root_past_the_baseline() {
+        let roots = vec![
+            test_msg(2, "a", None),
+            test_msg(5, "b", None),
+            test_msg(9, "c", None),
+        ];
+        let local = test_access(RoomAccessState::Local);
+        assert_eq!(
+            first_unread_root_seq(&roots, Some(2), Some(&local)),
+            Some(5)
+        );
+        assert_eq!(
+            first_unread_root_seq(&roots, Some(4), Some(&local)),
+            Some(5)
+        );
+        assert_eq!(
+            first_unread_root_seq(&roots, Some(5), Some(&local)),
+            Some(9)
+        );
+        assert_eq!(first_unread_root_seq(&roots, Some(9), Some(&local)), None);
+        assert_eq!(first_unread_root_seq(&roots, Some(99), Some(&local)), None);
+    }
+
+    #[test]
+    fn first_unread_needs_a_baseline_and_tolerates_an_empty_room() {
+        let roots = vec![test_msg(2, "a", None)];
+        let local = test_access(RoomAccessState::Local);
+        assert_eq!(first_unread_root_seq(&roots, None, Some(&local)), None);
+        assert_eq!(first_unread_root_seq(&[], Some(3), Some(&local)), None);
+        assert_eq!(first_unread_root_seq(&[], None, Some(&local)), None);
+    }
+
+    #[test]
+    fn first_unread_ignores_thread_replies() {
+        let roots = super::super::threads::partition_thread_messages(
+            &[
+                test_msg(1, "root", None),
+                test_msg(2, "reply", Some(1)),
+                test_msg(3, "next root", None),
+            ],
+            1,
+        )
+        .roots;
+        assert_eq!(
+            first_unread_root_seq(&roots, Some(1), Some(&test_access(RoomAccessState::Local))),
+            Some(3)
+        );
+    }
+
+    /// A `Live` room's cursor is a federated-ledger position; comparing it to
+    /// transcript `seq` would drop the divider (baseline 300 over seqs 1..3)
+    /// or pin it to the top (baseline 1).
+    #[test]
+    fn first_unread_compares_global_sequence_in_a_live_room() {
+        let roots = vec![
+            federated_msg(1, 100),
+            federated_msg(2, 300),
+            federated_msg(3, 500),
+        ];
+        let live = test_access(RoomAccessState::Live);
+        assert_eq!(
+            first_unread_root_seq(&roots, Some(300), Some(&live)),
+            Some(3)
+        );
+        assert_eq!(
+            first_unread_root_seq(&roots, Some(100), Some(&live)),
+            Some(2)
+        );
+        assert_eq!(first_unread_root_seq(&roots, Some(500), Some(&live)), None);
+        // Transcript-space comparison would answer Some(2) here.
+        assert_eq!(first_unread_root_seq(&roots, Some(1), Some(&live)), Some(1));
+    }
+
+    #[test]
+    fn first_unread_compares_transcript_seq_in_a_local_room() {
+        let roots = vec![
+            federated_msg(1, 100),
+            federated_msg(2, 300),
+            federated_msg(3, 500),
+        ];
+        let local = test_access(RoomAccessState::Local);
+        assert_eq!(
+            first_unread_root_seq(&roots, Some(1), Some(&local)),
+            Some(2)
+        );
+        assert_eq!(first_unread_root_seq(&roots, Some(3), Some(&local)), None);
+    }
+
+    /// Unmarked rows in a live room are local-era history, never evidence of
+    /// recency, so they neither move nor conjure the boundary.
+    #[test]
+    fn legacy_rows_never_fabricate_an_unread_boundary() {
+        let roots = vec![
+            test_msg(1, "G1 history", None),
+            federated_msg(2, 100),
+            test_msg(3, "more G1 history", None),
+            federated_msg(4, 500),
+        ];
+        let live = test_access(RoomAccessState::Live);
+        assert_eq!(
+            first_unread_root_seq(&roots, Some(100), Some(&live)),
+            Some(4)
+        );
+        assert_eq!(
+            first_unread_root_seq(&roots, Some(50), Some(&live)),
+            Some(2)
+        );
+        assert_eq!(first_unread_root_seq(&roots, Some(500), Some(&live)), None);
+
+        let all_legacy = vec![test_msg(1, "G1", None), test_msg(2, "G1", None)];
+        assert_eq!(
+            first_unread_root_seq(&all_legacy, Some(0), Some(&live)),
+            None
+        );
+    }
+
+    #[test]
+    fn no_divider_when_the_read_space_is_unknown() {
+        let roots = vec![test_msg(1, "a", None), test_msg(2, "b", None)];
+        for state in [
+            RoomAccessState::Connecting,
+            RoomAccessState::Recovering,
+            RoomAccessState::Revoked,
+        ] {
+            assert_eq!(
+                first_unread_root_seq(&roots, Some(1), Some(&test_access(state))),
+                None,
+                "{state:?} does not pin a read space"
+            );
+        }
+        assert_eq!(first_unread_root_seq(&roots, Some(1), None), None);
+        assert_eq!(
+            read_sequence_space(Some(&test_access(RoomAccessState::Live))),
+            Some(ReadSequenceSpace::Global)
+        );
+        assert_eq!(
+            read_sequence_space(Some(&test_access(RoomAccessState::Local))),
+            Some(ReadSequenceSpace::Transcript)
+        );
+    }
+
+    /// The designer lane styles both unread affordances; the Rust lane must
+    /// keep emitting them, and the divider memo must read the App-scoped
+    /// baseline and hand the access projection to the selector.
+    #[test]
+    fn unread_affordances_are_styled_and_emitted() {
+        let css = include_str!("../../../../styles/rooms-interaction.css");
+        let divider = ["rooms-workspace__unread", "-divider"].concat();
+        let row_modifier = ["rooms-workspace__room", "--unread"].concat();
+        assert!(css.contains(&format!(".{divider}")));
+        assert!(css.contains(&format!(".{row_modifier}")));
+
+        let transcript = include_str!("mod.rs");
+        assert!(transcript.contains(&format!("class=\"{divider}\"")));
+        assert!(transcript.contains(&["rooms.unread_baseline", ".get()"].concat()));
+        assert!(!transcript.contains(&["let unread_baseline", " = RwSignal::new"].concat()));
+        let call = transcript
+            .find(&["first_unread_root", "_seq("].concat())
+            .expect("the divider memo must call the selector");
+        assert!(
+            transcript[call..call + 300].contains(&["rooms.access.get()", ".as_ref()"].concat()),
+            "the divider memo must pass the access projection, not a guessed space"
+        );
+
+        let rail = include_str!("room_list.rs");
+        assert!(rail.contains(&format!("class:{row_modifier}=")));
     }
 }
