@@ -1220,6 +1220,11 @@ pub(crate) fn session_detail(session: Session) -> SessionDetail {
         resumable: true,
         active_requests: Vec::new(),
         pending_permissions: Vec::new(),
+        // No steer outcomes or terminal turn records at this layer; the
+        // daemon's `enrich_session_detail` owns both (it records them while
+        // turns run). Older daemons leave them empty on the wire (#148).
+        steering: Vec::new(),
+        finished_requests: Vec::new(),
         transcript,
         tool_context,
         messages,
