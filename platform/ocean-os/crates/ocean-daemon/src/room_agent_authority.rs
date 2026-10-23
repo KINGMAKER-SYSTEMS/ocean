@@ -2964,7 +2964,6 @@ mod tests {
     #[tokio::test]
     async fn preview_refusal_and_busy_pre_admission_release_capacity() {
         use crate::tests::{TestEnvRestore, AUTO_CONVENE_ENV_LOCK};
-        let _yolo = crate::tests::yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _restore = TestEnvRestore::capture(&[
             "OCEAN_CONFIG_DIR",
@@ -3032,7 +3031,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn daemon_issued_memory_callback_refuses_retain_and_recall_without_other_gates() {
         use crate::tests::{TestEnvRestore, AUTO_CONVENE_ENV_LOCK};
-        let _yolo = crate::tests::yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _restore = TestEnvRestore::capture(&[
             "OCEAN_CONFIG_DIR",
