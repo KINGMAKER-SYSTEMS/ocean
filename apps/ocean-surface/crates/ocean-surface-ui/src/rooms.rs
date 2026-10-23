@@ -402,8 +402,35 @@ struct RoomGetResponse {
     room: Option<Room>,
     #[serde(default)]
     transcript: Vec<RoomMessage>,
+    /// Whether rows exist beyond `transcript` (OCEAN-249): the open serves the
+    /// OLDEST rows capped at the daemon's `MAX_TRANSCRIPT_LIMIT`, and `true`
+    /// means the room is longer than that page. Defaults to `false` for a
+    /// daemon that predates the field, which then hydrated the whole room.
+    #[serde(default)]
+    has_more: bool,
+    /// The daemon's forward cursor (`after_seq` of the next page) when
+    /// `has_more`; by contract the last returned row's `seq`.
+    #[serde(default)]
+    next_seq: Option<u64>,
     /// Required on every successful room open, including local rooms.
     access: RoomAccessProjection,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+/// One forward page of `GET /v1/rooms/persistent/{key}/transcript?after_seq=`:
+/// rows strictly after the cursor, ascending, bounded, with the same
+/// `has_more` / `next_seq` pair the open response carries.
+#[derive(Debug, Clone, Deserialize)]
+struct RoomTranscriptPageResponse {
+    #[serde(default)]
+    ok: bool,
+    #[serde(default)]
+    transcript: Vec<RoomMessage>,
+    #[serde(default)]
+    has_more: bool,
+    #[serde(default)]
+    next_seq: Option<u64>,
     #[serde(default)]
     error: Option<String>,
 }
@@ -1386,6 +1413,14 @@ impl Rooms {
 
     /// Open a room: load its record + full transcript, bump the generation, and
     /// start the room-scoped SSE live tail (TASK-10/TASK-11).
+    ///
+    /// The open response serves the OLDEST rows capped at the daemon's
+    /// transcript limit (OCEAN-249). When it reports `has_more`, the open
+    /// follows `/transcript?after_seq=` pages ([`OpenCatchUp`]) before it
+    /// publishes anything, so the room lands on its newest, contiguous rows
+    /// in one fill: one pin, one read advance, and an unread divider computed
+    /// over the whole history. A room switch mid-catch-up is cancelled by the
+    /// same generation check as every other open-time read.
     pub fn open_room(&self, key: String) {
         let base = self.base();
         let me = *self;
@@ -1410,7 +1445,11 @@ impl Rooms {
             let get_url = format!("{base}/v1/rooms/persistent/{}", encode(&key));
             let result = match Request::get(&get_url).send().await {
                 Ok(resp) if resp.ok() => match resp.json::<RoomGetResponse>().await {
-                    Ok(r) if r.ok => Ok((r.room, r.transcript, r.access)),
+                    Ok(r) if r.ok => Ok((
+                        r.room,
+                        OpenCatchUp::start(r.transcript, r.has_more, r.next_seq),
+                        r.access,
+                    )),
                     Ok(r) => Err(format!(
                         "room load failed: {}",
                         r.error.unwrap_or_else(|| "unknown error".into())
@@ -1433,7 +1472,29 @@ impl Rooms {
                 return;
             }
             match result {
-                Ok((room, transcript, access)) => {
+                Ok((room, mut catch_up, access)) => {
+                    // Bounded one-time catch-up past the daemon's open page.
+                    // Not polling: it ends at the first exhausted page and the
+                    // SSE tail below stays the sole forward-ingest path.
+                    while let Some(after_seq) = catch_up.next_after_seq() {
+                        let page = fetch_open_catch_up_page(&base, &key, after_seq).await;
+                        if !me.room_is_current(generation_id, &key) {
+                            return;
+                        }
+                        match page {
+                            Ok(page) => {
+                                catch_up.absorb(page.transcript, page.has_more, page.next_seq)
+                            }
+                            Err(error) => {
+                                // Land on the rows held so far: the tail's
+                                // durable replay still delivers the rest in
+                                // order, just one frame at a time.
+                                log::warn!("room {key}: open catch-up stopped early: {error}");
+                                break;
+                            }
+                        }
+                    }
+                    let transcript = catch_up.finish();
                     me.open_room.set(room);
                     me.transcript.set(transcript.clone());
                     me.access.set(Some(access.clone()));
@@ -3172,6 +3233,120 @@ fn last_transcript_seq(transcript: &[RoomMessage]) -> u64 {
     transcript.last().map(|message| message.seq).unwrap_or(0)
 }
 
+/// Rows the open catch-up asks for per `/transcript` page. Mirrors the daemon's
+/// `MAX_TRANSCRIPT_LIMIT` (ocean-store, OCEAN-249); the daemon clamps anything
+/// larger, so asking for the ceiling only minimises round trips.
+const OPEN_CATCH_UP_PAGE_LIMIT: usize = 1_000;
+
+/// Upper bound on `/transcript` pages one open follows past the first. The
+/// catch-up is a bounded one-time read, never a loop that can outlive the open:
+/// past this many pages the room lands on the rows it holds and the SSE tail's
+/// durable replay delivers the remainder in order.
+const OPEN_CATCH_UP_MAX_PAGES: usize = 50;
+
+/// The one-time forward catch-up `open_room` folds over the daemon's bounded
+/// open page (OCEAN-249). `GET /v1/rooms/persistent/{key}` serves the OLDEST
+/// rows capped at the daemon's `MAX_TRANSCRIPT_LIMIT` plus `has_more`, so a
+/// longer room would otherwise open on its first page and the live tail would
+/// then replay every later history row one frame at a time, re-pinning and
+/// re-queuing the read advance per row. Folding `/transcript?after_seq=` pages
+/// onto the open page until the daemon reports no more rows lets the open land
+/// on the newest, contiguous transcript in one fill.
+///
+/// This is not transcript polling: it runs once per open, stops at the first
+/// exhausted page (or the page bound, or a page that advances nothing), and the
+/// room-scoped SSE tail remains the sole forward-ingest path afterwards.
+///
+/// Contiguity is a client invariant, not trust: no page is requested from past
+/// the frontier this fold already holds, and rows at or below it are dropped,
+/// so no page can skip or duplicate a row even if a cursor misbehaves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OpenCatchUp {
+    transcript: Vec<RoomMessage>,
+    /// `after_seq` of the next page to request; `None` once the open may land.
+    after_seq: Option<u64>,
+    pages: usize,
+}
+
+impl OpenCatchUp {
+    /// Begin from the open response's page and its `has_more` / `next_seq`.
+    fn start(first_page: Vec<RoomMessage>, has_more: bool, next_seq: Option<u64>) -> Self {
+        let mut catch_up = Self {
+            transcript: first_page,
+            after_seq: None,
+            pages: 0,
+        };
+        catch_up.after_seq = catch_up.cursor(has_more, next_seq);
+        catch_up
+    }
+
+    /// The `after_seq` of the next `/transcript` page, or `None` when the open
+    /// should land on the rows it holds.
+    fn next_after_seq(&self) -> Option<u64> {
+        self.after_seq
+    }
+
+    /// Fold one forward page in. Rows at or below the held frontier are
+    /// dropped so the transcript stays strictly ascending; a page that
+    /// advances nothing ends the catch-up regardless of what it claims.
+    fn absorb(&mut self, page: Vec<RoomMessage>, has_more: bool, next_seq: Option<u64>) {
+        let frontier = self.transcript.last().map(|message| message.seq);
+        let before = self.transcript.len();
+        self.transcript.extend(
+            page.into_iter()
+                .filter(|message| frontier.is_none_or(|frontier| message.seq > frontier)),
+        );
+        let appended = self.transcript.len() - before;
+        self.pages += 1;
+        self.after_seq = if appended == 0 || self.pages >= OPEN_CATCH_UP_MAX_PAGES {
+            None
+        } else {
+            self.cursor(has_more, next_seq)
+        };
+    }
+
+    /// Where the next page starts: the daemon's `next_seq`, never past the
+    /// frontier already held, and nothing at all once the daemon is exhausted.
+    fn cursor(&self, has_more: bool, next_seq: Option<u64>) -> Option<u64> {
+        if !has_more {
+            return None;
+        }
+        let frontier = self.transcript.last().map(|message| message.seq)?;
+        Some(next_seq.map_or(frontier, |next| next.min(frontier)))
+    }
+
+    fn finish(self) -> Vec<RoomMessage> {
+        self.transcript
+    }
+}
+
+/// One `/transcript?after_seq=` page for the open catch-up. This is the only
+/// production reader of the forward transcript route: it is reached from
+/// `open_room` alone, never from a mutation response or a timer, so the
+/// room-scoped SSE tail stays the sole forward-ingest path once a room is open.
+async fn fetch_open_catch_up_page(
+    base: &str,
+    key: &str,
+    after_seq: u64,
+) -> Result<RoomTranscriptPageResponse, String> {
+    let url = format!(
+        "{base}/v1/rooms/persistent/{}/transcript?after_seq={after_seq}&limit={OPEN_CATCH_UP_PAGE_LIMIT}",
+        encode(key)
+    );
+    match Request::get(&url).send().await {
+        Ok(resp) if resp.ok() => match resp.json::<RoomTranscriptPageResponse>().await {
+            Ok(page) if page.ok => Ok(page),
+            Ok(page) => Err(format!(
+                "transcript page failed: {}",
+                page.error.unwrap_or_else(|| "unknown error".into())
+            )),
+            Err(err) => Err(format!("transcript page decode error: {err}")),
+        },
+        Ok(resp) => Err(format!("transcript page failed: HTTP {}", resp.status())),
+        Err(err) => Err(format!("transcript page fetch error: {err}")),
+    }
+}
+
 fn list_request_is_current(expected_ticket: u64, current_ticket: u64) -> bool {
     expected_ticket == current_ticket
 }
@@ -4039,6 +4214,147 @@ mod tests {
         assert_eq!(opened, Some(("room-a".to_string(), None)));
         let advanced = next_unread_baseline(opened.as_ref(), Some("room-a"), Some(7));
         assert_eq!(advanced, Some(("room-a".to_string(), None)));
+    }
+
+    /// The daemon's forward transcript read (`transcript_page`, OCEAN-249):
+    /// the oldest rows strictly after `after_seq`, at most `limit`, with the
+    /// `limit + 1` sentinel deciding `has_more` and `next_seq` the last
+    /// returned row. `GET /v1/rooms/persistent/{key}` serves the same page
+    /// with `after_seq = None`.
+    fn daemon_forward_page(
+        rows: &[RoomMessage],
+        after_seq: Option<u64>,
+        limit: usize,
+    ) -> (Vec<RoomMessage>, bool, Option<u64>) {
+        let mut page: Vec<RoomMessage> = rows
+            .iter()
+            .filter(|message| after_seq.is_none_or(|after| message.seq > after))
+            .cloned()
+            .collect();
+        let has_more = page.len() > limit;
+        page.truncate(limit);
+        let next_seq = has_more
+            .then(|| page.last().map(|message| message.seq))
+            .flatten();
+        (page, has_more, next_seq)
+    }
+
+    /// Drive one open against the fake daemon exactly as `open_room` does:
+    /// the open page, then `/transcript?after_seq=` pages while the fold asks.
+    /// Returns the landed transcript and the pages followed past the first.
+    fn open_against(rows: &[RoomMessage]) -> (Vec<RoomMessage>, usize) {
+        let (first, has_more, next_seq) = daemon_forward_page(rows, None, OPEN_CATCH_UP_PAGE_LIMIT);
+        let mut catch_up = OpenCatchUp::start(first, has_more, next_seq);
+        let mut pages = 0;
+        while let Some(after_seq) = catch_up.next_after_seq() {
+            pages += 1;
+            let (page, has_more, next_seq) =
+                daemon_forward_page(rows, Some(after_seq), OPEN_CATCH_UP_PAGE_LIMIT);
+            catch_up.absorb(page, has_more, next_seq);
+        }
+        (catch_up.finish(), pages)
+    }
+
+    /// Reproduction: a room longer than the daemon's transcript cap must open
+    /// on its newest row with every row in between, not on the oldest page.
+    #[test]
+    fn open_lands_on_the_newest_contiguous_transcript_past_the_daemon_cap() {
+        let rows: Vec<RoomMessage> = (0..(OPEN_CATCH_UP_PAGE_LIMIT as u64 * 2 + 7))
+            .map(message)
+            .collect();
+        let newest = rows.last().map(|message| message.seq).unwrap();
+        let (first, has_more, _) = daemon_forward_page(&rows, None, OPEN_CATCH_UP_PAGE_LIMIT);
+        assert!(
+            has_more && first.last().map(|message| message.seq) < Some(newest),
+            "fixture must exceed the daemon cap or it reproduces nothing"
+        );
+
+        let (transcript, pages) = open_against(&rows);
+
+        assert_eq!(
+            transcript.last().map(|message| message.seq),
+            Some(newest),
+            "the open landed on the oldest page instead of the newest row"
+        );
+        let seqs: Vec<u64> = transcript.iter().map(|message| message.seq).collect();
+        assert_eq!(
+            seqs,
+            (0..=newest).collect::<Vec<u64>>(),
+            "the landed transcript must be contiguous and strictly ascending"
+        );
+        assert_eq!(
+            pages, 2,
+            "three pages of rows take exactly two catch-up reads"
+        );
+    }
+
+    #[test]
+    fn open_within_the_cap_follows_no_transcript_page() {
+        let rows: Vec<RoomMessage> = (0..(OPEN_CATCH_UP_PAGE_LIMIT as u64))
+            .map(message)
+            .collect();
+        let (transcript, pages) = open_against(&rows);
+        assert_eq!(
+            pages, 0,
+            "exactly the cap with nothing behind it is complete"
+        );
+        assert_eq!(transcript, rows);
+        assert_eq!(open_against(&[]), (Vec::new(), 0));
+    }
+
+    /// Older daemons omit `has_more`: the open decodes as complete and lands
+    /// on whatever the record carried, exactly as before.
+    #[test]
+    fn open_response_without_paging_fields_decodes_as_complete() {
+        let decoded: RoomGetResponse = serde_json::from_str(
+            r#"{"ok":true,"room":null,"transcript":[],"access":{"state":"local"}}"#,
+        )
+        .expect("legacy open response decodes");
+        assert!(!decoded.has_more);
+        assert_eq!(decoded.next_seq, None);
+        assert_eq!(
+            OpenCatchUp::start(decoded.transcript, decoded.has_more, decoded.next_seq)
+                .next_after_seq(),
+            None
+        );
+    }
+
+    /// The catch-up is bounded in every direction a daemon could push it:
+    /// a page that advances nothing ends it, a cursor can never skip past the
+    /// held frontier, and the page bound lands the open regardless.
+    #[test]
+    fn open_catch_up_stops_on_a_stuck_page_a_bad_cursor_and_the_page_bound() {
+        let held: Vec<RoomMessage> = (0..3).map(message).collect();
+
+        let mut stuck = OpenCatchUp::start(held.clone(), true, Some(2));
+        assert_eq!(stuck.next_after_seq(), Some(2));
+        stuck.absorb(vec![message(1), message(2)], true, Some(2));
+        assert_eq!(stuck.next_after_seq(), None, "no new row: stop asking");
+        assert_eq!(stuck.finish(), held);
+
+        let skipping = OpenCatchUp::start(held.clone(), true, Some(40));
+        assert_eq!(
+            skipping.next_after_seq(),
+            Some(2),
+            "a cursor past the frontier would skip rows; resume from the frontier"
+        );
+        let mut lagging = OpenCatchUp::start(held.clone(), true, Some(0));
+        assert_eq!(lagging.next_after_seq(), Some(0));
+        lagging.absorb(vec![message(1), message(2), message(3)], false, None);
+        assert_eq!(
+            lagging.finish(),
+            (0..4).map(message).collect::<Vec<_>>(),
+            "re-served rows are dropped, the new one lands"
+        );
+
+        let mut bounded = OpenCatchUp::start(vec![message(0)], true, Some(0));
+        let mut pages = 0;
+        while let Some(after_seq) = bounded.next_after_seq() {
+            pages += 1;
+            bounded.absorb(vec![message(after_seq + 1)], true, Some(after_seq + 1));
+        }
+        assert_eq!(pages, OPEN_CATCH_UP_MAX_PAGES);
+        assert_eq!(bounded.finish().len(), OPEN_CATCH_UP_MAX_PAGES + 1);
     }
 
     /// Source guard: `open_room` captures the baseline from the room-list

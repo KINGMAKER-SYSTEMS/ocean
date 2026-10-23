@@ -40,6 +40,12 @@ fn workspace() -> String {
 /// owns ordered replay and resumes from its own cursor after a reconnect; a
 /// request-time `/transcript` read after join, leave, agent add or post races
 /// that stream for the same rows.
+///
+/// The one permitted `/transcript` reader is the open catch-up: a bounded,
+/// one-time fold over the pages behind the daemon's capped open response, run
+/// before the open publishes its transcript and before the tail starts. It is
+/// not polling and it is not a mutation re-read; see
+/// `open_catch_up_is_the_only_transcript_reader_and_lands_before_the_tail`.
 #[test]
 fn mutation_responses_leave_forward_ingest_to_the_live_tail() {
     let rooms = rooms();
@@ -48,16 +54,70 @@ fn mutation_responses_leave_forward_ingest_to_the_live_tail() {
         "mutation responses must not reintroduce the competing forward reader; \
          the room SSE tail is the sole forward-ingest path",
     );
-    assert!(
-        !rooms.contains("/transcript?after_seq="),
-        "no production path re-reads `/transcript` forward; the tail resumes \
-         from `/events?after_seq=` instead",
+    // The brace form is the URL as code builds it; doc comments name the
+    // route without one.
+    assert_eq!(
+        rooms.matches("/transcript?after_seq={").count(),
+        1,
+        "exactly one production path reads `/transcript` forward (the open \
+         catch-up); everything after open resumes from `/events?after_seq=`",
     );
     assert!(
         rooms.contains(
             "letevents_url=format!(\"{base}/v1/rooms/persistent/{}/events\",encode(&key));"
         ),
         "the room-scoped SSE tail stays the forward stream",
+    );
+}
+
+/// The open catch-up (`OpenCatchUp` + `fetch_open_catch_up_page`) is reached
+/// from `open_room` alone, and `open_room` lands the folded transcript before
+/// it publishes rows or starts the tail, so the first fill is the newest,
+/// contiguous transcript and the tail resumes from its real frontier.
+#[test]
+fn open_catch_up_is_the_only_transcript_reader_and_lands_before_the_tail() {
+    let rooms = rooms();
+    let reader = "{base}/v1/rooms/persistent/{}/transcript?after_seq={after_seq}&limit={OPEN_CATCH_UP_PAGE_LIMIT}";
+    assert!(
+        rooms.contains(reader),
+        "the catch-up asks for the daemon's page ceiling from the held frontier",
+    );
+    let call = "fetch_open_catch_up_page(&base,&key,after_seq).await";
+    assert_eq!(
+        rooms.matches(call).count(),
+        1,
+        "the forward transcript page is fetched from exactly one call site",
+    );
+    let open_start = rooms
+        .find("pubfnopen_room(&self,key:String){")
+        .expect("open_room exists");
+    let open_end = rooms[open_start..]
+        .find("pubfnclose_room(&self){")
+        .map(|offset| open_start + offset)
+        .expect("close_room follows open_room");
+    let open = &rooms[open_start..open_end];
+    let call_at = open
+        .find(call)
+        .expect("the one call site is inside open_room");
+    assert!(
+        open.contains(
+            "whileletSome(after_seq)=catch_up.next_after_seq(){letpage=fetch_open_catch_up_page(&base,&key,after_seq).await;if!me.room_is_current(generation_id,&key){return;}"
+        ),
+        "each page is followed by the room-identity check that cancels a \
+         stale open on room switch",
+    );
+    let landed = open[call_at..]
+        .find("lettranscript=catch_up.finish();")
+        .expect("the fold lands after the last page");
+    let published = open[call_at..]
+        .find("me.transcript.set(transcript.clone());")
+        .expect("the landed transcript is what gets published");
+    let tail = open[call_at..]
+        .find("me.start_live_tail(key,generation_id);")
+        .expect("the tail starts after the open publishes");
+    assert!(
+        landed < published && published < tail,
+        "land the whole transcript, publish it once, then tail from its frontier",
     );
 }
 
