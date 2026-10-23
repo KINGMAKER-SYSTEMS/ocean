@@ -30,5 +30,4 @@ pub use fake_tool_provider::{
 pub use types::{
     tool_def, AgentConfig, AgentEvent, AgentTool, AgentToolResult, AllowAllPolicy, Concurrency,
     PermissionDecision, PermissionPolicy, SteerRefusal, SteeringInbox, SteeringMessage,
-    SteeringOutcome,
 };

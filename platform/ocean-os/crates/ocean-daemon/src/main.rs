@@ -22,11 +22,10 @@ use axum::{
 use chrono::{DateTime, TimeZone, Utc};
 use ocean_agent::{AgentRuntime, PromptControl};
 use ocean_agent_sdk::{
-    AgentOwningProject, AgentRole, AgentSessionCreateRequest, AgentSessionCreateResponse,
-    AgentSessionId, AgentSessionResponse, AgentSessionSummary, AgentSessionsResponse, AgentTurn,
-    AgentTurnEvent, AgentTurnId, AgentTurnRequest, AgentTurnResponse, AgentTurnStatus,
-    ContextUsage, Federation, ToolCall, ToolCallId, ToolResult, CONTEXT_SOURCE_FINAL_ROUND,
-    CONTEXT_SOURCE_LAST_COMPLETED_ROUND,
+    AgentOwningProject, AgentSessionCreateRequest, AgentSessionCreateResponse, AgentSessionId,
+    AgentSessionResponse, AgentSessionSummary, AgentSessionsResponse, AgentTurn, AgentTurnEvent,
+    AgentTurnId, AgentTurnRequest, AgentTurnResponse, AgentTurnStatus, ContextUsage, ToolCall,
+    ToolCallId, ToolResult, CONTEXT_SOURCE_FINAL_ROUND, CONTEXT_SOURCE_LAST_COMPLETED_ROUND,
 };
 use ocean_core::{
     CompactResponse, EventEnvelope, HealthResponse, OceanEvent, PermissionControlResponse,
@@ -34,7 +33,7 @@ use ocean_core::{
     PermissionMode, PermissionStatus, PermissionsResponse, ProjectRef, PromptRequest,
     RequestControlResponse, RequestCreateResponse, RequestId, RequestState, RequestStatus,
     RequestsResponse, RoomKey, RoomMessageKind, RoomParticipantKind, SessionDetail, SessionId,
-    SessionResponse, SessionRunState,
+    SessionResponse, SessionRunState, SteeringOutcome, SteeringOutcomeStatus,
 };
 use ocean_runtime::{AgentEvent, PermissionDecision as AgentPermissionDecision, PermissionPolicy};
 // Brings the `RoomStore` trait methods (create/get/list/append_message/…) into
@@ -65,6 +64,11 @@ use crate::bus::{AgentEventBus, AgentEventEnvelope, EventBus, SSE_KEEPALIVE_INTE
 use crate::bus::AGENT_EVENT_REPLAY_BUFFER;
 #[cfg(test)]
 use tokio::sync::broadcast;
+// Test-only: the inline Longhouse fixtures and characterization build SDK
+// events directly. Production use of these names moved to
+// `longhouse_convene.rs` and `longhouse_governance_control.rs`.
+#[cfg(test)]
+use ocean_agent_sdk::{AgentRole, Federation};
 
 /// One-time startup config validation (OCEAN-276): fail-fast on malformed
 /// telephony/STT/provider/Longhouse env, warn on partial feature config, and log
@@ -125,6 +129,9 @@ mod history_search;
 mod host_guard;
 /// Rooms S0 — `GET /v1/identity`: who this daemon says its human is.
 mod identity;
+/// Real Longhouse convene: ready-model admission, awaited council orchestration,
+/// registry-first projection, durable title grant/bind, and raw-token delivery.
+mod longhouse_convene;
 /// Persisted-title and read-projection mutation HTTP adapters.
 mod longhouse_governance_control;
 /// State-free Longhouse prepare, inspect, and workflow HTTP adapters.
@@ -163,8 +170,9 @@ mod room_agent_authority;
 mod room_agent_runs;
 /// Room attachments: durable file bytes beside the DB that indexes them.
 mod room_attachments;
-/// Restart-safe outbound Bedrock room client and per-room supervisor (S2 P2-B).
+/// Operator-owned first team-service selection (GET/PUT /v1/rooms/connection).
 mod room_connection;
+/// Restart-safe outbound Bedrock room client and per-room supervisor (S2 P2-B).
 mod room_federation;
 /// Retention sweeps and orphan cleanup for closed rooms.
 mod room_maintenance;
@@ -207,6 +215,7 @@ use extension_lifecycle::{
 use filesystem::{fs_dirs, fs_file};
 use history_search::history_search;
 use host_guard::AllowedHosts;
+use longhouse_convene::longhouse_convene;
 #[cfg(test)]
 use longhouse_governance_control::with_titles;
 use longhouse_governance_control::{
@@ -226,7 +235,7 @@ use persistent_rooms::{
     me_get, me_put, resolve_named_agent, room_create, room_create_invite, room_db_path,
     room_events, room_get, room_get_read_cursor, room_inspect, room_join, room_leave,
     room_patch_read_cursor, room_post_message, room_redeem_invite, room_register_agents,
-    room_retry_outbox, room_snapshot, room_transcript, rooms_list_persistent,
+    room_retry_outbox, room_snapshot, room_transcript, room_update, rooms_list_persistent,
     run_federated_trigger_dispatcher, with_rooms, with_rooms_handle, RoomAccessWakeBus,
     RoomReadCursorWakeBus, RoomStoreHandle, RoomWakeBus,
 };
@@ -306,6 +315,9 @@ struct AppState {
     agent_events: AgentEventBus,
     requests: RequestRegistry,
     permissions: PermissionRegistry,
+    /// Per-session terminal steer outcomes for `GET /v1/sessions/{id}`
+    /// (#148). See [`SteeringOutcomeRegistry`].
+    steering_outcomes: Arc<SteeringOutcomeRegistry>,
     /// Read-side projection of longhouse councils: a `topic_id -> TopicSnapshot`
     /// store folded from the events each council emits, so the quorum
     /// observability deck survives a refresh (OCEAN-58). Convergence is still
@@ -1196,6 +1208,7 @@ async fn main() -> anyhow::Result<()> {
         agent_events: agent_event_bus.clone(),
         requests: Arc::new(RwLock::new(HashMap::new())),
         permissions: Arc::new(RwLock::new(HashMap::new())),
+        steering_outcomes: Arc::new(SteeringOutcomeRegistry::default()),
         longhouse,
         rooms,
         room_operator,
@@ -1655,6 +1668,7 @@ fn banner_routes() -> &'static [&'static str] {
         "GET /v1/rooms/persistent",
         "POST /v1/rooms/persistent",
         "GET /v1/rooms/persistent/{key}",
+        "PATCH /v1/rooms/persistent/{key}",
         "GET /v1/rooms/persistent/{key}/inspect",
         "POST /v1/rooms/persistent/{key}/close",
         "GET /v1/rooms/persistent/{key}/agents",
@@ -3018,7 +3032,10 @@ fn room_routes() -> Router<AppState> {
             "/v1/rooms/persistent",
             get(rooms_list_persistent).post(room_create),
         )
-        .route("/v1/rooms/persistent/{key}", get(room_get))
+        .route(
+            "/v1/rooms/persistent/{key}",
+            get(room_get).patch(room_update),
+        )
         .route("/v1/rooms/persistent/{key}/inspect", get(room_inspect))
         .route(
             "/v1/rooms/persistent/{key}/close",
@@ -3250,197 +3267,6 @@ fn longhouse_routes() -> Router<AppState> {
         // Workflow-brief endpoint (OCEAN-340): advisory + read-only + fail-open
         // shell that surfaces the OCEAN-338 loader's workflows[] over HTTP.
         .route("/v1/workflows/prepare", post(workflows_prepare))
-}
-
-/// Request body for `POST /v1/longhouse/convene`.
-#[derive(Debug, serde::Deserialize)]
-struct LonghouseConveneRequest {
-    /// The question / task the council deliberates.
-    question: String,
-    /// Which department room hosts it: dev | sales | content | campaign |
-    /// commons. Defaults to `commons` if omitted or unrecognized.
-    #[serde(default)]
-    federation: Option<String>,
-    /// Optional model alias override; one worker per alias. Every supplied alias
-    /// is validated against the daemon's live ready-model registry before the
-    /// council starts; unknown or unready aliases are rejected (never silently
-    /// resolved as a fallback).
-    #[serde(default)]
-    models: Option<Vec<String>>,
-}
-
-fn parse_federation(s: Option<&str>) -> Federation {
-    match s.map(|v| v.trim().to_lowercase()).as_deref() {
-        Some("dev") => Federation::Dev,
-        Some("sales") => Federation::Sales,
-        Some("content") => Federation::Content,
-        Some("campaign") => Federation::Campaign,
-        _ => Federation::Commons,
-    }
-}
-
-/// Convene a **real** longhouse council: run cheap-model LLM workers through the
-/// propose → endorse/inhibit rounds, let the daemon-side `QuorumEngine` decide
-/// convergence, and stream the resulting `LonghouseEvent`s onto the existing
-/// agent event bus — exactly like `longhouse_demo`, but driven by real agents
-/// and a real quorum engine instead of a scripted timer. The deck renders it
-/// with zero changes.
-///
-/// Blocks until the council finishes, then returns `200 { ok, question,
-/// federation, streaming_on, title_id?, token? }`. `title_id` and `token` are
-/// present only when the council converged; they are the firekeeper's durable
-/// cross-turn claim credential. The token is delivered **only** in this direct
-/// HTTP response — it is never emitted on the SSE/bus (OCEAN-229 discipline:
-/// the bus carries public event data only, never secrets; an SSE sniff would
-/// otherwise let any bus subscriber forge a firekeeper claim).
-async fn longhouse_convene(
-    State(state): State<AppState>,
-    Json(req): Json<LonghouseConveneRequest>,
-) -> Json<serde_json::Value> {
-    let bus = state.agent_events.clone();
-    let registry = state.longhouse.clone();
-    // The persisted title registry (OCEAN-272): the convened council mints its
-    // firekeeper title into THIS durable store on convergence, so the title —
-    // and the right to `claim_outcome` against it — survives the turn.
-    let titles = state.titles.clone();
-    let federation = parse_federation(req.federation.as_deref());
-
-    let mut convene_req = ocean_longhouse::ConveneRequest::new(req.question.clone(), federation);
-    if let Some(models) = req.models {
-        if !models.is_empty() {
-            let ready: std::collections::HashSet<_> = ocean_providers::known_models_with_readiness(
-                &ocean_providers::ProviderEnv::from_process(),
-            )
-            .into_iter()
-            .filter(|model| model.ready)
-            .map(|model| model.model.id)
-            .collect();
-            let invalid: Vec<_> = models
-                .iter()
-                .filter(|model| !ready.contains(model.as_str()))
-                .cloned()
-                .collect();
-            if !invalid.is_empty() {
-                return Json(json!({
-                    "ok": false,
-                    "error": "longhouse council requires ready model ids from GET /v1/models",
-                    "invalid_models": invalid,
-                    "ready_models": ready,
-                }));
-            }
-            convene_req.models = models;
-        }
-    }
-
-    let topic_hint = convene_req.question.clone();
-    let clock = ocean_longhouse::SystemClock;
-    // Emit each longhouse event onto the agent bus, exactly as the demo does
-    // (`bus.emit(ev.into_turn_event())`), so existing SSE clients render it —
-    // AND tee it into the in-memory read-side registry so the topic survives a
-    // client refresh during this process lifetime (OCEAN-58). The bus is the live
-    // feed; the registry is not restart durability.
-    //
-    // OCEAN-229/339: the bus closure carries only `LonghouseEvent` variants
-    // (TopicConvened, RoleGranted, Converged, …) — none of which carry the
-    // secret token. The token lives only in the `FirekeeperTitle` returned by
-    // `grant()` below and is delivered solely in this HTTP response body.
-    let outcome = ocean_longhouse::convene(convene_req, &clock, |ev| {
-        // Fold into the observable topic store first, then publish to the bus.
-        // The closure is synchronous and drops the std Mutex guard before any
-        // await. Lock acquisition can still block this worker on contention; this
-        // checkpoint preserves that behavior rather than changing lock types.
-        if let Ok(mut reg) = registry.lock() {
-            reg.ingest(&ev);
-        }
-        bus.emit(ev.into_turn_event());
-    })
-    .await;
-
-    // OCEAN-272/339: persist the firekeeper title for a converged council into
-    // the durable registry, bound to the engine's decision. The in-frame title
-    // inside `convene()` already gated the binding `Converged` it emitted
-    // (OCEAN-229); this is the *additional* durable authority that lets a
-    // firekeeper ratify in a LATER turn via `POST /v1/longhouse/claim`.
-    //
-    // Security: `grant()` mints the secret server-side from the CSPRNG and the
-    // registry persists only a salt+SHA-256 verifier — the raw token is NEVER
-    // stored and NEVER emitted on any event (we log only the public title_id /
-    // agent_id / decision). The raw `FirekeeperTitle` returned here is used to
-    // extract the token for this response, then dropped. The durable *authority*
-    // persists in the registry; the secret travels only in this HTTP response,
-    // directly to the convening caller. It never touches the SSE bus.
-    let grant_result: Option<(Uuid, String)> = if let Some(decision) = outcome.decision {
-        // The winning proposal's author holds the firekeeper title (the same
-        // binding `convene()` uses). A converged outcome always has a recorded
-        // firekeeper on the snapshot.
-        let firekeeper = registry
-            .lock()
-            .ok()
-            .and_then(|reg| reg.topic(&outcome.topic_id).and_then(|t| t.firekeeper));
-        if let Some(firekeeper) = firekeeper {
-            let now = ocean_protocol::now_ms();
-            let mut reg = titles
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            match reg.grant(outcome.topic_id, firekeeper, AgentRole::Firekeeper, now) {
-                Ok((persisted, secret)) => {
-                    // Bind the durable title to the engine's decision so a
-                    // later, engine-free `claim_bound_outcome` can ratify
-                    // exactly this proposal.
-                    if let Err(e) = reg.bind_decision(persisted.title_id, decision) {
-                        tracing::warn!(error = %e, "failed to bind persisted firekeeper title to decision");
-                    }
-                    tracing::info!(
-                        topic = %outcome.topic_id,
-                        title = %persisted.title_id,
-                        firekeeper = %firekeeper,
-                        decision = %decision,
-                        "persisted firekeeper title bound to converged decision (claimable across turns)"
-                    );
-                    // Capture title_id + token before `secret` is dropped.
-                    // The token is never logged; only the title_id is public.
-                    Some((persisted.title_id, secret.token().to_string()))
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to persist firekeeper title for converged council");
-                    None
-                }
-            }
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    tracing::info!(
-        topic = %outcome.topic_id,
-        converged = outcome.decision.is_some(),
-        convergence_basis = outcome
-            .convergence_basis
-            .map(|basis| basis.as_str())
-            .unwrap_or("none"),
-        proposals = outcome.proposals.len(),
-        "longhouse council finished"
-    );
-
-    // Build the response. `title_id` and `token` are included only on
-    // convergence — a caller MUST check `converged` before using them.
-    // The token is the cross-turn claim credential; it must be stored by
-    // the caller and presented verbatim to `POST /v1/longhouse/claim`.
-    let mut resp = json!({
-        "ok": true,
-        "question": topic_hint,
-        "federation": format!("{federation:?}").to_lowercase(),
-        "streaming_on": "/v1/agent/events",
-        "converged": grant_result.is_some(),
-        "convergence_basis": outcome.convergence_basis.map(|basis| basis.as_str()),
-    });
-    if let Some((title_id, token)) = grant_result {
-        resp["title_id"] = json!(title_id.to_string());
-        resp["token"] = json!(token);
-    }
-    Json(resp)
 }
 
 // --- Skill-librarian API: /v1/skills/query + /v1/skills/fetch (OCEAN-281) -----
@@ -5358,15 +5184,18 @@ async fn session(
     State(state): State<AppState>,
     Path(session_id): Path<SessionId>,
 ) -> (StatusCode, Json<SessionResponse>) {
-    match coherent_session_detail(&state, session_id).await {
-        Ok(session) => (
-            StatusCode::OK,
-            Json(SessionResponse {
-                ok: true,
-                session: Some(session),
-                error: None,
-            }),
-        ),
+    match state.runtime.session_detail(session_id) {
+        Ok(mut session) => {
+            enrich_session_detail(&state, &mut session).await;
+            (
+                StatusCode::OK,
+                Json(SessionResponse {
+                    ok: true,
+                    session: Some(session),
+                    error: None,
+                }),
+            )
+        }
         Err(error) if is_not_found(&error) => (
             StatusCode::NOT_FOUND,
             Json(SessionResponse {
@@ -5376,28 +5205,17 @@ async fn session(
             }),
         ),
         Err(error) => {
-            let (status, message) = session_detail_read_error(&error);
+            tracing::warn!(%session_id, error = %error, "failed to read session detail");
             (
-                status,
+                StatusCode::INTERNAL_SERVER_ERROR,
                 Json(SessionResponse {
                     ok: false,
                     session: None,
-                    error: Some(message.into()),
+                    error: Some("session could not be read".into()),
                 }),
             )
         }
     }
-}
-
-async fn coherent_session_detail(state: &AppState, id: SessionId) -> anyhow::Result<SessionDetail> {
-    for _ in 0..4 {
-        let mut detail = state.runtime.session_detail(id)?;
-        enrich_session_detail(state, &mut detail).await;
-        if detail.steering.as_ref() == Some(&state.runtime.session_steering_snapshot(id)) {
-            return Ok(detail);
-        }
-    }
-    Err(ocean_agent::SteeringSnapshotChanged.into())
 }
 
 async fn enrich_session_detail(state: &AppState, session: &mut SessionDetail) {
@@ -5410,41 +5228,33 @@ async fn enrich_session_detail(state: &AppState, session: &mut SessionDetail) {
     matching.sort_by_key(|status| status.updated_at.or(status.started_at));
     matching.reverse();
 
-    let ended: HashSet<_> = session
-        .steering
-        .as_deref()
-        .unwrap_or_default()
-        .iter()
-        .filter(|turn| turn.ended)
-        .map(|turn| turn.turn_id.as_str())
-        .collect();
-    let is_live = |status: &&RequestStatus| {
-        !status.state.is_terminal() && !ended.contains(status.request_id.to_string().as_str())
-    };
     session.active_requests = matching
         .iter()
-        .filter(is_live)
+        .filter(|status| !status.state.is_terminal())
         .map(|status| status.request_id)
         .collect();
     session.pending_permissions = matching
         .iter()
-        .filter(|status| !ended.contains(status.request_id.to_string().as_str()))
         .filter_map(|status| status.permission_id)
         .collect();
 
-    if let Some(active) = matching.iter().find(is_live) {
+    // #148: expose the session's terminal steer outcomes (the only delivery
+    // record — the transcript carries no steer identity) and its finished
+    // request ids (so a hydration can prove a locally-live Stop target names
+    // a turn the daemon already finished). `matching` is most-recent first.
+    session.steering = state.steering_outcomes.terminal_outcomes(session.id);
+    session.finished_requests = matching
+        .iter()
+        .filter(|status| status.state.is_terminal())
+        .map(|status| status.request_id)
+        .take(FINISHED_REQUESTS_RETAIN)
+        .collect();
+
+    if let Some(active) = matching.iter().find(|status| !status.state.is_terminal()) {
         session.state = session_run_state(active.state);
         session.resumable = false;
     } else if let Some(latest) = matching.first() {
-        // Registration closure proves execution ended, not whether it succeeded.
-        // Bridge drain and request finalization may still be in progress.
-        session.state = if ended.contains(latest.request_id.to_string().as_str())
-            && !latest.state.is_terminal()
-        {
-            SessionRunState::Stored
-        } else {
-            session_run_state(latest.state)
-        };
+        session.state = session_run_state(latest.state);
         session.resumable = true;
     }
 
@@ -5661,22 +5471,6 @@ fn active_request_for_session(
                 session_run_state(status.state),
             )
         })
-}
-
-fn session_detail_read_error(error: &anyhow::Error) -> (StatusCode, &'static str) {
-    if error
-        .downcast_ref::<ocean_agent::SteeringSnapshotChanged>()
-        .is_some()
-    {
-        (StatusCode::SERVICE_UNAVAILABLE, "session_snapshot_changed")
-    } else if is_not_found(error) {
-        (StatusCode::NOT_FOUND, "session not found")
-    } else {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "session could not be read",
-        )
-    }
 }
 
 fn is_not_found(error: &anyhow::Error) -> bool {
@@ -6826,6 +6620,10 @@ async fn agent_turn(
     let bridge_project_id = lifecycle_project_id;
     let bridge_turn_id = turn_id;
     let bridge_session_id = session_id;
+    // #148: the bridge is the daemon's authoritative delivery witness — record
+    // each steer outcome BEFORE the relay, so a client fetching the session
+    // snapshot the moment the frame arrives can already reconcile by id.
+    let bridge_steering = Arc::clone(&state.steering_outcomes);
 
     let bridge = tokio::spawn(async move {
         let mut tool_call_ids: HashMap<String, ToolCallId> = HashMap::new();
@@ -6853,9 +6651,15 @@ async fn agent_turn(
                     });
                 }
                 // Mid-turn steering: the loop put an operator message into the
-                // transcript at a tool boundary. Relay it so the sender can
+                // transcript at a tool boundary. Record the delivery in the
+                // steer-outcome ledger (#148), then relay it so the sender can
                 // show it where it landed and stop treating it as pending.
                 AgentEvent::SteeringDelivered { id, text, .. } => {
+                    bridge_steering.record_delivered(
+                        bridge_session_id.inner(),
+                        &id,
+                        bridge_turn_id.inner(),
+                    );
                     bridge_bus.emit(AgentTurnEvent::SteeringDelivered {
                         session_id: bridge_session_id,
                         turn_id: bridge_turn_id,
@@ -7252,9 +7056,7 @@ async fn agent_turn(
     // runs. The registration moves into the turn task and is dropped the
     // moment the prompt returns (or the task unwinds), closing the inbox so
     // later steers are refused and the sender falls back to a new turn.
-    let steering = state
-        .runtime
-        .open_steering_for_turn(core_sid(session_id), turn_id.to_string());
+    let steering = state.runtime.open_steering(core_sid(session_id));
     let control = control.with_steering(steering.inbox());
     // ── fire-and-ack (OCEAN-410): spawn the turn, ACK immediately ──
     // The POST is an ACK carrying turn_id / session_id / event_id_prefix so the
@@ -7307,6 +7109,16 @@ async fn agent_turn(
         bg_state.metrics.record_turn(res.wall_ms, res.ok);
         // Wait for the bridge to drain (the sender has been dropped by now).
         let _ = bridge.await;
+        // The bridge has drained, so every steer delivery relay for this turn
+        // is already in the ledger. Anything still pending for this turn was
+        // handed back unread by the inbox close — settle it as dropped BEFORE
+        // the terminal registry transition below, so a snapshot can never
+        // observe the turn terminal while this turn's steer outcomes are
+        // undecided (#148). A panic above skips this; those entries stay
+        // pending and are never exposed, which clients read as unresolved.
+        bg_state
+            .steering_outcomes
+            .settle_turn(session_id.inner(), request_id);
         // Prefer real provider usage; fall back to a visible-text estimate only
         // when the provider reported no output tokens.
         let output_tokens = if res.usage.output > 0 {
@@ -8258,18 +8070,15 @@ async fn agent_session(
                 }),
             )
         }
-        Err(error) => {
-            let (status, message) = session_detail_read_error(&error);
-            (
-                status,
-                Json(AgentSessionResponse {
-                    ok: false,
-                    session: None,
-                    turns: vec![],
-                    error: Some(message.into()),
-                }),
-            )
-        }
+        Err(_) => (
+            StatusCode::NOT_FOUND,
+            Json(AgentSessionResponse {
+                ok: false,
+                session: None,
+                turns: vec![],
+                error: Some("session not found".into()),
+            }),
+        ),
     }
 }
 
@@ -8467,15 +8276,174 @@ fn format_session_append(kind: Option<&str>, content: &str) -> String {
 #[derive(Debug, serde::Deserialize)]
 struct SteerRequest {
     text: String,
-    #[serde(default)]
-    steer_id: Option<Uuid>,
-    #[serde(default)]
-    turn_id: Option<Uuid>,
 }
 
 /// Longest steering message accepted, in bytes. A steer redirects work in
 /// progress; anything longer belongs in a turn of its own.
 const STEER_TEXT_MAX_BYTES: usize = 32 * 1024;
+
+/// Terminal steer outcomes retained per session for
+/// [`SessionDetail::steering`] — far more than any realistic reconnect
+/// window needs, while a long session cannot grow the ledger unbounded.
+const STEERING_OUTCOME_RETAIN: usize = 64;
+
+/// Terminal request ids retained per session for
+/// [`SessionDetail::finished_requests`]. A surface's Stop target is at most
+/// the session's latest turn, so the most recent handful is decisive; the
+/// bound keeps a busy session's snapshot bounded.
+const FINISHED_REQUESTS_RETAIN: usize = 32;
+
+/// Lifecycle of one ledger entry, as the daemon currently knows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SteerLedgerStatus {
+    /// Accepted into a live turn's inbox; the agent loop has not decided.
+    /// Never exposed — a client must not treat it as any outcome.
+    Pending,
+    Delivered,
+    Dropped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SteerLedgerEntry {
+    steer_id: String,
+    turn_id: RequestId,
+    status: SteerLedgerStatus,
+}
+
+/// In-memory per-session ledger of mid-turn steer outcomes (#148).
+///
+/// The daemon mints a `steer_id` when the steer route accepts a message; the
+/// agent loop later either delivers it into the turn's transcript (relayed
+/// through the turn bridge as `AgentEvent::SteeringDelivered`) or discards it
+/// unread at turn end (`SteeringInbox::close` returns it and the loop drops
+/// it). Neither outcome is recorded anywhere else — the persisted transcript
+/// carries no steer identity — so without this ledger a client that missed
+/// the SSE frames (a reconnect gap) cannot tell a delivered steer from a
+/// dropped one except by guessing at text. `GET /v1/sessions/{id}` exposes
+/// the terminal records so surfaces reconcile by `steer_id` alone.
+///
+/// Std `Mutex` like the other daemon registries: every method is synchronous
+/// and the guard never crosses an `await`. Entries are in-memory only — a
+/// daemon restart loses them, and clients treat a missing record as
+/// explicitly unresolved rather than guessing.
+#[derive(Debug, Default)]
+struct SteeringOutcomeRegistry {
+    sessions: std::sync::Mutex<HashMap<SessionId, Vec<SteerLedgerEntry>>>,
+}
+
+impl SteeringOutcomeRegistry {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<SessionId, Vec<SteerLedgerEntry>>> {
+        // A poisoned lock only means a holder panicked mid-update; the map of
+        // plain entries is still coherent, so keep serving it.
+        self.sessions
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    /// Drop the oldest terminal entries beyond [`STEERING_OUTCOME_RETAIN`].
+    /// Pending entries are always kept — they are bounded by the inbox's own
+    /// per-turn cap and are settled by their turn's end.
+    fn prune(entries: &mut Vec<SteerLedgerEntry>) {
+        let terminal = entries
+            .iter()
+            .filter(|entry| entry.status != SteerLedgerStatus::Pending)
+            .count();
+        let mut drop_oldest = terminal.saturating_sub(STEERING_OUTCOME_RETAIN);
+        if drop_oldest == 0 {
+            return;
+        }
+        entries.retain(|entry| {
+            if drop_oldest > 0 && entry.status != SteerLedgerStatus::Pending {
+                drop_oldest -= 1;
+                false
+            } else {
+                true
+            }
+        });
+    }
+
+    /// Record an accepted steer, bound to the session's live turn so the
+    /// end-of-turn settle can decide its outcome.
+    fn record_accepted(&self, session: SessionId, steer_id: &str, turn: RequestId) {
+        let mut sessions = self.lock();
+        let entries = sessions.entry(session).or_default();
+        entries.push(SteerLedgerEntry {
+            steer_id: steer_id.to_string(),
+            turn_id: turn,
+            status: SteerLedgerStatus::Pending,
+        });
+        Self::prune(entries);
+    }
+
+    /// Mark `steer_id` delivered inside `turn`, recorded at the bridge relay
+    /// (the daemon's own delivery announcement is authoritative). A delivery
+    /// whose acceptance was never recorded — the relay outran the steer
+    /// route's live-turn lookup — is inserted directly.
+    fn record_delivered(&self, session: SessionId, steer_id: &str, turn: RequestId) {
+        let mut sessions = self.lock();
+        let entries = sessions.entry(session).or_default();
+        match entries.iter_mut().find(|entry| entry.steer_id == steer_id) {
+            Some(entry) => {
+                entry.status = SteerLedgerStatus::Delivered;
+                entry.turn_id = turn;
+            }
+            None => {
+                entries.push(SteerLedgerEntry {
+                    steer_id: steer_id.to_string(),
+                    turn_id: turn,
+                    status: SteerLedgerStatus::Delivered,
+                });
+            }
+        }
+        Self::prune(entries);
+    }
+
+    /// The turn ended: every entry still [`Pending`](SteerLedgerStatus::Pending)
+    /// for `(session, turn)` was handed back unread by the inbox close and
+    /// discarded by the loop — settle it as `Dropped`. Called after the turn's
+    /// bridge drained (all delivery relays already recorded) and before the
+    /// terminal registry transition, so a snapshot can never observe the turn
+    /// terminal with this turn's ledger unsettled. Terminal entries are
+    /// untouched, making a repeated settle idempotent.
+    fn settle_turn(&self, session: SessionId, turn: RequestId) {
+        if let Some(entries) = self.lock().get_mut(&session) {
+            for entry in entries.iter_mut() {
+                if entry.turn_id == turn && entry.status == SteerLedgerStatus::Pending {
+                    entry.status = SteerLedgerStatus::Dropped;
+                }
+            }
+            Self::prune(entries);
+        }
+    }
+
+    /// Terminal outcomes for the session snapshot, oldest first, bounded to
+    /// the most recent [`STEERING_OUTCOME_RETAIN`]. Pending entries are not
+    /// exposed: no record is a client's signal to keep the row pending (its
+    /// turn is live) or treat it unresolved (its turn is gone) — never a
+    /// guess.
+    fn terminal_outcomes(&self, session: SessionId) -> Vec<SteeringOutcome> {
+        let sessions = self.lock();
+        let Some(entries) = sessions.get(&session) else {
+            return Vec::new();
+        };
+        entries
+            .iter()
+            .filter_map(|entry| match entry.status {
+                SteerLedgerStatus::Delivered => Some(SteeringOutcome {
+                    steer_id: entry.steer_id.clone(),
+                    turn_id: entry.turn_id,
+                    status: SteeringOutcomeStatus::Delivered,
+                }),
+                SteerLedgerStatus::Dropped => Some(SteeringOutcome {
+                    steer_id: entry.steer_id.clone(),
+                    turn_id: entry.turn_id,
+                    status: SteeringOutcomeStatus::Dropped,
+                }),
+                SteerLedgerStatus::Pending => None,
+            })
+            .collect()
+    }
+}
 
 /// Steer an operator message into the turn running on this session. The
 /// message joins the turn's inbox and the agent loop delivers it at the next
@@ -8483,8 +8451,8 @@ const STEER_TEXT_MAX_BYTES: usize = 32 * 1024;
 /// one more round if the model was about to finish). Answers:
 ///
 /// - `202 {ok, steer_id}`: accepted; `steering_delivered` with the same
-///   delivery follows only after its checkpoint saves. Reconnect through
-///   session-detail receipts; missing events never prove replay safe.
+///   `steer_id` follows on `/v1/agent/events` when it lands. If
+///   `turn_finished` arrives first, it was not run: send it as a new turn.
 /// - `409 no_active_turn`: nothing steerable is running here (no turn, a
 ///   room or other non-operator operation, or the turn already ended).
 /// - `429 steering_full`: too many messages already waiting.
@@ -8510,37 +8478,40 @@ async fn agent_session_steer(
             })),
         );
     }
-    if req.steer_id.is_some() != req.turn_id.is_some() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "ok": false, "error": "steering_identity_required" })),
-        );
-    }
-    let steer_id = req.steer_id.unwrap_or_else(Uuid::new_v4).to_string();
-    let expected_turn = req.turn_id.map(|id| id.to_string());
+    let steer_id = Uuid::new_v4().to_string();
     let message = ocean_runtime::SteeringMessage {
         id: steer_id.clone(),
         text: text.to_string(),
     };
-    match state
-        .runtime
-        .steer_for_turn(core_sid(session_id), expected_turn.as_deref(), message)
-    {
-        Ok(()) => (
-            StatusCode::ACCEPTED,
-            Json(json!({ "ok": true, "steer_id": steer_id })),
-        ),
+    match state.runtime.steer(core_sid(session_id), message) {
+        Ok(()) => {
+            // Bind the acceptance to the session's live turn so the
+            // end-of-turn settle can decide its outcome (#148). A missing
+            // live request (registry race at turn end) simply leaves no
+            // record — clients treat that as unresolved, never a guess.
+            let live_turn = state
+                .requests
+                .read()
+                .await
+                .values()
+                .find(|control| {
+                    control.status.session_id == Some(core_sid(session_id))
+                        && !control.status.state.is_terminal()
+                })
+                .map(|control| control.status.request_id);
+            if let Some(turn) = live_turn {
+                state
+                    .steering_outcomes
+                    .record_accepted(core_sid(session_id), &steer_id, turn);
+            }
+            (
+                StatusCode::ACCEPTED,
+                Json(json!({ "ok": true, "steer_id": steer_id })),
+            )
+        }
         Err(ocean_runtime::SteerRefusal::Closed) => (
             StatusCode::CONFLICT,
             Json(json!({ "ok": false, "error": "no_active_turn" })),
-        ),
-        Err(ocean_runtime::SteerRefusal::Conflict) => (
-            StatusCode::CONFLICT,
-            Json(json!({ "ok": false, "error": "steering_identity_conflict" })),
-        ),
-        Err(ocean_runtime::SteerRefusal::WrongTurn) => (
-            StatusCode::CONFLICT,
-            Json(json!({ "ok": false, "error": "steering_turn_unknown" })),
         ),
         Err(ocean_runtime::SteerRefusal::Full) => (
             StatusCode::TOO_MANY_REQUESTS,
@@ -12409,7 +12380,6 @@ mod tests {
 
     fn detail_fixture(state: SessionRunState) -> SessionDetail {
         SessionDetail {
-            steering: None,
             id: SessionId::new_v4(),
             created_ms: 1_000,
             updated_ms: 5_000,
@@ -12426,6 +12396,8 @@ mod tests {
             resumable: true,
             active_requests: vec![],
             pending_permissions: vec![],
+            steering: vec![],
+            finished_requests: vec![],
             transcript: vec![
                 transcript_entry("user", "first ask", 1_000),
                 transcript_entry("assistant", "working on it", 2_000),
@@ -14685,6 +14657,7 @@ mod tests {
             agent_events: AgentEventBus::new(64),
             requests: Arc::new(RwLock::new(HashMap::new())),
             permissions: Arc::new(RwLock::new(HashMap::new())),
+            steering_outcomes: Arc::new(SteeringOutcomeRegistry::default()),
             longhouse: Arc::new(Mutex::new(ocean_longhouse::LonghouseRegistry::new())),
             rooms,
             room_operator: Arc::new(room_operator::OperatorIdentity::for_test(
@@ -15408,143 +15381,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn steering_ended_proof_excludes_only_matching_live_request() {
-        let state = permission_test_state();
-        let mut detail = detail_fixture(SessionRunState::Stored);
-        detail.workspace_root = None;
-        let old = RequestId::new_v4();
-        let mut control = status(old, RequestState::Running);
-        control.status.session_id = Some(detail.id);
-        state.requests.write().await.insert(old, control);
-        detail.steering = Some(vec![ocean_core::SteeringTurnSnapshot {
-            turn_id: old.to_string(),
-            ended: true,
-            receipts: vec![],
-        }]);
-        enrich_session_detail(&state, &mut detail).await;
-        assert!(detail.active_requests.is_empty());
-        assert_eq!(
-            detail.state,
-            SessionRunState::Stored,
-            "ended is not succeeded"
-        );
-        let newer = RequestId::new_v4();
-        let mut control = status(newer, RequestState::Running);
-        control.status.session_id = Some(detail.id);
-        state.requests.write().await.insert(newer, control);
-        enrich_session_detail(&state, &mut detail).await;
-        assert_eq!(detail.active_requests, vec![newer]);
-        assert_eq!(detail.state, SessionRunState::Running);
-    }
-
-    #[tokio::test]
-    async fn steering_session_handlers_preserve_real_missing_and_corrupt_storage() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut state = permission_test_state();
-        state.runtime = Arc::new(AgentRuntime::with_config_dir(tmp.path().to_path_buf()).unwrap());
-        let id = AgentSessionId::new_v4();
-        for corrupt in [false, true] {
-            if corrupt {
-                std::fs::create_dir_all(tmp.path().join("sessions")).unwrap();
-                std::fs::write(
-                    tmp.path().join("sessions").join(format!("{id}.json")),
-                    b"not json",
-                )
-                .unwrap();
-            }
-            let expected = if corrupt {
-                StatusCode::INTERNAL_SERVER_ERROR
-            } else {
-                StatusCode::NOT_FOUND
-            };
-            let (status, Json(body)) = agent_session(
-                State(state.clone()),
-                Path(id),
-                Query(SessionDetailQuery::default()),
-            )
-            .await;
-            assert_eq!(status, expected);
-            assert!(!body.ok);
-            let (status, Json(body)) = session(State(state.clone()), Path(core_sid(id))).await;
-            assert_eq!(status, expected);
-            assert!(!body.ok);
-        }
-    }
-
-    #[test]
-    fn steering_snapshot_read_failure_is_not_reported_as_session_deletion() {
-        let missing = anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::NotFound));
-        assert_eq!(session_detail_read_error(&missing).0, StatusCode::NOT_FOUND);
-        assert_eq!(
-            session_detail_read_error(&ocean_agent::SteeringSnapshotChanged.into()),
-            (StatusCode::SERVICE_UNAVAILABLE, "session_snapshot_changed")
-        );
-        for error in [
-            anyhow::anyhow!("untyped internal failure"),
-            anyhow::anyhow!("private storage detail"),
-        ] {
-            assert_eq!(
-                session_detail_read_error(&error),
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "session could not be read"
-                )
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn steering_identity_admission_is_idempotent_and_never_targets_successor() {
-        let state = permission_test_state();
-        let sid = AgentSessionId::new_v4();
-        let turn = Uuid::new_v4();
-        let id = Uuid::new_v4();
-        let first = state
-            .runtime
-            .open_steering_for_turn(core_sid(sid), turn.to_string());
-        let submit = |text: &str, turn_id| {
-            agent_session_steer(
-                State(state.clone()),
-                Path(sid),
-                Json(SteerRequest {
-                    text: text.into(),
-                    steer_id: Some(id),
-                    turn_id,
-                }),
-            )
-        };
-        for _ in 0..2 {
-            assert_eq!(submit("same", Some(turn)).await.0, StatusCode::ACCEPTED);
-        }
-        assert_eq!(first.inbox().take_pending().len(), 1);
-        let (_, Json(conflict)) = submit("different", Some(turn)).await;
-        assert_eq!(conflict["error"], "steering_identity_conflict");
-        assert_eq!(submit("same", None).await.0, StatusCode::BAD_REQUEST);
-        drop(first);
-        let next = state
-            .runtime
-            .open_steering_for_turn(core_sid(sid), Uuid::new_v4().to_string());
-        assert_eq!(
-            submit("same", Some(turn)).await.0,
-            StatusCode::ACCEPTED,
-            "known duplicate remains an acknowledgement only"
-        );
-        assert!(next.inbox().take_pending().is_empty());
-        let (_, Json(unknown)) = agent_session_steer(
-            State(state.clone()),
-            Path(sid),
-            Json(SteerRequest {
-                text: "same".into(),
-                steer_id: Some(Uuid::new_v4()),
-                turn_id: Some(Uuid::new_v4()),
-            }),
-        )
-        .await;
-        assert_eq!(unknown["error"], "steering_turn_unknown");
-        assert!(next.inbox().take_pending().is_empty());
-    }
-
-    #[tokio::test]
     async fn steer_reaches_only_a_running_turn_and_validates_its_text() {
         let state = permission_test_state();
         let sid = AgentSessionId::new_v4();
@@ -15552,11 +15388,7 @@ mod tests {
             agent_session_steer(
                 State(state.clone()),
                 Path(sid),
-                Json(SteerRequest {
-                    text: text.into(),
-                    steer_id: None,
-                    turn_id: None,
-                }),
+                Json(SteerRequest { text: text.into() }),
             )
         };
 
@@ -15595,6 +15427,224 @@ mod tests {
             "a finished turn refuses steering"
         );
         assert_eq!(body["error"], "no_active_turn");
+    }
+
+    // ── Steer outcome ledger (#148) ──────────────────────────────────────
+    //
+    // The ledger is the only authoritative record of whether an accepted
+    // steer was delivered or discarded; these pin its identity rules, its
+    // hide-pending exposure contract, and the steer route's live-turn
+    // binding.
+
+    #[test]
+    fn steer_ledger_exposes_only_terminal_outcomes_in_order() {
+        let ledger = SteeringOutcomeRegistry::default();
+        let session = SessionId::new_v4();
+        let turn = RequestId::new_v4();
+
+        ledger.record_accepted(session, "steer-a", turn);
+        ledger.record_accepted(session, "steer-b", turn);
+        // Pending steers are never exposed: no record is a client's signal
+        // to keep the row pending or treat it unresolved — never a guess.
+        assert!(ledger.terminal_outcomes(session).is_empty());
+
+        // The delivery relay (the bridge) settles steer-a...
+        ledger.record_delivered(session, "steer-a", turn);
+        // ...the turn-end settle drops the still-pending steer-b.
+        ledger.settle_turn(session, turn);
+
+        let outcomes = ledger.terminal_outcomes(session);
+        assert_eq!(
+            outcomes,
+            vec![
+                SteeringOutcome {
+                    steer_id: "steer-a".into(),
+                    turn_id: turn,
+                    status: SteeringOutcomeStatus::Delivered,
+                },
+                SteeringOutcome {
+                    steer_id: "steer-b".into(),
+                    turn_id: turn,
+                    status: SteeringOutcomeStatus::Dropped,
+                },
+            ],
+            "oldest first, by outcome"
+        );
+
+        // A repeated settle is idempotent: terminal entries are untouched.
+        ledger.settle_turn(session, turn);
+        assert_eq!(ledger.terminal_outcomes(session).len(), 2);
+
+        // A delivery relay for a steer whose acceptance was never recorded
+        // (it outran the route's live-turn lookup) is inserted directly.
+        ledger.record_delivered(session, "steer-late", turn);
+        assert_eq!(ledger.terminal_outcomes(session).len(), 3);
+
+        // Sessions are isolated.
+        assert!(ledger.terminal_outcomes(SessionId::new_v4()).is_empty());
+    }
+
+    #[test]
+    fn steer_ledger_keeps_only_the_most_recent_terminal_outcomes() {
+        let ledger = SteeringOutcomeRegistry::default();
+        let session = SessionId::new_v4();
+        let turn = RequestId::new_v4();
+        for i in 0..(STEERING_OUTCOME_RETAIN + 10) {
+            let id = format!("steer-{i}");
+            ledger.record_accepted(session, &id, turn);
+            ledger.record_delivered(session, &id, turn);
+        }
+        let outcomes = ledger.terminal_outcomes(session);
+        assert_eq!(
+            outcomes.len(),
+            STEERING_OUTCOME_RETAIN,
+            "the per-session terminal bound holds"
+        );
+        assert_eq!(
+            outcomes.first().unwrap().steer_id,
+            format!("steer-{}", 10),
+            "the oldest terminal entries are the ones pruned"
+        );
+    }
+
+    #[tokio::test]
+    async fn steer_route_binds_acceptance_to_the_session_live_turn() {
+        let state = permission_test_state();
+        let session = SessionId::new_v4();
+        let turn = RequestId::new_v4();
+
+        // A live request for this session is what the route binds to.
+        let mut req = control_prompt_request(Some(turn), Some(session), None);
+        let _ = register_running_request(
+            &state.requests,
+            &mut req,
+            "agent turn running",
+            RequestState::Running,
+        )
+        .await;
+
+        let registration = state.runtime.open_steering(session);
+        let (status, Json(body)) = agent_session_steer(
+            State(state.clone()),
+            Path(sdk_sid(session)),
+            Json(SteerRequest {
+                text: "use tabs".into(),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let steer_id = body["steer_id"].as_str().unwrap().to_string();
+        assert!(
+            state
+                .steering_outcomes
+                .terminal_outcomes(session)
+                .is_empty(),
+            "the acceptance is pending, not exposed"
+        );
+
+        // Turn ends without delivering: the settle records the drop under the
+        // turn the route bound it to — the identity a reconnecting surface
+        // reconciles against.
+        state.steering_outcomes.settle_turn(session, turn);
+        let outcomes = state.steering_outcomes.terminal_outcomes(session);
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].steer_id, steer_id);
+        assert_eq!(outcomes[0].turn_id, turn);
+        assert_eq!(outcomes[0].status, SteeringOutcomeStatus::Dropped);
+        drop(registration);
+
+        // With no registered live request (registry race), a still-accepted
+        // steer simply leaves no record — clients read missing as unresolved.
+        let other = SessionId::new_v4();
+        let registration = state.runtime.open_steering(other);
+        let (status, _) = agent_session_steer(
+            State(state.clone()),
+            Path(sdk_sid(other)),
+            Json(SteerRequest {
+                text: "no record".into(),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert!(state.steering_outcomes.terminal_outcomes(other).is_empty());
+        drop(registration);
+    }
+
+    #[tokio::test]
+    async fn session_detail_splits_live_from_finished_and_exposes_steering() {
+        let state = permission_test_state();
+        let tmp = tempfile::tempdir().unwrap();
+        let (session_id, _, _) = state
+            .runtime
+            .create_session(tmp.path().to_str().unwrap(), Some("test".into()))
+            .unwrap();
+
+        // A finished turn, then a live one, most recent = live.
+        let done_turn = RequestId::new_v4();
+        let mut first = control_prompt_request(Some(done_turn), Some(session_id), None);
+        let _ = register_running_request(
+            &state.requests,
+            &mut first,
+            "finished turn",
+            RequestState::Running,
+        )
+        .await;
+        let _ = update_request_finished(
+            &state.requests,
+            done_turn,
+            Some(session_id),
+            RequestState::Completed,
+            "done".into(),
+            |_| {},
+        )
+        .await;
+        let live_turn = RequestId::new_v4();
+        let mut second = control_prompt_request(Some(live_turn), Some(session_id), None);
+        let _ = register_running_request(
+            &state.requests,
+            &mut second,
+            "live turn",
+            RequestState::Running,
+        )
+        .await;
+
+        // Two steer outcomes on the ledger for this session.
+        state
+            .steering_outcomes
+            .record_accepted(session_id, "steer-1", done_turn);
+        state
+            .steering_outcomes
+            .record_delivered(session_id, "steer-1", done_turn);
+        state
+            .steering_outcomes
+            .record_accepted(session_id, "steer-2", done_turn);
+        state.steering_outcomes.settle_turn(session_id, done_turn);
+
+        let mut detail = state.runtime.session_detail(session_id).unwrap();
+        enrich_session_detail(&state, &mut detail).await;
+
+        assert_eq!(detail.active_requests, vec![live_turn]);
+        assert_eq!(
+            detail.finished_requests,
+            vec![done_turn],
+            "terminal request ids are exposed for stale-Stop reconciliation"
+        );
+        assert_eq!(
+            detail.steering,
+            vec![
+                SteeringOutcome {
+                    steer_id: "steer-1".into(),
+                    turn_id: done_turn,
+                    status: SteeringOutcomeStatus::Delivered,
+                },
+                SteeringOutcome {
+                    steer_id: "steer-2".into(),
+                    turn_id: done_turn,
+                    status: SteeringOutcomeStatus::Dropped,
+                },
+            ],
+            "terminal steer outcomes ride the session snapshot"
+        );
     }
 
     #[tokio::test]
@@ -16778,6 +16828,7 @@ mod tests {
             agent_events: AgentEventBus::new(1024),
             requests: Arc::new(RwLock::new(HashMap::new())),
             permissions: Arc::new(RwLock::new(HashMap::new())),
+            steering_outcomes: Arc::new(SteeringOutcomeRegistry::default()),
             longhouse: Arc::new(Mutex::new(ocean_longhouse::LonghouseRegistry::new())),
             rooms,
             room_operator: Arc::new(room_operator::OperatorIdentity::for_test(
@@ -17294,6 +17345,7 @@ mod tests {
             agent_events: AgentEventBus::new(1024),
             requests: Arc::new(RwLock::new(HashMap::new())),
             permissions: Arc::new(RwLock::new(HashMap::new())),
+            steering_outcomes: Arc::new(SteeringOutcomeRegistry::default()),
             longhouse: Arc::new(Mutex::new(ocean_longhouse::LonghouseRegistry::new())),
             rooms,
             room_operator: Arc::new(room_operator::OperatorIdentity::for_test(
@@ -18222,6 +18274,309 @@ mod tests {
         );
 
         std::env::remove_var("OCEAN_YOLO");
+    }
+
+    // ---- Real convene/title grant-bind characterization ----------------------
+    //
+    // The deterministic successful path through the REAL handler — ready-model
+    // admission, the awaited council over the real `ModelHandle` wire,
+    // registry-first projection, durable title grant plus decision bind, and
+    // raw-token delivery — is reached WITHOUT a new trait, substate, test
+    // seam, or public API: the production provider configuration surface
+    // (`OCEAN_GLM_BASE_URL` + `OCEAN_GLM_API_KEY`, the same env pair an
+    // operator uses to proxy GLM) points the council's OpenAI-compatible
+    // wire at a loopback endpoint serving the scripted council dialogue.
+    // `fake-ok` cannot staff a council: the Fake provider resolves without a
+    // credential by construction, so `ModelHandle::ask` drops those workers
+    // and the council aborts — only a catalog model with an env credential
+    // reaches the provider wire.
+
+    /// A loopback OpenAI-compatible endpoint serving one scripted council. The
+    /// `system` prompt identifies the round (the same constants
+    /// `ocean_longhouse` sends), and the per-model answers stage a converging
+    /// field: two workers commit the same structured answer (round-1
+    /// consolidation folds the duplicate into an endorse of the first), the
+    /// third fields a genuine rival, and every review endorses the leader.
+    /// Returns the bound address plus the captured `Authorization` headers, so
+    /// a test can also pin that the env-resolved credential reached the wire.
+    async fn scripted_council_endpoint(
+    ) -> (std::net::SocketAddr, Arc<std::sync::Mutex<Vec<String>>>) {
+        use axum::routing::post;
+
+        let bearers = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = bearers.clone();
+        let app = axum::Router::new().route(
+            "/v1/chat/completions",
+            post(
+                move |headers: axum::http::HeaderMap,
+                      axum::Json(body): axum::Json<serde_json::Value>| {
+                    let captured = captured.clone();
+                    async move {
+                        captured.lock().unwrap().push(
+                            headers
+                                .get(axum::http::header::AUTHORIZATION)
+                                .and_then(|value| value.to_str().ok())
+                                .unwrap_or("")
+                                .to_string(),
+                        );
+                        let system = body["messages"][0]["content"].as_str().unwrap_or("");
+                        let user = body["messages"][1]["content"].as_str().unwrap_or("");
+                        let model = body["model"].as_str().unwrap_or("");
+                        let answer = if system.contains("small council answering a question") {
+                            // Round 1: propose. Two models commit the same
+                            // ANSWER key; the third commits a genuine rival.
+                            if model == "glm-4.5-flash" {
+                                "ANSWER: Proposal B\nA different tradeoff with lower cost."
+                                    .to_string()
+                            } else {
+                                "ANSWER: Proposal A\nIt is the safest choice for the fleet."
+                                    .to_string()
+                            }
+                        } else if system.contains("reviewing proposed answers") {
+                            // Review: endorse the leader by its projection
+                            // number in this exact prompt.
+                            let number = user
+                                .lines()
+                                .find(|line| line.contains("Proposal A"))
+                                .and_then(|line| line.trim().split('.').next())
+                                .unwrap_or("1")
+                                .to_string();
+                            format!("ENDORSE {number}: strongest")
+                        } else if system.contains("genuinely different alternative") {
+                            // Rival generation: no further alternatives.
+                            "PASS".to_string()
+                        } else {
+                            // Evidence request: rationale only, no vote.
+                            "Proposal A ships faster and carries less risk.".to_string()
+                        };
+                        let chunk = json!({
+                            "choices": [{
+                                "index": 0,
+                                "delta": { "content": answer },
+                                "finish_reason": null,
+                            }]
+                        });
+                        axum::http::Response::builder()
+                            .status(StatusCode::OK)
+                            .header(axum::http::header::CONTENT_TYPE, "text/event-stream")
+                            .body(axum::body::Body::from(format!(
+                                "data: {chunk}\n\ndata: [DONE]\n\n"
+                            )))
+                            .unwrap()
+                    }
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (address, bearers)
+    }
+
+    /// The full successful convene path, end to end through the real route
+    /// table and the real provider wire: ready models staff the council, the
+    /// handler awaits the council, the converged topic is projected into the
+    /// read-side registry, the firekeeper title is granted into the durable
+    /// registry and bound to the engine's exact decision, and the raw token
+    /// travels ONLY in the HTTP response — a later engine-free claim with
+    /// that token ratifies, a wrong token is refused.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn convene_converged_council_grants_binds_and_delivers_the_raw_token() {
+        use http_body_util::BodyExt;
+        use tower::ServiceExt; // for `oneshot`
+
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _env = TestEnvRestore::capture(&[
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+            "OCEAN_GLM_BASE_URL",
+            "OCEAN_GLM_API_KEY",
+        ]);
+        let (endpoint, bearers) = scripted_council_endpoint().await;
+        std::env::set_var("OCEAN_GLM_BASE_URL", format!("http://{endpoint}/v1"));
+        std::env::set_var("OCEAN_GLM_API_KEY", "test-glm-key");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let state = fake_convene_state(&tmp);
+        let (_replay, mut rx) = state.agent_events.subscribe_with_replay(None);
+        let app = longhouse_routes().with_state(state.clone());
+
+        let request = axum::http::Request::builder()
+            .method(axum::http::Method::POST)
+            .uri("/v1/longhouse/convene")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(
+                json!({
+                    "question": "ship it?",
+                    "federation": "dev",
+                    "models": ["glm-5.3", "glm-5.3-flash", "glm-4.5-flash"],
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        // The handler awaited the council: convergence, the durable title id,
+        // and the raw claim token all arrive in this one response body.
+        assert_eq!(body["ok"], json!(true), "body: {body}");
+        assert_eq!(body["question"], json!("ship it?"), "body: {body}");
+        assert_eq!(body["federation"], json!("dev"), "body: {body}");
+        assert_eq!(body["streaming_on"], json!("/v1/agent/events"));
+        assert_eq!(body["converged"], json!(true), "body: {body}");
+        assert!(
+            body["convergence_basis"].is_string(),
+            "a converged council reports its auditable basis: {body}"
+        );
+        let title_id: Uuid = body["title_id"]
+            .as_str()
+            .and_then(|raw| raw.parse().ok())
+            .expect("title_id is present and a UUID on convergence");
+        let token = body["token"]
+            .as_str()
+            .expect("the raw token is delivered only in this response")
+            .to_string();
+        assert!(!token.is_empty());
+
+        // Provider readiness admitted the exact requested aliases and the
+        // council was staffed with those ready models — proven on the wire.
+        {
+            let captured = bearers.lock().unwrap();
+            assert!(
+                !captured.is_empty(),
+                "the council made real provider-wire calls"
+            );
+            assert!(
+                captured.iter().all(|value| value == "Bearer test-glm-key"),
+                "every council call carried the env-resolved credential: {captured:?}"
+            );
+        }
+        let (topic_id, firekeeper, decision) = {
+            let registry = state.longhouse.lock().unwrap();
+            let topics = registry.topics();
+            assert_eq!(topics.len(), 1, "exactly one topic was convened");
+            let snapshot = &topics[0];
+            let mut members: Vec<&str> = snapshot
+                .members
+                .iter()
+                .map(|member| member.model.as_str())
+                .collect();
+            members.sort_unstable();
+            assert_eq!(
+                members,
+                ["glm-4.5-flash", "glm-5.3", "glm-5.3-flash"],
+                "the roster is the requested ready-model set"
+            );
+            assert!(matches!(
+                snapshot.state,
+                ocean_longhouse::TopicState::Converged
+            ));
+            (
+                snapshot.topic_id,
+                snapshot
+                    .firekeeper
+                    .expect("a converged topic records its firekeeper"),
+                snapshot
+                    .decision
+                    .expect("a converged topic records the engine decision"),
+            )
+        };
+
+        // Durable grant + bind: the title survives the turn in the durable
+        // registry, and the engine's exact decision is bound to it — proven
+        // by a LATER, engine-free claim over HTTP.
+        {
+            let titles = state.titles.lock().unwrap();
+            assert!(
+                titles.lookup(title_id).expect("titles store").is_some(),
+                "the converged council persisted its firekeeper title"
+            );
+        }
+        let claim = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(axum::http::Method::POST)
+                    .uri("/v1/longhouse/claim")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(
+                        json!({
+                            "title_id": title_id.to_string(),
+                            "agent_id": firekeeper.to_string(),
+                            "decision": decision.to_string(),
+                            "token": token,
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(claim.status(), StatusCode::OK);
+        let claim_bytes = claim.into_body().collect().await.unwrap().to_bytes();
+        let claim_body: serde_json::Value = serde_json::from_slice(&claim_bytes).unwrap();
+        assert_eq!(claim_body["ok"], json!(true), "claim body: {claim_body}");
+        assert_eq!(
+            claim_body["decision"],
+            json!(decision.to_string()),
+            "the claim ratifies the engine-bound decision"
+        );
+
+        // A wrong token is refused identically to an unknown title: the
+        // delivered token is the credential, not decoration.
+        let forged = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(axum::http::Method::POST)
+                    .uri("/v1/longhouse/claim")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(
+                        json!({
+                            "title_id": title_id.to_string(),
+                            "agent_id": firekeeper.to_string(),
+                            "decision": decision.to_string(),
+                            "token": "forged-token",
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(forged.status(), StatusCode::FORBIDDEN);
+
+        // Raw-token discipline (OCEAN-229): the secret traveled ONLY in the
+        // direct HTTP response. The bus carries public event data — the topic
+        // itself appears there, but neither the token nor the durable title
+        // id may appear in any published frame.
+        let title_wire = title_id.to_string();
+        let topic_wire = topic_id.to_string();
+        let mut published_frames = 0usize;
+        let mut topic_published = false;
+        while let Ok(envelope) = rx.try_recv() {
+            let wire = serde_json::to_string(&envelope.event).unwrap();
+            assert!(
+                !wire.contains(token.as_str()),
+                "the raw token leaked onto the agent bus: {wire}"
+            );
+            assert!(
+                !wire.contains(&title_wire),
+                "the durable title id leaked onto the agent bus: {wire}"
+            );
+            published_frames += 1;
+            topic_published |= wire.contains(&topic_wire);
+        }
+        assert!(published_frames > 0, "the council published bus events");
+        assert!(
+            topic_published,
+            "the convened topic id itself is public bus data"
+        );
     }
 
     // ---- Longhouse topic-projection extraction characterization ------------
@@ -19182,7 +19537,7 @@ mod tests {
         let routes = source_section(
             production_main,
             "fn longhouse_routes()",
-            "/// Request body for `POST /v1/longhouse/convene`.",
+            "// --- Skill-librarian API",
         );
         for mount in [
             ".route(\"/v1/longhouse/demo\", post(longhouse_demo))",
@@ -19191,8 +19546,13 @@ mod tests {
         ] {
             assert!(routes.contains(mount), "route mount drifted: {mount}");
         }
-        assert!(production_main.contains("async fn longhouse_convene("));
-        assert!(production_main.contains("let titles = state.titles.clone();"));
+        // Real convene lives in its own private owner since the convene/title
+        // grant-bind extraction; the handler reaches the route through the
+        // `use longhouse_convene::longhouse_convene;` import.
+        let convene_owner = std::fs::read_to_string(src_dir.join("longhouse_convene.rs")).unwrap();
+        assert!(!production_main.contains("async fn longhouse_convene("));
+        assert!(convene_owner.contains("async fn longhouse_convene("));
+        assert!(convene_owner.contains("let titles = state.titles.clone();"));
     }
 
     // ---- OCEAN-272: persisted escrow wired into the daemon ------------------
@@ -19256,6 +19616,7 @@ mod tests {
             agent_events: AgentEventBus::new(64),
             requests: Arc::new(RwLock::new(HashMap::new())),
             permissions: Arc::new(RwLock::new(HashMap::new())),
+            steering_outcomes: Arc::new(SteeringOutcomeRegistry::default()),
             longhouse: Arc::new(Mutex::new(ocean_longhouse::LonghouseRegistry::new())),
             rooms,
             room_operator: Arc::new(room_operator::OperatorIdentity::for_test(
@@ -20841,7 +21202,7 @@ mod tests {
         let routes = source_section(
             production_main,
             "fn longhouse_routes()",
-            "/// Request body for `POST /v1/longhouse/convene`.",
+            "// --- Skill-librarian API",
         );
         for (path, handler) in [
             ("/v1/longhouse/claim", "longhouse_claim"),
@@ -20855,7 +21216,10 @@ mod tests {
         assert!(!routes.contains("Authorization"));
         assert!(!routes.contains("ObservatoryAuth"));
         assert!(!routes.contains("PermissionDecision"));
-        assert!(production_main.contains("async fn longhouse_convene("));
+        // Real convene moved to its own private owner; composition imports the
+        // handler and keeps both route mounts.
+        assert!(!production_main.contains("async fn longhouse_convene("));
+        assert!(production_main.contains("use longhouse_convene::longhouse_convene;"));
         assert!(production_main.contains("fn titles_db_path()"));
         assert_eq!(
             production_main
@@ -26381,11 +26745,7 @@ mod tests {
         let sections = [
             app_router_source,
             source_section(source, "fn room_routes(", "fn longhouse_routes("),
-            source_section(
-                source,
-                "fn longhouse_routes(",
-                "/// Request body for `POST /v1/longhouse/convene`.",
-            ),
+            source_section(source, "fn longhouse_routes(", "// --- Skill-librarian API"),
         ];
         let mut routes = std::collections::BTreeSet::new();
         for call in sections.into_iter().flat_map(route_calls) {
@@ -26452,7 +26812,7 @@ mod tests {
         assert_eq!(admission_routes, expected_admission_routes);
         assert_eq!(
             banner.len(),
-            147,
+            150,
             "route baseline changed; review the manifest"
         );
 
@@ -26475,6 +26835,250 @@ mod tests {
         assert_eq!(
             banner, documented,
             "operator HTTP quick reference and GET / discovery must match"
+        );
+    }
+
+    /// Byte offset of the `method(` method-router call inside one `.route(...)`
+    /// call, with the same word-boundary rule as [`route_call_contains`], or
+    /// `None` when that method is not chained there.
+    fn route_call_position(call: &str, method: &str) -> Option<usize> {
+        let needle = format!("{method}(");
+        call.match_indices(&needle)
+            .map(|(index, _)| index)
+            .find(|&index| {
+                index == 0
+                    || !call.as_bytes()[index - 1].is_ascii_alphanumeric()
+                        && call.as_bytes()[index - 1] != b'_'
+            })
+    }
+
+    /// Whether `path` is a room route: `/v1/rooms` itself or anything below it.
+    /// `/v1/me` shares `room_routes()` but is the owner identity, not a room.
+    fn is_room_path(path: &str) -> bool {
+        path == "/v1/rooms" || path.starts_with("/v1/rooms/")
+    }
+
+    /// The `/v1/rooms` half of `source_registered_routes()`. The contract's
+    /// room-route table claims to be the WHOLE room surface, so the comparison
+    /// has to be against every registered room route rather than a hand-listed
+    /// subset — otherwise a new route could be added to neither side and the
+    /// table would still pass while lying.
+    fn registered_room_routes() -> std::collections::BTreeSet<String> {
+        source_registered_routes()
+            .into_iter()
+            .filter(|route| {
+                route
+                    .split_once(' ')
+                    .is_some_and(|(_, path)| is_room_path(path))
+            })
+            .collect()
+    }
+
+    /// `room_routes()`'s room registrations in the order the router chain
+    /// states them: `.route(...)` calls top to bottom, and within one call each
+    /// method router in the order it is chained, so `post(a).get(b)` reads
+    /// POST then GET. This is the order the contract table promises.
+    fn registered_room_routes_in_order() -> Vec<String> {
+        let source = include_str!("main.rs");
+        let section = source_section(source, "fn room_routes(", "fn longhouse_routes(");
+        let mut routes = Vec::new();
+        for call in route_calls(section) {
+            let path_start = call.find('"').expect("route call has a quoted path") + 1;
+            let path_end = path_start
+                + call[path_start..]
+                    .find('"')
+                    .expect("route path has a closing quote");
+            let path = &call[path_start..path_end];
+            if !is_room_path(path) {
+                continue;
+            }
+            let mut methods: Vec<(usize, &str)> = [
+                ("get", "GET"),
+                ("post", "POST"),
+                ("put", "PUT"),
+                ("patch", "PATCH"),
+                ("delete", "DELETE"),
+            ]
+            .into_iter()
+            .filter_map(|(rust_name, wire_name)| {
+                route_call_position(call, rust_name).map(|position| (position, wire_name))
+            })
+            .collect();
+            methods.sort_unstable();
+            routes.extend(
+                methods
+                    .into_iter()
+                    .map(|(_, wire_name)| format!("{wire_name} {path}")),
+            );
+        }
+        routes
+    }
+
+    /// Parse the room-route table out of `OCEAN_ECOSYSTEM_CONTRACT.md`, in
+    /// document order: any Markdown table row whose first cell is a wire
+    /// method and whose second is a `/v1/rooms` path. Prose mentioning a path
+    /// is ignored because it is not a table row, and the header/separator rows
+    /// are ignored because `Method` and `---` are not wire methods.
+    fn contract_room_route_table() -> Vec<String> {
+        contract_room_route_table_with_auth()
+            .into_iter()
+            .map(|(route, _auth)| route)
+            .collect()
+    }
+
+    /// The same rows as [`contract_room_route_table`], each paired with its
+    /// Auth cell (the fourth column, backticks kept) so a test can hold the
+    /// row's auth CLAIM against the handler's behaviour.
+    fn contract_room_route_table_with_auth() -> Vec<(String, String)> {
+        let contract = include_str!("../../../docs/OCEAN_ECOSYSTEM_CONTRACT.md");
+        contract
+            .lines()
+            .filter_map(|line| {
+                let mut cells = line.trim().strip_prefix('|')?.split('|').map(str::trim);
+                let method = cells.next()?.trim_matches('`');
+                let path = cells.next()?.trim_matches('`');
+                if !(matches!(method, "GET" | "POST" | "PUT" | "PATCH" | "DELETE")
+                    && is_room_path(path))
+                {
+                    return None;
+                }
+                let _purpose = cells.next()?;
+                let auth = cells.next()?;
+                Some((format!("{method} {path}"), auth.to_string()))
+            })
+            .collect()
+    }
+
+    /// Whether a room-route table row claims the header-only Room operator as
+    /// the route's ONLY authority, so a request without the header must be the
+    /// 503 `operator_credential_missing` refusal. The close route's cell starts
+    /// with the operator too but only "when the header is present" (an absent
+    /// header selects its roster-asserted member lane), so it does not count.
+    fn table_row_claims_operator_only(auth: &str) -> bool {
+        auth.starts_with("`X-Ocean-Operator`") && !auth.contains("when the header is present")
+    }
+
+    /// Marker the contract puts in the Auth cell of the per-reader room-state
+    /// rows (read cursor, prefs): loopback trust by design, no operator gate.
+    const PER_READER_ROOM_STATE_MARKER: &str = "per-reader room state";
+
+    /// The `/v1/rooms` mutations that answer a request carrying no
+    /// `X-Ocean-Operator` header with something other than the operator
+    /// refusal, in `room_routes()` registration order. Every entry's authority
+    /// is named by its contract row (roster-asserted identity, the daemon-held
+    /// room bearer, the invite code, the LiveKit publish token, or loopback
+    /// trust), and the two per-reader rows are the by-design ungated room
+    /// state. A mutation added to the router without the operator gate must be
+    /// added here AND to the table with its real auth rule, or
+    /// `router_contract_operator_gates_match_the_room_route_table` fails.
+    const OPERATOR_UNGATED_ROOM_MUTATIONS: &[&str] = &[
+        "POST /v1/rooms/persistent",
+        "PATCH /v1/rooms/persistent/{key}",
+        "POST /v1/rooms/persistent/{key}/close",
+        "POST /v1/rooms/persistent/{key}/agents/{agent_member_id}/invoke",
+        "POST /v1/rooms/persistent/{key}/participants",
+        "DELETE /v1/rooms/persistent/{key}/participants/{participant_id}",
+        "POST /v1/rooms/persistent/{key}/attachments",
+        "DELETE /v1/rooms/persistent/{key}/attachments/{attachment_id}",
+        "POST /v1/rooms/persistent/{key}/summarize",
+        "POST /v1/rooms/persistent/{key}/messages",
+        "POST /v1/rooms/persistent/{key}/invites",
+        "POST /v1/rooms/persistent/invites/redeem",
+        "POST /v1/rooms/persistent/{key}/members/agents",
+        "POST /v1/rooms/persistent/{key}/artifacts",
+        "POST /v1/rooms/persistent/{key}/artifacts/{artifact_id}/amend",
+        "PUT /v1/rooms/persistent/{key}/prefs",
+        "PATCH /v1/rooms/persistent/{key}/read-cursor",
+        "POST /v1/rooms/persistent/{key}/outbox/retry",
+        "POST /v1/rooms/{room_id}/livekit-token",
+    ];
+
+    /// The per-reader room-state routes: state that belongs to the local
+    /// reader alone (what they have read, whether the room is muted for them),
+    /// never to the room, so by design they carry no operator gate.
+    const PER_READER_ROOM_STATE_ROUTES: &[&str] = &[
+        "GET /v1/rooms/persistent/{key}/prefs",
+        "PUT /v1/rooms/persistent/{key}/prefs",
+        "GET /v1/rooms/persistent/{key}/read-cursor",
+        "PATCH /v1/rooms/persistent/{key}/read-cursor",
+    ];
+
+    /// The decimal number immediately following `marker` in `sentence`. Anchored
+    /// on the surrounding words rather than "the first number in the line" so
+    /// that ordinary prose gaining a digit cannot silently repoint the check at
+    /// the wrong number.
+    fn number_after(sentence: &str, marker: &str) -> usize {
+        let start = sentence.find(marker).unwrap_or_else(|| {
+            panic!("ARCHITECTURE.md's route-count sentence must contain {marker:?}")
+        }) + marker.len();
+        sentence[start..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect::<String>()
+            .parse()
+            .unwrap_or_else(|_| panic!("ARCHITECTURE.md must state a number after {marker:?}"))
+    }
+
+    /// The ecosystem contract lists ALL daemon room routes and
+    /// `ARCHITECTURE.md`'s route counts are true, both pinned executably.
+    ///
+    /// The sibling above pins the router against `GET /` discovery and the
+    /// operator guide. This one pins the remaining prose claims: the
+    /// contract's room-route table is exactly the router's `/v1/rooms`
+    /// registrations — same methods, same paths, each listed once, in
+    /// `room_routes()` registration order — and `ARCHITECTURE.md`'s stated
+    /// totals are the router's own counts rather than a number that was true
+    /// once. A route added to the router without a table row, a table row
+    /// the router does not register, and a row carrying the wrong method all
+    /// fail the first assertion with the two sets printed.
+    #[test]
+    fn router_contract_room_route_table_and_architecture_counts_are_in_parity() {
+        let registered = registered_room_routes();
+        let registered_in_order = registered_room_routes_in_order();
+        assert_eq!(
+            registered_in_order
+                .iter()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            registered,
+            "the ordered room_routes() parser and source_registered_routes() must agree"
+        );
+        assert_eq!(
+            registered_in_order.len(),
+            registered.len(),
+            "room_routes() must not register the same method and path twice"
+        );
+
+        let documented = contract_room_route_table();
+        assert_eq!(
+            documented
+                .iter()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            registered,
+            "every registered /v1/rooms route must appear in the ecosystem contract's \
+             room-route table, and every row of that table must be a registered route"
+        );
+        assert_eq!(
+            documented, registered_in_order,
+            "the ecosystem contract's room-route table must list each route once, in \
+             room_routes() registration order"
+        );
+
+        let architecture = include_str!("../../../docs/ARCHITECTURE.md");
+        let sentence = architecture
+            .lines()
+            .find(|line| line.contains("explicit method/path pairs"))
+            .expect("ARCHITECTURE.md states the router's registered route count");
+        assert_eq!(
+            number_after(sentence, "registers "),
+            source_registered_routes().len(),
+            "ARCHITECTURE.md's total route count must equal the router's own registrations"
+        );
+        assert_eq!(
+            number_after(sentence, "pairs, "),
+            registered.len(),
+            "ARCHITECTURE.md's room-route count must equal the router's own /v1/rooms registrations"
         );
     }
 
@@ -26773,6 +27377,126 @@ mod tests {
         }
     }
 
+    /// The room-route table's operator claims are the router's behaviour, and
+    /// the set of operator-ungated room mutations is pinned.
+    ///
+    /// Every `/v1/rooms` mutation is sent through the production router with
+    /// no `X-Ocean-Operator` header (and no cookie or origin, so nothing else
+    /// can refuse it on shape) against a configured operator key. A row whose
+    /// Auth cell claims the operator as its only authority must answer the
+    /// 503 `operator_credential_missing` refusal before anything else is read
+    /// or looked up; no other row may answer with an operator refusal. The
+    /// mutations that are NOT operator-refused must then be exactly
+    /// `OPERATOR_UNGATED_ROOM_MUTATIONS`, so a mutation registered without the
+    /// gate fails here until it is added to that list and to the table with
+    /// its real auth rule, and the rows the table marks as per-reader room
+    /// state are exactly the read-cursor and prefs routes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn router_contract_operator_gates_match_the_room_route_table() {
+        use axum::{body::Body, http::Request};
+        use tower::ServiceExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let state = route_contract_state(&tmp).await;
+        assert!(
+            state.room_operator.is_configured(),
+            "the probe must run against a configured operator key so a missing header \
+             is the 503 refusal rather than operator_identity_unavailable"
+        );
+        let app = app_router(BrowserOrigins::default(), AllowedHosts::default()).with_state(state);
+
+        let table = contract_room_route_table_with_auth();
+        assert_eq!(
+            table
+                .iter()
+                .map(|(route, _)| route.clone())
+                .collect::<Vec<_>>(),
+            registered_room_routes_in_order(),
+            "the auth-bearing parse must see the same rows as the parity test"
+        );
+
+        let per_reader: Vec<&str> = table
+            .iter()
+            .filter(|(_, auth)| auth.contains(PER_READER_ROOM_STATE_MARKER))
+            .map(|(route, _)| route.as_str())
+            .collect();
+        assert_eq!(
+            per_reader, PER_READER_ROOM_STATE_ROUTES,
+            "the contract marks exactly the read-cursor and prefs routes as per-reader room state"
+        );
+        for route in PER_READER_ROOM_STATE_ROUTES {
+            assert!(
+                !route.starts_with("GET ") || !OPERATOR_UNGATED_ROOM_MUTATIONS.contains(route),
+                "{route}: reads are not mutations"
+            );
+            assert!(
+                route.starts_with("GET ") || OPERATOR_UNGATED_ROOM_MUTATIONS.contains(route),
+                "{route}: a per-reader mutation is by design operator-ungated"
+            );
+        }
+
+        let mut operator_refused = Vec::new();
+        let mut ungated = Vec::new();
+        let mut mismatches = Vec::new();
+        for (route, auth) in &table {
+            let (method, path) = route.split_once(' ').expect("well-formed table route");
+            if method == "GET" {
+                continue;
+            }
+            let request = Request::builder()
+                .method(method)
+                .uri(materialize_route_path(path))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .unwrap();
+            let response = app.clone().oneshot(request).await.unwrap();
+            let status = response.status();
+            let body: serde_json::Value = serde_json::from_slice(
+                &axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap_or(serde_json::Value::Null);
+            let code = body["error"]
+                .as_str()
+                .or_else(|| body["code"].as_str())
+                .unwrap_or_default();
+            let refused = status == StatusCode::SERVICE_UNAVAILABLE
+                && code == room_operator::OperatorAuthError::Missing.code();
+            assert_ne!(
+                status,
+                StatusCode::METHOD_NOT_ALLOWED,
+                "{route}: the table row must be a served method"
+            );
+            if refused {
+                operator_refused.push(route.as_str());
+            } else {
+                ungated.push(route.as_str());
+            }
+            if refused != table_row_claims_operator_only(auth) {
+                mismatches.push(format!("{route}: {status} {code:?} vs auth cell {auth:?}"));
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "every row claiming `X-Ocean-Operator` as its only authority must refuse a \
+             header-less request with 503 operator_credential_missing, and no other row may \
+             answer with that refusal:\n{}",
+            mismatches.join("\n")
+        );
+        assert!(
+            operator_refused.contains(&"PUT /v1/rooms/persistent/{key}/agents/{agent_id}/settings"),
+            "the probe must observe at least the P4 settings gate: {operator_refused:?}"
+        );
+        assert_eq!(
+            ungated, OPERATOR_UNGATED_ROOM_MUTATIONS,
+            "the operator-ungated room mutations are pinned: a new mutation without the \
+             operator gate must be added here and to the contract table with its real auth \
+             rule (per-reader room state, a roster-asserted identity, the daemon-held room \
+             bearer, the invite code, the publish token or loopback trust)"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn router_contract_fallback_headers_and_implicit_methods_match_snapshot() {
         use axum::{body::Body, http::Request};
@@ -26931,7 +27655,7 @@ mod tests {
                 .headers()
                 .get(header::ALLOW)
                 .and_then(|value| value.to_str().ok()),
-            Some("GET,HEAD")
+            Some("GET,HEAD,PATCH")
         );
 
         // Team-platform P6: the inbox lives at `/v1/rooms/inbox`, outside the
@@ -30450,6 +31174,73 @@ prunable gitdir file points to non-existent location
         .await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(unavailable["error"], "workspace_unavailable");
+
+        // OCEAN-260: that refusal is the whole reason PATCH grew
+        // `workspace_root`. The room above was created unbound, so every agent
+        // turn in it fails closed forever; before the field existed the only
+        // repair was a new room and a lost transcript. Bind it in place and the
+        // SAME invocation is admitted — this is the pair that proves the field
+        // is load-bearing rather than merely stored.
+        let bound_workspace = tmp.path().join("room-workspace");
+        std::fs::create_dir(&bound_workspace).unwrap();
+        let canonical_workspace = std::fs::canonicalize(&bound_workspace)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let (status, bound) = operator_room_http_request(
+            app.clone(),
+            axum::http::Method::PATCH,
+            "/v1/rooms/persistent/bootstrap-route",
+            Some(json!({ "workspace_root": canonical_workspace })),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(bound["room"]["workspace_root"], canonical_workspace);
+
+        let (status, admitted) = operator_room_http_request(
+            app.clone(),
+            axum::http::Method::POST,
+            "/v1/rooms/persistent/bootstrap-route/agents/builder/invoke",
+            Some(json!({
+                "invoked_by": "human-1",
+                "message_seq": invocation.seq,
+            })),
+            &[],
+        )
+        .await;
+        assert_ne!(
+            admitted.get("error").and_then(|e| e.as_str()),
+            Some("workspace_unavailable"),
+            "a bound room must not still refuse its own agents: {admitted}"
+        );
+        assert_eq!(status, StatusCode::ACCEPTED, "{admitted}");
+
+        // And unbinding puts the room back where it was, so the binding really
+        // is what gates execution rather than some one-way latch the first
+        // successful turn flipped.
+        let (status, _) = operator_room_http_request(
+            app.clone(),
+            axum::http::Method::PATCH,
+            "/v1/rooms/persistent/bootstrap-route",
+            Some(json!({ "workspace_root": serde_json::Value::Null })),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, unavailable_again) = operator_room_http_request(
+            app.clone(),
+            axum::http::Method::POST,
+            "/v1/rooms/persistent/bootstrap-route/agents/builder/invoke",
+            Some(json!({
+                "invoked_by": "human-1",
+                "message_seq": invocation.seq,
+            })),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(unavailable_again["error"], "workspace_unavailable");
 
         let federated = RoomKey::new("bootstrap-federated");
         with_rooms(&state, |store| {

@@ -18,16 +18,16 @@ use std::rc::Rc;
 #[cfg(target_arch = "wasm32")]
 use std::sync::{Arc, Mutex};
 
-use futures_util::future::{AbortHandle, LocalBoxFuture, abortable};
+use futures_util::future::{abortable, AbortHandle, LocalBoxFuture};
 use futures_util::{FutureExt, StreamExt};
-use gloo_net::eventsource::State as EventSourceState;
 use gloo_net::eventsource::futures::EventSource;
+use gloo_net::eventsource::State as EventSourceState;
 use gloo_net::http::Request;
 use leptos::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use send_wrapper::SendWrapper;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 
@@ -151,7 +151,8 @@ fn session_fetch_ticket_is_current(current: u64, claimed: u64) -> bool {
 
 /// RFC 3986 query-component encoding for daemon-owned pagination cursors.
 /// Keeping this pure makes reserved-character behavior testable off-WASM.
-fn percent_encode_query_component(value: &str) -> String {
+/// Shared with the room-list pager (`rooms::RoomListPaging`).
+pub(crate) fn percent_encode_query_component(value: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut encoded = String::with_capacity(value.len());
     for byte in value.bytes() {
@@ -1991,8 +1992,9 @@ struct PlannerStreamSources {
 /// A message the operator typed while a turn was running and sent INTO that
 /// turn (`POST /v1/agent/sessions/{id}/steer`). The daemon delivers it at the
 /// turn's next tool boundary; until `steering_delivered` arrives it shows as a
-/// pending row below live activity. Only definitive refusal or an authoritative
-/// unconsumed receipt queues it again; absent/ambiguous evidence stays unresolved.
+/// pending row below the live-activity row. If the daemon refuses it, or the
+/// turn ends without delivering it, it falls back to the queue and runs as
+/// the next turn instead.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SteeringPrompt {
     /// Local row identity (shares the queued-prompt id space).
@@ -2000,8 +2002,16 @@ pub struct SteeringPrompt {
     /// The daemon's id once the steer was accepted; `None` while the POST is
     /// in flight.
     pub steer_id: Option<String>,
-    pub session_id: String,
-    pub turn_id: String,
+    /// The daemon turn this steer was sent INTO (the Stop target at steer
+    /// time). Snapshot reconciliation matches it against the daemon's
+    /// per-steer outcome record so a row can never be resolved against
+    /// another turn's outcome (#148).
+    pub origin_turn: Option<String>,
+    /// True once an authoritative snapshot could NOT resolve this row's
+    /// outcome (no record, conflicting turn identity, or an answer the steer
+    /// POST never returned). Unresolved rows stay visible as pending and are
+    /// never auto-requeued — a delivery the surface missed must not run
+    /// twice, and a guess is not a resolution (#148).
     pub unresolved: bool,
     /// The wire text (may carry attached text context).
     pub prompt: String,
@@ -2009,6 +2019,16 @@ pub struct SteeringPrompt {
     pub display: String,
     /// Routing tag to use if it falls back to the queue.
     pub client_type: &'static str,
+}
+
+/// How a steer POST ended, as decided by the sending task in
+/// [`Daemon::steer_prompt`]. `Refused` is an explicit daemon answer (409/429:
+/// the message was NOT accepted, so queueing it is safe); `Lost` never got an
+/// answer, so whether the daemon accepted it is unknowable from here.
+enum SteerSettlement {
+    Accepted(String),
+    Refused,
+    Lost,
 }
 
 /// A prompt the operator sent while the session was busy: a turn was still
@@ -2273,8 +2293,6 @@ pub struct Daemon {
     /// Messages steered into the running turn and not yet delivered (see
     /// [`SteeringPrompt`]), oldest first.
     pub steering_prompts: RwSignal<Vec<SteeringPrompt>>,
-    delivered_steering: RwSignal<Vec<(String, String, String)>>,
-    steering_hydrated: RwSignal<bool>,
     /// Monotonic id source for queued rows.
     queued_prompt_seq: RwSignal<u64>,
     /// Consecutive busy (409) refusals for the head of the queue; reset once a
@@ -2496,29 +2514,7 @@ struct SessionDetailResponse {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct SteeringTurnSnapshot {
-    turn_id: String,
-    ended: bool,
-    receipts: Vec<SteeringReceipt>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct SteeringReceipt {
-    steer_id: String,
-    outcome: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SteerAck {
-    Accepted,
-    Refused,
-    Unknown,
-}
-
-#[derive(Debug, Clone, Deserialize)]
 struct SessionDetail {
-    #[serde(default)]
-    steering: Option<Vec<SteeringTurnSnapshot>>,
     id: String,
     title: String,
     model: String,
@@ -2556,6 +2552,42 @@ struct SessionDetail {
     /// target restored on reconnect (TASK-44, finding 3).
     #[serde(default)]
     active_requests: Vec<String>,
+    /// Terminal outcomes of mid-turn steers on this session, as recorded by
+    /// the daemon (`SessionDetail::steering`, additive — #148). Empty on
+    /// older daemons. This is the ONLY authoritative delivery record: the
+    /// persisted transcript carries no steer identity, so identical text is
+    /// never proof a pending row was delivered.
+    #[serde(default)]
+    steering: Vec<SteeringOutcomeWire>,
+    /// Terminal (finished) request ids for this session, most-recent first,
+    /// bounded (`SessionDetail::finished_requests`, additive — #148). Lets a
+    /// hydration prove that a locally-live Stop target names a turn the
+    /// daemon has already finished. Empty on older daemons.
+    #[serde(default)]
+    finished_requests: Vec<String>,
+}
+
+/// The daemon's terminal record for one mid-turn steer (`SteeringOutcome` on
+/// the session snapshot wire). Matched by `steer_id` only — never by text.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct SteeringOutcomeWire {
+    steer_id: String,
+    /// The turn the steer belonged to (equals the turn/request id the surface
+    /// saw as its Stop target). Empty when the daemon could not bind it.
+    #[serde(default)]
+    turn_id: String,
+    status: SteeringOutcomeStatusWire,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SteeringOutcomeStatusWire {
+    Delivered,
+    Dropped,
+    /// A status a newer daemon emits that this surface does not know. It is
+    /// not a resolution: rows matching it stay explicitly unresolved.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -2632,9 +2664,18 @@ const SESSION_PROJECTION_ACTIVITY_CHANGED: &str =
 /// A terminal HTTP snapshot can briefly race a TurnStarted frame received
 /// before the daemon registers the request in its durable request map. Preserve
 /// the already-admitted local Stop target while still committing the complete
-/// transcript instead of deferring the whole projection.
-fn should_preserve_local_live_state(query_is_live: bool, local_has_live_turn: bool) -> bool {
-    !query_is_live && local_has_live_turn
+/// transcript instead of deferring the whole projection — UNLESS the snapshot
+/// itself names the local turn among the session's finished requests, which is
+/// the daemon positively reporting that this turn already terminated (a
+/// `turn_finished` the connection never saw). Without that record the race
+/// guard keeps its old behavior, so an older daemon that omits
+/// `finished_requests` still preserves the local Stop target (#148).
+fn should_preserve_local_live_state(
+    query_is_live: bool,
+    local_has_live_turn: bool,
+    local_turn_finished_in_snapshot: bool,
+) -> bool {
+    !query_is_live && local_has_live_turn && !local_turn_finished_in_snapshot
 }
 
 impl Daemon {
@@ -2706,8 +2747,6 @@ impl Daemon {
             pending_images: RwSignal::new(Vec::new()),
             queued_prompts: RwSignal::new(Vec::new()),
             steering_prompts: RwSignal::new(Vec::new()),
-            delivered_steering: RwSignal::new(Vec::new()),
-            steering_hydrated: RwSignal::new(false),
             queued_prompt_seq: RwSignal::new(0),
             queue_busy_retries: RwSignal::new(0),
             queue_retry_pending: RwSignal::new(false),
@@ -2794,8 +2833,6 @@ impl Daemon {
             pending_images: RwSignal::new(Vec::new()),
             queued_prompts: RwSignal::new(Vec::new()),
             steering_prompts: RwSignal::new(Vec::new()),
-            delivered_steering: RwSignal::new(Vec::new()),
-            steering_hydrated: RwSignal::new(false),
             queued_prompt_seq: RwSignal::new(0),
             queue_busy_retries: RwSignal::new(0),
             queue_retry_pending: RwSignal::new(false),
@@ -3324,27 +3361,18 @@ impl Daemon {
                         break;
                     }
 
-                    if let AgentEvent::SteeringDelivered {
-                        steer_id,
-                        text,
-                        turn_id,
-                        ..
-                    } = &evt
-                    {
-                        if daemon.deliver_steering(turn_id, steer_id, text) {
-                            daemon.spawn_session_projection(active_session_id.clone(), generation);
-                        }
+                    // Mid-turn steering: a delivery resolves a pending row and
+                    // places the message in the transcript where it landed; the
+                    // active turn's finish sends any accepted-but-undelivered
+                    // steer as the next turn (queued before `apply_event` flips
+                    // `streaming`, so the drain effect sees it).
+                    if let AgentEvent::SteeringDelivered { steer_id, text, .. } = &evt {
+                        daemon.deliver_steering(steer_id, text);
                         continue;
                     }
                     if let AgentEvent::TurnFinished { turn_id, .. } = &evt {
-                        if daemon.steering_prompts.with_untracked(|rows| {
-                            rows.iter().any(|row| {
-                                row.session_id == active_session_id && row.turn_id == *turn_id
-                            })
-                        }) {
-                            // A missed delivery cannot be inferred from finish.
-                            // Read bounded authoritative receipts after close.
-                            daemon.spawn_session_projection(active_session_id.clone(), generation);
+                        if active_turn_id.get_untracked().as_deref() == Some(turn_id.as_str()) {
+                            daemon.requeue_undelivered_steering();
                         }
                     }
 
@@ -3707,36 +3735,22 @@ impl Daemon {
             && self.pending_images.with_untracked(Vec::is_empty)
     }
 
-    /// Capture the originating identity before transport. Lost acknowledgements
-    /// remain pending/unknown; neither text matching nor turn finish proves replay safe.
+    /// Steer `prompt` into the running turn. The row shows as pending until
+    /// the daemon delivers it; an explicit refusal falls back to the queue,
+    /// while a POST that never returned an answer stays pending and pinned
+    /// unresolved (the daemon may or may not have accepted it — #148).
     fn steer_prompt(&self, prompt: String, display: String, client_type: &'static str) {
-        let (Some(session_id), Some(turn_id)) = (
-            self.session_id.get_untracked(),
-            self.active_turn_id.get_untracked(),
-        ) else {
+        let Some(session_id) = self.session_id.get_untracked() else {
             self.enqueue_prompt(prompt, display, client_type);
             return;
         };
-        let entropy = mint_decision_token();
-        if entropy.len() != 64 || !entropy.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            self.enqueue_prompt(prompt, display, client_type);
-            return;
-        }
-        let steer_id = format!(
-            "{}-{}-{}-{}-{}",
-            &entropy[..8],
-            &entropy[8..12],
-            &entropy[12..16],
-            &entropy[16..20],
-            &entropy[20..32]
-        );
         let id = self.next_queued_prompt_id();
+        let origin_turn = self.active_turn_id.get_untracked();
         self.steering_prompts.update(|rows| {
             rows.push(SteeringPrompt {
                 id,
-                steer_id: Some(steer_id.clone()),
-                session_id: session_id.clone(),
-                turn_id: turn_id.clone(),
+                steer_id: None,
+                origin_turn,
                 unresolved: false,
                 prompt: prompt.clone(),
                 display,
@@ -3753,148 +3767,140 @@ impl Daemon {
                 url.trim_end_matches('/'),
                 session_id
             );
-            let ack = match Request::post(&post_url)
+            // How the steer POST ended. `Refused` is an explicit daemon answer
+            // (not accepted — queueing is safe); `Lost` never got an answer,
+            // so acceptance is ambiguous and the row must never auto-resend.
+            let settlement = match Request::post(&post_url)
                 .header("content-type", "application/json")
-                .json(&json!({ "text": prompt, "steer_id": steer_id, "turn_id": turn_id }))
+                .json(&json!({ "text": prompt }))
             {
                 Ok(request) => match request.send().await {
+                    Ok(response) if response.status() == 202 => response
+                        .json::<Value>()
+                        .await
+                        .ok()
+                        .and_then(|body| body.get("steer_id")?.as_str().map(str::to_string))
+                        .map(SteerSettlement::Accepted)
+                        .unwrap_or(SteerSettlement::Lost),
                     Ok(response) => {
-                        let status = response.status();
-                        let body = response.json::<Value>().await.ok();
-                        classify_steer_ack(status, body.as_ref(), &steer_id)
+                        log::info!("steer refused with HTTP {}; queueing", response.status());
+                        SteerSettlement::Refused
                     }
-                    Err(_) => SteerAck::Unknown,
-                },
-                Err(_) => SteerAck::Refused,
-            };
-            daemon.settle_steer_ack_with(
-                &url,
-                id,
-                &session_id,
-                &turn_id,
-                &steer_id,
-                ack,
-                |daemon, session_id, generation| {
-                    daemon.spawn_session_projection(session_id, generation)
-                },
-            );
-        });
-    }
-
-    // POST completion uses the same owning recovery rail as reconnect and finish.
-    fn settle_steer_ack_with(
-        &self,
-        url: &str,
-        id: u64,
-        session_id: &str,
-        turn_id: &str,
-        steer_id: &str,
-        ack: SteerAck,
-        dispatch: impl FnOnce(&Self, String, u64),
-    ) {
-        if self.url.get_untracked() != url {
-            return;
-        }
-        self.settle_steer(id, session_id, turn_id, steer_id, ack);
-        if self.session_id.get_untracked().as_deref() == Some(session_id) {
-            dispatch(
-                self,
-                session_id.to_string(),
-                self.sse_generation.get_untracked(),
-            );
-        }
-    }
-
-    fn settle_steer(
-        &self,
-        id: u64,
-        session_id: &str,
-        turn_id: &str,
-        steer_id: &str,
-        ack: SteerAck,
-    ) {
-        let refused = self
-            .steering_prompts
-            .try_update(|rows| {
-                let index = rows.iter().position(|row| {
-                    row.id == id
-                        && row.session_id == session_id
-                        && row.turn_id == turn_id
-                        && row.steer_id.as_deref() == Some(steer_id)
-                })?;
-                match ack {
-                    SteerAck::Refused => Some(rows.remove(index)),
-                    SteerAck::Accepted => None,
-                    SteerAck::Unknown => {
-                        rows[index].unresolved = true;
-                        None
+                    Err(error) => {
+                        log::warn!("steer failed: {error}; keeping the row unresolved");
+                        SteerSettlement::Lost
                     }
+                },
+                Err(error) => {
+                    log::warn!("steer encode failed: {error}; keeping the row unresolved");
+                    SteerSettlement::Lost
                 }
-            })
-            .flatten();
-        if let Some(row) = refused {
-            self.queue_steering_rows(vec![row], false);
-            self.status
-                .set("couldn't steer the turn · message queued".into());
-            self.status_detail.set(None);
+            };
+            match settlement {
+                SteerSettlement::Accepted(steer_id) => daemon.settle_steer(id, Some(steer_id)),
+                SteerSettlement::Refused => daemon.settle_steer(id, None),
+                SteerSettlement::Lost => daemon.lose_steer(id),
+            }
+        });
+    }
+
+    /// Record the daemon's answer to a steer. Accepted: keep the row pending
+    /// under its `steer_id` (a delivery that already arrived and removed it
+    /// makes this a no-op). Refused or failed: the turn is over or cannot take
+    /// it, so it goes to the queue and runs as the next turn.
+    fn settle_steer(&self, id: u64, steer_id: Option<String>) {
+        match steer_id {
+            Some(steer_id) => self.steering_prompts.update(|rows| {
+                if let Some(row) = rows.iter_mut().find(|row| row.id == id) {
+                    row.steer_id = Some(steer_id);
+                }
+            }),
+            None => {
+                let row = self
+                    .steering_prompts
+                    .try_update(|rows| {
+                        let index = rows.iter().position(|row| row.id == id)?;
+                        Some(rows.remove(index))
+                    })
+                    .flatten();
+                if let Some(row) = row {
+                    self.queue_steering_rows(vec![row], false);
+                    self.status
+                        .set("couldn't steer the turn · message queued".into());
+                    self.status_detail.set(None);
+                }
+            }
         }
     }
 
-    /// Returns true when an ambiguous delivery needs an authoritative refresh.
-    pub(crate) fn deliver_steering(&self, turn_id: &str, steer_id: &str, text: &str) -> bool {
-        let Some(session_id) = self.session_id.get_untracked() else {
-            return false;
-        };
-        let key = (
-            session_id.clone(),
-            turn_id.to_string(),
-            steer_id.to_string(),
-        );
-        if self
-            .delivered_steering
-            .with_untracked(|known| known.contains(&key))
-        {
-            return false;
-        }
-        let known_pending = self.steering_prompts.with_untracked(|rows| {
-            rows.iter().any(|row| {
-                row.session_id == session_id
-                    && row.turn_id == turn_id
-                    && row.steer_id.as_deref() == Some(steer_id)
-                    && !row.unresolved
-            })
+    /// The steer POST never returned an answer: the daemon may not have seen
+    /// it, or may have accepted it and lost the response mid-gap. That
+    /// ambiguity is exactly the never-auto-resend case (#148): the row stays
+    /// pending and is pinned unresolved. It still resolves positively — a
+    /// later `steering_delivered` frame or a snapshot outcome record for its
+    /// `steer_id` removes or requeues it on the daemon's authority.
+    fn lose_steer(&self, id: u64) {
+        self.steering_prompts.update(|rows| {
+            if let Some(row) = rows.iter_mut().find(|row| row.id == id) {
+                row.unresolved = true;
+            }
         });
-        if self.steering_hydrated.get_untracked() && !known_pending {
-            // A receipt may have been evicted after this text persisted. Never
-            // infer inclusion by text or append an ambiguous delayed event.
-            self.activity_revision
-                .update(|revision| *revision = revision.wrapping_add(1));
-            self.delivered_steering
-                .update(|known| remember_steering_delivery(known, key));
-            return true;
-        }
+        self.status
+            .set("couldn't confirm the steer · not resent".into());
+        self.status_detail.set(None);
+    }
+
+    /// The daemon delivered a steered message: drop its pending row and show
+    /// it in the transcript where it landed. Matched by `steer_id`, or (when
+    /// the delivery outran the steer POST's response) by the oldest in-flight
+    /// row with the same text. A delivery this surface did not send (another
+    /// client steered) still renders, from the daemon's text.
+    pub(crate) fn deliver_steering(&self, steer_id: &str, text: &str) {
         let row = self
             .steering_prompts
             .try_update(|rows| {
-                let index = rows.iter().position(|row| {
-                    row.session_id == session_id
-                        && row.turn_id == turn_id
-                        && row.steer_id.as_deref() == Some(steer_id)
-                })?;
+                let index = rows
+                    .iter()
+                    .position(|row| row.steer_id.as_deref() == Some(steer_id))
+                    .or_else(|| {
+                        rows.iter()
+                            .position(|row| row.steer_id.is_none() && row.prompt.trim() == text)
+                    })?;
                 Some(rows.remove(index))
             })
             .flatten();
         let display = row
             .map(|row| row.display)
             .unwrap_or_else(|| text.to_string());
-        self.activity_revision
-            .update(|revision| *revision = revision.wrapping_add(1));
-        self.delivered_steering
-            .update(|known| remember_steering_delivery(known, key));
-        self.turns.update(|turns| turns.push(Turn::user(display)));
+        self.turns.update(|t| t.push(Turn::user(display)));
         self.status.set("steering delivered".into());
         self.status_detail.set(None);
-        false
+    }
+
+    /// The active turn finished. Accepted steers it never delivered (it hit
+    /// its round limit, failed, or was rerouted) run next, ahead of anything
+    /// already queued; steers whose POST is still in flight settle when their
+    /// answer arrives. Rows pinned unresolved by a reconciliation are skipped:
+    /// their outcome could not be proven, and an unseen delivery must never
+    /// run twice (#148).
+    pub(crate) fn requeue_undelivered_steering(&self) {
+        let undelivered = self
+            .steering_prompts
+            .try_update(|rows| {
+                let (accepted, remaining): (Vec<_>, Vec<_>) = rows
+                    .drain(..)
+                    .partition(|row| row.steer_id.is_some() && !row.unresolved);
+                *rows = remaining;
+                accepted
+            })
+            .unwrap_or_default();
+        if undelivered.is_empty() {
+            return;
+        }
+        self.queue_steering_rows(undelivered, true);
+        self.status
+            .set("the turn ended before reading your message · sending it next".into());
+        self.status_detail.set(None);
     }
 
     fn queue_steering_rows(&self, rows: Vec<SteeringPrompt>, ahead: bool) {
@@ -5394,6 +5400,20 @@ impl Daemon {
         if !detail.model.is_empty() {
             self.model.set(Some(detail.model.clone()));
         }
+        // A poll tick runs while connected, so it only applies the POSITIVE
+        // steering resolutions (a delivered row disappears, a dropped row
+        // queues once); anything without a record keeps its normal lifecycle —
+        // pining rows unresolved is reserved for the authoritative reconnect
+        // hydration pass (#148).
+        reconcile_steering_rows(
+            self.steering_prompts,
+            self.queued_prompts,
+            self.queued_prompt_seq,
+            self.status,
+            &detail.steering,
+            &active_requests,
+            false,
+        );
 
         ProjectionOutcome::Terminal
     }
@@ -5452,18 +5472,12 @@ impl Daemon {
                 {
                     self.status
                         .set(format!("session load failed: {}", concise_error(&error)));
-                    self.steering_prompts.update(|rows| {
-                        for row in rows.iter_mut().filter(|row| row.session_id == id) {
-                            row.unresolved = true;
-                        }
-                    });
                 }
             }
         }
     }
 
     fn select_session_state(&self, id: &str, title: String) {
-        self.steering_hydrated.set(false);
         self.turns.set(Vec::new());
         self.streaming.set(false);
         self.active_turn_id.set(None);
@@ -5542,31 +5556,10 @@ impl Daemon {
         Wait: std::future::Future<Output = ()>,
     {
         let mut collisions = 0u8;
-        let mut coherence_retries = 0u8;
         loop {
             let result = self
                 .commit_session_projection_with(id, generation, fetch())
                 .await;
-            if result.as_ref().err().map(String::as_str) == Some("session_snapshot_changed") {
-                coherence_retries += 1;
-                if coherence_retries >= 4 {
-                    return result;
-                }
-                let epoch = self.session_projection_epoch.get_untracked();
-                self.status.set("session recovering".into());
-                quiet_tick().await;
-                if self.session_projection_epoch.get_untracked() != epoch
-                    || admit_session_snapshot(
-                        id,
-                        generation,
-                        self.session_id.get_untracked().as_deref(),
-                        self.sse_generation.get_untracked(),
-                    ) == SnapshotAdmission::Discard
-                {
-                    return Err(SESSION_PROJECTION_RETIRED.into());
-                }
-                continue;
-            }
             if result.as_ref().err().map(String::as_str)
                 != Some(SESSION_PROJECTION_ACTIVITY_CHANGED)
             {
@@ -5664,7 +5657,7 @@ impl Daemon {
             .map_err(|error| format!("session fetch error: {error}"))?;
         if !resp.ok() {
             let text = resp.text().await.unwrap_or_default();
-            return Err(session_fetch_error(resp.status(), &text));
+            return Err(format!("session fetch rejected: {}", concise_error(&text)));
         }
         let response = resp
             .json::<SessionDetailResponse>()
@@ -5720,10 +5713,6 @@ impl Daemon {
     /// Bundle the live signals `apply_session_projection` reads and writes.
     fn commit_signals(&self) -> SessionCommitSignals {
         SessionCommitSignals {
-            steering_prompts: self.steering_prompts,
-            queued_prompts: self.queued_prompts,
-            delivered_steering: self.delivered_steering,
-            steering_hydrated: self.steering_hydrated,
             session_id: self.session_id,
             sse_generation: self.sse_generation,
             activity_revision: self.activity_revision,
@@ -5739,6 +5728,9 @@ impl Daemon {
             turns: self.turns,
             pinned_widgets: self.pinned_widgets,
             status: self.status,
+            steering_prompts: self.steering_prompts,
+            queued_prompts: self.queued_prompts,
+            queued_prompt_seq: self.queued_prompt_seq,
         }
     }
 
@@ -6875,132 +6867,6 @@ fn publish_permission_view(
     true
 }
 
-fn session_fetch_error(status: u16, text: &str) -> String {
-    if status == 503
-        && serde_json::from_str::<Value>(text)
-            .ok()
-            .and_then(|body| {
-                body.get("error")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-            })
-            .as_deref()
-            == Some("session_snapshot_changed")
-    {
-        "session_snapshot_changed".into()
-    } else {
-        format!("session fetch rejected: {}", concise_error(text))
-    }
-}
-
-fn classify_steer_ack(status: u16, body: Option<&Value>, steer_id: &str) -> SteerAck {
-    if status == 202
-        && body.and_then(|v| v.get("steer_id")).and_then(Value::as_str) == Some(steer_id)
-    {
-        SteerAck::Accepted
-    } else if (status == 413
-        && body.and_then(|v| v.get("ok")).and_then(Value::as_bool) == Some(false)
-        && body.and_then(|v| v.get("error")).and_then(Value::as_str)
-            == Some("message is too long to steer; send it as a new turn"))
-        || matches!(
-            (
-                status,
-                body.and_then(|v| v.get("error")).and_then(Value::as_str)
-            ),
-            (409, Some("no_active_turn")) | (429, Some("steering_full"))
-        )
-    {
-        SteerAck::Refused
-    } else {
-        SteerAck::Unknown
-    }
-}
-
-fn remember_steering_delivery(
-    known: &mut Vec<(String, String, String)>,
-    key: (String, String, String),
-) {
-    if !known.contains(&key) {
-        known.push(key);
-    }
-    if known.len() > 2048 {
-        known.drain(..known.len() - 2048);
-    }
-}
-
-fn reconcile_steering_snapshot(
-    sig: &SessionCommitSignals,
-    session_id: &str,
-    turns: Option<&[SteeringTurnSnapshot]>,
-) {
-    let turns = turns.unwrap_or_default();
-    sig.delivered_steering.update(|known| {
-        for turn in turns {
-            for receipt in &turn.receipts {
-                if receipt.outcome == "delivered" {
-                    remember_steering_delivery(
-                        known,
-                        (
-                            session_id.into(),
-                            turn.turn_id.clone(),
-                            receipt.steer_id.clone(),
-                        ),
-                    );
-                }
-            }
-        }
-    });
-    let observed = sig.delivered_steering.get_untracked();
-    let mut unconsumed = Vec::new();
-    sig.steering_prompts.update(|rows| {
-        rows.retain_mut(|row| {
-            if row.session_id != session_id {
-                return true;
-            }
-            if row.steer_id.as_ref().is_some_and(|id| {
-                observed.contains(&(session_id.into(), row.turn_id.clone(), id.clone()))
-            }) {
-                return false;
-            }
-            let receipt = turns
-                .iter()
-                .find(|turn| turn.turn_id == row.turn_id)
-                .and_then(|turn| {
-                    turn.receipts
-                        .iter()
-                        .find(|r| Some(r.steer_id.as_str()) == row.steer_id.as_deref())
-                });
-            match receipt.map(|receipt| receipt.outcome.as_str()) {
-                Some("delivered") => false,
-                Some("unconsumed") => {
-                    unconsumed.push(QueuedPrompt {
-                        id: row.id,
-                        prompt: row.prompt.clone(),
-                        display: row.display.clone(),
-                        client_type: row.client_type,
-                        images: Vec::new(),
-                    });
-                    false
-                }
-                Some("pending") => {
-                    row.unresolved = false;
-                    true
-                }
-                _ => {
-                    row.unresolved = true;
-                    true
-                }
-            }
-        })
-    });
-    if !unconsumed.is_empty() {
-        sig.queued_prompts.update(|queued| {
-            unconsumed.append(queued);
-            *queued = unconsumed;
-        });
-    }
-}
-
 /// The live signals `apply_session_projection` reads and writes — the signal half
 /// of `commit_session_projection_with`. Grouped so the post-fetch commit body can be a
 /// free function driven in a native test over a `Daemon::dummy()` (via
@@ -7009,10 +6875,6 @@ fn reconcile_steering_snapshot(
 /// this struct is too.
 #[derive(Clone, Copy)]
 struct SessionCommitSignals {
-    steering_prompts: RwSignal<Vec<SteeringPrompt>>,
-    queued_prompts: RwSignal<Vec<QueuedPrompt>>,
-    delivered_steering: RwSignal<Vec<(String, String, String)>>,
-    steering_hydrated: RwSignal<bool>,
     session_id: RwSignal<Option<String>>,
     sse_generation: RwSignal<u64>,
     activity_revision: RwSignal<u64>,
@@ -7028,6 +6890,142 @@ struct SessionCommitSignals {
     turns: RwSignal<Vec<Turn>>,
     pinned_widgets: RwSignal<Vec<PinnedWidget>>,
     status: RwSignal<String>,
+    steering_prompts: RwSignal<Vec<SteeringPrompt>>,
+    queued_prompts: RwSignal<Vec<QueuedPrompt>>,
+    queued_prompt_seq: RwSignal<u64>,
+}
+
+// #148 supersession note (PR #129 reconciliation): this surface carries the
+// canonical #148 fix from main's #156 — the daemon-side steer-outcome ledger
+// (GET /v1/sessions/{id} `steering` + `finished_requests`, daemon-minted
+// steer ids, `SteerSettlement`/`lose_steer`, `reconcile_steering_rows` here).
+// The desktop candidate's earlier client-identity + bounded-receipts design
+// (client-minted steer ids, `SteeringInbox` receipts/`acknowledge_saved`,
+// surface delivery-ledger hydration) was an independent solution of the same
+// issue and was dropped here in favor of #156: #156 is merged, maintainer
+// reviewed, and mutation-tested on main, and its reg148_* regressions cover
+// the same gap classes. The two designs must not be blended.
+
+/// Whether a daemon steer-outcome record names the same turn the row was
+/// steered into. `steer_id` is the primary identity (a daemon-minted id); the
+/// turn check is defense in depth — a record bound to a different turn means
+/// the ids disagree about the world, and the row stays unresolved instead of
+/// being resolved against a stranger's outcome. When either side carries no
+/// turn identity, `steer_id` alone decides.
+fn steering_outcome_names_row_turn(row: &SteeringPrompt, entry: &SteeringOutcomeWire) -> bool {
+    match (row.origin_turn.as_deref(), entry.turn_id.as_str()) {
+        (Some(row_turn), entry_turn) if !entry_turn.is_empty() => row_turn == entry_turn,
+        _ => true,
+    }
+}
+
+/// Reconcile pending steering rows against the daemon's authoritative
+/// snapshot after a connection gap (#148). SSE is a live tail — a
+/// `steering_delivered` or `turn_finished` emitted while disconnected never
+/// re-arrives, so the snapshot's per-steer outcome records are the only
+/// identity-based authority (the persisted transcript carries no steer ids;
+/// identical text is never delivery proof).
+///
+/// Rules, per row, resolved by `steer_id` only:
+/// - **Delivered** (and the record names the row's turn): the row disappears.
+///   The hydrated transcript already contains the message; pushing a local
+///   turn would duplicate it.
+/// - **Dropped** (same turn check): the daemon discarded it unread at turn
+///   end — it queues ONCE, ahead of the existing queue, exactly like the
+///   connected `turn_finished` requeue.
+/// - **No record while the originating turn is still live**: the steer may
+///   simply be waiting in the daemon's inbox. The row stays pending and keeps
+///   its normal lifecycle (a later delivery frame still resolves it).
+/// - **No record and the turn is gone** (or the record names a different
+///   turn, or carries an unknown status): the outcome is missing/ambiguous.
+///   On an authoritative hydration pass (`gap_pass`) the row is pinned
+///   `unresolved`: it stays visible as pending and is never auto-requeued. A
+///   conservative pass (the sync-poll tick, which runs while connected) only
+///   applies the positive resolutions and leaves rows untouched otherwise.
+/// - **In-flight POST** (no `steer_id` yet): no identity to reconcile
+///   against. A `gap_pass` pins it unresolved — its answer, when it lands,
+///   still settles it (a refusal queues it; an acceptance leaves it pending
+///   under its id, resolvable by a later frame or record).
+fn reconcile_steering_rows(
+    steering_prompts: RwSignal<Vec<SteeringPrompt>>,
+    queued_prompts: RwSignal<Vec<QueuedPrompt>>,
+    queued_prompt_seq: RwSignal<u64>,
+    status: RwSignal<String>,
+    ledger: &[SteeringOutcomeWire],
+    active_requests: &[String],
+    gap_pass: bool,
+) {
+    let mut dropped: Vec<SteeringPrompt> = Vec::new();
+    steering_prompts.update(|rows| {
+        let mut kept: Vec<SteeringPrompt> = Vec::with_capacity(rows.len());
+        for mut row in rows.drain(..) {
+            let Some(steer_id) = row.steer_id.clone() else {
+                if gap_pass {
+                    row.unresolved = true;
+                }
+                kept.push(row);
+                continue;
+            };
+            let record = ledger
+                .iter()
+                .find(|entry| entry.steer_id == steer_id)
+                .filter(|entry| steering_outcome_names_row_turn(&row, entry));
+            match record.map(|entry| entry.status) {
+                Some(SteeringOutcomeStatusWire::Delivered) => {
+                    // Remove without pushing a local turn: the committed
+                    // snapshot transcript already carries the message.
+                }
+                Some(SteeringOutcomeStatusWire::Dropped) => dropped.push(row),
+                Some(SteeringOutcomeStatusWire::Unknown) => {
+                    if gap_pass {
+                        row.unresolved = true;
+                    }
+                    kept.push(row);
+                }
+                None => {
+                    // A record bound to a DIFFERENT turn loses the
+                    // `names_row_turn` filter above and lands here too:
+                    // identity conflict, never a guess.
+                    let turn_still_live = match row.origin_turn.as_deref() {
+                        Some(turn) => active_requests.iter().any(|live| live == turn),
+                        None => !active_requests.is_empty(),
+                    };
+                    if turn_still_live {
+                        kept.push(row);
+                    } else if gap_pass {
+                        row.unresolved = true;
+                        kept.push(row);
+                    } else {
+                        kept.push(row);
+                    }
+                }
+            }
+        }
+        *rows = kept;
+    });
+    if dropped.is_empty() {
+        return;
+    }
+    let queued: Vec<QueuedPrompt> = dropped
+        .into_iter()
+        .map(|row| {
+            let id = queued_prompt_seq.get_untracked().wrapping_add(1);
+            queued_prompt_seq.set(id);
+            QueuedPrompt {
+                id,
+                prompt: row.prompt,
+                display: row.display,
+                client_type: row.client_type,
+                images: Vec::new(),
+            }
+        })
+        .collect();
+    queued_prompts.update(|q| {
+        let rest = std::mem::take(q);
+        *q = queued;
+        q.extend(rest);
+    });
+    status.set("the turn ended before reading your message · sending it next".into());
 }
 
 /// The post-fetch body of `commit_session_projection`: the final admission
@@ -7071,23 +7069,16 @@ fn apply_session_projection(
 
     // 4. Determine whether the daemon reports a live turn. A terminal snapshot
     // can briefly race an already-admitted TurnStarted frame, so remember that
-    // local Stop target for the atomic commit below.
+    // local Stop target for the atomic commit below — unless the snapshot's
+    // finished-request record positively names that turn as terminated, in
+    // which case the finish happened in a gap this connection never saw and
+    // the Stop target is stale (#148).
     let query_is_live = detail.state.is_some_and(|s| s.is_live());
     let local_has_live_turn =
         sig.streaming.get_untracked() && sig.active_turn_id.get_untracked().is_some();
-    let local_turn_ended = detail.steering.as_ref().is_some_and(|turns| {
-        turns.iter().any(|turn| {
-            turn.ended
-                && sig.active_turn_id.get_untracked().as_deref() == Some(turn.turn_id.as_str())
-        })
-    });
-    let preserve_local_live_state =
-        should_preserve_local_live_state(query_is_live, local_has_live_turn) && !local_turn_ended;
     let local_active_turn_id = sig.active_turn_id.get_untracked();
     let local_streaming = sig.streaming.get_untracked();
 
-    // Receipt decisions share the admitted transcript read. No text inference.
-    reconcile_steering_snapshot(sig, id, detail.steering.as_deref());
     // 5. Pure projection, then one atomic commit — no `await` between writes.
     let SessionDetail {
         title,
@@ -7101,8 +7092,18 @@ fn apply_session_projection(
         // The daemon's authoritative pending-permission ids for this session; the
         // only proof of a pre-load gate when the rich card snapshot degrades.
         pending_permissions: detail_pending_ids,
+        steering: detail_steering,
+        finished_requests,
         ..
     } = detail;
+    let local_turn_finished_in_snapshot = local_active_turn_id
+        .as_deref()
+        .is_some_and(|turn| finished_requests.iter().any(|finished| finished == turn));
+    let preserve_local_live_state = should_preserve_local_live_state(
+        query_is_live,
+        local_has_live_turn,
+        local_turn_finished_in_snapshot,
+    );
 
     let (rebuilt_turns, rebuilt_pinned) = turns_from_session_transcript(transcript, &tool_context);
     let authority = sig.decision_authority.get_untracked();
@@ -7145,7 +7146,6 @@ fn apply_session_projection(
         sig.model.set(Some(model));
     }
     sig.turns.set(rebuilt_turns);
-    sig.steering_hydrated.set(true);
     sig.pinned_widgets.set(rebuilt_pinned);
     if preserve_local_live_state {
         sig.active_turn_id.set(local_active_turn_id);
@@ -7160,6 +7160,20 @@ fn apply_session_projection(
         prune_session_authority(authority, id, &live_requests);
     });
     sig.status.set("session loaded".into());
+    // Steering reconciliation rides the same synchronous commit, after the
+    // transcript swap it depends on: rows the daemon records as delivered
+    // disappear (the snapshot transcript already shows them), rows it
+    // recorded dropped queue once, and anything the snapshot cannot prove
+    // stays explicitly unresolved instead of being guessed (#148).
+    reconcile_steering_rows(
+        sig.steering_prompts,
+        sig.queued_prompts,
+        sig.queued_prompt_seq,
+        sig.status,
+        &detail_steering,
+        &active_requests,
+        true,
+    );
     Ok(ProjectionOutcome::Terminal)
 }
 
@@ -10231,10 +10245,17 @@ mod tests {
 
     #[test]
     fn register_before_accepted_preserves_only_terminal_snapshot_with_local_live_turn() {
-        assert!(should_preserve_local_live_state(false, true));
-        assert!(!should_preserve_local_live_state(true, true));
-        assert!(!should_preserve_local_live_state(false, false));
-        assert!(!should_preserve_local_live_state(true, false));
+        // No finished-request record (older daemon, or the registration race
+        // the guard exists for): preserve the local Stop target.
+        assert!(should_preserve_local_live_state(false, true, false));
+        assert!(!should_preserve_local_live_state(true, true, false));
+        assert!(!should_preserve_local_live_state(false, false, false));
+        assert!(!should_preserve_local_live_state(true, false, false));
+        // The snapshot positively names the local turn finished: the Stop
+        // target is stale (a turn_finished the connection never saw) and must
+        // not survive terminal hydration (#148).
+        assert!(!should_preserve_local_live_state(false, true, true));
+        assert!(!should_preserve_local_live_state(true, true, true));
     }
 
     // 6. Deciding an old card after a new dispatch resolves the ORIGINAL turn's
@@ -12453,7 +12474,6 @@ mod tests {
         transcript: Vec<SessionTranscriptEntry>,
     ) -> SessionDetail {
         SessionDetail {
-            steering: None,
             id: "s1".into(),
             title: "session".into(),
             model: String::new(),
@@ -12464,6 +12484,8 @@ mod tests {
             pending_permissions: pending,
             state: None, // terminal — no live turn, so the wrapper commits
             active_requests: vec![],
+            steering: vec![],
+            finished_requests: vec![],
         }
     }
 
@@ -12807,95 +12829,6 @@ mod tests {
         assert!(matches!(&daemon.turns.get_untracked()[0].blocks[..],
             [Block::Text(text)] if text == "authoritative T+D"));
         assert_eq!(daemon.status.get_untracked(), "session loaded");
-    }
-
-    #[test]
-    fn projection_content_steering_delivery_survives_stale_read_and_recovers() {
-        for local in [false, true] {
-            let daemon = wrapper_daemon();
-            daemon.streaming.set(true);
-            daemon.active_turn_id.set(Some("t1".into()));
-            daemon
-                .turns
-                .set(vec![Turn::user("start"), Turn::assistant("t1".into())]);
-            daemon.enqueue_prompt("queued next".into(), "queued next".into(), "surface-web");
-            steering_row(&daemon, "unrelated pending", Some("other-steer"));
-            if local {
-                steering_row(&daemon, "use tabs", Some("delivered-steer"));
-            }
-            let reply = RefCell::new(None);
-            let reads = std::cell::Cell::new(0);
-            let live_turns = RefCell::new(String::new());
-            let mut recovery = Box::pin(daemon.recover_session_projection_with(
-                "s1",
-                5,
-                || async {
-                    reads.set(reads.get() + 1);
-                    if reads.get() == 1 {
-                        return std::future::poll_fn(|_| {
-                            reply
-                                .borrow_mut()
-                                .take()
-                                .map_or(std::task::Poll::Pending, std::task::Poll::Ready)
-                        })
-                        .await;
-                    }
-                    // Reaching a second read proves the stale reply was refused
-                    // through the real recovery seam, before overwriting content.
-                    assert_eq!(reads.get(), 2);
-                    assert_eq!(
-                        format!("{:?}", daemon.turns.get_untracked()),
-                        *live_turns.borrow()
-                    );
-                    assert!(daemon.streaming.get_untracked());
-                    assert_eq!(daemon.active_turn_id.get_untracked().as_deref(), Some("t1"));
-                    assert_eq!(
-                        daemon.queued_prompts.get_untracked()[0].prompt,
-                        "queued next"
-                    );
-                    assert_eq!(daemon.steering_prompts.get_untracked().len(), 1);
-                    let mut fresh =
-                        wrapper_detail(vec![], vec![user_entry("start"), user_entry("use tabs")]);
-                    fresh.state = Some(SessionRunState::Running);
-                    fresh.active_requests = vec!["t1".into()];
-                    Ok((fresh, SnapshotSettle::Fresh(vec![])))
-                },
-                || async { panic!("one collision must retry without entering the quiet window") },
-            ));
-            assert!(recovery.as_mut().now_or_never().is_none());
-            let revision = daemon.activity_revision.get_untracked();
-            // This is the production stream's post-admission delivery seam;
-            // another client's steer has no matching local pending row.
-            daemon.deliver_steering("t1", "delivered-steer", "use tabs");
-            assert_eq!(
-                daemon.activity_revision.get_untracked(),
-                revision.wrapping_add(1)
-            );
-            let display = if local { "shown: use tabs" } else { "use tabs" };
-            assert!(
-                matches!(&daemon.turns.get_untracked().last().unwrap().blocks[..],
-                [Block::Text(text)] if text == display)
-            );
-            *live_turns.borrow_mut() = format!("{:?}", daemon.turns.get_untracked());
-            *reply.borrow_mut() = Some(Ok((
-                wrapper_detail(vec![], vec![user_entry("stale before delivery")]),
-                SnapshotSettle::Fresh(vec![]),
-            )));
-            assert_eq!(
-                recovery.as_mut().now_or_never().unwrap(),
-                Ok(ProjectionOutcome::Terminal)
-            );
-            assert_eq!(reads.get(), 2);
-            let turns = daemon.turns.get_untracked();
-            assert_eq!(turns.len(), 2);
-            assert!(matches!(&turns[1].blocks[..], [Block::Text(text)] if text == "use tabs"));
-            assert!(daemon.streaming.get_untracked());
-            assert_eq!(daemon.active_turn_id.get_untracked().as_deref(), Some("t1"));
-            assert_eq!(daemon.queued_prompts.get_untracked().len(), 1);
-            let pending = daemon.steering_prompts.get_untracked();
-            assert_eq!(pending.len(), 1);
-            assert_eq!(pending[0].steer_id.as_deref(), Some("other-steer"));
-        }
     }
 
     #[test]
@@ -14715,7 +14648,6 @@ mod tests {
     /// the admission gate and signal-write path without depending on the daemon.
     fn minimal_detail() -> SessionDetail {
         SessionDetail {
-            steering: None,
             id: "s1".into(),
             title: "test session".into(),
             model: String::new(),
@@ -14726,6 +14658,8 @@ mod tests {
             pending_permissions: vec![],
             state: None, // terminal (no live turn)
             active_requests: vec![],
+            steering: vec![],
+            finished_requests: vec![],
         }
     }
 
@@ -14735,14 +14669,21 @@ mod tests {
     // it hands off to: settle, deliver, requeue, clear.
 
     fn steering_row(daemon: &Daemon, prompt: &str, steer_id: Option<&str>) -> u64 {
-        daemon.session_id.set(Some("s1".into()));
+        steering_row_in_turn(daemon, prompt, steer_id, None)
+    }
+
+    fn steering_row_in_turn(
+        daemon: &Daemon,
+        prompt: &str,
+        steer_id: Option<&str>,
+        origin_turn: Option<&str>,
+    ) -> u64 {
         let id = daemon.next_queued_prompt_id();
         daemon.steering_prompts.update(|rows| {
             rows.push(SteeringPrompt {
                 id,
-                steer_id: Some(steer_id.unwrap_or("steer-1").to_string()),
-                session_id: "s1".into(),
-                turn_id: "t1".into(),
+                steer_id: steer_id.map(str::to_string),
+                origin_turn: origin_turn.map(str::to_string),
                 unresolved: false,
                 prompt: prompt.into(),
                 display: format!("shown: {prompt}"),
@@ -14750,385 +14691,6 @@ mod tests {
             })
         });
         id
-    }
-
-    fn steering_detail(receipts: &[(&str, &str)], ended: bool) -> SessionDetail {
-        let mut detail = wrapper_detail(vec![], vec![user_entry("same")]);
-        detail.steering = Some(vec![SteeringTurnSnapshot {
-            turn_id: "t1".into(),
-            ended,
-            receipts: receipts
-                .iter()
-                .map(|(id, outcome)| SteeringReceipt {
-                    steer_id: (*id).into(),
-                    outcome: (*outcome).into(),
-                })
-                .collect(),
-        }]);
-        detail
-    }
-
-    #[test]
-    fn steering_recovery_resolves_delivered_and_unconsumed_once_without_text_matching() {
-        let daemon = wrapper_daemon();
-        daemon.streaming.set(true);
-        daemon.active_turn_id.set(Some("t1".into()));
-        let delivered = steering_row(&daemon, "same", Some("delivered"));
-        let unconsumed = steering_row(&daemon, "same", Some("unconsumed"));
-        steering_row(&daemon, "same", Some("missing"));
-        let detail = steering_detail(
-            &[("delivered", "delivered"), ("unconsumed", "unconsumed")],
-            true,
-        );
-        for _ in 0..2 {
-            assert!(daemon
-                .commit_session_projection_with("s1", 5, async {
-                    Ok((detail.clone(), SnapshotSettle::Fresh(vec![])))
-                })
-                .now_or_never()
-                .unwrap()
-                .is_ok());
-        }
-        assert!(!daemon.streaming.get_untracked());
-        assert!(daemon.active_turn_id.get_untracked().is_none());
-        assert_eq!(
-            daemon.turns.get_untracked().len(),
-            1,
-            "snapshot owns delivered text"
-        );
-        let pending = daemon.steering_prompts.get_untracked();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].steer_id.as_deref(), Some("missing"));
-        assert!(pending[0].unresolved, "identical text is not proof");
-        let queue = daemon.queued_prompts.get_untracked();
-        assert_eq!(queue.len(), 1);
-        assert_eq!(queue[0].id, unconsumed);
-        // Both a lost-then-late acknowledgement and delayed SSE are harmless.
-        daemon.settle_steer(delivered, "s1", "t1", "delivered", SteerAck::Accepted);
-        daemon.settle_steer(unconsumed, "s1", "t1", "unconsumed", SteerAck::Accepted);
-        daemon.deliver_steering("t1", "delivered", "same");
-        assert_eq!(daemon.turns.get_untracked().len(), 1);
-        assert_eq!(daemon.steering_prompts.get_untracked().len(), 1);
-        assert_eq!(daemon.queued_prompts.get_untracked().len(), 1);
-    }
-
-    #[test]
-    fn steering_recovery_keeps_unknown_and_newer_stop_and_retires_stale_focus() {
-        let daemon = wrapper_daemon();
-        daemon.streaming.set(true);
-        daemon.active_turn_id.set(Some("newer".into()));
-        let id = steering_row(&daemon, "same", Some("a"));
-        daemon.settle_steer(id, "s1", "t1", "a", SteerAck::Unknown);
-        let detail = steering_detail(&[("a", "unknown")], true);
-        assert!(daemon
-            .commit_session_projection_with("s1", 5, async {
-                Ok((detail, SnapshotSettle::Fresh(vec![])))
-            })
-            .now_or_never()
-            .unwrap()
-            .is_ok());
-        assert_eq!(
-            daemon.active_turn_id.get_untracked().as_deref(),
-            Some("newer")
-        );
-        assert!(daemon.streaming.get_untracked());
-        assert!(daemon.steering_prompts.get_untracked()[0].unresolved);
-        assert!(daemon.queued_prompts.get_untracked().is_empty());
-        let reply = RefCell::new(None);
-        let mut old = Box::pin(daemon.commit_session_projection_with(
-            "s1",
-            5,
-            std::future::poll_fn(|_| {
-                reply
-                    .borrow_mut()
-                    .take()
-                    .map_or(std::task::Poll::Pending, std::task::Poll::Ready)
-            }),
-        ));
-        assert!(old.as_mut().now_or_never().is_none());
-        daemon.session_id.set(Some("s2".into()));
-        *reply.borrow_mut() = Some(Ok((
-            steering_detail(&[("a", "unconsumed")], true),
-            SnapshotSettle::Fresh(vec![]),
-        )));
-        assert!(old.as_mut().now_or_never().unwrap().is_err());
-        assert!(daemon.queued_prompts.get_untracked().is_empty());
-        assert_eq!(daemon.steering_prompts.get_untracked().len(), 1);
-    }
-
-    #[test]
-    fn steering_recovery_ambiguous_delayed_delivery_refreshes_without_duplicate() {
-        for local in [false, true] {
-            for unknown in [false, true] {
-                let daemon = wrapper_daemon();
-                if local {
-                    steering_row(&daemon, "same", Some("a"));
-                }
-                let mut detail = steering_detail(&[("a", "unknown")], true);
-                if !unknown {
-                    detail.steering = None;
-                }
-                run_wrapper(&daemon, detail.clone(), SnapshotSettle::Fresh(vec![]));
-                assert!(
-                    daemon.deliver_steering("t1", "a", "same"),
-                    "refresh instead of ambiguous append"
-                );
-                assert_eq!(daemon.turns.get_untracked().len(), 1);
-                if local {
-                    assert_eq!(daemon.steering_prompts.get_untracked().len(), 1);
-                }
-                assert!(
-                    !daemon.deliver_steering("t1", "a", "same"),
-                    "duplicate event is inert"
-                );
-                assert!(daemon
-                    .commit_session_projection_with("s1", 5, async {
-                        Ok((detail, SnapshotSettle::Fresh(vec![])))
-                    })
-                    .now_or_never()
-                    .unwrap()
-                    .is_ok());
-                assert!(daemon.steering_prompts.get_untracked().is_empty());
-                assert_eq!(daemon.turns.get_untracked().len(), 1);
-                assert!(daemon.queued_prompts.get_untracked().is_empty());
-            }
-        }
-    }
-
-    #[test]
-    fn steering_recovery_coherence_retries_are_bounded_and_fail_visibly() {
-        for fail_forever in [false, true] {
-            let daemon = wrapper_daemon();
-            steering_row(&daemon, "pending", Some("a"));
-            let reads = Cell::new(0);
-            let result = daemon
-                .recover_session_projection_with(
-                    "s1",
-                    5,
-                    || {
-                        reads.set(reads.get() + 1);
-                        let result = if fail_forever || reads.get() == 1 {
-                            Err(session_fetch_error(
-                                503,
-                                r#"{"ok":false,"error":"session_snapshot_changed"}"#,
-                            ))
-                        } else {
-                            Ok((
-                                steering_detail(&[("a", "unconsumed")], true),
-                                SnapshotSettle::Fresh(vec![]),
-                            ))
-                        };
-                        async move { result }
-                    },
-                    || async {},
-                )
-                .now_or_never()
-                .unwrap();
-            if fail_forever {
-                assert_eq!(reads.get(), 4);
-                daemon.finish_session_projection("s1", 5, result);
-                assert!(daemon
-                    .status
-                    .get_untracked()
-                    .starts_with("session load failed:"));
-                assert_eq!(daemon.steering_prompts.get_untracked().len(), 1);
-                assert!(daemon.queued_prompts.get_untracked().is_empty());
-            } else {
-                assert!(result.is_ok());
-                assert_eq!(reads.get(), 2);
-                assert_eq!(daemon.queued_prompts.get_untracked().len(), 1);
-            }
-        }
-        let daemon = wrapper_daemon();
-        let ready = Cell::new(false);
-        let mut retry = Box::pin(daemon.recover_session_projection_with(
-            "s1",
-            5,
-            || async { Err("session_snapshot_changed".into()) },
-            || {
-                std::future::poll_fn(|_| {
-                    if ready.get() {
-                        std::task::Poll::Ready(())
-                    } else {
-                        std::task::Poll::Pending
-                    }
-                })
-            },
-        ));
-        assert!(retry.as_mut().now_or_never().is_none());
-        let epoch = daemon.session_projection_epoch.get_untracked();
-        assert!(daemon
-            .commit_session_projection_with("s1", 5, async {
-                Ok((minimal_detail(), SnapshotSettle::Fresh(vec![])))
-            })
-            .now_or_never()
-            .unwrap()
-            .is_ok());
-        assert!(daemon.session_projection_epoch.get_untracked() > epoch);
-        ready.set(true);
-        let retired = retry.as_mut().now_or_never().unwrap();
-        assert_eq!(retired, Err(SESSION_PROJECTION_RETIRED.into()));
-        daemon.finish_session_projection("s1", 5, retired);
-        assert_eq!(daemon.status.get_untracked(), "session loaded");
-    }
-
-    #[test]
-    fn steering_ack_completion_owns_recovery_failure_and_retires_stale_context() {
-        for error in ["session_snapshot_changed", "network unavailable"] {
-            let daemon = wrapper_daemon();
-            steering_row(&daemon, "pending", Some("a"));
-            let id = daemon.steering_prompts.get_untracked()[0].id;
-            let url = daemon.url.get_untracked();
-            let calls = Cell::new(0);
-            daemon.settle_steer_ack_with(
-                &url,
-                id,
-                "s1",
-                "t1",
-                "a",
-                SteerAck::Accepted,
-                |daemon, session_id, generation| {
-                    calls.set(calls.get() + 1);
-                    assert_eq!((session_id.as_str(), generation), ("s1", 5));
-                    daemon.finish_session_projection(&session_id, generation, Err(error.into()));
-                },
-            );
-            assert_eq!(calls.get(), 1);
-            assert!(daemon
-                .status
-                .get_untracked()
-                .starts_with("session load failed:"));
-            assert!(daemon.steering_prompts.get_untracked()[0].unresolved);
-            assert!(daemon.queued_prompts.get_untracked().is_empty());
-            daemon.settle_steer_ack_with(
-                "different endpoint",
-                id,
-                "s1",
-                "t1",
-                "a",
-                SteerAck::Refused,
-                |_, _, _| panic!("old endpoint must not recover"),
-            );
-            assert!(daemon.queued_prompts.get_untracked().is_empty());
-            daemon.session_id.set(Some("s2".into()));
-            daemon.settle_steer_ack_with(
-                &url,
-                id,
-                "s1",
-                "t1",
-                "a",
-                SteerAck::Accepted,
-                |_, _, _| panic!("old focus must not recover"),
-            );
-        }
-    }
-
-    #[test]
-    fn steering_oversized_attachment_refusal_preserves_wire_prompt_once() {
-        let daemon = wrapper_daemon();
-        let wire = format!(
-            "Review this\n\n--- BEGIN ATTACHED CONTEXT: notes.txt (text/plain) ---\n{}\n--- END ATTACHED CONTEXT: notes.txt ---\n",
-            "x".repeat(64 * 1024)
-        );
-        let display = "Review this · notes.txt";
-        let id = steering_row(&daemon, &wire, Some("a"));
-        daemon
-            .steering_prompts
-            .update(|rows| rows[0].display = display.into());
-        let body = json!({
-            "ok": false,
-            "error": "message is too long to steer; send it as a new turn"
-        });
-        let ack = classify_steer_ack(413, Some(&body), "a");
-        assert_eq!(ack, SteerAck::Refused);
-        let url = daemon.url.get_untracked();
-        let mut queued_id = None;
-        for _ in 0..2 {
-            daemon.settle_steer_ack_with(
-                &url,
-                id,
-                "s1",
-                "t1",
-                "a",
-                ack,
-                |_, session_id, generation| {
-                    assert_eq!((session_id.as_str(), generation), ("s1", 5));
-                },
-            );
-            let queued = daemon.queued_prompts.get_untracked();
-            assert_eq!(queued.len(), 1);
-            assert_eq!(*queued_id.get_or_insert(queued[0].id), queued[0].id);
-        }
-        assert!(daemon.steering_prompts.get_untracked().is_empty());
-        let queued = daemon.queued_prompts.get_untracked();
-        assert_eq!(queued.len(), 1);
-        assert_eq!(queued[0].prompt, wire);
-        assert_eq!(queued[0].display, display);
-        assert_eq!(queued[0].client_type, "surface-web");
-        assert!(queued[0].images.is_empty());
-    }
-
-    #[test]
-    fn steering_ambiguous_oversize_response_never_requeues() {
-        let error = "message is too long to steer; send it as a new turn";
-        for (status, body) in [
-            (413, None),
-            (413, Some(json!({"error": error}))),
-            (413, Some(json!({"ok": true, "error": error}))),
-            (413, Some(json!({"ok": "false", "error": error}))),
-            (
-                413,
-                Some(json!({"ok": false, "error": "request too large"})),
-            ),
-            (413, Some(json!({"ok": false, "error": null}))),
-            (413, Some(json!("proxy rejection"))),
-            (400, Some(json!({"ok": false, "error": error}))),
-            (500, Some(json!({"ok": false, "error": error}))),
-        ] {
-            let daemon = wrapper_daemon();
-            let id = steering_row(&daemon, "keep me", Some("a"));
-            let ack = classify_steer_ack(status, body.as_ref(), "a");
-            assert_eq!(ack, SteerAck::Unknown);
-            let url = daemon.url.get_untracked();
-            daemon.settle_steer_ack_with(&url, id, "s1", "t1", "a", ack, |_, _, _| {});
-            assert!(daemon.queued_prompts.get_untracked().is_empty());
-            assert!(daemon.steering_prompts.get_untracked()[0].unresolved);
-        }
-    }
-
-    #[test]
-    fn steering_ack_requires_exact_identity_and_definitive_refusal() {
-        assert_eq!(
-            classify_steer_ack(202, Some(&json!({"steer_id":"a"})), "a"),
-            SteerAck::Accepted
-        );
-        for (status, body) in [
-            (202, json!({"steer_id":"other"})),
-            (202, json!({})),
-            (500, json!({})),
-            (409, json!({"error":"steering_turn_unknown"})),
-            (409, json!({"error":"steering_identity_conflict"})),
-        ] {
-            assert_eq!(
-                classify_steer_ack(status, Some(&body), "a"),
-                SteerAck::Unknown
-            );
-        }
-        assert_eq!(
-            classify_steer_ack(429, Some(&json!({"error":"steering_full"})), "a"),
-            SteerAck::Refused
-        );
-        let daemon = wrapper_daemon();
-        let id = steering_row(&daemon, "same", Some("a"));
-        daemon.settle_steer(id, "s1", "wrong-turn", "a", SteerAck::Refused);
-        assert!(daemon.queued_prompts.get_untracked().is_empty());
-        daemon.settle_steer(id, "s1", "t1", "a", SteerAck::Unknown);
-        assert!(daemon.steering_prompts.get_untracked()[0].unresolved);
-        let mut detail = steering_detail(&[("a", "pending")], false);
-        detail.state = Some(SessionRunState::Running);
-        detail.active_requests = vec!["t1".into()];
-        run_wrapper(&daemon, detail, SnapshotSettle::Fresh(vec![]));
-        assert!(!daemon.steering_prompts.get_untracked()[0].unresolved);
     }
 
     #[test]
@@ -15152,7 +14714,7 @@ mod tests {
     fn an_accepted_steer_stays_pending_under_its_daemon_id() {
         let daemon = Daemon::dummy();
         let id = steering_row(&daemon, "use tabs", None);
-        daemon.settle_steer(id, "s1", "t1", "steer-1", SteerAck::Accepted);
+        daemon.settle_steer(id, Some("steer-1".into()));
         let rows = daemon.steering_prompts.get_untracked();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].steer_id.as_deref(), Some("steer-1"));
@@ -15164,7 +14726,7 @@ mod tests {
         let daemon = Daemon::dummy();
         daemon.enqueue_prompt("earlier".into(), "earlier".into(), "surface-web");
         let id = steering_row(&daemon, "use tabs", None);
-        daemon.settle_steer(id, "s1", "t1", "steer-1", SteerAck::Refused);
+        daemon.settle_steer(id, None);
         assert!(daemon.steering_prompts.get_untracked().is_empty());
         let queued = daemon.queued_prompts.get_untracked();
         assert_eq!(queued.len(), 2);
@@ -15186,7 +14748,7 @@ mod tests {
             .turns
             .set(vec![Turn::user("start"), Turn::assistant("t1".into())]);
         steering_row(&daemon, "use tabs", Some("steer-1"));
-        daemon.deliver_steering("t1", "steer-1", "use tabs");
+        daemon.deliver_steering("steer-1", "use tabs");
         assert!(daemon.steering_prompts.get_untracked().is_empty());
         daemon.turns.update(|t| {
             // The next round's output for the same turn renders BELOW the
@@ -15203,13 +14765,13 @@ mod tests {
     }
 
     #[test]
-    fn a_delivery_that_outruns_the_post_answer_matches_preallocated_identity() {
+    fn a_delivery_that_outruns_the_post_answer_matches_by_text() {
         let daemon = Daemon::dummy();
-        let id = steering_row(&daemon, "  use tabs ", Some("steer-9"));
-        daemon.deliver_steering("t1", "steer-9", "use tabs");
+        let id = steering_row(&daemon, "  use tabs ", None);
+        daemon.deliver_steering("steer-9", "use tabs");
         assert!(daemon.steering_prompts.get_untracked().is_empty());
         // The late 202 for the already-delivered row is a no-op.
-        daemon.settle_steer(id, "s1", "t1", "steer-9", SteerAck::Accepted);
+        daemon.settle_steer(id, Some("steer-9".into()));
         assert!(daemon.steering_prompts.get_untracked().is_empty());
         assert!(daemon.queued_prompts.get_untracked().is_empty());
         assert_eq!(daemon.turns.get_untracked().len(), 1);
@@ -15218,11 +14780,33 @@ mod tests {
     #[test]
     fn a_delivery_from_another_client_still_renders() {
         let daemon = Daemon::dummy();
-        daemon.session_id.set(Some("s1".into()));
-        daemon.deliver_steering("t1", "elsewhere", "from the phone");
+        daemon.deliver_steering("elsewhere", "from the phone");
         let turns = daemon.turns.get_untracked();
         assert_eq!(turns.len(), 1);
         assert!(matches!(&turns[0].blocks[0], Block::Text(t) if t == "from the phone"));
+    }
+
+    #[test]
+    fn a_finished_turn_sends_its_undelivered_steers_next() {
+        let daemon = Daemon::dummy();
+        daemon.enqueue_prompt("later".into(), "later".into(), "surface-web");
+        steering_row(&daemon, "accepted, never read", Some("steer-1"));
+        steering_row(&daemon, "still in flight", None);
+        daemon.requeue_undelivered_steering();
+        let queued = daemon.queued_prompts.get_untracked();
+        assert_eq!(queued.len(), 2);
+        assert_eq!(
+            queued[0].prompt, "accepted, never read",
+            "ahead of the queue"
+        );
+        assert_eq!(queued[1].prompt, "later");
+        let pending = daemon.steering_prompts.get_untracked();
+        assert_eq!(
+            pending.len(),
+            1,
+            "an in-flight steer settles on its own answer"
+        );
+        assert_eq!(pending[0].prompt, "still in flight");
     }
 
     #[test]
@@ -15235,6 +14819,372 @@ mod tests {
         steering_row(&daemon, "c", None);
         daemon.select_session_state("s2", "other".into());
         assert!(daemon.steering_prompts.get_untracked().is_empty());
+    }
+
+    // ── Steering reconciliation across snapshot hydration (#148) ──────────
+    //
+    // SSE is a live tail: a `steering_delivered` or `turn_finished` emitted
+    // during a connection gap never re-arrives, so the reconnect projection
+    // must reconcile pending rows against the daemon's per-steer outcome
+    // records — by steer_id/turn identity, never by text. These drive the
+    // REAL post-fetch wrapper (`apply_session_projection`) exactly like the
+    // wrapper regressions above, with the outcome ledger injected through the
+    // session detail.
+
+    fn steer_outcome(
+        steer_id: &str,
+        turn_id: &str,
+        status: SteeringOutcomeStatusWire,
+    ) -> SteeringOutcomeWire {
+        SteeringOutcomeWire {
+            steer_id: steer_id.into(),
+            turn_id: turn_id.into(),
+            status,
+        }
+    }
+
+    /// Reconnect hydration detail carrying a steering ledger and optional
+    /// live/finished turn records.
+    fn rehydrate_detail(
+        steering: Vec<SteeringOutcomeWire>,
+        active_requests: Vec<&str>,
+        finished_requests: Vec<&str>,
+    ) -> SessionDetail {
+        SessionDetail {
+            active_requests: active_requests.into_iter().map(str::to_string).collect(),
+            steering,
+            finished_requests: finished_requests.into_iter().map(str::to_string).collect(),
+            ..wrapper_detail(vec![], vec![user_entry("start"), user_entry("use tabs")])
+        }
+    }
+
+    // Regression 1 (#148): the steer was ACCEPTED and DELIVERED inside the
+    // gap. The `steering_delivered` frame is gone forever; only the ledger
+    // record proves delivery. The row must disappear and the transcript must
+    // show the message exactly ONCE (from the snapshot — no local duplicate).
+    #[test]
+    fn reg148_delivered_in_gap_row_disappears_without_duplicating_transcript() {
+        let daemon = wrapper_daemon();
+        steering_row_in_turn(&daemon, "use tabs", Some("steer-1"), Some("t1"));
+        let detail = rehydrate_detail(
+            vec![steer_outcome(
+                "steer-1",
+                "t1",
+                SteeringOutcomeStatusWire::Delivered,
+            )],
+            vec![],
+            vec!["t1"],
+        );
+        run_wrapper(&daemon, detail, SnapshotSettle::Fresh(Vec::new()));
+        assert!(
+            daemon.steering_prompts.get_untracked().is_empty(),
+            "a confirmed delivery resolves the pending row"
+        );
+        assert!(daemon.queued_prompts.get_untracked().is_empty());
+        let turns = daemon.turns.get_untracked();
+        let delivered = turns
+            .iter()
+            .filter(|turn| matches!(&turn.blocks[..], [Block::Text(t)] if t == "use tabs"))
+            .count();
+        assert_eq!(
+            delivered, 1,
+            "the snapshot transcript is the only copy — reconciliation adds no duplicate"
+        );
+    }
+
+    // Regression 2 (#148): the steer was accepted but the turn finished in
+    // the gap without consuming it (the daemon's record says dropped). The
+    // missed `turn_finished` means the connected requeue never fired; the
+    // hydration must queue it exactly once, ahead of the existing queue.
+    #[test]
+    fn reg148_unconsumed_in_gap_queues_once_ahead_of_existing_queue() {
+        let daemon = wrapper_daemon();
+        daemon.enqueue_prompt("later".into(), "later".into(), "surface-web");
+        steering_row_in_turn(&daemon, "use tabs", Some("steer-1"), Some("t1"));
+        let detail = rehydrate_detail(
+            vec![steer_outcome(
+                "steer-1",
+                "t1",
+                SteeringOutcomeStatusWire::Dropped,
+            )],
+            vec![],
+            vec!["t1"],
+        );
+        run_wrapper(&daemon, detail, SnapshotSettle::Fresh(Vec::new()));
+        assert!(daemon.steering_prompts.get_untracked().is_empty());
+        let queued = daemon.queued_prompts.get_untracked();
+        assert_eq!(queued.len(), 2, "queued exactly once");
+        assert_eq!(queued[0].prompt, "use tabs", "ahead of the existing queue");
+        assert_eq!(queued[0].display, "shown: use tabs");
+        assert_eq!(queued[1].prompt, "later");
+        assert_eq!(
+            daemon.status.get_untracked(),
+            "the turn ended before reading your message · sending it next"
+        );
+    }
+
+    // Regression 3 (#148): identical text is not delivery proof. The
+    // snapshot transcript contains the same text (another client's steer, or
+    // the turn's own prompt) and the ledger records a DIFFERENT steer id: the
+    // row must not resolve against either.
+    #[test]
+    fn reg148_identical_text_with_different_identity_stays_unresolved() {
+        let daemon = wrapper_daemon();
+        steering_row_in_turn(&daemon, "use tabs", Some("steer-2"), Some("t1"));
+        let detail = rehydrate_detail(
+            // steer-9 is someone else's steer with the same text; the row's
+            // own steer-2 has no record at all and its turn is finished.
+            vec![steer_outcome(
+                "steer-9",
+                "t1",
+                SteeringOutcomeStatusWire::Delivered,
+            )],
+            vec![],
+            vec!["t1"],
+        );
+        run_wrapper(&daemon, detail, SnapshotSettle::Fresh(Vec::new()));
+        let rows = daemon.steering_prompts.get_untracked();
+        assert_eq!(rows.len(), 1, "text identity never resolves a row");
+        assert_eq!(rows[0].steer_id.as_deref(), Some("steer-2"));
+        assert!(
+            rows[0].unresolved,
+            "missing outcome pins the row unresolved"
+        );
+        assert!(daemon.queued_prompts.get_untracked().is_empty());
+        // A delivered record for the row's steer id but bound to a DIFFERENT
+        // turn is an identity conflict, not a resolution.
+        let daemon = wrapper_daemon();
+        steering_row_in_turn(&daemon, "use tabs", Some("steer-2"), Some("t1"));
+        let detail = rehydrate_detail(
+            vec![steer_outcome(
+                "steer-2",
+                "t9",
+                SteeringOutcomeStatusWire::Delivered,
+            )],
+            vec![],
+            vec!["t1"],
+        );
+        run_wrapper(&daemon, detail, SnapshotSettle::Fresh(Vec::new()));
+        let rows = daemon.steering_prompts.get_untracked();
+        assert_eq!(
+            rows.len(),
+            1,
+            "a different turn's outcome never resolves a row"
+        );
+        assert!(rows[0].unresolved);
+        assert!(daemon.queued_prompts.get_untracked().is_empty());
+    }
+
+    // Regression 4 (#148): the steer POST's answer was lost or arrives late.
+    // An in-flight row at hydration gains no identity; a late acceptance
+    // leaves it pending but pinned unresolved, and neither a later
+    // turn_finished nor the requeue path may auto-resend it. An explicit
+    // refusal still queues (the daemon answered: it never accepted it).
+    #[test]
+    fn reg148_lost_or_late_acceptance_never_auto_resends() {
+        // (a) In-flight at hydration, accepted afterwards.
+        let daemon = wrapper_daemon();
+        let id = steering_row(&daemon, "use tabs", None);
+        run_wrapper(
+            &daemon,
+            rehydrate_detail(vec![], vec![], vec![]),
+            SnapshotSettle::Fresh(Vec::new()),
+        );
+        daemon.settle_steer(id, Some("steer-1".into()));
+        let rows = daemon.steering_prompts.get_untracked();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].steer_id.as_deref(), Some("steer-1"));
+        assert!(rows[0].unresolved, "the gap made its outcome uncertain");
+        daemon.requeue_undelivered_steering();
+        assert_eq!(
+            daemon.steering_prompts.get_untracked().len(),
+            1,
+            "an unresolved row is never auto-requeued"
+        );
+        assert!(daemon.queued_prompts.get_untracked().is_empty());
+        // A later delivery frame still resolves it positively.
+        daemon.deliver_steering("steer-1", "use tabs");
+        assert!(daemon.steering_prompts.get_untracked().is_empty());
+
+        // (b) The POST never returned an answer at all.
+        let daemon = wrapper_daemon();
+        let id = steering_row(&daemon, "use tabs", None);
+        daemon.lose_steer(id);
+        let rows = daemon.steering_prompts.get_untracked();
+        assert_eq!(rows.len(), 1, "a lost answer keeps the row visible");
+        assert!(rows[0].unresolved);
+        assert!(daemon.queued_prompts.get_untracked().is_empty());
+
+        // (c) An explicit refusal (an HTTP answer) still queues.
+        let daemon = wrapper_daemon();
+        let id = steering_row(&daemon, "use tabs", None);
+        daemon.settle_steer(id, None);
+        assert!(daemon.steering_prompts.get_untracked().is_empty());
+        assert_eq!(daemon.queued_prompts.get_untracked().len(), 1);
+    }
+
+    // Regression 5 (#148): repeated reconnects re-hydrate the same session.
+    // Reconciliation must be idempotent — a resolved row cannot queue twice
+    // or leave a second copy behind.
+    #[test]
+    fn reg148_repeated_reconnect_reconciles_idempotently() {
+        let daemon = wrapper_daemon();
+        daemon.enqueue_prompt("later".into(), "later".into(), "surface-web");
+        steering_row_in_turn(&daemon, "use tabs", Some("steer-1"), Some("t1"));
+        let detail = rehydrate_detail(
+            vec![steer_outcome(
+                "steer-1",
+                "t1",
+                SteeringOutcomeStatusWire::Dropped,
+            )],
+            vec![],
+            vec!["t1"],
+        );
+        run_wrapper(&daemon, detail, SnapshotSettle::Fresh(Vec::new()));
+        let snapshot_after_first = daemon.queued_prompts.get_untracked();
+        assert_eq!(snapshot_after_first.len(), 2);
+        // The second reconnect sees the same authoritative snapshot.
+        let daemon2 = daemon.clone();
+        run_wrapper(
+            &daemon2,
+            rehydrate_detail(
+                vec![steer_outcome(
+                    "steer-1",
+                    "t1",
+                    SteeringOutcomeStatusWire::Dropped,
+                )],
+                vec![],
+                vec!["t1"],
+            ),
+            SnapshotSettle::Fresh(Vec::new()),
+        );
+        assert!(daemon.steering_prompts.get_untracked().is_empty());
+        assert_eq!(
+            daemon.queued_prompts.get_untracked().len(),
+            2,
+            "the row is gone after the first pass — the second queues nothing new"
+        );
+    }
+
+    // Regression 6 (#148): a retired snapshot (session focus or SSE
+    // generation moved during the fetch) must reconcile NOTHING — the rows
+    // belong to the session/generation the surface is on now.
+    #[test]
+    fn reg148_retired_snapshot_reconciles_no_steering_rows() {
+        let daemon = wrapper_daemon();
+        steering_row_in_turn(&daemon, "use tabs", Some("steer-1"), Some("t1"));
+        let rows_before = daemon.steering_prompts.get_untracked();
+        let queue_before = daemon.queued_prompts.get_untracked();
+        // Stale generation (surface is on 5; snapshot captured 4).
+        let epoch = daemon.claim_permission_epoch();
+        let outcome = apply_session_projection(
+            &daemon.commit_signals(),
+            "s1",
+            4,
+            0,
+            epoch,
+            rehydrate_detail(
+                vec![steer_outcome(
+                    "steer-1",
+                    "t1",
+                    SteeringOutcomeStatusWire::Dropped,
+                )],
+                vec![],
+                vec!["t1"],
+            ),
+            SnapshotSettle::Fresh(Vec::new()),
+        );
+        assert!(outcome.is_err(), "a retired snapshot must not commit");
+        // Wrong focus: a snapshot for another session.
+        let epoch = daemon.claim_permission_epoch();
+        let outcome = apply_session_projection(
+            &daemon.commit_signals(),
+            "s9",
+            5,
+            0,
+            epoch,
+            rehydrate_detail(
+                vec![steer_outcome(
+                    "steer-1",
+                    "t1",
+                    SteeringOutcomeStatusWire::Dropped,
+                )],
+                vec![],
+                vec!["t1"],
+            ),
+            SnapshotSettle::Fresh(Vec::new()),
+        );
+        assert!(outcome.is_err());
+        assert_eq!(
+            daemon.steering_prompts.get_untracked(),
+            rows_before,
+            "a retired snapshot must not touch pending rows"
+        );
+        assert_eq!(daemon.queued_prompts.get_untracked(), queue_before);
+    }
+
+    // Companion to regression 2's negative: a row whose steer is still
+    // waiting in a LIVE turn's inbox has no record yet — it must stay pending
+    // with its normal lifecycle, not be pinned unresolved by the gap pass.
+    #[test]
+    fn reg148_live_turn_without_record_stays_pending_unpinned() {
+        let daemon = wrapper_daemon();
+        steering_row_in_turn(&daemon, "use tabs", Some("steer-1"), Some("t-live"));
+        let mut detail = rehydrate_detail(vec![], vec!["t-live"], vec![]);
+        detail.state = Some(SessionRunState::Running);
+        run_wrapper(&daemon, detail, SnapshotSettle::Fresh(Vec::new()));
+        let rows = daemon.steering_prompts.get_untracked();
+        assert_eq!(rows.len(), 1, "still waiting in the daemon's inbox");
+        assert!(
+            !rows[0].unresolved,
+            "a live turn has not produced an outcome yet"
+        );
+        // And the connected finish still requeues it exactly once.
+        daemon.requeue_undelivered_steering();
+        assert!(daemon.steering_prompts.get_untracked().is_empty());
+        assert_eq!(daemon.queued_prompts.get_untracked().len(), 1);
+    }
+
+    // Stale Stop target (#148): the turn finished inside the gap and the
+    // daemon's finished-request record names it. Terminal hydration must
+    // clear the preserved local Stop target instead of retaining it forever.
+    #[test]
+    fn reg148_terminal_hydration_clears_stale_stop_target() {
+        let daemon = wrapper_daemon();
+        daemon.streaming.set(true);
+        daemon.active_turn_id.set(Some("t1".into()));
+        let detail = rehydrate_detail(vec![], vec![], vec!["t1"]);
+        run_wrapper(&daemon, detail, SnapshotSettle::Fresh(Vec::new()));
+        assert!(
+            !daemon.streaming.get_untracked(),
+            "a turn the daemon names finished must not stream"
+        );
+        assert_eq!(
+            daemon.active_turn_id.get_untracked(),
+            None,
+            "the stale Stop target is cleared"
+        );
+    }
+
+    // The race the preserve guard exists for: TurnStarted arrived but the
+    // daemon's request registry had not registered it when the snapshot was
+    // taken (no finished record for it either). The local Stop target must
+    // still be preserved — and an older daemon without the field behaves the
+    // same way (empty list).
+    #[test]
+    fn reg148_registration_race_and_legacy_daemon_preserve_stop_target() {
+        for finished in [vec!["t9"], Vec::<&str>::new()] {
+            let daemon = wrapper_daemon();
+            daemon.streaming.set(true);
+            daemon.active_turn_id.set(Some("t1".into()));
+            let detail = rehydrate_detail(vec![], vec![], finished.clone());
+            run_wrapper(&daemon, detail, SnapshotSettle::Fresh(Vec::new()));
+            assert!(
+                daemon.streaming.get_untracked(),
+                "an unregistered turn keeps its local Stop target"
+            );
+            assert_eq!(daemon.active_turn_id.get_untracked().as_deref(), Some("t1"));
+        }
     }
 
     // ── Queued prompts (send while a turn runs) ─────────────────────────

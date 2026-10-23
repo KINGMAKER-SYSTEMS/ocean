@@ -40,7 +40,7 @@ This child contract governs current architecture, operations, cross-repository r
 - `TEAM_ONBOARDING.md` owns public package/host-identity preparation only. Keep repository routing canonical, package commands source-backed, and PR41 identity and supervised/federation installation prerequisites explicit. Never include private host/network/access inventories or claim configuration writes establish runtime activation.
   Package access targets `@kingmaker-systems/ocean`; personal npm installations
   require the package guide's explicit migration even when Bun is available.
-- Rooms means durable `/v1/rooms/persistent/*` collaboration plus the independent LiveKit token route; Track-0 projection-room material is historical.
+- Rooms means durable `/v1/rooms/persistent/*` collaboration plus the independent LiveKit token route; Track-0 projection-room material is historical. The room-route table in `OCEAN_ECOSYSTEM_CONTRACT.md` and the two route counts in `ARCHITECTURE.md` are executable claims pinned by the daemon's `router_contract` tests: change them only together with `room_routes()`, and derive each row's auth rule from the handler rather than the intended design. The Auth column is itself executable: `router_contract_operator_gates_match_the_room_route_table` holds every row's `X-Ocean-Operator` claim against the router and pins the per-reader room-state rows (read cursor, prefs: loopback trust by design, no operator gate) and the list of operator-ungated mutations, so a row's auth wording changes only with the handler.
 - `specs/2026-09-01-ocean-rooms-definition-of-done.md` is the active
   cross-repository Rooms finish-line contract. It records member-visible,
   executable acceptance criteria and remaining ownership across Ocean OS,

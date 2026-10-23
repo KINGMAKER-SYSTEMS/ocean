@@ -315,28 +315,18 @@ token to browser code, bundle it, or cache it in client storage.
   active-turn action. Its model panel is anchored to the compact composer.
   Browser float mode uses Ocean's background; native overlay transparency is
   gated through the existing `host::running_in_tauri` seam.
-- Enter during a steerable turn sends text with a CSPRNG UUID and the captured
-  originating turn to the existing steer route. Pending rows retain exact
-  session/turn/steer identity before the POST; identical text never correlates
-  delivery. Definitive refusal or an admitted unconsumed receipt queues once.
-  The daemon's exact 413/ok:false/oversized-steering error is a pre-admission
-  refusal: preserve the full attached-context wire prompt and compact display
-  in that once-only queue fallback. Generic/malformed/proxy 413 stays unknown.
-  Lost/malformed acknowledgements and missing/restarted/evicted receipt evidence
-  retain the existing row as outcome unknown, without resending. Full projection
-  admission (focus, SSE generation, projection epoch and activity revision) owns
-  reconciliation: delivered receipts remove rows without adding transcript text,
-  pending stays pending, and matching ended-turn proof clears only that old Stop
-  target. Bounded delivered IDs suppress late SSE already represented by a snapshot.
-  Ambiguous deliveries after hydration refresh the authoritative transcript instead
-  of appending; durable observed-event IDs settle only after the admitted post-event
-  read. ACK, finish and delayed-delivery recovery use the shared owning projection
-  caller. Typed snapshot churn retries four times with guarded delays, then exposes
-  failure and unresolved rows; retired callers never publish or retry.
-  Turn finish requests receipt reconciliation, never blind requeue. New Session,
-  session switch and explicit Stop keep their existing local queue-clear behavior.
-  Verify with UI cargo test -p ocean-surface-ui steering_ and the real WASM bundle.
-
+- Enter while one of this surface's turns is streaming steers it: the text
+  goes to `POST /v1/agent/sessions/{id}/steer` and shows as a
+  `turn--steering` row ("Steering · next step", no remove control) until the
+  daemon's `steering_delivered` frame, when it becomes a user turn at the
+  point it landed and the next round renders below it. A refusal (409/429/
+  network) sends it to the queue; an accepted steer still pending when the
+  active turn's `turn_finished` arrives goes to the FRONT of the queue and runs
+  as the next turn. Delivery matches by `steer_id`, or by text for a row whose
+  POST answer has not arrived yet. Messages with staged images, voice
+  prompts, and sends with no acknowledged turn take the queue instead. Stop,
+  New Session and a session switch clear pending steers with the queue.
+>>>>>>> origin/main
 - The main composer never refuses a send because a turn is running. A prompt
   that cannot steer (see above), sent while earlier prompts are queued, or
   while the head of the queue is waiting out a busy daemon goes into
@@ -484,6 +474,22 @@ Web surface session UI:
   daemon-owned running/Stop projection and continuing the scoped SSE tail.
   Never quarantine a live session behind client-side detail polling,
   `detail syncing…`, or a manual refresh control.
+- Snapshot hydration reconciles pending steering rows and the Stop target by
+  identity (#148). SSE is a live tail, so `steering_delivered` /
+  `turn_finished` frames missed in a gap never re-arrive: the projection
+  commit matches each accepted row against the daemon's `steering` outcome
+  records (`steer_id` + originating turn — never text), removes confirmed
+  deliveries without duplicating the transcript, queues confirmed drops once
+  ahead of the queue, keeps rows whose turn is still live pending, and pins
+  everything else `unresolved` (visible, never auto-requeued). A steer POST
+  that never returned an answer stays unresolved; an explicit HTTP refusal
+  still queues. A terminal snapshot naming the local turn in
+  `finished_requests` clears the preserved Stop target (the registration race
+  and older daemons keep the old preserve behavior).
+  (PR #129 reconciliation: the desktop candidate's #148 variant — client-minted
+  steer ids, bounded receipt hydration, and typed 503 snapshot-churn retries —
+  was an independent solution of #148 and is superseded by this #156 contract;
+  do not reintroduce or blend the two designs.)
 - The daemon's `event: error` reset frame on `GET /v1/agent/events`
   (published `agent_events_error`: `live_lag`, `anchor_unavailable`,
   `malformed_anchor`, `reset_required`) shares its name with the DOM
@@ -527,6 +533,16 @@ activity, the room details drawer, agent authoring, the S0-S8 slice plan):
 `docs/OCEAN_ROOMS_DESIGN_DIRECTION.md`. It supersedes the rendering bullets of
 `docs/OCEAN_ROOMS_PRODUCT.md`; the contract bullets below describe main as it
 ships today and are updated slice by slice.
+- `docs/OCEAN_ROOMS_PRODUCT.md` is held to the code by
+  `tests/rooms_product_doc_truth.rs` (Rooms DoD 5.4): the access states it
+  names must be exactly `RoomAccessState`'s variants (read from
+  `src/rooms.rs`), every `.rooms-*` class it names must be defined in
+  `styles/` and emitted from production Rust (page or Tauri shell), and every
+  route in its API table must be sent by the page or shell and, in the
+  monorepo, registered by `ocean-daemon`'s router with that method; its
+  create body must show exactly the wake policy `CreateRoomBody::new`
+  attaches. Edit the doc and this guard together; a backticked non-state word
+  on a line that mentions access goes in `ACCESS_LINE_NON_STATES`.
 - The operator-authorized post-G3 product-depth program is governed by
   `docs/specs/2026-08-13-ocean-rooms-post-g3-product-depth.md`. A share link is
   only the admission rail; do not describe Rooms as complete before its
@@ -547,6 +563,26 @@ ships today and are updated slice by slice.
   both `room_message` and `room_access` immediately: messages alone advance the
   room sequence cursor; access projections replace state without a sequence.
   Do not restore transcript polling or consume the global agent-event stream.
+  The tail is the sole forward-ingest path: join, leave, agent add and post
+  responses never re-read `/transcript` (`tests/room_history_follow.rs`).
+- The open response serves the OLDEST rows capped at the daemon's
+  `MAX_TRANSCRIPT_LIMIT` with `has_more` / `next_seq` (OCEAN-249). `open_room`
+  follows `/transcript?after_seq=&limit=` pages (`rooms::OpenCatchUp`) until
+  the daemon reports no more rows, then publishes the whole transcript once
+  and starts the tail from its real frontier, so a long room opens on its
+  newest, contiguous rows with follow pinned, one read advance, and the unread
+  divider computed over the full history. This bounded one-time catch-up on
+  open is explicitly not transcript polling: it runs once per open, stops at
+  the first exhausted page, a non-advancing page, or 50 pages, is cancelled by
+  the room generation on switch, and is the only production `/transcript`
+  reader. Do not add "load older" or any backward paging here (the rail's
+  forward room-list paging is a separate user control; see the room-list
+  paging bullet below); a failed page lands the open on the rows held and the
+  tail's durable replay delivers the rest in order.
+- Room live-follow consumes scroll intent captured by the transcript's own
+  scroll events (`transcript_follow_pinned`), not post-render geometry, so a
+  tall append still follows a pinned reader and never yanks a scrolled one.
+  Only the pin and the "New messages" jump write `scroll_top`.
 - Decoded room-tail frames mutate state only after one shared generation+room
   admission check. Opening and closing a room share one synchronous reset path
   so stale transcript, access, and tail state cannot leak across room identity.
@@ -625,10 +661,43 @@ ships today and are updated slice by slice.
     extension proxy login, so these actions keep the daemon's authority error
     there.
 - The room header has exactly one primary action (Join when not joined) and
-  one overflow (`room_overflow.rs`): Share, Agents, Mute/Unmute, Leave. Agents opens the
+  one overflow (`room_overflow.rs`): Members, Share, Agents, Mute/Unmute, Leave,
+  Close room…. Agents opens the
   per-room agent settings panel (instructions overlay + model) over
   `GET/PUT .../agents/{agent_id}/settings`; these settings are local to this
   Ocean. New secondary room actions go into this overflow, not the header.
+- Closing a room (DoD 4.3, `room_close.rs`; ported from
+  Risingtides-dev/ocean-surface#229): the overflow's `Close room…` item renders
+  only for a viewer the daemon's member lane would accept — `identity_id` (the
+  `/v1/me` owner, non-empty after trimming) on `Room.participants` as a
+  non-`Agent`/`System` row (`close_offered`; `Human`, `Bot`, `Tool` pass) — and
+  only ARMS a modal (`RoomCloseDialog`) whose focused default is `Keep room
+  open`; the modal's own button fires, re-checking the rule at dispatch
+  (`dispatch_check`). `RoomCloseState` and the dialog live at `RoomsWorkspace`
+  scope, outside the header closure that every `open_room` write rebuilds, so a
+  roster frame cannot re-enable the button or unmount a close in flight
+  (`tests/unheld_room_close.rs`). The fire sends
+  `POST /v1/rooms/persistent/{key}/close?actor_id=<me>`, the daemon's MEMBER
+  lane only, on every host: the operator lane (`X-Ocean-Operator`) is
+  deliberately not roster-checked, so close is not an owner-mutation route and
+  the proxy injects nothing (`cargo test -p ocean-surface-proxy room_close`);
+  the Tauri operator transport is not used for the same reason. Reply contract
+  (`classify_close`): `200 {ok:true, closed:true}` is closed; this daemon's
+  close route answers a not-open room with the store's `UnknownRoom` as a JSON
+  `404 {ok:false}` WITHOUT the `room_not_open` marker its read routes carry, so
+  a 404 that decodes (marker or `ok:false`) means the room already closed,
+  while an EMPTY 404 or a 405 is a daemon or proxy without the route; 502/504
+  and a transport error say the close MAY have landed (the daemon commits
+  before it answers; a retry of a landed close reads as already closed);
+  `403 forged_closer`, the roster 403 (no code), 400 and 5xx each get their own
+  sentence. Main has no soft-closed audit view, so both closed outcomes land on
+  the rail: `Rooms::close_room` retires the tail through the shared reset path
+  and `fetch_rooms` drops the row; focus is handed to the rail listbox's tab
+  stop when it fell to `<body>`. The modal traps Tab (`tab_trap`), holds focus
+  on itself while both buttons are disabled in flight, dismisses on Escape
+  (`prevent_default`, so the workspace and window handlers stand down) or the
+  scrim, and returns focus to the overflow trigger. For any non-`Local` access
+  state the copy says the close is local and other nodes keep their copy.
 - Room create (`RoomListRail`) carries an optional workspace (PR F): a
   native `<select>` under the name input defaults to "No workspace" and lists
   the daemon project catalogue's absolute `ProjectInfo.workspace_root`s
@@ -637,13 +706,66 @@ ships today and are updated slice by slice.
   explicit and resets after a successful create; it is never seeded from a
   session cwd, the focused chat's project, or `/tmp`, and a root no longer
   offered is not sent. `CreateRoomBody.workspace_root` is omitted when unset.
+  `CreateRoomBody.trigger_policy` is never omitted: `CreateRoomBody::new`
+  attaches `RoomTriggerPolicy::create_default()` (`on_mention` and
+  `on_thread_reply` on; `on_component_event`, `on_build_failure`,
+  `on_ci_failure` off; no `on_schedule`) to every create, so
+  `Rooms::create_room` takes only the name and folder and no create path can
+  send a policy-less body. That default is the "+ New room" policy in
+  `docs/OCEAN_ROOMS_DESIGN_DIRECTION.md` (Sidebar) and the Gate 1 create
+  flow; ocean-core never convenes on an absent policy, so the `None` the rail
+  used to pass made every Surface room invoke-only against the documented
+  "mention an agent to wake it" expectation. A mention still has to pass the
+  agent binding's activation policy (`mention` / `task_and_thread`; the
+  consent default is `explicit_only`). No policy UI here: a later control
+  writes through the daemon's `PATCH /v1/rooms/persistent/{key}`. Guarded by
+  `create_body_always_carries_the_canonical_wake_policy` (`rooms.rs`) and
+  `product_doc_create_body_carries_the_wake_policy_rooms_rs_sends`
+  (`tests/rooms_product_doc_truth.rs`).
   The daemon binds it once (absolute existing directory, canonicalized;
   otherwise 400 `invalid_workspace_root`, shown as "create failed: workspace
-  folder not found on this Ocean" with the draft kept) and has no route to
-  change it. `Room.workspace_root` decodes as absent for unbound rooms and
+  folder not found on this Ocean" with the draft kept); the daemon's
+  `PATCH /v1/rooms/persistent/{key}` can rebind or unbind it later, but this
+  surface does not call it. `Room.workspace_root` decodes as absent for unbound rooms and
   older daemons; when set, the header shows its folder name read-only
   (`title` = full root). A room turn's folder is agent folder, then room
   folder, then `workspace_root`, else `workspace_unavailable`.
+- The Rooms rail groups rooms by `Room.workspace_root` (`group_rail_rooms` in
+  `room_list.rs`; derived, never stored): first-seen root order, daemon order
+  within a group, unbound rooms last under "Other rooms". Each group is a static
+  `role="group"` labelled by a non-interactive header showing the full,
+  case-preserved root (wrapping, never a basename or ellipsis) and a live count.
+  Headers are not buttons and groups never collapse, so the listbox keeps one
+  roving tab stop and Arrow/Home/End over the flattened grouped order
+  (`rail_room_keys`). Header ids derive from the root, not list position. A
+  shared root is a folder binding, not a daemon Project identity; do not call
+  these project groups.
+- Room-list paging (OCEAN-250): `GET /v1/rooms/persistent` serves one bounded
+  page (`limit` default 100, max 1000; `next_cursor` / `has_more`). The rail
+  renders the daemon-default first page with no query and, while the daemon
+  reports `has_more`, ends with one "Load more rooms" button
+  (`.rooms-workspace__left-more`) after the last workspace group and outside
+  the listbox: a plain tab stop, never an option, so the roving tab stop and
+  the `rail_room_keys` order are unchanged. `Rooms::fetch_rooms_more` sends
+  `?cursor=` for one page at a time (disabled while in flight) and
+  `rooms::RoomListPaging::absorb` appends it in daemon order, dropping ids the
+  rail already holds and dropping the whole page when the list ticket or the
+  pending cursor moved underneath it; an empty or non-advancing page ends
+  paging. Every refetch (create, close, the 8 s silent refresh) sends `?limit=`
+  for the depth the rail has been extended to (clamped to 1000), so a refresh
+  never shrinks the rail back to one page. Forward only; the daemon's
+  `has_more` is the only gate (never a local guess at page size), and older
+  daemons that omit the pair decode as one complete page. Guarded by
+  `load_more_rooms_follows_the_groups_outside_the_listbox` in `room_list.rs`
+  and the `RoomListPaging` tests in `rooms.rs`.
+- Transcript rows whose `author_kind` is `agent` carry an "agent" badge beside
+  the name (`.rooms-workspace__msg-kind`, `format::author_kind_badge`) in the
+  timeline, the thread root and thread replies. It is the mention suggestion's
+  kind label reused: the class shares `.rooms-workspace__mention-kind`'s rule
+  in `styles/rooms-workspace.css` (tokens only, no new colours). Humans and
+  every other kind stay unlabelled, compact system rows never carry it, and
+  grouped rows hide it with the name. `tests/rooms_agent_badge.rs` pins the
+  three emit sites, the shared rule and the agent-only gate.
 - Rooms UI lives in `src/rooms_workspace/` (team-platform P5): `mod.rs`
   owns `RoomsWorkspace`, its shared signals, and the transcript; child
   components are `RoomListRail` (`room_list.rs`), `ChannelComposer`
@@ -670,6 +792,15 @@ ships today and are updated slice by slice.
   the full durable sequence; never mark unseen conversation read to silence a dot.
   Deploy the Surface and daemon attention changes together; older daemon summaries
   can still count hidden audits in unopened rooms.
+- Unread rows also emit `rooms-workspace__room--unread` (bold name; muted rooms
+  never). The transcript's `rooms-workspace__unread-divider` sits above the first
+  visible root past `Rooms.unread_baseline`, which `open_room` locks from the
+  room-list `read_summaries` before the open resets or advances the cursor and
+  `close_room` clears; never derive it from `open_read_cursor` or keep it
+  workspace-local. Compare in the room's read space (`read_cursor.rs`):
+  transcript `seq` for `Local`, `global_sequence` for `Live` (rows without
+  federated metadata are history, not unread), no divider in other states or
+  without a baseline.
 - The timeline hides routine convene, bootstrap, admission and output audit
   rows (`room_messages::is_convene_audit`), including exact labels when the
   daemon omits an agent name; durable records stay untouched.
@@ -703,6 +834,45 @@ ships today and are updated slice by slice.
   The line above the composer shows agents with a live run. Coworker typing
   presence is not built: it would cross Bedrock and needs an operator
   trust-boundary decision. Empty states carry no copy.
+- Room files (ported from Risingtides-dev/ocean-surface `attachments.rs`,
+  legacy main `1b88f862`; now `src/rooms_workspace/attachments.rs`): the
+  right rail's Files mode (Room options → Files; same reveal, Escape and
+  return-focus rules as Members) lists the open room's context files from
+  `GET /v1/rooms/persistent/{key}/attachments` and links each at
+  `GET .../attachments/{id}` with `<a download>` — the daemon serves a type
+  DERIVED from the bytes with `nosniff` + `Content-Disposition: attachment`,
+  so the declared type only picks a glyph and nothing is rendered inline. The
+  composer's paperclip and the panel's `+ file` forward to one hidden
+  `<input type=file>` mounted at `RoomsWorkspace` scope (`AttachmentInput`,
+  outside the `open_room` closure a roster write rebuilds); the pick POSTs
+  the file's raw bytes to `.../attachments?filename=&content_type=&uploader_id=`
+  — metadata in the QUERY, never multipart or a custom header (daemon CORS
+  allows only `content-type`/`authorization`) — with `uploader_id` = the
+  `/v1/me` owner, after the daemon's own guards run client-side first (8 MiB
+  cap, empty file, unusable name; an empty declared type is sent as
+  `application/octet-stream`). `RoomAttachmentsState` lives at workspace
+  scope: the admission Effect `reset()`s it (ticket bump retires in-flight
+  lists, the upload flag goes with the room, the Files mode closes like the
+  other rail modes), an upload completion re-validates `(generation, key)`
+  through `room_is_current`, and the list is re-read after a success (the
+  daemon's System marker row arrives on the tail but does not carry the
+  attachment). Both controls take `access::local_store_write_gate`
+  (Local/Connecting/Live/Recovering; Revoked and unknown held) — NOT
+  `access_allows_writes` — because the write lands in this daemon's store
+  and is never enqueued for a peer; identity is refused at the action, not
+  the control. `DELETE .../attachments/{id}` exists on the daemon and is not
+  called (the legacy surface designed no remove control). Web proxy
+  (`rooms_persistent_shape`): the upload lane forwards the raw body up to
+  `ATTACHMENT_UPLOAD_BODY_LIMIT` (8 MiB + 4096 slack, so a just-over-cap body
+  still earns the daemon's typed 413) under the declared content type, the
+  download lane relays Content-Type / Content-Disposition /
+  X-Content-Type-Options verbatim (re-stamping `application/json` would have
+  undone the daemon's XSS defence), every other shape keeps the 1 MiB JSON
+  ceiling, and no operator key is injected
+  (`cargo test -p ocean-surface-proxy room_attachments`). Guards:
+  `tests/room_attachments_contract.rs` (route literals in the query form,
+  CSS ↔ emitter parity, tokens-only CSS, workspace-scope mount, gate choice,
+  daemon-constant parity) and `tests/rooms_product_doc_truth.rs`.
 - In `styles/rooms-workspace.css` the "Layout & depth (canonical)" section is
   the final say on geometry, density, and depth; change values there rather
   than adding another override layer. Colors only from `tokens.css`.
@@ -742,9 +912,12 @@ ships today and are updated slice by slice.
 - Rooms G1 is daemon-native text collaboration. LiveKit controls stay outside
   the room join, leave, roster, and transcript lifecycle until explicitly
   reintroduced behind a reviewed platform contract.
-- The rooms browser is a flex column; `.rooms-panel__list` keeps
-  `min-height: 0` with vertical overflow so long room lists scroll instead of
-  pushing status/actions outside the viewport.
+- The Rooms rail (`.rooms-workspace__left`, `styles/rooms-workspace.css`) is
+  a flex column; its list `.rooms-workspace__left-list` (rendered from
+  `rooms_workspace/room_list.rs`) keeps `min-height: 0` with `overflow-y:
+  auto` so long room lists scroll instead of pushing the create field and
+  status line outside the viewport. Guarded by
+  `rooms_list_flex_child_can_shrink_and_scroll` in `app.rs`.
 
 ### Native Room agent consent consumer (ocean-private #65)
 
@@ -960,6 +1133,50 @@ ships today and are updated slice by slice.
   oversize/invalid reply, lost-ack → unknown), `cargo test owner_mutation`,
   `cargo test room_consent`, `cargo clippy --all-targets -- -D warnings`.
 
+### Coding plans (web identity M3)
+
+- `src/coding_plans.rs` is the panel for this daemon's Claude/Codex/ChatGPT
+  plan logins over the daemon's five operator-gated routes
+  (`platform/ocean-os/crates/ocean-daemon/src/provider_auth.rs`:
+  `GET /v1/auth/providers`, `POST …/{provider}/login`,
+  `GET|DELETE …/{provider}/login/{attempt_id}`, `POST …/{provider}/logout`).
+  It renders what the daemon reports (status, `source` hint, expiry only
+  once passed, a pending `login` adopted on open) and collects intent; it
+  never holds a token. The monorepo proxy fronts one daemon, so sentences
+  name "the machine running this Ocean" rather than a picked device. Reached
+  from the header `⋯` overflow row and the ⌘K `coding-plans` command, both
+  calling `CodingPlansState::show`; `tests/unheld_coding_plans_controls.rs`
+  pins the overflow row (the phone's only door) and the `supported` gate.
+- Transport is the one seam `call`, mirroring the Room owner mutations:
+  web/PWA sends a same-origin fetch and the proxy attaches the operator key
+  (`crates/ocean-surface-proxy/src/coding_plans.rs`: exact five shapes,
+  dot-segment refusal, 4 KiB body cap, key via `owner_operator_key` so
+  `OCEAN_SURFACE_AUTH=off` attaches nothing and the daemon keeps refusing;
+  upstream built fresh so Cookie/Origin/Referer/forged operator headers never
+  pass); Tauri calls `host::coding_plan_request(kind, provider, attempt)` with
+  a fixed `kind` (`list`, `login_start`, `login_poll`, `login_cancel`,
+  `logout`) and the shell (`crates/ocean-tauri/src/coding_plans.rs`) builds
+  the method and path itself over the shared `daemon_transport.rs`
+  (`Method::Delete` added for cancel; ids restricted to `[A-Za-z0-9_-]{1,64}`).
+  The Chrome extension has neither, so `coding_plans::supported()` hides the
+  command, the overflow row and the panel there.
+- Sign-in opens a blank tab synchronously in the click (popup-blocker safe,
+  `opener` severed) and points it at `authorize_url` once the daemon
+  answers; on Tauri `host::open_external_url` hands the URL to the OS
+  browser. The panel then polls the attempt every 2 s, bounded by 300 polls
+  or 5 consecutive transport failures; attempts retired on those bounds are
+  never re-adopted from the list. Closing, cancelling or a newer intent
+  retires the loop by generation; a list reply publishes only for the newest
+  refresh ticket. Sign-out is confirmed in place and hidden for
+  environment-sourced credentials. Every refusal code (`login_unavailable`,
+  `operator_credential_unavailable`/`_missing`, `unknown_attempt`,
+  `unknown_provider`, `logout_failed`, the proxy's 502) and every attempt
+  failure classification renders as a sentence, never the code. The
+  same-machine caveat is stated once per attempt: the provider redirects to
+  the daemon machine's localhost, so a browser elsewhere cannot finish it.
+- Verification: `cargo test -p ocean-surface-ui coding_plans`, the proxy's
+  `cargo test coding_plan`, `cd crates/ocean-tauri && cargo test coding_plan`.
+
 ## Workspace Files lifecycle
 
 - Native Open Externally is a document action. On Windows it refuses known
@@ -974,6 +1191,7 @@ ships today and are updated slice by slice.
 
 - Native empty Files exposes the host folder picker as pane-local browsing; picking never rewrites daemon session cwd. Session/cwd intent changes retire picked roots, previews, tree caches and asynchronous results synchronously, including A-B-A; disposal rejects late picker/watch/read completions.
 - Files acquires one native root lease per generation and drops only that lease on change or cleanup. `watch_paths`/`unwatch_paths` accept an optional owner token scoped by the injected native window label; scoped canonical maps are independent of legacy Repo watchers and other consumers/windows. Page-load Started and window destruction retire only that window’s scoped leases; a native page generation rejects pending old-page admissions, while Finished leaves new watches intact. Events carry the lease owner and canonical paths map back to the requested alias. Never clear the legacy canonical map for Files cleanup.
+- The release fixture `scoped_native_watch_release_keeps_alias_peer_and_legacy_watch_live` (`crates/ocean-tauri/src/lib.rs`) drives real OS watches. `watch()` returns once a stream is scheduled, not once the OS delivers for it (FSEvents registers asynchronously), so each stream must prove it is live on a probe write before the release is performed, and the survivors are judged on a second, distinct file by path; a report from the released stream fails the fixture. Never add a post-`watch()` sleep or judge liveness on a write that preceded the probe. Verify with `cd crates/ocean-tauri && cargo test --locked watch_admission` (needs the ignored `dist/index.html` stub).
 - The private `host/native_events.mjs` adapter belongs to the `host.rs` seam and uses Tauri 2 IPC callback registration and `plugin:event|listen/unlisten`; legacy subscribers retain their app lifetime. Workspace path listeners belong to the component; cleanup unregisters even late native registration. Ignore events outside the root by path-component boundary. All transcript tool argument previews, including browser tools, are capped at 60 Unicode characters; no remaining consumer parses whole preview JSON.
 - Verify the production event adapter with `node --test scripts/native-events.test.mjs`; its mocked pinned Tauri API exercises delivery, cancellation, late admission and failure cleanup.
 - Pinned cards use the vertical gutter only with the workspace closed; open-workspace layouts retain the horizontal strip.
@@ -1030,6 +1248,75 @@ commit an organization-owned browser key or restore a compiled-in default.
   arrives before the upstream stream closes, input method/body/status
   passthrough, and refusal of both routes before upstream access without a
   valid existing proxy session. Do not use live daemon/browser state.
+
+### Upstream paths and the auth-off cross-site gate (ocean-surface#230 port)
+
+What the client sends is what the daemon gets, or nothing. The daemon behind
+the proxy has no auth of its own for most routes, so the proxy's route table
+and these checks are the real allow-list of browser-reachable authority.
+
+- Every forward builds its upstream URL with `upstream_url(daemon_url, path,
+  query)`, which parses the URL and refuses (`400
+  {"ok":false,"error":"upstream_path_rewritten"}`) unless the parsed path is
+  byte-for-byte the path the proxy decided to forward. The `url` crate
+  normalises on parse (dot segments collapse, `\` becomes `/`, tab/newline
+  vanish), and each of those once let an approved path arrive upstream as a
+  different route. Callers hand the returned `reqwest::Url` to the client, so
+  the value checked is the value sent. Never add a forwarder that formats a
+  `String` URL and passes `&url` to reqwest. In `proxy_send_json_as` and
+  `proxy_rooms_persistent` the check runs before the operator key is
+  attached, so a refused path never carries the credential.
+- `has_dot_segment` refuses, per `/`-segment and after one percent-decode,
+  `.`, `..`, and any backslash (raw `\`, `%5C`, `%5c`). Answer: `400` plain
+  text `invalid path`. hyper accepts a raw `\` in the request target, and the
+  segment split did not see it as a separator while the URL parser did:
+  `GET /v1/rooms/persistent/team\..\..\..\agent\sessions` reached
+  `/v1/agent/sessions`. It runs on the raw wildcard paths (rooms-persistent,
+  longhouse), on every captured `{id}`, and on the GitHub template captures.
+- A captured `{id}` is percent-DECODED by axum, so it is rebuilt with
+  `daemon_path_with_segment(prefix, id, suffix)`: dot-checked, then
+  re-encoded into exactly one segment (sessions, agent sessions, projects,
+  session messages and steer, permission decision, request cancel, LiveKit
+  room id). Formatting a capture raw let `%2F` become a second segment and
+  `%3F` start a query.
+- Wildcard families forward the RAW request path (`req.uri().path()`), never
+  the decoded `{*rest}` capture.
+- Both halves are needed and each is tested alone
+  (`src/tests/path_csrf.rs`): `%5C` is not rewritten by the parser (only the
+  dot guard stops it), and a future normalisation rule is stopped only by the
+  parse-and-compare. The tests drive the production router over `oneshot`
+  AND a real TCP socket against a recording upstream, so "refused" means an
+  empty upstream log.
+- Legitimate clients are unaffected: the Surface bundle percent-encodes ids
+  and room keys with the unreserved alphabet (`rooms::encode`,
+  `daemon::encode_path_segment`) and query values with `encodeURIComponent`,
+  so its paths parse back to themselves. Tauri, the VS Code extension and the
+  Chrome extension reach the daemon directly and never cross this proxy.
+  Fail-closed side effects: a hand-built request target carrying bytes the
+  parser re-encodes (non-ASCII, spaces) is refused rather than forwarded
+  re-encoded, and a room key or id containing a backslash is unreachable.
+- Auth-off (`OCEAN_SURFACE_AUTH=off`, loopback-only by contract):
+  `auth_off_cross_site_gate`, layered inside the session gate, runs
+  `auth_off_mutation_source_allowed` on EVERY non-GET/HEAD request under
+  `/v1/` and `/api/`. Every supplied Origin/Referer must be `http(s)` and
+  name the exact loopback Host that received the request (case-insensitive;
+  another loopback spelling or another port is a different origin); a
+  request with neither header is admitted (local scripts/CLIs). Refusal:
+  `403 {"ok":false,"error":"cross_site_mutation_refused"}`. Why all of them:
+  every proxied POST is reachable without a CORS preflight (a `<form>` or
+  `no-cors` fetch), the forwarders stamp `application/json` on whatever body
+  arrives, and close needs no body at all. `/csp-report`, `/login`, `/logout`
+  are outside it. Reads are never gated.
+- Auth-on: no Origin check. The session cookie is `SameSite=Strict`, so a
+  cross-site request arrives unauthenticated and the auth gate answers 401;
+  keep it Strict. A tunnel or tailnet name is how auth-on is legitimately
+  reached, so Host is not a gate there.
+- Not ported from ocean-surface#230: the session-actor binding and room-owner
+  gate (a multi-device, roster-user proxy model this proxy does not have), the
+  JSON content-type lane, and the auth-off every-request loopback-Host
+  (DNS-rebinding) refusal, which is a reads-side defence separate from the
+  CSRF gate and would turn any non-loopback auth-off reach into a 403 outage.
+- Verify: `cargo test -p ocean-surface-proxy path_csrf`.
 
 ## Build / Check
 

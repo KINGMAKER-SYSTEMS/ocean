@@ -27,6 +27,7 @@ use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
+mod coding_plans;
 mod daemon_transport;
 mod owner_mutation;
 mod provider_accounts;
@@ -432,6 +433,14 @@ mod watch_admission_tests {
         }
     }
 
+    /// Every surviving stream must still deliver after one owner releases a
+    /// shared canonical key. The streams are real OS watches, and `watch()`
+    /// returns once a stream is scheduled, not once the OS is delivering for
+    /// it (FSEvents in particular registers asynchronously), so each stream
+    /// first proves it is live on a probe write; only then is the release
+    /// performed and judged on a second, distinct file. The released stream is
+    /// joined before that write, so any report from it means the release
+    /// retired the wrong handle.
     #[cfg(unix)]
     #[test]
     fn scoped_native_watch_release_keeps_alias_peer_and_legacy_watch_live() {
@@ -446,8 +455,10 @@ mod watch_admission_tests {
             let tx = tx.clone();
             let mut watcher = RecommendedWatcher::new(
                 move |event: notify::Result<notify::Event>| {
-                    if event.is_ok() {
-                        let _ = tx.send(id);
+                    if let Ok(event) = event {
+                        for path in event.paths {
+                            let _ = tx.send((id, path));
+                        }
                     }
                 },
                 notify::Config::default(),
@@ -488,20 +499,57 @@ mod watch_admission_tests {
             drop,
         );
         assert!(outcome.failed.is_empty());
+        let git_dir = root.join(".git").canonicalize().unwrap();
+        std::fs::write(git_dir.join("probe"), "probe").unwrap();
+        await_reports(
+            &rx,
+            &git_dir.join("probe"),
+            &["old", "new", "peer", "legacy"],
+            None,
+        );
+
         let root_key = root.canonicalize().unwrap().to_string_lossy().into_owned();
         retire_scoped_paths(&mut scoped, "main", "old", &[root_key], drop);
-        std::fs::write(root.join(".git/live"), "changed").unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        let mut seen = std::collections::HashSet::new();
-        while !["new", "peer", "legacy"].iter().all(|id| seen.contains(id)) {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            seen.insert(
-                rx.recv_timeout(remaining)
-                    .expect("surviving native watches emit"),
-            );
-        }
+        std::fs::write(git_dir.join("live"), "changed").unwrap();
+        await_reports(
+            &rx,
+            &git_dir.join("live"),
+            &["new", "peer", "legacy"],
+            Some("old"),
+        );
         assert_eq!(legacy.len(), 1);
         assert_eq!(scoped.len(), 2);
+    }
+
+    /// Drain `rx` until every watch in `expected` has reported `file`: its own
+    /// path, or an ancestor directory when the OS collapsed a burst into a
+    /// rescan. Panics at the deadline, and on any report from `released`.
+    #[cfg(unix)]
+    fn await_reports(
+        rx: &std::sync::mpsc::Receiver<(&'static str, PathBuf)>,
+        file: &Path,
+        expected: &[&'static str],
+        released: Option<&'static str>,
+    ) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut seen = std::collections::HashSet::new();
+        while !expected.iter().all(|id| seen.contains(id)) {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let (id, path) = rx.recv_timeout(remaining).unwrap_or_else(|_| {
+                let missing: Vec<_> = expected.iter().filter(|id| !seen.contains(*id)).collect();
+                panic!("{} was never reported by {missing:?}", file.display())
+            });
+            if !file.starts_with(&path) {
+                continue;
+            }
+            assert_ne!(
+                Some(id),
+                released,
+                "a released watch reported {}",
+                file.display()
+            );
+            seen.insert(id);
+        }
     }
 
     #[test]
@@ -1594,9 +1642,10 @@ fn repo_ahead_behind(repo: &Repository) -> (usize, usize) {
         Ok(h) if h.is_branch() => h,
         _ => return (0, 0),
     };
+    // git2 0.21: shorthand() is Result<&str> (Err on non-UTF-8), was Option.
     let branch_name = match head.shorthand() {
-        Some(n) => n,
-        None => return (0, 0),
+        Ok(n) => n,
+        Err(_) => return (0, 0),
     };
     let branch = match repo.find_branch(branch_name, git2::BranchType::Local) {
         Ok(b) => b,
@@ -1687,7 +1736,8 @@ fn repo_recent_commits(repo: &Repository, n: usize) -> Vec<CommitInfoDto> {
         };
         let oid_str = oid.to_string();
         let id_short = oid_str[..7.min(oid_str.len())].to_string();
-        let summary = commit.summary().unwrap_or("").to_string();
+        // git2 0.21: summary() is Result<Option<&str>> (Err on non-UTF-8).
+        let summary = commit.summary().ok().flatten().unwrap_or("").to_string();
         let author = commit.author().name().unwrap_or("").to_string();
         let when_epoch = commit.time().seconds();
 
@@ -2715,6 +2765,7 @@ pub fn run() {
         .manage(owner_mutation::OwnerMutationState(
             operator_transport.clone(),
         ))
+        .manage(coding_plans::CodingPlansState(operator_transport.clone()))
         .manage(room_consent::ConsentState(Arc::new(
             room_consent::ConsentBroker::new(operator_transport),
         )))
@@ -3075,6 +3126,7 @@ pub fn run() {
             ui_debug_resize,
             open_external_url,
             owner_mutation::room_owner_mutation,
+            coding_plans::coding_plan_request,
             provider_accounts::provider_accounts,
             team_connection::team_connection,
             room_consent::room_consent_preview,

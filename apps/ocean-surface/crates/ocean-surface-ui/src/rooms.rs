@@ -300,23 +300,55 @@ struct ReadCursorRequest {
     read_seq: u64,
 }
 
-/// How a room's agents are auto-woken. Mirrors `ocean_core::RoomTriggerPolicy`.
-/// All flags default off; the daemon reads this on `room_create` and evaluates
-/// it on every non-agent-authored message (OCEAN-65 / OCEAN-111).
+/// How a room's agents are auto-woken. Mirrors `ocean_core::RoomTriggerPolicy`
+/// flag for flag. Every flag is off on the wire unless set; the daemon stores
+/// what `room_create` receives and evaluates it on every non-agent-authored
+/// message (OCEAN-65 / OCEAN-111). Rooms this surface creates always carry
+/// [`RoomTriggerPolicy::create_default`].
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct RoomTriggerPolicy {
     /// Wake an agent when it is @-mentioned in the transcript (the common case).
     #[serde(default)]
     pub on_mention: bool,
-    /// Wake an agent when someone replies in a thread it participates in.
+    /// Wake an agent when someone replies in a thread it rooted.
     #[serde(default)]
     pub on_thread_reply: bool,
     /// Wake an agent when a rendered component emits an interaction event.
     #[serde(default)]
     pub on_component_event: bool,
+    /// Wake the room's agents when a workspace build fails.
+    #[serde(default)]
+    pub on_build_failure: bool,
+    /// Wake the room's agents when workspace CI comes back red. The daemon
+    /// refuses a create or update that enables it (400 `trigger_policy_unwired`).
+    #[serde(default)]
+    pub on_ci_failure: bool,
     /// Optional cron expression for scheduled wake-ups. `None`/empty = no schedule.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_schedule: Option<String>,
+}
+
+impl RoomTriggerPolicy {
+    /// The wake policy every room created from this surface carries.
+    ///
+    /// `on_mention` and `on_thread_reply` on, every other flag off, no
+    /// schedule: the create-dialog policy fixed by
+    /// `docs/OCEAN_ROOMS_DESIGN_DIRECTION.md` (Sidebar, "+ New room") and the
+    /// Gate 1 create flow (`trigger_policy: { on_mention: true }`). ocean-core
+    /// never convenes on an absent policy ("no trigger policy configured"), so
+    /// a create without this makes every room here invoke-only, against the
+    /// documented "mention an agent to wake it" expectation. `on_ci_failure`
+    /// stays off: the daemon refuses a policy that enables it.
+    pub fn create_default() -> Self {
+        Self {
+            on_mention: true,
+            on_thread_reply: true,
+            on_component_event: false,
+            on_build_failure: false,
+            on_ci_failure: false,
+            on_schedule: None,
+        }
+    }
 }
 
 /// A persistent room. Mirrors `ocean_core::Room` (we read only the fields the
@@ -356,6 +388,12 @@ struct RoomsListResponse {
     rooms: Vec<Room>,
     #[serde(default)]
     read_states: Vec<RoomReadStateWire>,
+    /// OCEAN-250 page pair: the daemon lists rooms one bounded page at a time.
+    /// Both default so an older daemon decodes as a single complete page.
+    #[serde(default)]
+    next_cursor: Option<String>,
+    #[serde(default)]
+    has_more: bool,
     #[serde(default)]
     error: Option<String>,
 }
@@ -402,8 +440,35 @@ struct RoomGetResponse {
     room: Option<Room>,
     #[serde(default)]
     transcript: Vec<RoomMessage>,
+    /// Whether rows exist beyond `transcript` (OCEAN-249): the open serves the
+    /// OLDEST rows capped at the daemon's `MAX_TRANSCRIPT_LIMIT`, and `true`
+    /// means the room is longer than that page. Defaults to `false` for a
+    /// daemon that predates the field, which then hydrated the whole room.
+    #[serde(default)]
+    has_more: bool,
+    /// The daemon's forward cursor (`after_seq` of the next page) when
+    /// `has_more`; by contract the last returned row's `seq`.
+    #[serde(default)]
+    next_seq: Option<u64>,
     /// Required on every successful room open, including local rooms.
     access: RoomAccessProjection,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+/// One forward page of `GET /v1/rooms/persistent/{key}/transcript?after_seq=`:
+/// rows strictly after the cursor, ascending, bounded, with the same
+/// `has_more` / `next_seq` pair the open response carries.
+#[derive(Debug, Clone, Deserialize)]
+struct RoomTranscriptPageResponse {
+    #[serde(default)]
+    ok: bool,
+    #[serde(default)]
+    transcript: Vec<RoomMessage>,
+    #[serde(default)]
+    has_more: bool,
+    #[serde(default)]
+    next_seq: Option<u64>,
     #[serde(default)]
     error: Option<String>,
 }
@@ -425,14 +490,6 @@ struct RoomMutateResponse {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct TranscriptResponse {
-    #[serde(default)]
-    ok: bool,
-    #[serde(default)]
-    transcript: Vec<RoomMessage>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
 struct RedeemInviteResponse {
     room_key: String,
 }
@@ -443,14 +500,27 @@ struct RedeemInviteResponse {
 struct CreateRoomBody<'a> {
     key: &'a str,
     name: &'a str,
-    /// Optional trigger policy. Skipped when `None` so the daemon's `#[serde(default)]`
-    /// (no triggers) applies; otherwise the daemon stores it verbatim.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    trigger_policy: Option<RoomTriggerPolicy>,
+    /// Never omitted. The daemon's `#[serde(default)]` for an absent field is
+    /// no policy at all, and ocean-core never convenes on `None`, so every room
+    /// this surface creates carries [`RoomTriggerPolicy::create_default`].
+    trigger_policy: RoomTriggerPolicy,
     /// Absolute workspace directory chosen explicitly by the creator. Omitted
     /// when `None`: the room stays unbound, never inheriting a session cwd.
     #[serde(skip_serializing_if = "Option::is_none")]
     workspace_root: Option<&'a str>,
+}
+
+impl<'a> CreateRoomBody<'a> {
+    /// The one create body this surface sends. The canonical wake policy is
+    /// attached here, not by callers, so no create path can drop it.
+    fn new(key: &'a str, name: &'a str, workspace_root: Option<&'a str>) -> Self {
+        Self {
+            key,
+            name,
+            trigger_policy: RoomTriggerPolicy::create_default(),
+            workspace_root,
+        }
+    }
 }
 
 /// Status line for a failed create. Daemon error codes the creator can fix
@@ -578,6 +648,11 @@ pub struct Rooms {
     /// Monotonic ticket ensuring only the latest overlapping list request may
     /// publish list/loading/error state.
     list_request_ticket: RwSignal<u64>,
+    /// Room-list paging fold (OCEAN-250): the pending "Load more rooms" cursor
+    /// and the depth a refetch must cover. See [`RoomListPaging`].
+    list_paging: RwSignal<RoomListPaging>,
+    /// Whether a "Load more rooms" page is in flight (one at a time).
+    pub rooms_loading_more: RwSignal<bool>,
     /// The currently selected room key, if any.
     pub open_key: RwSignal<Option<String>>,
     /// The open room's full record (roster + metadata).
@@ -624,6 +699,14 @@ pub struct Rooms {
     pub read_summaries: RwSignal<HashMap<String, RoomReadSummary>>,
     /// Durable read cursor for the currently open room.
     pub open_read_cursor: RwSignal<Option<RoomReadCursorProjection>>,
+    /// Where the reader left off in the open room, as `(room_key, read_seq)`,
+    /// for the transcript's "new messages" divider.
+    ///
+    /// Captured by [`Rooms::open_room`] before the open marks the room read and
+    /// cleared by [`Rooms::close_room`]. It lives on this store, not in the
+    /// workspace, because the workspace can remount while `open_key` survives;
+    /// a floor re-derived on remount would sit past every message by then.
+    pub unread_baseline: RwSignal<Option<(String, Option<u64>)>>,
     /// The latest PATCH /read-cursor, including ownership of its completion.
     read_cursor_in_flight: RwSignal<Option<ReadCursorRequest>>,
     read_cursor_request_ticket: RwSignal<u64>,
@@ -671,6 +754,8 @@ enum RoomsFetchMode {
 struct RoomsListSuccess {
     rooms: Vec<Room>,
     read_summaries: HashMap<String, RoomReadSummary>,
+    has_more: bool,
+    next_cursor: Option<String>,
 }
 
 impl Rooms {
@@ -694,6 +779,8 @@ impl Rooms {
             rooms_loading: RwSignal::new(false),
             rooms_error: RwSignal::new(None),
             list_request_ticket: RwSignal::new(0),
+            list_paging: RwSignal::new(RoomListPaging::default()),
+            rooms_loading_more: RwSignal::new(false),
             open_key: RwSignal::new(None),
             open_room: RwSignal::new(None),
             transcript: RwSignal::new(Vec::new()),
@@ -712,6 +799,7 @@ impl Rooms {
             access: RwSignal::new(None),
             read_summaries: RwSignal::new(HashMap::new()),
             open_read_cursor: RwSignal::new(None),
+            unread_baseline: RwSignal::new(None),
             read_cursor_in_flight: RwSignal::new(None),
             read_cursor_request_ticket: RwSignal::new(0),
             create_op: RwSignal::new((0, None)),
@@ -935,7 +1023,9 @@ impl Rooms {
 
     /// Fetch the room list (`GET /v1/rooms/persistent`). Overlapping requests
     /// are latest-wins: an older completion cannot publish any list lifecycle
-    /// state after a newer request has started.
+    /// state after a newer request has started. The request covers the depth
+    /// the rail has been extended to by "Load more rooms"
+    /// (`RoomListPaging::list_query`), so a refetch never shrinks the rail.
     pub fn fetch_rooms(&self) {
         self.fetch_rooms_with_mode(RoomsFetchMode::Interactive);
     }
@@ -956,25 +1046,11 @@ impl Rooms {
             self.rooms_loading.set(true);
             self.rooms_error.set(None);
         }
+        let query = self
+            .list_paging
+            .with_untracked(|paging| paging.list_query());
         spawn_local(async move {
-            let get_url = format!("{base}/v1/rooms/persistent");
-            let result = match Request::get(&get_url).send().await {
-                Ok(resp) => match resp.json::<RoomsListResponse>().await {
-                    Ok(r) if r.ok => match read_summaries_from_wire(&r.read_states) {
-                        Ok(read_summaries) => Ok(RoomsListSuccess {
-                            rooms: r.rooms,
-                            read_summaries,
-                        }),
-                        Err(error) => Err(format!("rooms decode error: {error}")),
-                    },
-                    Ok(r) => Err(format!(
-                        "rooms list failed: {}",
-                        r.error.unwrap_or_else(|| "unknown error".into())
-                    )),
-                    Err(err) => Err(format!("rooms decode error: {err}")),
-                },
-                Err(err) => Err(format!("rooms fetch error: {err}")),
-            };
+            let result = fetch_rooms_page(&rooms_list_url(&base, query.as_deref())).await;
             let is_current =
                 list_request_is_current(ticket, me.list_request_ticket.get_untracked());
             finish_rooms_fetch(&me.rooms_loaded, &me.rooms_loading, mode, is_current);
@@ -996,6 +1072,8 @@ impl Rooms {
                             &success.read_summaries,
                         );
                     });
+                    me.list_paging
+                        .update(|paging| paging.first_page(success.has_more, success.next_cursor));
                     me.rooms_error.set(None);
                 }
                 Err(error) => {
@@ -1004,6 +1082,65 @@ impl Rooms {
                         me.rooms_error.set(Some(error));
                     }
                 }
+            }
+        });
+    }
+
+    /// Whether the daemon reported rooms past what the rail holds, so the
+    /// rail ends with "Load more rooms". Reactive on the paging fold.
+    pub fn can_load_more_rooms(&self) -> bool {
+        self.list_paging.with(|paging| paging.has_more())
+    }
+
+    /// Append the daemon's next room-list page ("Load more rooms"): one page
+    /// per call, only while the daemon reports more, never concurrently. The
+    /// page is dropped when a refetch began in between (list ticket moved) or
+    /// the pending cursor changed underneath it (`RoomListPaging::absorb`),
+    /// so stale rows never land on a list they were not paged from.
+    pub fn fetch_rooms_more(&self) {
+        if self.rooms_loading_more.get_untracked() {
+            return;
+        }
+        let Some((cursor, query)) = self
+            .list_paging
+            .with_untracked(|paging| paging.more_request())
+        else {
+            return;
+        };
+        let base = self.base();
+        let me = *self;
+        let ticket = self.list_request_ticket.get_untracked();
+        self.rooms_loading_more.set(true);
+        spawn_local(async move {
+            let result = fetch_rooms_page(&rooms_list_url(&base, Some(&query))).await;
+            me.rooms_loading_more.set(false);
+            if !list_request_is_current(ticket, me.list_request_ticket.get_untracked()) {
+                return;
+            }
+            match result {
+                Ok(page) => {
+                    let held = me.list.get_untracked();
+                    let merged = me
+                        .list_paging
+                        .try_update(|paging| {
+                            paging.absorb(
+                                &held,
+                                &cursor,
+                                page.rooms,
+                                page.has_more,
+                                page.next_cursor,
+                            )
+                        })
+                        .flatten();
+                    if let Some(merged) = merged {
+                        me.read_summaries.update(|current| {
+                            *current =
+                                merge_room_read_summaries(current, &merged, &page.read_summaries);
+                        });
+                        me.list.set(merged);
+                    }
+                }
+                Err(error) => me.status.set(error),
             }
         });
     }
@@ -1083,9 +1220,10 @@ impl Rooms {
         });
     }
 
-    /// Create a room (`POST /v1/rooms/persistent`) with an optional auto-convene
-    /// `trigger_policy`, then select it. The daemon keys rooms by `key`; we
-    /// derive a url-safe key from the name but keep the human name intact.
+    /// Create a room (`POST /v1/rooms/persistent`) carrying the canonical wake
+    /// policy ([`RoomTriggerPolicy::create_default`], attached by
+    /// `CreateRoomBody::new`), then select it. The daemon keys rooms by `key`;
+    /// we derive a url-safe key from the name but keep the human name intact.
     /// Atomically dispatch a create-room request, returning the op_id the
     /// caller should snapshot. When the request resolves, `create_op` carries
     /// a typed outcome tagged with that id — surfaces gate only on their own
@@ -1102,12 +1240,7 @@ impl Rooms {
     /// `workspace_root` is only an explicit creator choice; the daemon binds it
     /// once (absolute existing directory, else 400 `invalid_workspace_root`)
     /// and offers no route to change it later.
-    pub fn create_room(
-        &self,
-        name: String,
-        policy: Option<RoomTriggerPolicy>,
-        workspace_root: Option<String>,
-    ) -> u64 {
+    pub fn create_room(&self, name: String, workspace_root: Option<String>) -> u64 {
         let name = name.trim().to_string();
         if name.is_empty() {
             return 0;
@@ -1130,12 +1263,7 @@ impl Rooms {
         // observe a stale-success resolution from a prior request.
         signal.set((op_id, None));
         spawn_local(async move {
-            let body = CreateRoomBody {
-                key: &key,
-                name: &name,
-                trigger_policy: policy,
-                workspace_root: workspace_root.as_deref(),
-            };
+            let body = CreateRoomBody::new(&key, &name, workspace_root.as_deref());
             let post_url = format!("{base}/v1/rooms/persistent");
             let res = Request::post(&post_url)
                 .header("content-type", "application/json")
@@ -1385,11 +1513,30 @@ impl Rooms {
 
     /// Open a room: load its record + full transcript, bump the generation, and
     /// start the room-scoped SSE live tail (TASK-10/TASK-11).
+    ///
+    /// The open response serves the OLDEST rows capped at the daemon's
+    /// transcript limit (OCEAN-249). When it reports `has_more`, the open
+    /// follows `/transcript?after_seq=` pages ([`OpenCatchUp`]) before it
+    /// publishes anything, so the room lands on its newest, contiguous rows
+    /// in one fill: one pin, one read advance, and an unread divider computed
+    /// over the whole history. A room switch mid-catch-up is cancelled by the
+    /// same generation check as every other open-time read.
     pub fn open_room(&self, key: String) {
         let base = self.base();
         let me = *self;
         let generation_id = self.generation.get_untracked().wrapping_add(1);
         self.generation.set(generation_id);
+        // Snapshot the reader's left-off point before the open resets the
+        // cursor and marks the room read: right now the room-list summary
+        // still holds the pre-open floor; a moment later it is advanced.
+        let read_seq_at_open = self
+            .read_summaries
+            .with_untracked(|summaries| summaries.get(&key).and_then(|s| s.read_seq));
+        self.unread_baseline.set(next_unread_baseline(
+            self.unread_baseline.get_untracked().as_ref(),
+            Some(key.as_str()),
+            read_seq_at_open,
+        ));
         self.open_key.set(Some(key.clone()));
         self.reset_room_state();
         self.status.set("loading room…".into());
@@ -1398,7 +1545,11 @@ impl Rooms {
             let get_url = format!("{base}/v1/rooms/persistent/{}", encode(&key));
             let result = match Request::get(&get_url).send().await {
                 Ok(resp) if resp.ok() => match resp.json::<RoomGetResponse>().await {
-                    Ok(r) if r.ok => Ok((r.room, r.transcript, r.access)),
+                    Ok(r) if r.ok => Ok((
+                        r.room,
+                        OpenCatchUp::start(r.transcript, r.has_more, r.next_seq),
+                        r.access,
+                    )),
                     Ok(r) => Err(format!(
                         "room load failed: {}",
                         r.error.unwrap_or_else(|| "unknown error".into())
@@ -1421,7 +1572,29 @@ impl Rooms {
                 return;
             }
             match result {
-                Ok((room, transcript, access)) => {
+                Ok((room, mut catch_up, access)) => {
+                    // Bounded one-time catch-up past the daemon's open page.
+                    // Not polling: it ends at the first exhausted page and the
+                    // SSE tail below stays the sole forward-ingest path.
+                    while let Some(after_seq) = catch_up.next_after_seq() {
+                        let page = fetch_open_catch_up_page(&base, &key, after_seq).await;
+                        if !me.room_is_current(generation_id, &key) {
+                            return;
+                        }
+                        match page {
+                            Ok(page) => {
+                                catch_up.absorb(page.transcript, page.has_more, page.next_seq)
+                            }
+                            Err(error) => {
+                                // Land on the rows held so far: the tail's
+                                // durable replay still delivers the rest in
+                                // order, just one frame at a time.
+                                log::warn!("room {key}: open catch-up stopped early: {error}");
+                                break;
+                            }
+                        }
+                    }
+                    let transcript = catch_up.finish();
                     me.open_room.set(room);
                     me.transcript.set(transcript.clone());
                     me.access.set(Some(access.clone()));
@@ -1445,6 +1618,7 @@ impl Rooms {
     pub fn close_room(&self) {
         self.generation.update(|g| *g = g.wrapping_add(1));
         self.open_key.set(None);
+        self.unread_baseline.set(None);
         self.reset_room_state();
     }
 
@@ -1489,7 +1663,6 @@ impl Rooms {
                 Ok(room) => {
                     me.open_room.set(room);
                     me.status.set("joined".into());
-                    me.refresh_open_transcript(&key, generation_id);
                 }
                 Err(error) => me.status.set(error),
             }
@@ -1570,7 +1743,6 @@ impl Rooms {
                     me.open_room.set(room);
                     me.status
                         .set(format!("agent '{agent_id}' added — mention @{agent_id}"));
-                    me.refresh_open_transcript(&key, generation_id);
                 }
                 Err(error) => me.status.set(error),
             }
@@ -1994,7 +2166,6 @@ impl Rooms {
                 Ok(room) => {
                     me.open_room.set(room);
                     me.status.set("left".into());
-                    me.refresh_open_transcript(&key, generation_id);
                 }
                 Err(error) => me.status.set(error),
             }
@@ -2041,9 +2212,10 @@ impl Rooms {
             if !me.room_is_current(generation_id, &key) {
                 return;
             }
-            match result {
-                Ok(()) => me.refresh_open_transcript(&key, generation_id),
-                Err(error) => me.status.set(error),
+            // The live tail delivers the posted row; the response starts no
+            // competing forward read of `/transcript`.
+            if let Err(error) = result {
+                me.status.set(error);
             }
         });
     }
@@ -2106,41 +2278,16 @@ impl Rooms {
         });
     }
 
-    /// Re-fetch the open room's transcript tail and append only new entries.
-    fn refresh_open_transcript(&self, key: &str, generation_id: u64) {
-        let base = self.base();
-        let me = *self;
-        let key = key.to_string();
-        spawn_local(async move {
-            if !me.room_is_current(generation_id, &key) {
-                return;
-            }
-            let after = last_transcript_seq(&me.transcript.get_untracked());
-            let get_url = format!(
-                "{base}/v1/rooms/persistent/{}/transcript?after_seq={after}",
-                encode(&key)
-            );
-            if let Ok(resp) = Request::get(&get_url).send().await {
-                if let Ok(r) = resp.json::<TranscriptResponse>().await {
-                    if r.ok && !r.transcript.is_empty() && me.room_is_current(generation_id, &key) {
-                        me.transcript.update(|transcript| {
-                            for message in r.transcript {
-                                if transcript.last().map(|last| last.seq).unwrap_or(0) < message.seq
-                                {
-                                    transcript.push(message);
-                                }
-                            }
-                        });
-                    }
-                }
-            }
-        });
-    }
-
     /// Start the live tail for `key` at `generation_id`: room-scoped SSE
     /// (`GET /v1/rooms/persistent/{key}/events`) with `?after_seq=` resume for
     /// newly constructed browser connections (TASK-10/TASK-11). Replaces the
     /// 2.5s poll workaround.
+    ///
+    /// This tail is the room's SOLE forward-ingest path. Join, leave, agent add
+    /// and message post responses do not re-read `/transcript`: a request-time
+    /// read races this ordered stream for the same rows, and the tail already
+    /// delivers each mutation's row and resumes from its own `after_seq` after
+    /// a reconnect.
     fn start_live_tail(&self, key: String, generation_id: u64) {
         let me = *self;
         let base = self.base();
@@ -3039,6 +3186,28 @@ fn applied_open_read_seq(summary_read_seq: Option<u64>, durable_read_seq: Option
     max_optional_u64(summary_read_seq, durable_read_seq).unwrap_or(0)
 }
 
+/// Lock-on-key-change for the unread divider baseline.
+///
+/// The baseline is captured once per opened room and never revised while that
+/// room stays open: opening auto-marks the room read, so re-reading a live
+/// cursor afterwards would lock onto the advanced value and the divider would
+/// never render. `read_seq_at_open` must come from `read_summaries` at the
+/// instant of the open, never from `open_read_cursor`. A never-read room locks
+/// a `None` floor rather than staying unlocked.
+pub(crate) fn next_unread_baseline(
+    current: Option<&(String, Option<u64>)>,
+    open_key: Option<&str>,
+    read_seq_at_open: Option<u64>,
+) -> Option<(String, Option<u64>)> {
+    let key = open_key?;
+    if let Some((locked_key, locked_seq)) = current {
+        if locked_key == key {
+            return Some((locked_key.clone(), *locked_seq));
+        }
+    }
+    Some((key.to_string(), read_seq_at_open))
+}
+
 fn latest_summary_seq_for_open_room(
     transcript: &[RoomMessage],
     access: Option<&RoomAccessProjection>,
@@ -3162,6 +3331,252 @@ fn replace_access_projection(
 
 fn last_transcript_seq(transcript: &[RoomMessage]) -> u64 {
     transcript.last().map(|message| message.seq).unwrap_or(0)
+}
+
+/// Rows the open catch-up asks for per `/transcript` page. Mirrors the daemon's
+/// `MAX_TRANSCRIPT_LIMIT` (ocean-store, OCEAN-249); the daemon clamps anything
+/// larger, so asking for the ceiling only minimises round trips.
+const OPEN_CATCH_UP_PAGE_LIMIT: usize = 1_000;
+
+/// Upper bound on `/transcript` pages one open follows past the first. The
+/// catch-up is a bounded one-time read, never a loop that can outlive the open:
+/// past this many pages the room lands on the rows it holds and the SSE tail's
+/// durable replay delivers the remainder in order.
+const OPEN_CATCH_UP_MAX_PAGES: usize = 50;
+
+/// The one-time forward catch-up `open_room` folds over the daemon's bounded
+/// open page (OCEAN-249). `GET /v1/rooms/persistent/{key}` serves the OLDEST
+/// rows capped at the daemon's `MAX_TRANSCRIPT_LIMIT` plus `has_more`, so a
+/// longer room would otherwise open on its first page and the live tail would
+/// then replay every later history row one frame at a time, re-pinning and
+/// re-queuing the read advance per row. Folding `/transcript?after_seq=` pages
+/// onto the open page until the daemon reports no more rows lets the open land
+/// on the newest, contiguous transcript in one fill.
+///
+/// This is not transcript polling: it runs once per open, stops at the first
+/// exhausted page (or the page bound, or a page that advances nothing), and the
+/// room-scoped SSE tail remains the sole forward-ingest path afterwards.
+///
+/// Contiguity is a client invariant, not trust: no page is requested from past
+/// the frontier this fold already holds, and rows at or below it are dropped,
+/// so no page can skip or duplicate a row even if a cursor misbehaves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OpenCatchUp {
+    transcript: Vec<RoomMessage>,
+    /// `after_seq` of the next page to request; `None` once the open may land.
+    after_seq: Option<u64>,
+    pages: usize,
+}
+
+impl OpenCatchUp {
+    /// Begin from the open response's page and its `has_more` / `next_seq`.
+    fn start(first_page: Vec<RoomMessage>, has_more: bool, next_seq: Option<u64>) -> Self {
+        let mut catch_up = Self {
+            transcript: first_page,
+            after_seq: None,
+            pages: 0,
+        };
+        catch_up.after_seq = catch_up.cursor(has_more, next_seq);
+        catch_up
+    }
+
+    /// The `after_seq` of the next `/transcript` page, or `None` when the open
+    /// should land on the rows it holds.
+    fn next_after_seq(&self) -> Option<u64> {
+        self.after_seq
+    }
+
+    /// Fold one forward page in. Rows at or below the held frontier are
+    /// dropped so the transcript stays strictly ascending; a page that
+    /// advances nothing ends the catch-up regardless of what it claims.
+    fn absorb(&mut self, page: Vec<RoomMessage>, has_more: bool, next_seq: Option<u64>) {
+        let frontier = self.transcript.last().map(|message| message.seq);
+        let before = self.transcript.len();
+        self.transcript.extend(
+            page.into_iter()
+                .filter(|message| frontier.is_none_or(|frontier| message.seq > frontier)),
+        );
+        let appended = self.transcript.len() - before;
+        self.pages += 1;
+        self.after_seq = if appended == 0 || self.pages >= OPEN_CATCH_UP_MAX_PAGES {
+            None
+        } else {
+            self.cursor(has_more, next_seq)
+        };
+    }
+
+    /// Where the next page starts: the daemon's `next_seq`, never past the
+    /// frontier already held, and nothing at all once the daemon is exhausted.
+    fn cursor(&self, has_more: bool, next_seq: Option<u64>) -> Option<u64> {
+        if !has_more {
+            return None;
+        }
+        let frontier = self.transcript.last().map(|message| message.seq)?;
+        Some(next_seq.map_or(frontier, |next| next.min(frontier)))
+    }
+
+    fn finish(self) -> Vec<RoomMessage> {
+        self.transcript
+    }
+}
+
+/// One `/transcript?after_seq=` page for the open catch-up. This is the only
+/// production reader of the forward transcript route: it is reached from
+/// `open_room` alone, never from a mutation response or a timer, so the
+/// room-scoped SSE tail stays the sole forward-ingest path once a room is open.
+async fn fetch_open_catch_up_page(
+    base: &str,
+    key: &str,
+    after_seq: u64,
+) -> Result<RoomTranscriptPageResponse, String> {
+    let url = format!(
+        "{base}/v1/rooms/persistent/{}/transcript?after_seq={after_seq}&limit={OPEN_CATCH_UP_PAGE_LIMIT}",
+        encode(key)
+    );
+    match Request::get(&url).send().await {
+        Ok(resp) if resp.ok() => match resp.json::<RoomTranscriptPageResponse>().await {
+            Ok(page) if page.ok => Ok(page),
+            Ok(page) => Err(format!(
+                "transcript page failed: {}",
+                page.error.unwrap_or_else(|| "unknown error".into())
+            )),
+            Err(err) => Err(format!("transcript page decode error: {err}")),
+        },
+        Ok(resp) => Err(format!("transcript page failed: HTTP {}", resp.status())),
+        Err(err) => Err(format!("transcript page fetch error: {err}")),
+    }
+}
+
+/// One `GET /v1/rooms/persistent` page, decoded to the rail's shape. Shared
+/// by the first-page (re)fetch and "Load more rooms".
+async fn fetch_rooms_page(url: &str) -> Result<RoomsListSuccess, String> {
+    match Request::get(url).send().await {
+        Ok(resp) => match resp.json::<RoomsListResponse>().await {
+            Ok(r) if r.ok => match read_summaries_from_wire(&r.read_states) {
+                Ok(read_summaries) => Ok(RoomsListSuccess {
+                    rooms: r.rooms,
+                    read_summaries,
+                    has_more: r.has_more,
+                    next_cursor: r.next_cursor,
+                }),
+                Err(error) => Err(format!("rooms decode error: {error}")),
+            },
+            Ok(r) => Err(format!(
+                "rooms list failed: {}",
+                r.error.unwrap_or_else(|| "unknown error".into())
+            )),
+            Err(err) => Err(format!("rooms decode error: {err}")),
+        },
+        Err(err) => Err(format!("rooms fetch error: {err}")),
+    }
+}
+
+/// The room-list route with an optional query (`limit=` / `cursor=`, already
+/// encoded). The daemon-default first page sends no query at all.
+fn rooms_list_url(base: &str, query: Option<&str>) -> String {
+    match query {
+        Some(query) => format!("{base}/v1/rooms/persistent?{query}"),
+        None => format!("{base}/v1/rooms/persistent"),
+    }
+}
+
+/// Pure fold for the rail's room-list paging. The daemon lists rooms one
+/// bounded page at a time (OCEAN-250: `GET /v1/rooms/persistent?limit=&cursor=`,
+/// default 100, clamped to 1000, `next_cursor` = the page's last room key,
+/// `has_more`). The rail renders the daemon-default first page and ends with
+/// "Load more rooms" while the daemon reports more; every refetch (create,
+/// close, the silent refresh) then asks for the depth the rail has been
+/// extended to, so a refresh never shrinks an expanded rail back to one page.
+/// Forward only: there is no backward paging anywhere in Rooms.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct RoomListPaging {
+    /// Cursor the next "Load more rooms" replays; `None` once the daemon
+    /// reported no more rows (or an older daemon omitted the pair).
+    next_cursor: Option<String>,
+    /// `Some(limit)` once the rail holds more than the daemon's first page:
+    /// the `limit` a refetch sends so it covers every room the rail shows.
+    depth: Option<usize>,
+}
+
+impl RoomListPaging {
+    /// Mirror of the daemon's `ocean_store::MAX_LIST_LIMIT`; a larger limit
+    /// is clamped there, so asking for more is pointless.
+    pub(crate) const MAX_LIST_LIMIT: usize = 1000;
+
+    /// Whether the daemon reported rooms past the ones the rail holds.
+    pub(crate) fn has_more(&self) -> bool {
+        self.next_cursor.is_some()
+    }
+
+    /// Query for the (re)fetch of the rail's first page: none until the rail
+    /// has been extended, then `limit=<depth>`.
+    pub(crate) fn list_query(&self) -> Option<String> {
+        self.depth.map(|depth| format!("limit={depth}"))
+    }
+
+    /// The pending cursor and the query for the next page, while the daemon
+    /// reports more rooms.
+    pub(crate) fn more_request(&self) -> Option<(String, String)> {
+        self.next_cursor.as_deref().map(|cursor| {
+            (
+                cursor.to_string(),
+                format!(
+                    "cursor={}",
+                    crate::daemon::percent_encode_query_component(cursor)
+                ),
+            )
+        })
+    }
+
+    /// Fold a (re)fetched first page: the daemon's `has_more` / `next_cursor`
+    /// replace the pending cursor; the depth asked for is kept.
+    pub(crate) fn first_page(&mut self, has_more: bool, next_cursor: Option<String>) {
+        self.next_cursor = pending_cursor(has_more, next_cursor);
+    }
+
+    /// Fold an appended page fetched with `used_cursor` onto the rooms the
+    /// rail `held`. Returns the merged list (daemon order, duplicates by id
+    /// dropped), or `None` when the page is stale: the pending cursor is no
+    /// longer `used_cursor`, so a refetch landed in between and these rows
+    /// belong to another list. An empty page or a non-advancing cursor ends
+    /// paging so the control cannot loop on a daemon that never advances.
+    pub(crate) fn absorb(
+        &mut self,
+        held: &[Room],
+        used_cursor: &str,
+        page: Vec<Room>,
+        has_more: bool,
+        next_cursor: Option<String>,
+    ) -> Option<Vec<Room>> {
+        if self.next_cursor.as_deref() != Some(used_cursor) {
+            return None;
+        }
+        let appended = !page.is_empty();
+        let mut merged = held.to_vec();
+        for room in page {
+            if !merged.iter().any(|existing| existing.id == room.id) {
+                merged.push(room);
+            }
+        }
+        self.depth = Some(
+            self.depth
+                .unwrap_or(0)
+                .max(merged.len())
+                .clamp(1, Self::MAX_LIST_LIMIT),
+        );
+        self.next_cursor = pending_cursor(has_more, next_cursor)
+            .filter(|cursor| appended && cursor != used_cursor);
+        Some(merged)
+    }
+}
+
+/// The cursor to replay next, or `None` when the daemon reported the last page
+/// (or omitted a usable cursor despite `has_more`).
+fn pending_cursor(has_more: bool, next_cursor: Option<String>) -> Option<String> {
+    if !has_more {
+        return None;
+    }
+    next_cursor.filter(|cursor| !cursor.is_empty())
 }
 
 fn list_request_is_current(expected_ticket: u64, current_ticket: u64) -> bool {
@@ -3857,7 +4272,9 @@ pub(crate) fn invocation_error_text(code: &str) -> String {
         "room_not_found" => "This room is closed.",
         "activation_policy_refused" => "This agent does not accept explicit invocations.",
         "credential_slot_missing" => "This agent needs a credential this Ocean does not have.",
-        "room_turn_capacity" => "Ocean is busy. Try again shortly.",
+        // Definitive for this (agent, message): `may_invoke` blocks any
+        // repeat attempt, so the text promises no retry (#102).
+        "room_turn_capacity" => "Ocean is busy.",
         code if code.starts_with("agent_package_") => "Ocean could not load that agent folder.",
         _ => "Ocean could not invoke the agent.",
     }
@@ -4002,6 +4419,196 @@ pub(crate) fn livekit_token_path_for_room(key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unread_baseline_survives_the_read_advance_that_opening_a_room_triggers() {
+        let opened = next_unread_baseline(None, Some("room-a"), Some(5));
+        assert_eq!(opened, Some(("room-a".to_string(), Some(5))));
+        let advanced = next_unread_baseline(opened.as_ref(), Some("room-a"), Some(9));
+        assert_eq!(advanced, Some(("room-a".to_string(), Some(5))));
+        let further = next_unread_baseline(advanced.as_ref(), Some("room-a"), Some(42));
+        assert_eq!(further, Some(("room-a".to_string(), Some(5))));
+    }
+
+    #[test]
+    fn unread_baseline_relocks_on_room_change_and_clears_on_close() {
+        let a = next_unread_baseline(None, Some("room-a"), Some(5));
+        let b = next_unread_baseline(a.as_ref(), Some("room-b"), Some(2));
+        assert_eq!(b, Some(("room-b".to_string(), Some(2))));
+        let back = next_unread_baseline(b.as_ref(), Some("room-a"), Some(9));
+        assert_eq!(back, Some(("room-a".to_string(), Some(9))));
+        assert_eq!(next_unread_baseline(back.as_ref(), None, None), None);
+    }
+
+    #[test]
+    fn unread_baseline_locks_none_for_a_never_read_room() {
+        let opened = next_unread_baseline(None, Some("room-a"), None);
+        assert_eq!(opened, Some(("room-a".to_string(), None)));
+        let advanced = next_unread_baseline(opened.as_ref(), Some("room-a"), Some(7));
+        assert_eq!(advanced, Some(("room-a".to_string(), None)));
+    }
+
+    /// The daemon's forward transcript read (`transcript_page`, OCEAN-249):
+    /// the oldest rows strictly after `after_seq`, at most `limit`, with the
+    /// `limit + 1` sentinel deciding `has_more` and `next_seq` the last
+    /// returned row. `GET /v1/rooms/persistent/{key}` serves the same page
+    /// with `after_seq = None`.
+    fn daemon_forward_page(
+        rows: &[RoomMessage],
+        after_seq: Option<u64>,
+        limit: usize,
+    ) -> (Vec<RoomMessage>, bool, Option<u64>) {
+        let mut page: Vec<RoomMessage> = rows
+            .iter()
+            .filter(|message| after_seq.is_none_or(|after| message.seq > after))
+            .cloned()
+            .collect();
+        let has_more = page.len() > limit;
+        page.truncate(limit);
+        let next_seq = has_more
+            .then(|| page.last().map(|message| message.seq))
+            .flatten();
+        (page, has_more, next_seq)
+    }
+
+    /// Drive one open against the fake daemon exactly as `open_room` does:
+    /// the open page, then `/transcript?after_seq=` pages while the fold asks.
+    /// Returns the landed transcript and the pages followed past the first.
+    fn open_against(rows: &[RoomMessage]) -> (Vec<RoomMessage>, usize) {
+        let (first, has_more, next_seq) = daemon_forward_page(rows, None, OPEN_CATCH_UP_PAGE_LIMIT);
+        let mut catch_up = OpenCatchUp::start(first, has_more, next_seq);
+        let mut pages = 0;
+        while let Some(after_seq) = catch_up.next_after_seq() {
+            pages += 1;
+            let (page, has_more, next_seq) =
+                daemon_forward_page(rows, Some(after_seq), OPEN_CATCH_UP_PAGE_LIMIT);
+            catch_up.absorb(page, has_more, next_seq);
+        }
+        (catch_up.finish(), pages)
+    }
+
+    /// Reproduction: a room longer than the daemon's transcript cap must open
+    /// on its newest row with every row in between, not on the oldest page.
+    #[test]
+    fn open_lands_on_the_newest_contiguous_transcript_past_the_daemon_cap() {
+        let rows: Vec<RoomMessage> = (0..(OPEN_CATCH_UP_PAGE_LIMIT as u64 * 2 + 7))
+            .map(message)
+            .collect();
+        let newest = rows.last().map(|message| message.seq).unwrap();
+        let (first, has_more, _) = daemon_forward_page(&rows, None, OPEN_CATCH_UP_PAGE_LIMIT);
+        assert!(
+            has_more && first.last().map(|message| message.seq) < Some(newest),
+            "fixture must exceed the daemon cap or it reproduces nothing"
+        );
+
+        let (transcript, pages) = open_against(&rows);
+
+        assert_eq!(
+            transcript.last().map(|message| message.seq),
+            Some(newest),
+            "the open landed on the oldest page instead of the newest row"
+        );
+        let seqs: Vec<u64> = transcript.iter().map(|message| message.seq).collect();
+        assert_eq!(
+            seqs,
+            (0..=newest).collect::<Vec<u64>>(),
+            "the landed transcript must be contiguous and strictly ascending"
+        );
+        assert_eq!(
+            pages, 2,
+            "three pages of rows take exactly two catch-up reads"
+        );
+    }
+
+    #[test]
+    fn open_within_the_cap_follows_no_transcript_page() {
+        let rows: Vec<RoomMessage> = (0..(OPEN_CATCH_UP_PAGE_LIMIT as u64))
+            .map(message)
+            .collect();
+        let (transcript, pages) = open_against(&rows);
+        assert_eq!(
+            pages, 0,
+            "exactly the cap with nothing behind it is complete"
+        );
+        assert_eq!(transcript, rows);
+        assert_eq!(open_against(&[]), (Vec::new(), 0));
+    }
+
+    /// Older daemons omit `has_more`: the open decodes as complete and lands
+    /// on whatever the record carried, exactly as before.
+    #[test]
+    fn open_response_without_paging_fields_decodes_as_complete() {
+        let decoded: RoomGetResponse = serde_json::from_str(
+            r#"{"ok":true,"room":null,"transcript":[],"access":{"state":"local"}}"#,
+        )
+        .expect("legacy open response decodes");
+        assert!(!decoded.has_more);
+        assert_eq!(decoded.next_seq, None);
+        assert_eq!(
+            OpenCatchUp::start(decoded.transcript, decoded.has_more, decoded.next_seq)
+                .next_after_seq(),
+            None
+        );
+    }
+
+    /// The catch-up is bounded in every direction a daemon could push it:
+    /// a page that advances nothing ends it, a cursor can never skip past the
+    /// held frontier, and the page bound lands the open regardless.
+    #[test]
+    fn open_catch_up_stops_on_a_stuck_page_a_bad_cursor_and_the_page_bound() {
+        let held: Vec<RoomMessage> = (0..3).map(message).collect();
+
+        let mut stuck = OpenCatchUp::start(held.clone(), true, Some(2));
+        assert_eq!(stuck.next_after_seq(), Some(2));
+        stuck.absorb(vec![message(1), message(2)], true, Some(2));
+        assert_eq!(stuck.next_after_seq(), None, "no new row: stop asking");
+        assert_eq!(stuck.finish(), held);
+
+        let skipping = OpenCatchUp::start(held.clone(), true, Some(40));
+        assert_eq!(
+            skipping.next_after_seq(),
+            Some(2),
+            "a cursor past the frontier would skip rows; resume from the frontier"
+        );
+        let mut lagging = OpenCatchUp::start(held.clone(), true, Some(0));
+        assert_eq!(lagging.next_after_seq(), Some(0));
+        lagging.absorb(vec![message(1), message(2), message(3)], false, None);
+        assert_eq!(
+            lagging.finish(),
+            (0..4).map(message).collect::<Vec<_>>(),
+            "re-served rows are dropped, the new one lands"
+        );
+
+        let mut bounded = OpenCatchUp::start(vec![message(0)], true, Some(0));
+        let mut pages = 0;
+        while let Some(after_seq) = bounded.next_after_seq() {
+            pages += 1;
+            bounded.absorb(vec![message(after_seq + 1)], true, Some(after_seq + 1));
+        }
+        assert_eq!(pages, OPEN_CATCH_UP_MAX_PAGES);
+        assert_eq!(bounded.finish().len(), OPEN_CATCH_UP_MAX_PAGES + 1);
+    }
+
+    /// Source guard: `open_room` captures the baseline from the room-list
+    /// summaries before it resets or touches the live read cursor. Needles are
+    /// built at runtime so they cannot match their own literals.
+    #[test]
+    fn open_room_captures_the_unread_baseline_before_touching_the_cursor() {
+        let store = include_str!("rooms.rs");
+        let open_fn = store
+            .find(&["pub fn open_room", "(&self, key: String) {"].concat())
+            .expect("open_room must exist");
+        let open_src = &store[open_fn..];
+        let capture = ["self.unread_baseline", ".set("].concat();
+        let capture_at = open_src
+            .find(&capture)
+            .expect("open_room must capture the baseline");
+        let before = &open_src[..capture_at];
+        assert!(before.contains("read_summaries"));
+        assert!(!before.contains(&["open_read", "_cursor"].concat()));
+        assert!(!before.contains(&["reset_room", "_state()"].concat()));
+        assert!(!before.contains(&["spawn", "_local"].concat()));
+    }
 
     #[test]
     fn owner_routes_map_to_the_shell_kinds_and_the_daemon_paths() {
@@ -4204,36 +4811,90 @@ mod tests {
         }
     }
 
+    /// The wire object every create carries, kept literal so the contract is
+    /// visible here: every flag present, `on_schedule` absent.
+    fn canonical_wake_policy_json() -> serde_json::Value {
+        serde_json::json!({
+            "on_mention": true,
+            "on_thread_reply": true,
+            "on_component_event": false,
+            "on_build_failure": false,
+            "on_ci_failure": false,
+        })
+    }
+
     #[test]
-    fn create_body_omits_workspace_root_when_none() {
-        let body = CreateRoomBody {
-            key: "ops",
-            name: "Ops",
-            trigger_policy: None,
-            workspace_root: None,
-        };
-        assert_eq!(
-            serde_json::to_value(&body).unwrap(),
-            serde_json::json!({"key": "ops", "name": "Ops"})
+    fn create_default_wake_policy_wakes_on_mention_and_thread_reply_only() {
+        let policy = RoomTriggerPolicy::create_default();
+        assert!(policy.on_mention, "an @id mention must wake a bound agent");
+        assert!(policy.on_thread_reply);
+        assert!(!policy.on_component_event);
+        assert!(!policy.on_build_failure);
+        assert!(
+            !policy.on_ci_failure,
+            "the daemon refuses a create enabling on_ci_failure (400 trigger_policy_unwired)"
+        );
+        assert_eq!(policy.on_schedule, None);
+        assert_ne!(
+            policy,
+            RoomTriggerPolicy::default(),
+            "an all-off policy wakes nobody; the default must not collapse into it"
         );
     }
 
     #[test]
-    fn create_body_carries_explicit_workspace_root() {
-        let body = CreateRoomBody {
-            key: "ops",
-            name: "Ops",
-            trigger_policy: None,
-            workspace_root: Some("/Users/me/dev/ocean"),
-        };
+    fn create_body_always_carries_the_canonical_wake_policy() {
+        // Before this body owned the policy, the rail passed `None`, the field
+        // was skipped, and ocean-core answered every mention with "no trigger
+        // policy configured": Surface rooms were invoke-only.
+        let body = CreateRoomBody::new("ops", "Ops", None);
         assert_eq!(
             serde_json::to_value(&body).unwrap(),
             serde_json::json!({
                 "key": "ops",
                 "name": "Ops",
+                "trigger_policy": canonical_wake_policy_json(),
+            })
+        );
+    }
+
+    #[test]
+    fn create_body_carries_explicit_workspace_root_beside_the_policy() {
+        let body = CreateRoomBody::new("ops", "Ops", Some("/Users/me/dev/ocean"));
+        assert_eq!(
+            serde_json::to_value(&body).unwrap(),
+            serde_json::json!({
+                "key": "ops",
+                "name": "Ops",
+                "trigger_policy": canonical_wake_policy_json(),
                 "workspace_root": "/Users/me/dev/ocean",
             })
         );
+    }
+
+    #[test]
+    fn room_decodes_the_daemon_s_full_trigger_policy() {
+        // The daemon echoes the stored policy with the two failure flags; a
+        // policy stored before they existed decodes with both off.
+        let room: Room = serde_json::from_value(serde_json::json!({
+            "id": "ops",
+            "name": "Ops",
+            "trigger_policy": canonical_wake_policy_json(),
+        }))
+        .unwrap();
+        assert_eq!(
+            room.trigger_policy,
+            Some(RoomTriggerPolicy::create_default())
+        );
+        let legacy: Room = serde_json::from_value(serde_json::json!({
+            "id": "ops",
+            "name": "Ops",
+            "trigger_policy": {"on_mention": true},
+        }))
+        .unwrap();
+        let policy = legacy.trigger_policy.expect("policy decodes");
+        assert!(policy.on_mention);
+        assert!(!policy.on_thread_reply && !policy.on_build_failure && !policy.on_ci_failure);
     }
 
     #[test]
@@ -5505,6 +6166,183 @@ mod tests {
         assert!(!rooms_loading.get_untracked());
     }
 
+    fn rail_rooms(ids: &[&str]) -> Vec<Room> {
+        ids.iter()
+            .map(|id| Room {
+                id: (*id).into(),
+                name: (*id).into(),
+                ..local_room()
+            })
+            .collect()
+    }
+
+    fn rail_ids(rooms: &[Room]) -> Vec<&str> {
+        rooms.iter().map(|room| room.id.as_str()).collect()
+    }
+
+    /// The daemon-default first page sends no query; the daemon's `has_more`
+    /// / `next_cursor` pair decides whether the rail offers "Load more rooms".
+    /// An older daemon omits both, so the list decodes as one complete page.
+    #[test]
+    fn room_list_first_page_sends_no_query_and_offers_more_only_when_the_daemon_says_so() {
+        let mut paging = RoomListPaging::default();
+        assert_eq!(paging.list_query(), None);
+        assert_eq!(
+            rooms_list_url("http://d", None),
+            "http://d/v1/rooms/persistent"
+        );
+        assert!(!paging.has_more());
+        assert_eq!(paging.more_request(), None);
+
+        paging.first_page(true, Some("room-100".into()));
+        assert!(paging.has_more());
+        let (cursor, query) = paging.more_request().expect("pending page");
+        assert_eq!(cursor, "room-100");
+        assert_eq!(query, "cursor=room-100");
+        assert_eq!(
+            rooms_list_url("http://d", Some(&query)),
+            "http://d/v1/rooms/persistent?cursor=room-100"
+        );
+
+        // `has_more` without a usable cursor, or a complete page, ends paging.
+        paging.first_page(true, Some(String::new()));
+        assert!(!paging.has_more());
+        paging.first_page(true, None);
+        assert!(!paging.has_more());
+        paging.first_page(false, Some("room-100".into()));
+        assert!(!paging.has_more());
+
+        let legacy: RoomsListResponse =
+            serde_json::from_str(r#"{"ok":true,"rooms":[{"id":"a","name":"A"}],"read_states":[]}"#)
+                .unwrap();
+        assert!(!legacy.has_more);
+        assert_eq!(legacy.next_cursor, None);
+        let paged: RoomsListResponse = serde_json::from_str(
+            r#"{"ok":true,"rooms":[],"read_states":[],"next_cursor":"a","has_more":true}"#,
+        )
+        .unwrap();
+        assert!(paged.has_more);
+        assert_eq!(paged.next_cursor.as_deref(), Some("a"));
+    }
+
+    /// "Load more rooms" appends the next page in daemon order, drops rows
+    /// the rail already holds, and raises the refetch depth to the rooms held
+    /// so a refresh (create, close, the silent interval) covers the whole
+    /// extended rail instead of shrinking it back to the first page.
+    #[test]
+    fn room_list_load_more_appends_dedups_and_raises_the_refetch_depth() {
+        let mut paging = RoomListPaging::default();
+        paging.first_page(true, Some("b".into()));
+        let held = rail_rooms(&["a", "b"]);
+
+        let merged = paging
+            .absorb(
+                &held,
+                "b",
+                rail_rooms(&["b", "c", "d"]),
+                true,
+                Some("d".into()),
+            )
+            .expect("fresh page lands");
+        assert_eq!(rail_ids(&merged), vec!["a", "b", "c", "d"]);
+        assert!(paging.has_more());
+        assert_eq!(paging.more_request().unwrap().0, "d");
+        assert_eq!(paging.list_query().as_deref(), Some("limit=4"));
+
+        // The last page ends paging; the depth it reached stays for refetches,
+        // which replace only the pending cursor.
+        let merged = paging
+            .absorb(&merged, "d", rail_rooms(&["e"]), false, None)
+            .expect("last page lands");
+        assert_eq!(rail_ids(&merged), vec!["a", "b", "c", "d", "e"]);
+        assert!(!paging.has_more());
+        assert_eq!(paging.list_query().as_deref(), Some("limit=5"));
+        paging.first_page(true, Some("e".into()));
+        assert_eq!(paging.list_query().as_deref(), Some("limit=5"));
+        assert!(paging.has_more());
+
+        // A refetch that shrank the list never lowers the depth asked for.
+        let merged = paging
+            .absorb(&rail_rooms(&["a"]), "e", rail_rooms(&["f"]), false, None)
+            .unwrap();
+        assert_eq!(rail_ids(&merged), vec!["a", "f"]);
+        assert_eq!(paging.list_query().as_deref(), Some("limit=5"));
+    }
+
+    /// A page whose cursor is no longer the pending one is stale (a refetch
+    /// landed in between) and is dropped whole; an empty page or a cursor
+    /// that does not advance ends paging; the depth never exceeds the
+    /// daemon's clamp; cursors are query-encoded.
+    #[test]
+    fn room_list_load_more_drops_stale_pages_and_stops_on_exhausted_or_stuck_pages() {
+        let mut paging = RoomListPaging::default();
+        paging.first_page(true, Some("b".into()));
+        assert_eq!(
+            paging.absorb(&rail_rooms(&["a"]), "zz", rail_rooms(&["c"]), true, None),
+            None
+        );
+        assert!(
+            paging.has_more(),
+            "a dropped page leaves the pending cursor alone"
+        );
+
+        // Empty page: nothing appended, paging ends even if the daemon claims more.
+        let merged = paging
+            .absorb(
+                &rail_rooms(&["a", "b"]),
+                "b",
+                Vec::new(),
+                true,
+                Some("c".into()),
+            )
+            .unwrap();
+        assert_eq!(rail_ids(&merged), vec!["a", "b"]);
+        assert!(!paging.has_more());
+        assert_eq!(paging.list_query().as_deref(), Some("limit=2"));
+
+        // Non-advancing cursor: the rows land once, then paging ends.
+        let mut stuck = RoomListPaging::default();
+        stuck.first_page(true, Some("b".into()));
+        let merged = stuck
+            .absorb(
+                &rail_rooms(&["a", "b"]),
+                "b",
+                rail_rooms(&["c"]),
+                true,
+                Some("b".into()),
+            )
+            .unwrap();
+        assert_eq!(rail_ids(&merged), vec!["a", "b", "c"]);
+        assert!(!stuck.has_more());
+
+        // Depth is clamped to the daemon's maximum list limit.
+        let mut deep = RoomListPaging::default();
+        deep.first_page(true, Some("x".into()));
+        let many: Vec<String> = (0..RoomListPaging::MAX_LIST_LIMIT + 5)
+            .map(|i| format!("r{i}"))
+            .collect();
+        let many: Vec<&str> = many.iter().map(String::as_str).collect();
+        let merged = deep
+            .absorb(
+                &rail_rooms(&many),
+                "x",
+                rail_rooms(&["y"]),
+                true,
+                Some("y".into()),
+            )
+            .unwrap();
+        assert_eq!(merged.len(), RoomListPaging::MAX_LIST_LIMIT + 6);
+        assert_eq!(
+            deep.list_query().as_deref(),
+            Some(format!("limit={}", RoomListPaging::MAX_LIST_LIMIT).as_str())
+        );
+
+        // Room keys are URL-safe by the daemon's key rule; anything else is encoded.
+        let mut odd = RoomListPaging::default();
+        odd.first_page(true, Some("a b/c".into()));
+        assert_eq!(odd.more_request().unwrap().1, "cursor=a%20b%2Fc");
+    }
+
     #[test]
     fn owner_responses_retire_on_origin_switch_and_newer_read() {
         let url = RwSignal::new("https://old.example".into());
@@ -5940,6 +6778,17 @@ mod tests {
         assert!(may_invoke(&list, "agent-x", 5));
         assert!(may_invoke(&list, "agent-y", 4));
 
+        // A refusal is equally final, so its text promises no retry (#102).
+        let refused = vec![invocation(
+            "agent-x",
+            4,
+            InvocationState::Refused("room_turn_capacity".into()),
+        )];
+        assert!(
+            !may_invoke(&refused, "agent-x", 4),
+            "a refused invocation never retries"
+        );
+
         let ack = serde_json::json!({
             "ok": true, "status": "queued", "admission_id": "adm",
             "request_id": "req-1", "generation": "3", "session_id": "sess-1"
@@ -6060,7 +6909,7 @@ mod tests {
                 "That message is no longer in this room.",
             ),
             ("room_not_found", "This room is closed."),
-            ("room_turn_capacity", "Ocean is busy. Try again shortly."),
+            ("room_turn_capacity", "Ocean is busy."),
             (
                 "agent_package_unavailable",
                 "Ocean could not load that agent folder.",

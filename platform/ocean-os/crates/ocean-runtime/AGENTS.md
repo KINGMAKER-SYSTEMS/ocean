@@ -41,16 +41,22 @@ This crate owns the Ocean agent loop and permission-gated tool execution runtime
   preserve transcript order and, for tool rounds, include the assistant tool-call
   message followed by every corresponding ordered `ToolResult`; never checkpoint
   an incomplete batch.
-- Mid-turn steering moves pending messages into the transcript after tool results
-  and emits ordered delivery/checkpoint events. Inbox admission, consumption and close
-  share one mutex. Retain at most 64 identities per turn (32 KiB text, 128-byte ID);
-  refuse new IDs at capacity rather than evict active dedup evidence. Identical ID/text
-  retries do not enqueue twice; conflicting reuse refuses. Draining marks in-flight;
-  only still-pending messages become unconsumed on close. The persistence owner holds
-  inbox custody through synchronous save and exact-batch delivered acknowledgment.
-  Failed/interrupted saves remain in-flight/unknown, never unconsumed. Runtime events
-  alone are not durable delivery proof. Verify cargo test -p ocean-runtime --test steering.
-
+- Mid-turn steering (`AgentConfig::steering`, `SteeringInbox`): at the top of
+  every round after the first, the loop moves waiting messages into the
+  transcript as user messages after the previous round's tool results, emits
+  `SteeringDelivered` for each, and checkpoints them at once. Never before the
+  first round: a pre-stream failover re-runs the loop from the original
+  history. Every place the loop would end (model stopped without tools, or a
+  terminating tool) calls `close_if_idle`; waiting messages win and the loop
+  runs another round, otherwise the inbox closes in the same lock, so an
+  accepted message is delivered or handed back by `close`, never lost. Error
+  and cancel returns leave the inbox open for the owner (the daemon) to close;
+  the turn limit closes it with the undelivered ones logged.
+  (PR #129 reconciliation: the desktop candidate's #148 variant — bounded
+  per-turn identity receipts, `acknowledge_saved`/`save_and_acknowledge`
+  custody, `SteerRefusal::Conflict`/`WrongTurn` — was an independent solution
+  of #148 and is superseded by main's #156 daemon-side steer-outcome ledger;
+  do not reintroduce or blend the two designs.)
 - Runtime events must remain compatible with `ocean-core` event contracts and daemon SSE streaming.
 - `ToolExecutionEnd` intentionally sends full live content/details while only the transcript copy is capped (32 KiB text / 256 KiB image). The per-turn event sink remains unbounded; changes to this ownership seam require the finite queue/RSS characterization test and daemon replay review.
 - Keep provider concerns outside runtime unless mediated through the protocol/provider layers.

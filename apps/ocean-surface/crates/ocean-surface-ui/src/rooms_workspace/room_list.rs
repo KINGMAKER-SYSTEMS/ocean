@@ -164,6 +164,94 @@ pub(super) fn room_option_dom_id(key: &str) -> String {
     format!("rooms-opt-{key}")
 }
 
+// ── Rail grouping by workspace root (pure, unit-testable) ──────────────────
+
+/// Rooms sharing one daemon-side `workspace_root` binding, rendered under one
+/// static, non-interactive header (`role="group"` labelled by the header).
+/// `label: None` is the "Other rooms" bucket for unbound rooms, always last.
+/// Groups never collapse: every room stays in the DOM and the roving roster.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct RailGroup {
+    pub label: Option<String>,
+    pub rooms: Vec<Room>,
+}
+
+/// Group rooms by `workspace_root`. Derived, never stored: the daemon owns the
+/// binding (canonicalized at create), so roots compare verbatim. Group order
+/// is first-seen, rooms keep daemon list order within a group, and unbound
+/// rooms sink to a tail bucket. A shared root is a folder binding, not proof
+/// of a daemon Project identity.
+pub(super) fn group_rail_rooms(rooms: &[Room]) -> Vec<RailGroup> {
+    let mut groups: Vec<RailGroup> = Vec::new();
+    let mut unbound: Vec<Room> = Vec::new();
+    for room in rooms {
+        match room.workspace_root.as_deref().filter(|s| !s.is_empty()) {
+            Some(root) => match groups.iter_mut().find(|g| g.label.as_deref() == Some(root)) {
+                Some(group) => group.rooms.push(room.clone()),
+                None => groups.push(RailGroup {
+                    label: Some(root.to_string()),
+                    rooms: vec![room.clone()],
+                }),
+            },
+            None => unbound.push(room.clone()),
+        }
+    }
+    if !unbound.is_empty() {
+        groups.push(RailGroup {
+            label: None,
+            rooms: unbound,
+        });
+    }
+    groups
+}
+
+/// Room keys in rail visual order (groups flattened) — the one ordering both
+/// the keydown handler and the per-option tab-stop check use.
+pub(super) fn rail_room_keys(rooms: &[Room]) -> Vec<String> {
+    group_rail_rooms(rooms)
+        .into_iter()
+        .flat_map(|g| g.rooms.into_iter().map(|r| r.id))
+        .collect()
+}
+
+/// `<For>` identity for a group: the bound root, or a NUL-prefixed sentinel no
+/// absolute path can equal.
+pub(super) fn rail_group_key(label: &Option<String>) -> String {
+    label.clone().unwrap_or_else(|| "\u{0}unbound".to_string())
+}
+
+/// Header text: the full, case-preserved root with trailing separators
+/// trimmed (never a basename, so `/clients/acme/web` and `/archive/acme/web`
+/// stay distinguishable), or "Other rooms" for the unbound bucket.
+pub(super) fn rail_group_display_label(label: Option<&str>) -> String {
+    match label {
+        Some(root) => normalized_root(root).unwrap_or_else(|| root.to_string()),
+        None => "Other rooms".to_string(),
+    }
+}
+
+/// Header DOM id derived from the root's bytes, not list position, so keyed
+/// groups that reorder never collide.
+pub(super) fn rail_group_header_dom_id(label: Option<&str>) -> String {
+    match label {
+        Some(root) => {
+            let encoded: String = root.bytes().map(|b| format!("{b:02x}")).collect();
+            format!("rooms-group-head-bound-{encoded}")
+        }
+        None => "rooms-group-head-unbound".to_string(),
+    }
+}
+
+/// Live member rooms of one group, re-derived from the current list on every
+/// read so a retained keyed group never holds a stale snapshot.
+fn rail_group_rooms(rooms: &[Room], label: &Option<String>) -> Vec<Room> {
+    group_rail_rooms(rooms)
+        .into_iter()
+        .find(|g| &g.label == label)
+        .map(|g| g.rooms)
+        .unwrap_or_default()
+}
+
 /// Left rail: room listbox, status line, and create/join entry controls.
 /// The create draft, its workspace choice, and its op-id admission state live
 /// here; nothing else in the workspace reads them.
@@ -282,7 +370,10 @@ pub(super) fn RoomListRail(
         let workspace_root = workspace_choice.get_untracked().filter(|root| {
             workspace_choices.with_untracked(|options| options.iter().any(|o| &o.root == root))
         });
-        let op_id = rooms.create_room(name.clone(), None, workspace_root);
+        // The create body attaches the canonical wake policy itself
+        // (`RoomTriggerPolicy::create_default`); the rail chooses only the
+        // name and the folder.
+        let op_id = rooms.create_room(name.clone(), workspace_root);
         if op_id == 0 {
             // Synchronous rejection — empty name or slug. Don't set
             // pending; the name field already shows the error via status.
@@ -453,12 +544,7 @@ pub(super) fn RoomListRail(
                                 role="listbox"
                                 aria-label="Rooms"
                                 on:keydown=move |ev: web_sys::KeyboardEvent| {
-                                    let keys: Vec<String> = rooms
-                                        .list
-                                        .get_untracked()
-                                        .iter()
-                                        .map(|r| r.id.clone())
-                                        .collect();
+                                    let keys = rooms.list.with_untracked(|l| rail_room_keys(l));
                                     let focused = web_sys::window()
                                         .and_then(|w| w.document())
                                         .and_then(|d| d.active_element())
@@ -485,72 +571,45 @@ pub(super) fn RoomListRail(
                                     }
                                 }
                             >
+                                // Workspace-root groups are static structure
+                                // around the options: role="group" labelled by
+                                // a non-interactive header, so the listbox keeps
+                                // exactly one roving tab stop across all rooms.
                                 <For
-                                    each=move || rooms.list.get()
-                                    key=|r: &Room| (r.id.clone(), r.participants.len(), r.updated_at.clone(), r.muted)
-                                    children=move |room: Room| {
-                                        let key = room.id.clone();
-                                        let key2 = key.clone();
-                                        let key_tab = key.clone();
-                                        let key_sel = key.clone();
-                                        let key_unread = key.clone();
-                                        let active = move || rooms.open_key.get().as_deref() == Some(&*key);
-                                        let selected =
-                                            move || rooms.open_key.get().as_deref() == Some(&*key_sel);
-                                        let is_tab_stop = move || {
-                                            let keys: Vec<String> = rooms
-                                                .list
-                                                .get()
-                                                .iter()
-                                                .map(|r| r.id.clone())
-                                                .collect();
-                                            let open = rooms.open_key.get();
-                                            room_list_tab_stop(&keys, open.as_deref())
-                                                .and_then(|i| keys.get(i).cloned())
-                                                .as_deref()
-                                                == Some(&*key_tab)
-                                        };
-                                        let muted = room.muted;
-                                        // Muted rooms stay quiet in the list;
-                                        // their mentions still reach the inbox.
-                                        let unread = move || {
-                                            !muted && rooms.read_summaries.with(|summaries| {
-                                                crate::rooms::room_has_durable_unread(
-                                                    summaries.get(&key_unread),
-                                                )
-                                            })
-                                        };
-                                        view! {
-                                            <button
-                                                class="rooms-workspace__room"
-                                                class:is-active=active
-                                                class:is-muted=muted
-                                                type="button"
-                                                role="option"
-                                                id=room_option_dom_id(&room.id)
-                                                aria-selected=move || selected().to_string()
-                                                tabindex=move || if is_tab_stop() { "0" } else { "-1" }
-                                                on:click=move |_| {
-                                                    rooms.open_room(key2.clone());
-                                                    show_left_rail.set(false);
-                                                }
-                                            >
-                                                <span class="rooms-workspace__room-hash">"#"</span>
-                                                <span class="rooms-workspace__room-name">
-                                                    {room.name.clone()}
-                                                </span>
-                                                <Show when=move || unread()>
-                                                    <span
-                                                        class="rooms-workspace__room-unread"
-                                                        role="img"
-                                                        aria-label="Unread messages"
-                                                    ></span>
-                                                </Show>
-                                            </button>
-                                        }
+                                    each=move || {
+                                        rooms
+                                            .list
+                                            .with(|l| group_rail_rooms(l))
+                                            .into_iter()
+                                            .map(|g| g.label)
+                                            .collect::<Vec<_>>()
+                                    }
+                                    key=|label| rail_group_key(label)
+                                    children=move |label| {
+                                        rail_group_view(label, rooms, show_left_rail)
                                     }
                                 />
                             </div>
+                            // After the last group, outside the listbox: the
+                            // daemon pages the list (OCEAN-250), so while it
+                            // reports more rooms the rail ends with one plain
+                            // control that appends the next page. A separate
+                            // tab stop, never an option, so the listbox keeps
+                            // its single roving stop.
+                            {move || rooms.can_load_more_rooms().then(|| view! {
+                                <button
+                                    class="rooms-workspace__left-more"
+                                    type="button"
+                                    disabled=move || rooms.rooms_loading_more.get()
+                                    on:click=move |_| rooms.fetch_rooms_more()
+                                >
+                                    {move || if rooms.rooms_loading_more.get() {
+                                        "Loading…"
+                                    } else {
+                                        "Load more rooms"
+                                    }}
+                                </button>
+                            })}
                         }.into_any()
                     }
                 }}
@@ -697,6 +756,92 @@ pub(super) fn RoomListRail(
                 </Show>
             </div>
         </div>
+    }
+}
+
+/// One workspace-root group: a static labelled header over its room options.
+/// Count and membership re-read the live list on every change because `<For>`
+/// keeps this item while the root persists; a snapshot would go stale when a
+/// room joins, leaves or reorders within an already-rendered root.
+fn rail_group_view(
+    label: Option<String>,
+    rooms: Rooms,
+    show_left_rail: RwSignal<bool>,
+) -> impl IntoView {
+    let header_id = rail_group_header_dom_id(label.as_deref());
+    let labelled_by = header_id.clone();
+    let display = rail_group_display_label(label.as_deref());
+    let count_label = label.clone();
+    view! {
+        <div class="rooms-workspace__group" role="group" aria-labelledby=labelled_by>
+            <div class="rooms-workspace__group-head" id=header_id>
+                <span class="rooms-workspace__group-label">{display}</span>
+                <span class="rooms-workspace__group-count">
+                    {move || rooms.list.with(|l| rail_group_rooms(l, &count_label).len())}
+                </span>
+            </div>
+            <For
+                each=move || rooms.list.with(|l| rail_group_rooms(l, &label))
+                key=|r: &Room| (r.id.clone(), r.participants.len(), r.updated_at.clone(), r.muted)
+                children=move |room: Room| rail_room_option(room, rooms, show_left_rail)
+            />
+        </div>
+    }
+}
+
+/// One room option in the rail listbox. The single tab stop is computed over
+/// the grouped visual order so Tab enters the list once.
+fn rail_room_option(room: Room, rooms: Rooms, show_left_rail: RwSignal<bool>) -> impl IntoView {
+    let key = room.id.clone();
+    let key2 = key.clone();
+    let key_tab = key.clone();
+    let key_sel = key.clone();
+    let key_unread = key.clone();
+    let active = move || rooms.open_key.get().as_deref() == Some(&*key);
+    let selected = move || rooms.open_key.get().as_deref() == Some(&*key_sel);
+    let is_tab_stop = move || {
+        let keys = rooms.list.with(|l| rail_room_keys(l));
+        let open = rooms.open_key.get();
+        room_list_tab_stop(&keys, open.as_deref())
+            .and_then(|i| keys.get(i).cloned())
+            .as_deref()
+            == Some(&*key_tab)
+    };
+    let muted = room.muted;
+    // Muted rooms stay quiet in the list; their mentions still reach the inbox.
+    // Memo, not a closure: both the bold modifier and the dot read it.
+    let unread = Memo::new(move |_| {
+        !muted
+            && rooms
+                .read_summaries
+                .with(|summaries| crate::rooms::room_has_durable_unread(summaries.get(&key_unread)))
+    });
+    view! {
+        <button
+            class="rooms-workspace__room"
+            class:is-active=active
+            class:is-muted=muted
+            class:rooms-workspace__room--unread=move || unread.get()
+            type="button"
+            role="option"
+            id=room_option_dom_id(&room.id)
+            aria-selected=move || selected().to_string()
+            tabindex=move || if is_tab_stop() { "0" } else { "-1" }
+            on:click=move |_| {
+                rooms.open_room(key2.clone());
+                show_left_rail.set(false);
+            }
+        >
+            <span class="rooms-workspace__room-hash">"#"</span>
+            <span class="rooms-workspace__room-name">{room.name.clone()}</span>
+            <Show when=move || unread.get()>
+                <span
+                    class="rooms-workspace__room-unread"
+                    role="img"
+                    aria-label="Unread messages"
+                ></span>
+            </Show>
+        </button>
     }
 }
 
@@ -974,8 +1119,197 @@ mod tests {
         assert_eq!(root_basename("/"), "/");
     }
 
+    fn rail_room(id: &str, root: Option<&str>) -> Room {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "name": id,
+            "workspace_root": root,
+        }))
+        .unwrap()
+    }
+
+    fn ids(rooms: &[Room]) -> Vec<&str> {
+        rooms.iter().map(|r| r.id.as_str()).collect()
+    }
+
+    #[test]
+    fn rail_groups_by_workspace_root_in_first_seen_order_with_unbound_last() {
+        let rooms = vec![
+            rail_room("a", Some("/w/alpha")),
+            rail_room("u1", None),
+            rail_room("b", Some("/w/beta")),
+            rail_room("c", Some("/w/alpha")),
+            rail_room("u2", Some("")),
+        ];
+        let groups = group_rail_rooms(&rooms);
+        assert_eq!(groups.len(), 3);
+        assert_eq!(groups[0].label.as_deref(), Some("/w/alpha"));
+        assert_eq!(ids(&groups[0].rooms), vec!["a", "c"]);
+        assert_eq!(groups[1].label.as_deref(), Some("/w/beta"));
+        assert_eq!(groups[2].label, None);
+        assert_eq!(ids(&groups[2].rooms), vec!["u1", "u2"]);
+        // Keyboard order is the visual (grouped) order, not daemon order.
+        assert_eq!(rail_room_keys(&rooms), keys(&["a", "c", "b", "u1", "u2"]));
+    }
+
+    #[test]
+    fn rail_groups_all_unbound_into_one_tail_bucket_and_empty_list_is_empty() {
+        let rooms = vec![rail_room("u1", None), rail_room("u2", None)];
+        let groups = group_rail_rooms(&rooms);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].label, None);
+        assert_eq!(groups[0].rooms.len(), 2);
+        assert!(group_rail_rooms(&[]).is_empty());
+        assert!(rail_room_keys(&[]).is_empty());
+    }
+
+    #[test]
+    fn rail_group_label_keeps_full_root_so_shared_basenames_differ() {
+        assert_eq!(
+            rail_group_display_label(Some("/clients/acme/web")),
+            "/clients/acme/web"
+        );
+        assert_ne!(
+            rail_group_display_label(Some("/clients/acme/web")),
+            rail_group_display_label(Some("/archive/acme/web"))
+        );
+        assert_eq!(
+            rail_group_display_label(Some("/Users/Me/App")),
+            "/Users/Me/App"
+        );
+        assert_eq!(rail_group_display_label(Some("/w/")), "/w");
+        assert_eq!(rail_group_display_label(Some("/")), "/");
+        assert_eq!(rail_group_display_label(None), "Other rooms");
+    }
+
+    #[test]
+    fn rail_group_key_sentinel_never_collides_with_a_root() {
+        let bound = rail_group_key(&Some("/w/alpha".to_string()));
+        let unbound = rail_group_key(&None);
+        assert_eq!(bound, "/w/alpha");
+        assert_ne!(bound, unbound);
+        assert!(unbound.contains('\u{0}'));
+    }
+
+    #[test]
+    fn rail_group_header_ids_follow_identity_not_position() {
+        let alpha = rail_group_header_dom_id(Some("/w/alpha"));
+        let beta = rail_group_header_dom_id(Some("/w/beta"));
+        let unbound = rail_group_header_dom_id(None);
+        assert_ne!(alpha, beta);
+        assert_ne!(alpha, unbound);
+        assert_eq!(alpha, rail_group_header_dom_id(Some("/w/alpha")));
+        assert!(alpha.starts_with("rooms-group-head-bound-"));
+        // Hex encoding keeps ids free of path separators and spaces.
+        assert!(rail_group_header_dom_id(Some("/a b/c"))
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-'));
+    }
+
+    #[test]
+    fn rail_group_membership_tracks_the_live_list() {
+        let alpha = Some("/w/alpha".to_string());
+        let before = vec![
+            rail_room("a", Some("/w/alpha")),
+            rail_room("b", Some("/w/beta")),
+        ];
+        assert_eq!(ids(&rail_group_rooms(&before, &alpha)), vec!["a"]);
+        let after = vec![
+            rail_room("a", Some("/w/alpha")),
+            rail_room("c", Some("/w/alpha")),
+            rail_room("b", Some("/w/beta")),
+        ];
+        assert_eq!(ids(&rail_group_rooms(&after, &alpha)), vec!["a", "c"]);
+        assert!(rail_group_rooms(&after, &Some("/gone".into())).is_empty());
+    }
+
+    /// The group header is a label, not a control: a button, click handler or
+    /// aria-expanded would add Tab stops outside the listbox's one roving stop.
+    /// Labels wrap in full (no ellipsis, no case folding) so roots that differ
+    /// only deep in the path or by case stay distinguishable without hover.
+    #[test]
+    fn rail_group_header_is_static_and_its_label_wraps_in_full() {
+        let src: String = include_str!("room_list.rs")
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let start = src.find("fnrail_group_view(").expect("group view");
+        let end = start
+            + src[start..]
+                .find("fnrail_room_option(")
+                .expect("option view");
+        let group = &src[start..end];
+        assert!(group.contains(r#"role="group"aria-labelledby=labelled_by"#));
+        assert!(group.contains(r#"<divclass="rooms-workspace__group-head"id=header_id>"#));
+        let head = &group[group.find("rooms-workspace__group-head").unwrap()..];
+        let head = &head[..head.find("</div>").unwrap()];
+        assert!(!head.contains("on:click") && !head.contains("aria-expanded"));
+
+        let css: String = include_str!("../../../../styles/rooms-workspace.css")
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let rule = &css[css
+            .find(".rooms-workspace__group-label{")
+            .expect("label rule")..];
+        let rule = &rule[..rule.find('}').unwrap()];
+        assert!(rule.contains("white-space:normal") && rule.contains("overflow-wrap:anywhere"));
+        assert!(!rule.contains("text-overflow") && !rule.contains("text-transform"));
+    }
+
     #[test]
     fn option_dom_id_is_prefix_stable() {
         assert_eq!(room_option_dom_id("r1"), "rooms-opt-r1");
+    }
+
+    /// "Load more rooms" sits after the last group and OUTSIDE the listbox:
+    /// a plain button (not an option, no tabindex) gated on the daemon's
+    /// `has_more`, so the listbox keeps exactly one roving tab stop and the
+    /// grouped keyboard order (`rail_room_keys`) is untouched. It is the only
+    /// caller of `fetch_rooms_more`, and it is disabled while a page is in
+    /// flight so a double click cannot page twice.
+    #[test]
+    fn load_more_rooms_follows_the_groups_outside_the_listbox() {
+        let src: String = include_str!("room_list.rs")
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let listbox = src.find(r#"role="listbox""#).expect("listbox");
+        let groups = listbox
+            + src[listbox..]
+                .find("rail_group_view(label,rooms,show_left_rail)")
+                .expect("groups");
+        let more = src
+            .find(r#"class="rooms-workspace__left-more""#)
+            .expect("load more control");
+        assert!(groups < more, "the control follows the grouped options");
+        // The listbox closes (its `<For>` ends, then its `</div>`) before the control.
+        let listbox_close = groups + src[groups..].find("/></div>").expect("listbox close");
+        assert!(listbox_close < more, "the control is outside the listbox");
+        let control = &src[more..more + src[more..].find("</button>").unwrap()];
+        assert!(control.contains(r#"type="button""#));
+        assert!(!control.contains("role=") && !control.contains("tabindex"));
+        assert!(control.contains("disabled=move||rooms.rooms_loading_more.get()"));
+        assert!(control.contains("on:click=move|_|rooms.fetch_rooms_more()"));
+        assert!(control.contains(r#""Loadmorerooms""#));
+        // The production half of this file (before its test module) pages
+        // from exactly this one control.
+        let production = &src[..src.find("#[cfg(test)]").expect("test module")];
+        assert_eq!(production.matches("fetch_rooms_more()").count(), 1);
+        // Gated on the daemon's report, never on a local guess at page size.
+        let gate = &src[more - 120..more];
+        assert!(gate.contains("rooms.can_load_more_rooms().then("));
+        assert!(!production.contains(".len()>=100"));
+
+        let css: String = include_str!("../../../../styles/rooms-workspace.css")
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let rule = &css[css
+            .find(".rooms-workspace__left-more{")
+            .expect("control rule")..];
+        let rule = &rule[..rule.find('}').unwrap()];
+        assert!(rule.contains("color:var(--fg-3)") && rule.contains("background:transparent"));
+        assert!(!rule.contains('#') && !rule.contains("rgb("), "tokens only");
     }
 }

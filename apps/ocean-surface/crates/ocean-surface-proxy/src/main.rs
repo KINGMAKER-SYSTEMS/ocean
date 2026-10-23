@@ -16,7 +16,7 @@
 #[cfg(unix)]
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path as FsPath, PathBuf};
@@ -38,6 +38,8 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tower_http::{services::ServeDir, trace::TraceLayer};
 use tracing_subscriber::EnvFilter;
+
+mod coding_plans;
 
 const DEFAULT_DAEMON_URL: &str = "http://127.0.0.1:4780";
 const DEFAULT_LIVEKIT_ROOM_ID: &str = "project:surface-main";
@@ -293,6 +295,111 @@ fn read_local_credential(path: &FsPath, what: &str) -> Result<String, String> {
 /// Header the daemon reads the Room operator credential from.
 const OPERATOR_HEADER: &str = "x-ocean-operator";
 
+/// Body ceiling for a room-attachment upload forward.
+///
+/// Mirrors the daemon's `MAX_ATTACHMENT_BYTES` (8 MiB) + `BODY_LIMIT_SLACK`
+/// (4096) exactly. The slack is not decoration: a body a little over the cap
+/// must still REACH the daemon so it comes back as the typed
+/// `attachment_too_large` JSON. Capping at the cap itself would turn every
+/// oversize upload into our own untyped 413, which reads to the operator as a
+/// proxy bug rather than the rule it actually is. The generic
+/// [`ROOMS_JSON_BODY_LIMIT`] stays where it is; a room message has no business
+/// being megabytes. Ported from Risingtides-dev/ocean-surface's proxy.
+const ATTACHMENT_UPLOAD_BODY_LIMIT: usize = 8 * 1024 * 1024 + 4096;
+
+/// Body ceiling for every other persistent-rooms forward (TASK-73).
+const ROOMS_JSON_BODY_LIMIT: usize = 1 << 20;
+
+/// Which persistent-rooms request this is, because three of the shapes under
+/// one wildcard route cannot be forwarded the same way.
+///
+/// Classified from reconstructed path SEGMENTS, never a `contains`/`ends_with`
+/// probe: `{key}` is caller-supplied, so a room literally keyed `attachments`
+/// or one whose key embeds `/events` would otherwise pick the wrong lane. This
+/// is the idiom TASK-11 established for the SSE tail after the axum route
+/// conflict; the two attachment lanes join it rather than inventing a second.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RoomsPersistentShape {
+    /// `GET {key}/events` — stream, never buffer.
+    EventsTail,
+    /// `POST {key}/attachments` — a RAW-BYTES body up to the daemon's 8 MiB
+    /// cap, not JSON.
+    AttachmentUpload,
+    /// `GET {key}/attachments/{id}` — opaque bytes whose upstream
+    /// content-type / disposition / nosniff headers ARE the security contract.
+    AttachmentDownload,
+    /// Everything else in the subtree: a JSON request, a JSON reply.
+    Json,
+}
+
+fn rooms_persistent_shape(method: &axum::http::Method, path: &str) -> RoomsPersistentShape {
+    let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+    let keyed = segments.len() >= 5
+        && segments[0] == "v1"
+        && segments[1] == "rooms"
+        && segments[2] == "persistent"
+        && !segments[3].is_empty();
+    if !keyed {
+        return RoomsPersistentShape::Json;
+    }
+    let is_get = method == axum::http::Method::GET;
+    if is_get && segments.len() == 5 && segments[4] == "events" {
+        RoomsPersistentShape::EventsTail
+    } else if method == axum::http::Method::POST
+        && segments.len() == 5
+        && segments[4] == "attachments"
+    {
+        RoomsPersistentShape::AttachmentUpload
+    } else if is_get
+        && segments.len() == 6
+        && segments[4] == "attachments"
+        && !segments[5].is_empty()
+    {
+        RoomsPersistentShape::AttachmentDownload
+    } else {
+        RoomsPersistentShape::Json
+    }
+}
+
+/// Forward an attachment download with its headers intact.
+///
+/// The daemon answers a content type DERIVED from the bytes (an image type or
+/// `application/octet-stream`) + `X-Content-Type-Options: nosniff` +
+/// `Content-Disposition: attachment` precisely so an uploader-declared
+/// `text/html` can never execute on this origin. Re-stamping every buffered
+/// reply `application/json` — right for the rest of the subtree — would
+/// destroy all three, which would make the PROXY the stored-XSS surface the
+/// daemon had carefully closed. Only those three headers are copied; the rest
+/// of the response is ours.
+async fn attachment_download_response(status: StatusCode, resp: reqwest::Response) -> Response {
+    let mut headers = HeaderMap::new();
+    for name in [
+        header::CONTENT_TYPE,
+        header::CONTENT_DISPOSITION,
+        header::X_CONTENT_TYPE_OPTIONS,
+    ] {
+        if let Some(value) = resp.headers().get(&name) {
+            headers.insert(name, value.clone());
+        }
+    }
+    // A refusal (unknown attachment, malformed id) is a JSON body carrying its
+    // own content type, and the copy above already moved it across. The
+    // fallback is for an upstream that declared nothing at all: guess opaque,
+    // never guess renderable.
+    if !headers.contains_key(header::CONTENT_TYPE) {
+        headers.insert(
+            header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/octet-stream"),
+        );
+        headers.insert(
+            header::X_CONTENT_TYPE_OPTIONS,
+            axum::http::HeaderValue::from_static("nosniff"),
+        );
+    }
+    let bytes = resp.bytes().await.unwrap_or_default();
+    (status, headers, bytes).into_response()
+}
+
 /// The daemon owner mutations the logged-in operator may make through this
 /// origin: rename the owner (`PUT /v1/me`), decide a room run's pending
 /// permission, and save a room agent's settings. Exact shapes only.
@@ -541,6 +648,16 @@ fn build_app(state: Arc<AppState>, dist: &std::path::Path) -> Router {
         // Daemon owner identity (team-platform P2): every room author derives
         // from it; the browser never mints an identity.
         .route("/v1/me", get(proxy_me_get).put(proxy_me_put))
+        // Coding plans (web identity M3): this daemon's Claude/Codex plan
+        // logins, operator key attached server side. Exact shapes; see
+        // `coding_plans`.
+        .route("/v1/auth/providers", get(proxy_coding_plans))
+        .route(
+            "/v1/auth/providers/{*rest}",
+            get(proxy_coding_plans)
+                .post(proxy_coding_plans)
+                .delete(proxy_coding_plans),
+        )
         .route("/v1/fs/dirs", get(proxy_fs_dirs))
         // Routes the surface has always called and the daemon has always
         // served, which this table simply never carried. In the shipped PWA
@@ -682,6 +799,13 @@ fn build_app(state: Arc<AppState>, dist: &std::path::Path) -> Router {
         .layer(middleware::from_fn(wasm_headers))
         // Security headers decorate the login document and application shell.
         .layer(middleware::from_fn(security_headers))
+        // Auth-off only: a cross-site browser source may not mutate anything
+        // under /v1/ or /api/. Listed before — so it runs INSIDE — the session
+        // gate: it sees exactly the requests that gate admitted.
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_off_cross_site_gate,
+        ))
         // App-owned session auth deliberately does not emit WWW-Authenticate:
         // browser-native Basic prompts loop in standalone iOS PWAs. Navigations
         // redirect to /login; API calls receive a plain 401.
@@ -783,6 +907,93 @@ async fn session_auth_gate(
         return Redirect::to("/login").into_response();
     }
     (StatusCode::UNAUTHORIZED, "authentication required").into_response()
+}
+
+/// True when `host` (a Host header or URI authority, port optional) names
+/// this machine: `localhost`, or a loopback IPv4/IPv6 literal.
+fn is_loopback_authority(host: &str) -> bool {
+    let Ok(authority) = host.parse::<axum::http::uri::Authority>() else {
+        return false;
+    };
+    let authority_host = authority.host().trim_matches(['[', ']']);
+    authority_host.eq_ignore_ascii_case("localhost")
+        || authority_host
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
+/// In auth-off localhost development an ambient browser request has no
+/// session secret to distinguish it from a cross-site form or fetch. A
+/// mutation therefore accepts browser source headers only when every supplied
+/// Origin/Referer names the exact loopback Host that received the request.
+/// Headerless clients remain admitted for local scripts and CLIs.
+fn auth_off_mutation_source_allowed(headers: &HeaderMap) -> bool {
+    let origin = headers.get(header::ORIGIN);
+    let referer = headers.get(header::REFERER);
+    if origin.is_none() && referer.is_none() {
+        return true;
+    }
+
+    let Some(host) = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    if !is_loopback_authority(host) {
+        return false;
+    }
+
+    [origin, referer].into_iter().flatten().all(|value| {
+        let Ok(source) = value.to_str() else {
+            return false;
+        };
+        let Ok(uri) = source.parse::<axum::http::Uri>() else {
+            return false;
+        };
+        matches!(uri.scheme_str(), Some("http" | "https"))
+            && uri.authority().is_some_and(|source_authority| {
+                source_authority.as_str().eq_ignore_ascii_case(host)
+            })
+    })
+}
+
+/// Auth-off cross-site gate for every state-changing proxied request.
+///
+/// With auth off there is no session secret, so an ambient browser request
+/// from a hostile page is indistinguishable from the operator's own tab — and
+/// every POST under `/v1/` and `/api/` is reachable WITHOUT a CORS preflight:
+/// a `<form method=POST>` or a `no-cors` fetch sends it, and the forwarders
+/// stamp `application/json` on whatever body arrives. Closing a room needs no
+/// body at all. So every non-GET/HEAD request in the proxied namespaces must
+/// pass [`auth_off_mutation_source_allowed`]; the refusal is
+/// `403 {"ok":false,"error":"cross_site_mutation_refused"}`.
+///
+/// Auth-on mode is not gated here: its session cookie is `SameSite=Strict`,
+/// so a cross-site request arrives without it and the auth gate answers 401.
+/// `/csp-report`, `/login` and `/logout` sit outside both namespaces on
+/// purpose: a report sink must accept whatever the browser sends it, and the
+/// login pair carries no daemon authority.
+async fn auth_off_cross_site_gate(
+    State(state): State<Arc<AppState>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let method = req.method();
+    let path = req.uri().path();
+    let guarded = state.basic_auth.is_none()
+        && method != axum::http::Method::GET
+        && method != axum::http::Method::HEAD
+        && (path.starts_with("/v1/") || path.starts_with("/api/"));
+    if guarded && !auth_off_mutation_source_allowed(req.headers()) {
+        return (
+            StatusCode::FORBIDDEN,
+            [(header::CONTENT_TYPE, "application/json")],
+            Bytes::from_static(br#"{"ok":false,"error":"cross_site_mutation_refused"}"#),
+        )
+            .into_response();
+    }
+    next.run(req).await
 }
 
 #[derive(Deserialize)]
@@ -1123,10 +1334,12 @@ fn config_payload(state: &AppState) -> Value {
 
 /// Reverse-proxy POST /v1/agent/turns to the local daemon.
 async fn proxy_turns(State(state): State<Arc<AppState>>, body: Bytes) -> impl IntoResponse {
-    let url = format!("{}/v1/agent/turns", state.daemon_url.trim_end_matches('/'));
+    let Some(url) = upstream_url(&state.daemon_url, "/v1/agent/turns", None) else {
+        return upstream_path_rewritten();
+    };
     match state
         .http_json
-        .post(&url)
+        .post(url)
         .header(header::CONTENT_TYPE, "application/json")
         .body(body.to_vec())
         .send()
@@ -1148,13 +1361,12 @@ async fn proxy_turns(State(state): State<Arc<AppState>>, body: Bytes) -> impl In
 
 /// Reverse-proxy POST /v1/agent/sessions to the local daemon.
 async fn proxy_sessions_post(State(state): State<Arc<AppState>>, body: Bytes) -> impl IntoResponse {
-    let url = format!(
-        "{}/v1/agent/sessions",
-        state.daemon_url.trim_end_matches('/')
-    );
+    let Some(url) = upstream_url(&state.daemon_url, "/v1/agent/sessions", None) else {
+        return upstream_path_rewritten();
+    };
     match state
         .http_json
-        .post(&url)
+        .post(url)
         .header(header::CONTENT_TYPE, "application/json")
         .body(body.to_vec())
         .send()
@@ -1176,16 +1388,10 @@ async fn proxy_sessions_post(State(state): State<Arc<AppState>>, body: Bytes) ->
 
 /// Reverse-proxy GET /v1/agent/sessions to the local daemon.
 async fn proxy_sessions(State(state): State<Arc<AppState>>, req: Request) -> impl IntoResponse {
-    let q = req
-        .uri()
-        .query()
-        .map(|q| format!("?{q}"))
-        .unwrap_or_default();
-    let url = format!(
-        "{}/v1/agent/sessions{q}",
-        state.daemon_url.trim_end_matches('/')
-    );
-    match state.http_json.get(&url).send().await {
+    let Some(url) = upstream_url(&state.daemon_url, "/v1/agent/sessions", req.uri().query()) else {
+        return upstream_path_rewritten();
+    };
+    match state.http_json.get(url).send().await {
         Ok(resp) => {
             let status = resp.status();
             let bytes = resp.bytes().await.unwrap_or_default();
@@ -1208,20 +1414,29 @@ async fn proxy_session_detail(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
-    proxy_get_json(&state, &format!("/v1/sessions/{id}")).await
+    let Some(path) = daemon_path_with_segment("/v1/sessions/", &id, "") else {
+        return invalid_path();
+    };
+    proxy_get_json(&state, &path, None).await
 }
 
 async fn proxy_agent_session_detail(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
-    proxy_get_json(&state, &format!("/v1/agent/sessions/{id}")).await
+    let Some(path) = daemon_path_with_segment("/v1/agent/sessions/", &id, "") else {
+        return invalid_path();
+    };
+    proxy_get_json(&state, &path, None).await
 }
 
-/// JSON GET passthrough helper for small daemon endpoints.
-async fn proxy_get_json(state: &AppState, path: &str) -> Response {
-    let url = format!("{}{path}", state.daemon_url.trim_end_matches('/'));
-    match state.http_json.get(&url).send().await {
+/// JSON GET passthrough helper for small daemon endpoints. `query` is the
+/// caller's raw query string, forwarded verbatim after the approved path.
+async fn proxy_get_json(state: &AppState, path: &str, query: Option<&str>) -> Response {
+    let Some(url) = upstream_url(&state.daemon_url, path, query) else {
+        return upstream_path_rewritten();
+    };
+    match state.http_json.get(url).send().await {
         Ok(resp) => {
             let status = resp.status();
             let bytes = resp.bytes().await.unwrap_or_default();
@@ -1260,10 +1475,15 @@ async fn proxy_send_json_as(
     body: Bytes,
     operator_key: Option<String>,
 ) -> Response {
-    let url = format!("{}{path}", state.daemon_url.trim_end_matches('/'));
+    // The URL that will actually be sent is checked BEFORE the operator key
+    // (already resolved by the caller) is attached to anything: a path the
+    // parser would rewrite never carries the credential upstream.
+    let Some(url) = upstream_url(&state.daemon_url, path, None) else {
+        return upstream_path_rewritten();
+    };
     let mut request = state
         .http_json
-        .request(method, &url)
+        .request(method, url)
         .header(header::CONTENT_TYPE, "application/json")
         .body(body.to_vec());
     if let Some(key) = operator_key {
@@ -1286,12 +1506,12 @@ async fn proxy_send_json_as(
 
 /// Reverse-proxy GET /v1/models (model picker catalogue).
 async fn proxy_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    proxy_get_json(&state, "/v1/models").await
+    proxy_get_json(&state, "/v1/models", None).await
 }
 
 /// Reverse-proxy GET /v1/me (the daemon owner identity rooms author as).
 async fn proxy_me_get(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    proxy_get_json(&state, "/v1/me").await
+    proxy_get_json(&state, "/v1/me", None).await
 }
 
 /// Reverse-proxy PUT /v1/me (rename the daemon owner).
@@ -1303,37 +1523,31 @@ async fn proxy_me_put(State(state): State<Arc<AppState>>, body: Bytes) -> impl I
     proxy_send_json_as(&state, reqwest::Method::PUT, "/v1/me", body, operator_key).await
 }
 
-/// Reverse-proxy GET /v1/agents (named agent identity picker, TASK-9/TASK-11).
-async fn proxy_agents(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    proxy_get_json(&state, "/v1/agents").await
+/// This daemon's coding-plan routes (web identity M3); the allowlist and
+/// operator-key handling live in [`coding_plans`].
+async fn proxy_coding_plans(State(state): State<Arc<AppState>>, req: Request) -> Response {
+    coding_plans::forward(&state, req).await
 }
 
-/// Build `path` plus the caller's query string, owned, so no borrow of the
-/// request is held across the forward's await (the future must stay `Send`).
-///
-/// The plain [`proxy_get_json`] drops the query, which is silent breakage for
-/// any route whose meaning lives in it (`?path=`, `?q=`, `?state=`).
-fn path_with_query(path: &str, req: &Request) -> String {
-    match req.uri().query() {
-        Some(qs) => format!("{path}?{qs}"),
-        None => path.to_string(),
-    }
+/// Reverse-proxy GET /v1/agents (named agent identity picker, TASK-9/TASK-11).
+async fn proxy_agents(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    proxy_get_json(&state, "/v1/agents", None).await
 }
 
 /// Reverse-proxy GET /v1/agent/history/search?q=&limit= (transcript search).
 /// Without it the search box fell through to ServeDir → 404 → empty result
-/// list, indistinguishable from "no matches".
+/// list, indistinguishable from "no matches". The query is forwarded: a route
+/// whose meaning lives in it (`?path=`, `?q=`, `?state=`) breaks silently
+/// without it.
 async fn proxy_history_search(State(state): State<Arc<AppState>>, req: Request) -> Response {
-    let path = path_with_query("/v1/agent/history/search", &req);
-    proxy_get_json(&state, &path).await
+    proxy_get_json(&state, "/v1/agent/history/search", req.uri().query()).await
 }
 
 /// Reverse-proxy GET /v1/fs/file?path=<path> (single file read). Sibling of
 /// `/v1/fs/dirs`, which was routed while this one was not — so the tree listed
 /// but every file in it opened empty.
 async fn proxy_fs_file(State(state): State<Arc<AppState>>, req: Request) -> Response {
-    let path = path_with_query("/v1/fs/file", &req);
-    proxy_get_json(&state, &path).await
+    proxy_get_json(&state, "/v1/fs/file", req.uri().query()).await
 }
 
 /// Reverse-proxy the daemon's read-only GitHub projections
@@ -1359,15 +1573,15 @@ async fn proxy_repo_github(
     req: Request,
 ) -> Response {
     let Some(path) = rebuild_from_template(matched.as_str(), &captures) else {
-        return (StatusCode::BAD_REQUEST, "invalid path").into_response();
+        return invalid_path();
     };
-    let path = path_with_query(&path, &req);
-    proxy_get_json(&state, &path).await
+    proxy_get_json(&state, &path, req.uri().query()).await
 }
 
 /// Fill a route template's `{name}` slots from DECODED captures, refusing any
-/// capture that is a dot segment and percent-encoding the rest. `None` means
-/// "do not forward": a dot segment, or a slot with no capture to fill it.
+/// capture [`has_dot_segment`] refuses (a dot segment or a backslash) and
+/// percent-encoding the rest into exactly one segment. `None` means "do not
+/// forward": a refused capture, or a slot with no capture to fill it.
 fn rebuild_from_template(
     template: &str,
     captures: &std::collections::HashMap<String, String>,
@@ -1378,7 +1592,7 @@ fn rebuild_from_template(
         out.push_str(&rest[..open]);
         let close = rest[open..].find('}')? + open;
         let value = captures.get(&rest[open + 1..close])?;
-        if matches!(value.as_str(), "." | "..") {
+        if has_dot_segment(value) {
             return None;
         }
         out.push_str(&percent_encode_path_segment(value));
@@ -1391,12 +1605,10 @@ fn rebuild_from_template(
 /// Reverse-proxy GET /v1/fs/dirs?path=<path> (filesystem directory listing).
 /// Forwards the full query string so `?path=~/dev` reaches the daemon intact.
 async fn proxy_fs_dirs(State(state): State<Arc<AppState>>, req: Request) -> impl IntoResponse {
-    let mut url = format!("{}/v1/fs/dirs", state.daemon_url.trim_end_matches('/'));
-    if let Some(qs) = req.uri().query() {
-        url.push('?');
-        url.push_str(qs);
-    }
-    match state.http_json.get(&url).send().await {
+    let Some(url) = upstream_url(&state.daemon_url, "/v1/fs/dirs", req.uri().query()) else {
+        return upstream_path_rewritten();
+    };
+    match state.http_json.get(url).send().await {
         Ok(resp) => {
             let status = resp.status();
             let bytes = resp.bytes().await.unwrap_or_default();
@@ -1413,7 +1625,7 @@ async fn proxy_fs_dirs(State(state): State<Arc<AppState>>, req: Request) -> impl
 
 /// Reverse-proxy GET /v1/model (current selection).
 async fn proxy_model_get(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    proxy_get_json(&state, "/v1/model").await
+    proxy_get_json(&state, "/v1/model", None).await
 }
 
 /// Reverse-proxy POST /v1/model (hot-swap the model).
@@ -1423,7 +1635,7 @@ async fn proxy_model_set(State(state): State<Arc<AppState>>, body: Bytes) -> imp
 
 /// Reverse-proxy GET /v1/projects (project list for the picker).
 async fn proxy_projects_list(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    proxy_get_json(&state, "/v1/projects").await
+    proxy_get_json(&state, "/v1/projects", None).await
 }
 
 /// Reverse-proxy POST /v1/projects (create a project).
@@ -1439,7 +1651,10 @@ async fn proxy_project_get(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    proxy_get_json(&state, &format!("/v1/projects/{id}")).await
+    let Some(path) = daemon_path_with_segment("/v1/projects/", &id, "") else {
+        return invalid_path();
+    };
+    proxy_get_json(&state, &path, None).await
 }
 
 /// Reverse-proxy PATCH /v1/projects/{id} (update name/config).
@@ -1448,13 +1663,10 @@ async fn proxy_project_patch(
     Path(id): Path<String>,
     body: Bytes,
 ) -> impl IntoResponse {
-    proxy_method_json(
-        &state,
-        reqwest::Method::PATCH,
-        &format!("/v1/projects/{id}"),
-        body,
-    )
-    .await
+    let Some(path) = daemon_path_with_segment("/v1/projects/", &id, "") else {
+        return invalid_path();
+    };
+    proxy_method_json(&state, reqwest::Method::PATCH, &path, body).await
 }
 
 /// Reverse-proxy DELETE /v1/projects/{id}.
@@ -1462,13 +1674,10 @@ async fn proxy_project_delete(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    proxy_method_json(
-        &state,
-        reqwest::Method::DELETE,
-        &format!("/v1/projects/{id}"),
-        Bytes::new(),
-    )
-    .await
+    let Some(path) = daemon_path_with_segment("/v1/projects/", &id, "") else {
+        return invalid_path();
+    };
+    proxy_method_json(&state, reqwest::Method::DELETE, &path, Bytes::new()).await
 }
 
 /// Reverse-proxy POST /v1/component/event (component interaction → daemon).
@@ -1499,7 +1708,10 @@ async fn proxy_session_message_append(
     Path(id): Path<String>,
     body: Bytes,
 ) -> impl IntoResponse {
-    proxy_post_json(&state, &format!("/v1/agent/sessions/{id}/messages"), body).await
+    let Some(path) = daemon_path_with_segment("/v1/agent/sessions/", &id, "/messages") else {
+        return invalid_path();
+    };
+    proxy_post_json(&state, &path, body).await
 }
 
 /// Reverse-proxy POST /v1/agent/sessions/{id}/steer (mid-turn steering). The
@@ -1510,13 +1722,9 @@ async fn proxy_session_steer(
     Path(id): Path<String>,
     body: Bytes,
 ) -> Response {
-    if matches!(id.as_str(), "." | "..") {
-        return (StatusCode::BAD_REQUEST, "invalid session id").into_response();
-    }
-    let path = format!(
-        "/v1/agent/sessions/{}/steer",
-        percent_encode_path_segment(&id)
-    );
+    let Some(path) = daemon_path_with_segment("/v1/agent/sessions/", &id, "/steer") else {
+        return invalid_path();
+    };
     proxy_post_json(&state, &path, body).await
 }
 
@@ -1526,6 +1734,9 @@ async fn proxy_livekit_token(
     Path(room_id): Path<String>,
     body: Bytes,
 ) -> impl IntoResponse {
+    if has_dot_segment(&room_id) {
+        return invalid_path();
+    }
     proxy_post_json(&state, &livekit_token_daemon_path(&room_id), body).await
 }
 
@@ -1537,10 +1748,12 @@ async fn proxy_method_json(
     path: &str,
     body: Bytes,
 ) -> Response {
-    let url = format!("{}{path}", state.daemon_url.trim_end_matches('/'));
+    let Some(url) = upstream_url(&state.daemon_url, path, None) else {
+        return upstream_path_rewritten();
+    };
     match state
         .http_json
-        .request(method, &url)
+        .request(method, url)
         .header(header::CONTENT_TYPE, "application/json")
         .body(body.to_vec())
         .send()
@@ -1562,21 +1775,15 @@ async fn proxy_method_json(
 
 /// Reverse-proxy GET /v1/requests (daemon-owned request-status snapshot).
 async fn proxy_requests(State(state): State<Arc<AppState>>, req: Request) -> impl IntoResponse {
-    let mut path = String::from("/v1/requests");
-    if let Some(query) = req.uri().query() {
-        path.push('?');
-        path.push_str(query);
-    }
-    proxy_get_json(&state, &path).await
+    proxy_get_json(&state, "/v1/requests", req.uri().query()).await
 }
 
 /// Stream the daemon browser screencast through the authenticated PWA origin.
 async fn proxy_browser_screencast(State(state): State<Arc<AppState>>, _req: Request) -> Response {
-    let url = format!(
-        "{}/v1/browser/screencast",
-        state.daemon_url.trim_end_matches('/')
-    );
-    match state.http.get(&url).send().await {
+    let Some(url) = upstream_url(&state.daemon_url, "/v1/browser/screencast", None) else {
+        return upstream_path_rewritten();
+    };
+    match state.http.get(url).send().await {
         Ok(resp) => sse_stream_response(resp),
         Err(err) => (StatusCode::BAD_GATEWAY, daemon_unreachable_body(&err)).into_response(),
     }
@@ -1592,7 +1799,10 @@ async fn proxy_cancel(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    proxy_post_json(&state, &format!("/v1/requests/{id}/cancel"), Bytes::new()).await
+    let Some(path) = daemon_path_with_segment("/v1/requests/", &id, "/cancel") else {
+        return invalid_path();
+    };
+    proxy_post_json(&state, &path, Bytes::new()).await
 }
 
 fn livekit_token_daemon_path(room_id: &str) -> String {
@@ -1725,9 +1935,87 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 ///
 /// Segments are split on `/` so a legitimate id containing dots (`room.v2`)
 /// is unaffected; only a segment that IS `.` or `..` after decoding is refused.
+///
+/// A backslash is refused too, raw or as `%5C` in either case. The WHATWG
+/// parser `reqwest` uses treats `\` as `/` for http(s) URLs, so splitting the
+/// client's path on `/` alone judged `team\..\..\..\agent\turns` to be ONE
+/// harmless segment while the parser saw several and collapsed the dots —
+/// hyper accepts a raw `\` in the request target, so that is how an
+/// unproxied daemon route (and, on the owner-mutation shapes, the operator
+/// key) could be reached. `%5C` is not rewritten by the parser, but no daemon
+/// route has a legitimate use for a backslash and refusing it at the same
+/// gate keeps the rule one sentence long. [`upstream_url`] is the second,
+/// independent half: it refuses whatever the parser would rewrite, whether
+/// or not this list knows the shape.
 fn has_dot_segment(path: &str) -> bool {
-    path.split('/')
-        .any(|seg| matches!(decode_segment(seg).as_str(), "." | ".."))
+    path.split('/').any(|seg| {
+        let decoded = decode_segment(seg);
+        matches!(decoded.as_str(), "." | "..") || decoded.contains('\\')
+    })
+}
+
+/// The refusal [`upstream_url`] answers with. A fixed code, never an echo of
+/// the path — the path is attacker-shaped and the reply may be rendered.
+fn upstream_path_rewritten() -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        [(header::CONTENT_TYPE, "application/json")],
+        Bytes::from_static(br#"{"ok":false,"error":"upstream_path_rewritten"}"#),
+    )
+        .into_response()
+}
+
+/// Build the URL a forward will actually send, and refuse it unless the
+/// parsed URL still addresses exactly the path the proxy decided to forward.
+///
+/// Every guard before this one reasons about a STRING; this one reasons about
+/// what will go on the wire. The `url` crate normalises on parse — dot
+/// segments collapse, `\` becomes `/`, tabs and newlines vanish — and each of
+/// those is a way for a path the proxy approved (or attached the operator key
+/// to) to arrive upstream as a different route. Comparing the parsed path to
+/// the intended one makes the whole normalisation class inert, including
+/// rules a future dependency bump adds. Same shape as the Tauri shell's
+/// `daemon_transport` path check.
+///
+/// The returned [`reqwest::Url`] is what callers hand to the client, so the
+/// value checked is the value sent — a `&str` would be parsed a second time.
+/// `None` is answered with [`upstream_path_rewritten`]. The query is appended
+/// verbatim; it cannot move the path.
+fn upstream_url(daemon_url: &str, path: &str, query: Option<&str>) -> Option<reqwest::Url> {
+    let base = daemon_url.trim_end_matches('/');
+    let base_url = reqwest::Url::parse(base).ok()?;
+    let intended = format!("{}{path}", base_url.path().trim_end_matches('/'));
+    let raw = match query {
+        Some(query) => format!("{base}{path}?{query}"),
+        None => format!("{base}{path}"),
+    };
+    reqwest::Url::parse(&raw)
+        .ok()
+        .filter(|url| url.path() == intended)
+}
+
+/// A daemon path carrying one client-supplied segment, or `None` when the
+/// segment would reach a route the proxy never exposed.
+///
+/// `segment` is an axum `Path` capture, so it has ALREADY been percent-decoded
+/// once: `%2F` arrives as `/` and `%3F` as `?`. Formatting it raw — as the
+/// sessions/projects/permissions/cancel forwarders used to — let a single
+/// captured segment become several upstream segments (or a query). Encoding
+/// puts it back into exactly one segment; the dot guard catches `..`, which
+/// the encoder leaves alone because `.` is unreserved.
+fn daemon_path_with_segment(prefix: &str, segment: &str, suffix: &str) -> Option<String> {
+    if has_dot_segment(segment) {
+        return None;
+    }
+    Some(format!(
+        "{prefix}{}{suffix}",
+        percent_encode_path_segment(segment)
+    ))
+}
+
+/// The dot guard's answer: plain text, fixed, never an echo of the path.
+fn invalid_path() -> Response {
+    (StatusCode::BAD_REQUEST, "invalid path").into_response()
 }
 
 /// Single-pass percent-decode of one path segment, for [`has_dot_segment`].
@@ -1773,27 +2061,22 @@ fn percent_encode_path_segment(value: &str) -> String {
 /// `demo`, `convene`). Forwards method, path tail, query, and body so the
 /// deck can drive a council through this same origin. The resulting council
 /// events arrive on the existing `/v1/agent/events` SSE stream.
-async fn proxy_longhouse(
-    State(state): State<Arc<AppState>>,
-    Path(rest): Path<String>,
-    req: Request,
-) -> impl IntoResponse {
-    // TASK-71: `rest` is the DECODED wildcard capture, so `%2e%2e` is already
-    // `..` by the time we see it. Refuse dot segments before they can collapse
-    // into a daemon path this route was never meant to reach.
-    if has_dot_segment(&rest) {
-        return (StatusCode::BAD_REQUEST, "invalid path").into_response();
+async fn proxy_longhouse(State(state): State<Arc<AppState>>, req: Request) -> impl IntoResponse {
+    // Forward the RAW request path, not the `{*rest}` capture. The capture is
+    // percent-DECODED, so `%3F` in it became a `?` that started a query and
+    // `%2F` became a segment boundary the client never sent. The raw path is
+    // still under `/v1/longhouse/` — that is the only route wired here.
+    // TASK-71: refuse dot segments (and backslashes) before they can collapse
+    // into a daemon path this route was never meant to reach; the guard
+    // decodes each segment itself, so `%2e%2e` is caught on the raw form too.
+    let path = req.uri().path().to_string();
+    if has_dot_segment(&path) {
+        return invalid_path();
     }
     let method = req.method().clone();
-    let q = req
-        .uri()
-        .query()
-        .map(|q| format!("?{q}"))
-        .unwrap_or_default();
-    let url = format!(
-        "{}/v1/longhouse/{rest}{q}",
-        state.daemon_url.trim_end_matches('/')
-    );
+    let Some(url) = upstream_url(&state.daemon_url, &path, req.uri().query()) else {
+        return upstream_path_rewritten();
+    };
     // buffer the (small) body so we can forward it on POST
     // TASK-73: a body over the cap previously became an EMPTY forwarded
     // request via unwrap_or_default() — a truncation that presents upstream as
@@ -1807,11 +2090,11 @@ async fn proxy_longhouse(
     let builder = if method == axum::http::Method::POST {
         state
             .http_json
-            .post(&url)
+            .post(url)
             .header(header::CONTENT_TYPE, "application/json")
             .body(body.to_vec())
     } else {
-        state.http_json.get(&url)
+        state.http_json.get(url)
     };
     match builder.send().await {
         Ok(resp) => {
@@ -1836,6 +2119,10 @@ async fn proxy_longhouse(
 /// get (GET), join (POST), leave (DELETE), post-message (POST), transcript
 /// (GET, `?after_seq=`), and the live event tail (GET, exact `{key}/events`
 /// shape — streamed via sse_stream_response with Last-Event-ID resume).
+///
+/// [`RoomsPersistentShape`] splits out the three lanes that are not
+/// JSON-in / JSON-out: the SSE tail, the raw-bytes attachment upload, and the
+/// attachment download whose upstream headers must survive verbatim.
 async fn proxy_rooms_persistent(
     State(state): State<Arc<AppState>>,
     req: Request,
@@ -1845,33 +2132,27 @@ async fn proxy_rooms_persistent(
     // TASK-71: this handler forwards the RAW request path verbatim, so a `..`
     // segment would collapse upstream into an unproxied daemon route. Refuse
     // before the SSE branch below, so both the streaming and buffered paths
-    // are covered by one check.
+    // are covered by one check. Backslashes are refused here too: the parser
+    // reads `\` as `/`, which is how `team\..\..\..\agent\turns` once reached
+    // `/v1/agent/turns` through this handler.
     if has_dot_segment(&path) {
-        return (StatusCode::BAD_REQUEST, "invalid path").into_response();
+        return invalid_path();
     }
-    let q = req
-        .uri()
-        .query()
-        .map(|q| format!("?{q}"))
-        .unwrap_or_default();
+    // The URL that will actually be sent, checked BEFORE the operator key is
+    // read below: a path the parser would rewrite never reaches the key.
+    let Some(url) = upstream_url(&state.daemon_url, &path, req.uri().query()) else {
+        return upstream_path_rewritten();
+    };
 
     // TASK-11: GET paths that match the exact shape
     // `/v1/rooms/persistent/{key}/events` (exactly one key segment before
     // `/events`) must stream through sse_stream_response rather than buffering
     // (axum rejects a separate {key}/events route alongside {*rest}).
-    // We reconstruct this from path segments to avoid a loose ends_with.
-    let is_events_tail = method == axum::http::Method::GET && {
-        let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
-        segments.len() == 5
-            && segments[0] == "v1"
-            && segments[1] == "rooms"
-            && segments[2] == "persistent"
-            && segments[4] == "events"
-            && !segments[3].is_empty()
-    };
-    if is_events_tail {
-        let url = format!("{}{path}{q}", state.daemon_url.trim_end_matches('/'));
-        let mut upstream = state.http.get(&url);
+    // Reconstructed from path segments to avoid a loose ends_with; the two
+    // attachment lanes are classified the same way.
+    let shape = rooms_persistent_shape(&method, &path);
+    if shape == RoomsPersistentShape::EventsTail {
+        let mut upstream = state.http.get(url);
         if let Some(last_id) = req.headers().get("last-event-id") {
             if let Ok(val) = last_id.to_str() {
                 upstream = upstream.header("Last-Event-ID", val);
@@ -1884,14 +2165,29 @@ async fn proxy_rooms_persistent(
     }
 
     // The path is always under /v1/rooms/persistent or exactly /v1/rooms/inbox
-    // (the only routes wired to this handler); forward it unchanged, with the query string preserved so
-    // the transcript tail's ?after_seq= reaches the daemon.
-    let url = format!("{}{path}{q}", state.daemon_url.trim_end_matches('/'));
-    // buffer the (small) body so we can forward it on POST/DELETE
+    // (the only routes wired to this handler); it is forwarded unchanged, with
+    // the query string preserved so the transcript tail's ?after_seq= and an
+    // attachment upload's metadata reach the daemon.
+    // An attachment upload declares its own type; every other forward in this
+    // subtree is JSON. Read it BEFORE the body consumes the request.
+    let declared_type = req
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    // buffer the body so we can forward it on POST/PATCH/PUT/DELETE
     // TASK-73: a body over the cap previously became an EMPTY forwarded
     // request via unwrap_or_default() — a truncation that presents upstream as
     // a legitimate call. Refuse it instead.
-    let body = match axum::body::to_bytes(req.into_body(), 1 << 20).await {
+    //
+    // The 1 MiB ceiling is right for JSON and WRONG for an attachment: it made
+    // the daemon's 8 MiB cap unreachable from a browser, so every upload over
+    // 1 MiB died here with an untyped 413 that no client could explain.
+    let body_limit = match shape {
+        RoomsPersistentShape::AttachmentUpload => ATTACHMENT_UPLOAD_BODY_LIMIT,
+        _ => ROOMS_JSON_BODY_LIMIT,
+    };
+    let body = match axum::body::to_bytes(req.into_body(), body_limit).await {
         Ok(bytes) => bytes,
         Err(_) => {
             return (StatusCode::PAYLOAD_TOO_LARGE, "request body too large").into_response();
@@ -1906,12 +2202,21 @@ async fn proxy_rooms_persistent(
         None
     };
     let builder = if method == axum::http::Method::GET {
-        state.http_json.get(&url)
+        state.http_json.get(url)
     } else {
+        // Raw attachment bytes are not JSON, and saying they are is a lie any
+        // middlebox between here and the daemon is entitled to act on. The
+        // daemon reads the body as bytes and ignores this header either way.
+        let forwarded_type = match shape {
+            RoomsPersistentShape::AttachmentUpload => declared_type
+                .as_deref()
+                .unwrap_or("application/octet-stream"),
+            _ => "application/json",
+        };
         state
             .http_json
-            .request(method, &url)
-            .header(header::CONTENT_TYPE, "application/json")
+            .request(method, url)
+            .header(header::CONTENT_TYPE, forwarded_type)
             .body(body.to_vec())
     };
     let builder = match operator_key {
@@ -1920,14 +2225,13 @@ async fn proxy_rooms_persistent(
     };
     match builder.send().await {
         Ok(resp) => {
-            let status = resp.status();
+            let status =
+                StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            if shape == RoomsPersistentShape::AttachmentDownload {
+                return attachment_download_response(status, resp).await;
+            }
             let bytes = resp.bytes().await.unwrap_or_default();
-            (
-                StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
-                [(header::CONTENT_TYPE, "application/json")],
-                bytes,
-            )
-                .into_response()
+            (status, [(header::CONTENT_TYPE, "application/json")], bytes).into_response()
         }
         Err(err) => (StatusCode::BAD_GATEWAY, daemon_unreachable_body(&err)).into_response(),
     }
@@ -2003,13 +2307,10 @@ async fn proxy_control_events(
     State(state): State<Arc<AppState>>,
     req: Request,
 ) -> impl IntoResponse {
-    let q = req
-        .uri()
-        .query()
-        .map(|q| format!("?{q}"))
-        .unwrap_or_default();
-    let url = format!("{}/v1/events{q}", state.daemon_url.trim_end_matches('/'));
-    match state.http.get(&url).send().await {
+    let Some(url) = upstream_url(&state.daemon_url, "/v1/events", req.uri().query()) else {
+        return upstream_path_rewritten();
+    };
+    match state.http.get(url).send().await {
         Ok(resp) => sse_stream_response(resp),
         Err(err) => (StatusCode::BAD_GATEWAY, daemon_unreachable_body(&err)).into_response(),
     }
@@ -2019,7 +2320,7 @@ async fn proxy_control_events(
 /// this to render pending-permission cards; without it the request fell through
 /// to ServeDir → 404 (empty body) → "permission snapshot rejected".
 async fn proxy_permissions_snapshot(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    proxy_get_json(&state, "/v1/permissions").await
+    proxy_get_json(&state, "/v1/permissions", None).await
 }
 
 /// Reverse-proxy POST /v1/permissions/{id}/decision (OCEAN-136). The web UI
@@ -2031,7 +2332,10 @@ async fn proxy_permission_decision(
     Path(id): Path<String>,
     body: Bytes,
 ) -> impl IntoResponse {
-    proxy_post_json(&state, &format!("/v1/permissions/{id}/decision"), body).await
+    let Some(path) = daemon_path_with_segment("/v1/permissions/", &id, "/decision") else {
+        return invalid_path();
+    };
+    proxy_post_json(&state, &path, body).await
 }
 
 /// Reverse-proxy the daemon's SSE event stream. We stream the upstream body
@@ -2041,16 +2345,10 @@ async fn proxy_events(State(state): State<Arc<AppState>>, req: Request) -> impl 
     // OCEAN_ECOSYSTEM_CONTRACT.md. Do not strip. The full upstream query is
     // forwarded verbatim so session_id (and any other params like ?all=1)
     // reaches the daemon and the stream stays scoped to the caller's session.
-    let q = req
-        .uri()
-        .query()
-        .map(|q| format!("?{q}"))
-        .unwrap_or_default();
-    let url = format!(
-        "{}/v1/agent/events{q}",
-        state.daemon_url.trim_end_matches('/')
-    );
-    match state.http.get(&url).send().await {
+    let Some(url) = upstream_url(&state.daemon_url, "/v1/agent/events", req.uri().query()) else {
+        return upstream_path_rewritten();
+    };
+    match state.http.get(url).send().await {
         Ok(resp) => sse_stream_response(resp),
         Err(err) => (StatusCode::BAD_GATEWAY, daemon_unreachable_body(&err)).into_response(),
     }
@@ -2074,12 +2372,9 @@ async fn proxy_observatory(State(state): State<Arc<AppState>>, req: Request) -> 
         }
     };
     let path = req.uri().path();
-    let query = req
-        .uri()
-        .query()
-        .map(|query| format!("?{query}"))
-        .unwrap_or_default();
-    let url = format!("{}{path}{query}", state.daemon_url.trim_end_matches('/'));
+    let Some(url) = upstream_url(&state.daemon_url, path, req.uri().query()) else {
+        return upstream_path_rewritten();
+    };
     // TASK-83: this one handler serves BOTH an SSE tail (`/events`) and
     // buffered routes (`/snapshot`, `/replay`), so the client must be chosen
     // by route shape rather than swapped wholesale. The streaming tail keeps
@@ -2092,7 +2387,7 @@ async fn proxy_observatory(State(state): State<Arc<AppState>>, req: Request) -> 
     } else {
         &state.http_json
     };
-    let mut upstream = client.get(&url).bearer_auth(token);
+    let mut upstream = client.get(url).bearer_auth(token);
     if let Some(last_event_id) = req.headers().get("last-event-id") {
         if let Ok(last_event_id) = last_event_id.to_str() {
             upstream = upstream.header("Last-Event-ID", last_event_id);
@@ -2133,7 +2428,9 @@ async fn proxy_observatory(State(state): State<Arc<AppState>>, req: Request) -> 
 /// The daemon holds the xAI key and handles multipart construction.
 /// Returns `{ok, text}` on success, `{ok: false, error}` on failure.
 async fn stt(State(state): State<Arc<AppState>>, body: Bytes) -> impl IntoResponse {
-    let url = format!("{}/v1/voice/stt", state.daemon_url.trim_end_matches('/'));
+    let Some(url) = upstream_url(&state.daemon_url, "/v1/voice/stt", None) else {
+        return upstream_path_rewritten();
+    };
 
     // TASK-83: buffered (the response is read to completion via `.json()`),
     // so it belongs on the timed client. It was left on the untimed SSE
@@ -2141,7 +2438,7 @@ async fn stt(State(state): State<Arc<AppState>>, body: Bytes) -> impl IntoRespon
     // forever instead of failing.
     let resp = match state
         .http_json
-        .post(&url)
+        .post(url)
         .header(header::CONTENT_TYPE, "application/octet-stream")
         .body(body.to_vec())
         .send()
@@ -2206,12 +2503,17 @@ async fn tts(
         return Err((StatusCode::BAD_REQUEST, "text required".to_string()));
     }
 
-    let url = format!("{}/v1/voice/tts", state.daemon_url.trim_end_matches('/'));
+    let url = upstream_url(&state.daemon_url, "/v1/voice/tts", None).ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            "upstream_path_rewritten".to_string(),
+        )
+    })?;
 
     // TASK-83: buffered (`.bytes()` below) — same miss as stt.
     let resp = state
         .http_json
-        .post(&url)
+        .post(url)
         .header(header::CONTENT_TYPE, "application/json")
         .json(&json!({
             "text": text,
@@ -2259,6 +2561,11 @@ async fn tts(
 
 #[cfg(test)]
 mod tests {
+    // Path normalisation (the backslash hole and `upstream_url`) and the
+    // auth-off cross-site gate: their own file, so slices on this module do
+    // not collide with it.
+    mod path_csrf;
+
     use super::{
         build_app, config_payload, constant_time_eq, decode_segment, has_dot_segment,
         is_hashed_asset, livekit_token_daemon_path, percent_encode_path_segment,
@@ -2280,6 +2587,14 @@ mod tests {
     };
     use base64::Engine;
     use tower::ServiceExt; // for `oneshot`
+
+    // Room attachments through the wildcard forwarder (the raw-bytes upload
+    // lane and the header-preserving download lane): its own file too.
+    mod room_attachments_route;
+
+    // `POST .../close` through the proxy (Rooms DoD 4.3): its own file, so the
+    // many open slices on this module do not collide with it.
+    mod room_close_route;
 
     fn write_private_fixture(path: &std::path::Path, value: &str) {
         use std::io::Write;
@@ -2865,6 +3180,164 @@ mod tests {
             upstream,
             _dist: dist,
         }
+    }
+
+    /// The five coding-plan shapes reach the daemon through the real router
+    /// with the proxy's own operator key and nothing the browser sent; any
+    /// other shape under `/v1/auth/providers` is refused here, the lane stays
+    /// behind the login, and a proxy without login attaches nothing.
+    #[tokio::test]
+    async fn coding_plan_routes_forward_only_the_server_side_key() {
+        use serde_json::Value;
+        async fn echo(req: Request<Body>) -> axum::Json<Value> {
+            let headers = req.headers();
+            axum::Json(serde_json::json!({
+                "method": req.method().as_str(),
+                "path": req.uri().path(),
+                "operator": headers.get("x-ocean-operator").and_then(|v| v.to_str().ok()),
+                "cookie": headers.contains_key(header::COOKIE),
+                "origin": headers.contains_key(header::ORIGIN),
+                "referer": headers.contains_key(header::REFERER),
+            }))
+        }
+        let upstream = Router::new()
+            .route("/v1/auth/providers", get(echo))
+            .route("/v1/auth/providers/{p}/login", post(echo))
+            .route("/v1/auth/providers/{p}/logout", post(echo))
+            .route("/v1/auth/providers/{p}/login/{a}", get(echo).delete(echo));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+
+        let credential_dir = tempfile::tempdir().expect("credential tempdir");
+        let key_path = credential_dir.path().join("operator.key");
+        std::fs::write(&key_path, "proxy-owned-authority\n").unwrap();
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let dist = tempfile::tempdir().expect("dist tempdir");
+
+        for login in [true, false] {
+            let mut state = auth_test_state();
+            let inner = Arc::get_mut(&mut state).expect("sole state owner");
+            inner.daemon_url = format!("http://{addr}");
+            inner.operator_key_path = key_path.clone();
+            inner.http_json = reqwest::Client::builder()
+                .no_proxy()
+                .timeout(std::time::Duration::from_secs(2))
+                .build()
+                .unwrap();
+            if !login {
+                inner.basic_auth = None;
+            }
+            let app = build_app(state, dist.path());
+
+            for (method, uri) in [
+                ("GET", "/v1/auth/providers"),
+                ("POST", "/v1/auth/providers/claude/login"),
+                ("GET", "/v1/auth/providers/claude/login/abc123"),
+                ("DELETE", "/v1/auth/providers/claude/login/abc123"),
+                ("POST", "/v1/auth/providers/codex/logout"),
+            ] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method(method)
+                            .uri(uri)
+                            .header(header::COOKIE, "ocean_session=test-session")
+                            .header("x-ocean-operator", "browser-forged")
+                            .header(header::ORIGIN, "https://evil.example")
+                            .header(header::REFERER, "https://evil.example/page")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response.status(),
+                    StatusCode::OK,
+                    "login={login} {method} {uri}"
+                );
+                let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                let seen: Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(seen["method"], method);
+                assert_eq!(seen["path"], uri);
+                let expected = login.then_some("proxy-owned-authority");
+                assert_eq!(
+                    seen["operator"].as_str(),
+                    expected,
+                    "login={login} {method} {uri}"
+                );
+                assert_eq!(seen["cookie"], false);
+                assert_eq!(seen["origin"], false);
+                assert_eq!(seen["referer"], false);
+            }
+
+            // Outside the five shapes: refused here, never forwarded.
+            for (method, uri) in [
+                ("PUT", "/v1/auth/providers/claude/login/abc"),
+                ("POST", "/v1/auth/providers"),
+                ("GET", "/v1/auth/providers/claude/logout"),
+                ("POST", "/v1/auth/providers/%2e%2e/login"),
+            ] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method(method)
+                            .uri(uri)
+                            .header(header::COOKIE, "ocean_session=test-session")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert!(
+                    response.status().is_client_error(),
+                    "login={login} {method} {uri}: {}",
+                    response.status()
+                );
+            }
+        }
+
+        // The whole lane stays behind the login.
+        let mut state = auth_test_state();
+        let inner = Arc::get_mut(&mut state).expect("sole state owner");
+        inner.daemon_url = format!("http://{addr}");
+        inner.operator_key_path = key_path.clone();
+        let app = build_app(state, dist.path());
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/auth/providers")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        // An unreadable key fails closed before forwarding, as JSON the page
+        // can turn into a sentence.
+        let mut state = auth_test_state();
+        let inner = Arc::get_mut(&mut state).expect("sole state owner");
+        inner.daemon_url = format!("http://{addr}");
+        inner.operator_key_path = credential_dir.path().join("absent.key");
+        let app = build_app(state, dist.path());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/auth/providers")
+                    .header(header::COOKIE, "ocean_session=test-session")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let seen: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(seen["error"], "operator_credential_unavailable");
     }
 
     /// Owner mutations through the authenticated proxy carry the daemon's Room

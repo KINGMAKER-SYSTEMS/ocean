@@ -224,6 +224,48 @@
 
 /* ── Left rail — room list item ───────────────────────────────────── */
 
+/* Workspace-root group (group_rail_rooms in rooms_workspace/room_list.rs):
+   structure, not a card. The header labels the options (role="group" +
+   aria-labelledby) and is never a disclosure: no hover, focus ring or caret.
+   Full roots wrap rather than truncate or case-fold so distinct roots stay
+   distinguishable without hover. */
+.rooms-workspace__group {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.rooms-workspace__group + .rooms-workspace__group {
+  margin-top: 6px;
+}
+
+.rooms-workspace__group-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 12px 4px;
+  color: var(--fg-3);
+  font-family: var(--font);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.rooms-workspace__group-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.rooms-workspace__group-count {
+  flex: 0 0 auto;
+  color: var(--fg-3);
+  font-size: 10px;
+  font-weight: 400;
+}
+
 .rooms-workspace__room {
   appearance: none;
   display: flex;
@@ -299,6 +341,39 @@
   font-size: 11px;
   line-height: 1.4;
   overflow-wrap: anywhere;
+}
+
+/* "Load more rooms" (room_list.rs): one plain row after the last group,
+   outside the listbox so the options keep their single roving tab stop.
+   Same type and padding as a room row, quieter colour; tokens only. */
+.rooms-workspace__left-more {
+  appearance: none;
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin: 6px 0 0;
+  padding: 7px 12px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--fg-3);
+  font-family: var(--font);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__left-more:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__left-more:disabled {
+  background: transparent;
+  color: var(--fg-4);
+  cursor: default;
 }
 
 /* ── Center rail — room header ────────────────────────────────────── */
@@ -469,6 +544,119 @@
 .rooms-workspace__center-back:hover {
   background: var(--bg-hover);
   color: var(--fg);
+}
+
+/* ── Center rail — close confirmation (DoD 4.3) ───────────────────────
+   Armed by the header overflow's `Close room…` item (`.room-overflow__*`,
+   rooms-cards.css). Closing is irreversible, which is why it sits one menu
+   deep and then behind a modal whose focused default is the safe choice.
+   Above the compact left-rail drawer (400) and the mobile nav (410). */
+
+.rooms-workspace__close-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 440;
+  background: var(--scrim);
+}
+
+.rooms-workspace__close-dialog {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 445;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(440px, 92vw);
+  max-height: min(70vh, 520px);
+  overflow-y: auto;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-lg);
+}
+
+.rooms-workspace__close-title {
+  margin: 0;
+  color: var(--fg);
+  font-size: 14px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.rooms-workspace__close-warn {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--err);
+  border-radius: var(--radius-sm);
+  color: var(--err);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.rooms-workspace__close-note {
+  margin: 0;
+  color: var(--fg-2);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.rooms-workspace__close-error {
+  padding: 7px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--err-soft);
+  color: var(--fg);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.rooms-workspace__close-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.rooms-workspace__close-keep,
+.rooms-workspace__close-fire {
+  appearance: none;
+  height: var(--ctl-h);
+  padding: 0 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.rooms-workspace__close-fire {
+  color: var(--err);
+}
+
+.rooms-workspace__close-fire:hover:not(:disabled) {
+  background: var(--err-soft);
+  border-color: var(--border-strong);
+}
+
+.rooms-workspace__close-keep:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+:is(.rooms-workspace__close-dialog, .rooms-workspace__close-keep,
+   .rooms-workspace__close-fire):focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+:is(.rooms-workspace__close-keep, .rooms-workspace__close-fire):disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 /* ── Center rail — transcript ─────────────────────────────────────── */
@@ -1907,8 +2095,11 @@
   font-size: 12px;
 }
 
-.rooms-workspace__mention-kind {
-  margin-left: auto;
+/* Kind badge: one word, tokens only. Shared by the mention suggestion row
+   (every kind) and the transcript author line (`__msg-kind`, agents only;
+   rooms_workspace/format.rs `author_kind_badge`). */
+.rooms-workspace__mention-kind,
+.rooms-workspace__msg-kind {
   color: var(--fg-4);
   font-size: 10px;
   text-transform: uppercase;
@@ -1916,6 +2107,21 @@
   border: 1px solid var(--border-subtle);
   padding: 1px 6px;
   border-radius: 999px;
+}
+
+.rooms-workspace__mention-kind {
+  margin-left: auto;
+}
+
+.rooms-workspace__msg-kind {
+  flex: 0 0 auto;
+  line-height: 1.3;
+}
+
+/* Grouped rows hide the name (sr-only) and park the time in the avatar
+   gutter; the badge follows the name and stays on the group's first row. */
+.rooms-workspace__msg--grouped .rooms-workspace__msg-kind {
+  display: none;
 }
 
 .rooms-workspace__mention-desc {
@@ -1941,4 +2147,196 @@
 
 .rooms-workspace__member {
   flex-wrap: wrap;
+}
+
+/* ── Room context files (composer attach + right-rail Files mode) ──────
+   Ported from the legacy surface's files rail onto this layout: the attach
+   control sits in the composer row, the list is the right rail's Files mode
+   (opened from Room options, like Members). Tokens only. The DECLARED type
+   only ever picks a glyph; the href is the daemon's sniffed download route. */
+
+/* The paperclip: a quiet icon control at the head of the composer row. */
+.rooms-workspace__composer-attach {
+  appearance: none;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--fg-3);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__composer-attach svg {
+  width: 16px;
+  height: 16px;
+}
+
+.rooms-workspace__composer-attach:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__composer-attach:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* In flight: the control stays visibly present and visibly busy. */
+.rooms-workspace__composer-attach[aria-busy="true"] {
+  color: var(--accent);
+}
+
+/* The button forwards the user gesture; this is the real control, mounted
+   once at workspace scope and never shown. */
+.rooms-workspace__files-input {
+  display: none;
+}
+
+/* The right rail's Files mode. */
+.rooms-workspace__files {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.rooms-workspace__files-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 8px 8px;
+}
+
+/* The one head line: that files exist, and how many (or that we are still
+   asking). */
+.rooms-workspace__files-line {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--fg-3);
+}
+
+.rooms-workspace__files-add {
+  appearance: none;
+  flex: 0 0 auto;
+  padding: 4px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-2);
+  font-family: var(--font);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.6;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__files-add:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+  color: var(--fg);
+}
+
+.rooms-workspace__files-add:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* A refusal reads in red under the composer AND in the panel; it is the
+   only place a file's size or name rule is explained. */
+.rooms-workspace__files-error {
+  padding: 6px 8px 2px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--err);
+}
+
+.rooms-workspace__composer .rooms-workspace__files-error {
+  padding: 7px 2px 0;
+}
+
+.rooms-workspace__files-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.rooms-workspace__file {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  gap: 2px 8px;
+  min-height: 36px;
+  padding: 5px 8px;
+  border-radius: var(--radius);
+  color: var(--fg-2);
+  font-size: 12px;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__file:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__file-glyph {
+  grid-row: span 2;
+  font-size: 13px;
+  line-height: 1;
+  text-align: center;
+}
+
+/* A filename is the one thing here that must never be silently reflowed into
+   the rail's width — truncate it and let the title attribute carry the rest. */
+.rooms-workspace__file-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rooms-workspace__file-meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-4);
+  font-size: 10px;
+}
+
+.rooms-workspace__composer-attach:focus-visible,
+.rooms-workspace__files-add:focus-visible,
+.rooms-workspace__file:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+@media (pointer: coarse) {
+  .rooms-workspace__composer-attach {
+    position: relative;
+  }
+
+  .rooms-workspace__composer-attach::after {
+    content: '';
+    position: absolute;
+    inset: -6px;
+  }
 }

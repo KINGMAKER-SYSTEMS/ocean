@@ -10,9 +10,12 @@
 //! Submodules own the pure helpers (each with its unit tests) and the
 //! extracted rail components; this module owns `RoomsWorkspace`, the shared
 //! signals and Effects that must outlive rail re-renders, and the transcript.
+//! Room context files (`attachments.rs`) are the right rail's Files mode plus
+//! the composer's attach control, against the daemon's attachment routes.
 
 mod access;
 mod agents;
+mod attachments;
 mod banners;
 mod composer;
 mod format;
@@ -31,19 +34,20 @@ use crate::room_messages;
 use crate::rooms::{author_display_name, local_speaker_id, RoomMessage, Rooms};
 
 pub(crate) use access::access_allows_sharing;
-use access::{access_allows_thread_writes, access_allows_writes};
+use access::{access_allows_thread_writes, access_allows_writes, local_store_write_gate};
 use agents::{ConsentSheet, InvokeMenu};
+use attachments::{AttachmentInput, FilesPanel, RoomAttachmentsState};
 use banners::{AccessStateBanner, InviteResult, OutboxPanel, PendingInviteBanner};
 use composer::{
     message_send_admitted, normalized_message_body, outbox_matches_failed_message,
     should_clear_composer, ChannelComposer,
 };
-use format::{avatar_identity_class, canonical_wire_clock_time, today_day_key};
+use format::{author_kind_badge, avatar_identity_class, canonical_wire_clock_time, today_day_key};
 use members::MembersPanel;
 use mentions::{mention_roster, MentionState};
 use read_cursor::{
-    applied_read_seq, read_advance_needs_queue, read_advance_request, ready_read_target,
-    transcript_is_near_bottom, transcript_pass_action, transcript_read_hydrated,
+    applied_read_seq, first_unread_root_seq, read_advance_needs_queue, read_advance_request,
+    ready_read_target, transcript_is_near_bottom, transcript_pass_action, transcript_read_hydrated,
     ReadAdvanceRequest, TranscriptPassAction,
 };
 use room_list::RoomListRail;
@@ -168,7 +172,19 @@ pub fn RoomsWorkspace(
     // Team-platform P6: the right rail shows search when no thread is open.
     let search_open = RwSignal::new(false);
     let members_open = RwSignal::new(false);
+    // Room context files: the right rail's Files mode, opened from the
+    // overflow like Members. The attachments state lives at this scope for
+    // the same reason the close state does — the center and right rails
+    // re-render on room state, and an upload's in-flight flag rebuilt
+    // mid-request would re-enable the control during its own upload.
+    let files_open = RwSignal::new(false);
+    let attachments = RoomAttachmentsState::new(rooms);
     let overflow_ref: NodeRef<leptos::html::Button> = NodeRef::new();
+    // The close confirmation's state (DoD 4.3) lives here, not in the header
+    // closure below: that closure is rebuilt on every `open_room` write, and an
+    // in-flight flag rebuilt by one would re-enable the button during its own
+    // close. The dialog mounts at this scope for the same reason.
+    let close_control = crate::room_close::RoomCloseState::new(overflow_ref);
     let right_close_ref: NodeRef<leptos::html::Button> = NodeRef::new();
     let right_return_focus =
         StoredValue::new(send_wrapper::SendWrapper::new(None::<web_sys::HtmlElement>));
@@ -184,11 +200,16 @@ pub fn RoomsWorkspace(
             });
         right_return_focus.set_value(send_wrapper::SendWrapper::new(focused));
     };
-    let right_open =
-        move || members_open.get() || search_open.get() || selected_thread_root_seq.get().is_some();
+    let right_open = move || {
+        members_open.get()
+            || search_open.get()
+            || files_open.get()
+            || selected_thread_root_seq.get().is_some()
+    };
     let close_right = move || {
         members_open.set(false);
         search_open.set(false);
+        files_open.set(false);
         selected_thread_root_seq.set(None);
         let restored = right_return_focus.with_value(|element| {
             element
@@ -216,8 +237,12 @@ pub fn RoomsWorkspace(
         {
             members_open.set(false);
             search_open.set(false);
+            files_open.set(false);
             selected_thread_root_seq.set(None);
             right_return_focus.set_value(send_wrapper::SendWrapper::new(None));
+            // Files belong to the room they were listed for: retire the list,
+            // its ticket and any upload in flight with the admission.
+            attachments.reset();
         }
         admission
     });
@@ -241,6 +266,7 @@ pub fn RoomsWorkspace(
             remember_right_focus(None);
             members_open.set(false);
             search_open.set(false);
+            files_open.set(false);
             selected_thread_root_seq.set(Some(root));
         }
     });
@@ -267,6 +293,24 @@ pub fn RoomsWorkspace(
     });
     let mobile_toggle_ref: NodeRef<leptos::html::Button> = NodeRef::new();
 
+    // Root row the "new messages" divider sits above, from the baseline
+    // `Rooms::open_room` locked for this room. Computed over the same visible
+    // roots as the timeline so a hidden audit row cannot swallow the divider.
+    let first_unread_seq = Memo::new(move |_| {
+        let baseline = match rooms.unread_baseline.get() {
+            Some((key, baseline)) if rooms.open_key.get().as_deref() == Some(key.as_str()) => {
+                baseline
+            }
+            _ => return None,
+        };
+        let roots: Vec<RoomMessage> = partition_thread_messages(&rooms.transcript.get(), 0)
+            .roots
+            .into_iter()
+            .filter(|m| !room_messages::is_convene_audit(m))
+            .collect();
+        first_unread_root_seq(&roots, baseline, rooms.access.get().as_ref())
+    });
+
     // ── Mention autosuggest state (channel + thread composers) ──
     let mention = MentionState::new(rooms);
     let thread_mention = MentionState::new(rooms);
@@ -277,6 +321,12 @@ pub fn RoomsWorkspace(
     // this is not read-cursor "unread" state).
     let transcript = rooms.transcript;
     let new_below = RwSignal::new(false);
+    // Scroll intent captured by the reader's own scroll events BEFORE a render
+    // changes `scroll_height`. Post-render geometry alone misclassifies a
+    // reader who was pinned when a tall or batched append lands more than the
+    // 120px threshold below the old viewport, and would raise the jump instead
+    // of following.
+    let transcript_follow_pinned = RwSignal::new(true);
     let pending_read_advance = RwSignal::new(None::<ReadAdvanceRequest>);
     let refresh_handle = RwSignal::new(None::<IntervalHandle>);
     Effect::new(move |prev: Option<usize>| {
@@ -297,16 +347,18 @@ pub fn RoomsWorkspace(
         let metrics = el
             .as_ref()
             .map(|el| (el.scroll_height(), el.scroll_top(), el.client_height()));
-        let near_bottom = metrics.is_some_and(|(scroll_height, scroll_top, client_height)| {
-            transcript_is_near_bottom(scroll_height, scroll_top, client_height, 120)
-        });
-        match transcript_pass_action(len, prev_len, el.is_some(), near_bottom) {
+        // Untracked: the arms below write this signal, and tracking what the
+        // pass writes would re-enter the pass.
+        let follow_pinned = transcript_follow_pinned.get_untracked();
+        match transcript_pass_action(len, prev_len, el.is_some(), follow_pinned) {
             TranscriptPassAction::Reset => {
                 // Generation reset / room switch: nothing below.
+                transcript_follow_pinned.set(true);
                 new_below.set(false);
                 pending_read_advance.set(None);
             }
             TranscriptPassAction::PinAndQueue => {
+                transcript_follow_pinned.set(true);
                 let (scroll_height, _, client_height) = metrics.unwrap_or_default();
                 if let Some(el) = el.clone() {
                     request_animation_frame(move || el.set_scroll_top(el.scroll_height()));
@@ -319,7 +371,7 @@ pub fn RoomsWorkspace(
                     // pin above produces; a transcript that fits its measured
                     // viewport never fires one and marks read here instead.
                     transcript_read_hydrated(first_fill, scroll_height, client_height),
-                    near_bottom,
+                    follow_pinned,
                     rooms.open_room.get().is_some(),
                     &rooms.transcript.get_untracked(),
                     access.as_ref(),
@@ -717,6 +769,14 @@ pub fn RoomsWorkspace(
             // ═══ CENTER RAIL — header + transcript + composer ═══════════
             <div class="rooms-workspace__center">
                 <PendingInviteBanner rooms=rooms />
+                // Armed only by the overflow's `Close room…` item; empty
+                // otherwise. Outside the header closure so a roster write
+                // cannot unmount a close in flight.
+                <crate::room_close::RoomCloseDialog rooms=rooms state=close_control />
+                // The real file control, outside the header closure for the
+                // same reason: a roster write must not unmount the input a
+                // picker is about to report to.
+                <AttachmentInput rooms=rooms state=attachments />
                 {move || {
                     let open = rooms.open_room.get();
                     match open {
@@ -766,6 +826,7 @@ pub fn RoomsWorkspace(
                                                 } else {
                                                     remember_right_focus(ev.current_target());
                                                     members_open.set(false);
+                                                    files_open.set(false);
                                                     selected_thread_root_seq.set(None);
                                                     show_left_rail.set(false);
                                                     search_open.set(true);
@@ -778,14 +839,27 @@ pub fn RoomsWorkspace(
                                             rooms=rooms
                                             joined=joined
                                             trigger_ref=overflow_ref
+                                            close=close_control
                                             on_members=Callback::new(move |()| {
                                                 // The menu item is removed on selection; return
                                                 // to the persistent Room options trigger instead.
                                                 right_return_focus.set_value(send_wrapper::SendWrapper::new(None));
                                                 selected_thread_root_seq.set(None);
                                                 search_open.set(false);
+                                                files_open.set(false);
                                                 show_left_rail.set(false);
                                                 members_open.set(true);
+                                            })
+                                            on_files=Callback::new(move |()| {
+                                                // Same return-focus rule as Members: the
+                                                // menu item is gone, so Escape lands on
+                                                // the persistent Room options trigger.
+                                                right_return_focus.set_value(send_wrapper::SendWrapper::new(None));
+                                                selected_thread_root_seq.set(None);
+                                                search_open.set(false);
+                                                members_open.set(false);
+                                                show_left_rail.set(false);
+                                                files_open.set(true);
                                             })
                                         />
                                         <button
@@ -827,12 +901,14 @@ pub fn RoomsWorkspace(
                                     node_ref=list_ref
                                     on:scroll=move |_| {
                                         if let Some(el) = list_ref.get() {
-                                            if transcript_is_near_bottom(
+                                            let at_bottom = transcript_is_near_bottom(
                                                 el.scroll_height(),
                                                 el.scroll_top(),
                                                 el.client_height(),
                                                 120,
-                                            ) {
+                                            );
+                                            transcript_follow_pinned.set(at_bottom);
+                                            if at_bottom {
                                                 new_below.set(false);
                                                 queue_bottom_read_advance();
                                             }
@@ -879,6 +955,20 @@ pub fn RoomsWorkspace(
                                                 .map(|p| room_messages::is_grouped(p, &m))
                                                 .unwrap_or(false);
                                             view! {
+                                                // "New messages" line at the reader's
+                                                // left-off point, above the day/gap
+                                                // headers so it bounds what follows.
+                                                {move || {
+                                                    (first_unread_seq.get() == Some(root_seq)).then(|| view! {
+                                                        <div
+                                                            class="rooms-workspace__unread-divider"
+                                                            role="separator"
+                                                            aria-label="New messages"
+                                                        >
+                                                            "New"
+                                                        </div>
+                                                    })
+                                                }}
                                                 {day_label.map(|d| view! {
                                                     <div class="rooms-workspace__day-separator" data-day="true">{d}</div>
                                                 })}
@@ -909,6 +999,9 @@ pub fn RoomsWorkspace(
                                                             <span class="rooms-workspace__msg-name">
                                                                 { let id = m.author_id.clone(); move || author_name(rooms, &id) }
                                                             </span>
+                                                            {author_kind_badge(m.author_kind, is_system).map(|label| view! {
+                                                                <span class="rooms-workspace__msg-kind">{label}</span>
+                                                            })}
                                                             <time
                                                                 class="rooms-workspace__msg-time"
                                                                 datetime=full_ts.clone()
@@ -966,6 +1059,7 @@ pub fn RoomsWorkspace(
                                                                             remember_right_focus(ev.current_target());
                                                                             members_open.set(false);
                                                                             search_open.set(false);
+                                                                            files_open.set(false);
                                                                             selected_thread_root_seq.update(|selected| {
                                                                                 *selected = if *selected == Some(root_seq) {
                                                                                     None
@@ -1028,6 +1122,7 @@ pub fn RoomsWorkspace(
                                             if let Some(el) = list_ref.get() {
                                                 el.set_scroll_top(el.scroll_height());
                                             }
+                                            transcript_follow_pinned.set(true);
                                             new_below.set(false);
                                             queue_bottom_read_advance();
                                         }
@@ -1043,12 +1138,20 @@ pub fn RoomsWorkspace(
 
                                 <crate::room_attention::WorkingIndicator rooms=rooms />
                                 // Composer + status line
+                                // The attach control takes the local-store
+                                // gate, not the composer's: an upload lands
+                                // in this daemon's store and is never
+                                // enqueued for a peer.
                                 <ChannelComposer
                                     rooms=rooms
                                     composer=composer
                                     send_in_flight=send_in_flight
                                     mention=mention
                                     on_send=on_send
+                                    attachments=attachments
+                                    attach_allowed=Signal::derive(move || {
+                                        local_store_write_gate(rooms.access.get().as_ref())
+                                    })
                                 />
                             }.into_any()
                         }
@@ -1067,6 +1170,8 @@ pub fn RoomsWorkspace(
                             "Thread"
                         } else if search_open.get() {
                             "Search"
+                        } else if files_open.get() {
+                            "Files"
                         } else {
                             "Members"
                         }}
@@ -1080,6 +1185,8 @@ pub fn RoomsWorkspace(
                                 "Close thread"
                             } else if search_open.get() {
                                 "Close search"
+                            } else if files_open.get() {
+                                "Close files"
                             } else {
                                 "Close members"
                             }
@@ -1114,6 +1221,20 @@ pub fn RoomsWorkspace(
                                 <crate::room_attention::RoomSearchPanel
                                     rooms=rooms
                                     on_pick=Callback::new(move |root: u64| queue_search_thread(rooms, root))
+                                />
+                            }.into_any()
+                        } else if files_open.get() {
+                            // Room context files. The panel takes the
+                            // local-store gate like the composer's paperclip:
+                            // the write lands on this host and no outbox row
+                            // is minted anywhere on its path.
+                            view! {
+                                <FilesPanel
+                                    rooms=rooms
+                                    state=attachments
+                                    writes_allowed=Signal::derive(move || {
+                                        local_store_write_gate(rooms.access.get().as_ref())
+                                    })
                                 />
                             }.into_any()
                         } else {

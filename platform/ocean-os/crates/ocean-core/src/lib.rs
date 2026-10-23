@@ -426,35 +426,9 @@ pub struct SessionToolContext {
     pub text: String,
 }
 
-/// Bounded, boot-local proof for an exact originating turn. Absence is unknown,
-/// including after restart or retention eviction; it never authorizes replay.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SteeringTurnSnapshot {
-    pub turn_id: String,
-    pub ended: bool,
-    pub receipts: Vec<SteeringReceipt>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SteeringReceipt {
-    pub steer_id: String,
-    pub outcome: SteeringOutcome,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SteeringOutcome {
-    Pending,
-    Delivered,
-    Unconsumed,
-    Unknown,
-}
-
 /// Detailed session transcript returned by `GET /v1/sessions/{id}`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionDetail {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub steering: Option<Vec<SteeringTurnSnapshot>>,
     #[serde(alias = "session_id")]
     pub id: SessionId,
     pub created_ms: i64,
@@ -492,6 +466,20 @@ pub struct SessionDetail {
     pub active_requests: Vec<RequestId>,
     #[serde(default)]
     pub pending_permissions: Vec<PermissionId>,
+    /// Terminal outcomes of mid-turn steers on this session, oldest first,
+    /// bounded (the daemon keeps the most recent per session). Additive
+    /// (#148): empty on older daemons. The persisted transcript carries no
+    /// steer identity, so this ledger is the only authoritative delivery
+    /// record a reconnecting client can reconcile pending rows against — by
+    /// `steer_id`, never by text.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steering: Vec<SteeringOutcome>,
+    /// Terminal (finished) request ids for this session, most-recent first,
+    /// bounded. Additive (#148): lets a hydration prove a locally-live Stop
+    /// target names a turn the daemon already finished. Each id equals the
+    /// turn id clients saw in `turn_started`/`turn_finished`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub finished_requests: Vec<RequestId>,
     #[serde(default)]
     pub transcript: Vec<SessionTranscriptEntry>,
     #[serde(default)]
@@ -525,11 +513,40 @@ pub struct SessionDetail {
 
 /// A lightweight reference to the [`Project`] a session belongs to: just the
 /// stable id and display name, enough for a client to render and link to the
-/// project without re-fetching the full record. Surfaced on [`SessionDetail`].
+/// project without fetching the full [`Project`] record. Surfaced on [`SessionDetail`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectRef {
     pub id: ProjectId,
     pub name: String,
+}
+
+/// The daemon's terminal record for one mid-turn steer
+/// (`POST /v1/agent/sessions/{id}/steer`), as exposed on
+/// [`SessionDetail::steering`]. A steer the agent loop delivered into the
+/// turn is `Delivered`; a steer still waiting when the turn ended (round
+/// limit, failure, or reroute) is `Dropped` — the daemon discarded it, and
+/// the sender owns re-sending it as a new turn if it still wants it. A
+/// client reconciles by `steer_id` only; identical text is never delivery
+/// proof (#148).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SteeringOutcome {
+    /// The daemon-minted id returned by the steer POST and echoed on the
+    /// `steering_delivered` event.
+    pub steer_id: String,
+    /// The turn the steer was bound to (equals the turn/request id clients
+    /// saw as the running turn). Lets a client refuse to resolve its row
+    /// against another turn's outcome.
+    pub turn_id: RequestId,
+    pub status: SteeringOutcomeStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SteeringOutcomeStatus {
+    /// The message landed in the turn's transcript; the model answered it.
+    Delivered,
+    /// The turn ended without reading it; the daemon discarded it.
+    Dropped,
 }
 
 impl From<Project> for ProjectRef {
@@ -1735,31 +1752,6 @@ impl EventEnvelope {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn steering_session_snapshot_is_additive_and_keeps_explicit_unknown() {
-        let legacy = serde_json::json!({
-            "id": uuid::Uuid::new_v4(), "created_ms":0, "updated_ms":0,
-            "model":"test", "provider":"test", "turns":0, "title":"",
-            "state":"stored", "resumable":true
-        });
-        let mut detail: super::SessionDetail = serde_json::from_value(legacy).unwrap();
-        assert!(detail.steering.is_none());
-        detail.steering = Some(vec![super::SteeringTurnSnapshot {
-            turn_id: "t1".into(),
-            ended: true,
-            receipts: vec![super::SteeringReceipt {
-                steer_id: "s1".into(),
-                outcome: super::SteeringOutcome::Unknown,
-            }],
-        }]);
-        let wire = serde_json::to_value(&detail).unwrap();
-        assert_eq!(wire["steering"][0]["receipts"][0]["outcome"], "unknown");
-        assert_eq!(
-            serde_json::from_value::<super::SessionDetail>(wire).unwrap(),
-            detail
-        );
-    }
-
     use super::*;
 
     #[test]
