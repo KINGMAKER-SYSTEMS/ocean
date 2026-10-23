@@ -10,9 +10,12 @@
 //! Submodules own the pure helpers (each with its unit tests) and the
 //! extracted rail components; this module owns `RoomsWorkspace`, the shared
 //! signals and Effects that must outlive rail re-renders, and the transcript.
+//! Room context files (`attachments.rs`) are the right rail's Files mode plus
+//! the composer's attach control, against the daemon's attachment routes.
 
 mod access;
 mod agents;
+mod attachments;
 mod banners;
 mod composer;
 mod format;
@@ -31,8 +34,9 @@ use crate::room_messages;
 use crate::rooms::{author_display_name, local_speaker_id, RoomMessage, Rooms};
 
 pub(crate) use access::access_allows_sharing;
-use access::{access_allows_thread_writes, access_allows_writes};
+use access::{access_allows_thread_writes, access_allows_writes, local_store_write_gate};
 use agents::{ConsentSheet, InvokeMenu};
+use attachments::{AttachmentInput, FilesPanel, RoomAttachmentsState};
 use banners::{AccessStateBanner, InviteResult, OutboxPanel, PendingInviteBanner};
 use composer::{
     message_send_admitted, normalized_message_body, outbox_matches_failed_message,
@@ -168,6 +172,13 @@ pub fn RoomsWorkspace(
     // Team-platform P6: the right rail shows search when no thread is open.
     let search_open = RwSignal::new(false);
     let members_open = RwSignal::new(false);
+    // Room context files: the right rail's Files mode, opened from the
+    // overflow like Members. The attachments state lives at this scope for
+    // the same reason the close state does — the center and right rails
+    // re-render on room state, and an upload's in-flight flag rebuilt
+    // mid-request would re-enable the control during its own upload.
+    let files_open = RwSignal::new(false);
+    let attachments = RoomAttachmentsState::new(rooms);
     let overflow_ref: NodeRef<leptos::html::Button> = NodeRef::new();
     // The close confirmation's state (DoD 4.3) lives here, not in the header
     // closure below: that closure is rebuilt on every `open_room` write, and an
@@ -189,11 +200,16 @@ pub fn RoomsWorkspace(
             });
         right_return_focus.set_value(send_wrapper::SendWrapper::new(focused));
     };
-    let right_open =
-        move || members_open.get() || search_open.get() || selected_thread_root_seq.get().is_some();
+    let right_open = move || {
+        members_open.get()
+            || search_open.get()
+            || files_open.get()
+            || selected_thread_root_seq.get().is_some()
+    };
     let close_right = move || {
         members_open.set(false);
         search_open.set(false);
+        files_open.set(false);
         selected_thread_root_seq.set(None);
         let restored = right_return_focus.with_value(|element| {
             element
@@ -221,8 +237,12 @@ pub fn RoomsWorkspace(
         {
             members_open.set(false);
             search_open.set(false);
+            files_open.set(false);
             selected_thread_root_seq.set(None);
             right_return_focus.set_value(send_wrapper::SendWrapper::new(None));
+            // Files belong to the room they were listed for: retire the list,
+            // its ticket and any upload in flight with the admission.
+            attachments.reset();
         }
         admission
     });
@@ -246,6 +266,7 @@ pub fn RoomsWorkspace(
             remember_right_focus(None);
             members_open.set(false);
             search_open.set(false);
+            files_open.set(false);
             selected_thread_root_seq.set(Some(root));
         }
     });
@@ -752,6 +773,10 @@ pub fn RoomsWorkspace(
                 // otherwise. Outside the header closure so a roster write
                 // cannot unmount a close in flight.
                 <crate::room_close::RoomCloseDialog rooms=rooms state=close_control />
+                // The real file control, outside the header closure for the
+                // same reason: a roster write must not unmount the input a
+                // picker is about to report to.
+                <AttachmentInput rooms=rooms state=attachments />
                 {move || {
                     let open = rooms.open_room.get();
                     match open {
@@ -801,6 +826,7 @@ pub fn RoomsWorkspace(
                                                 } else {
                                                     remember_right_focus(ev.current_target());
                                                     members_open.set(false);
+                                                    files_open.set(false);
                                                     selected_thread_root_seq.set(None);
                                                     show_left_rail.set(false);
                                                     search_open.set(true);
@@ -820,8 +846,20 @@ pub fn RoomsWorkspace(
                                                 right_return_focus.set_value(send_wrapper::SendWrapper::new(None));
                                                 selected_thread_root_seq.set(None);
                                                 search_open.set(false);
+                                                files_open.set(false);
                                                 show_left_rail.set(false);
                                                 members_open.set(true);
+                                            })
+                                            on_files=Callback::new(move |()| {
+                                                // Same return-focus rule as Members: the
+                                                // menu item is gone, so Escape lands on
+                                                // the persistent Room options trigger.
+                                                right_return_focus.set_value(send_wrapper::SendWrapper::new(None));
+                                                selected_thread_root_seq.set(None);
+                                                search_open.set(false);
+                                                members_open.set(false);
+                                                show_left_rail.set(false);
+                                                files_open.set(true);
                                             })
                                         />
                                         <button
@@ -1018,6 +1056,7 @@ pub fn RoomsWorkspace(
                                                                             remember_right_focus(ev.current_target());
                                                                             members_open.set(false);
                                                                             search_open.set(false);
+                                                                            files_open.set(false);
                                                                             selected_thread_root_seq.update(|selected| {
                                                                                 *selected = if *selected == Some(root_seq) {
                                                                                     None
@@ -1096,12 +1135,20 @@ pub fn RoomsWorkspace(
 
                                 <crate::room_attention::WorkingIndicator rooms=rooms />
                                 // Composer + status line
+                                // The attach control takes the local-store
+                                // gate, not the composer's: an upload lands
+                                // in this daemon's store and is never
+                                // enqueued for a peer.
                                 <ChannelComposer
                                     rooms=rooms
                                     composer=composer
                                     send_in_flight=send_in_flight
                                     mention=mention
                                     on_send=on_send
+                                    attachments=attachments
+                                    attach_allowed=Signal::derive(move || {
+                                        local_store_write_gate(rooms.access.get().as_ref())
+                                    })
                                 />
                             }.into_any()
                         }
@@ -1120,6 +1167,8 @@ pub fn RoomsWorkspace(
                             "Thread"
                         } else if search_open.get() {
                             "Search"
+                        } else if files_open.get() {
+                            "Files"
                         } else {
                             "Members"
                         }}
@@ -1133,6 +1182,8 @@ pub fn RoomsWorkspace(
                                 "Close thread"
                             } else if search_open.get() {
                                 "Close search"
+                            } else if files_open.get() {
+                                "Close files"
                             } else {
                                 "Close members"
                             }
@@ -1167,6 +1218,20 @@ pub fn RoomsWorkspace(
                                 <crate::room_attention::RoomSearchPanel
                                     rooms=rooms
                                     on_pick=Callback::new(move |root: u64| queue_search_thread(rooms, root))
+                                />
+                            }.into_any()
+                        } else if files_open.get() {
+                            // Room context files. The panel takes the
+                            // local-store gate like the composer's paperclip:
+                            // the write lands on this host and no outbox row
+                            // is minted anywhere on its path.
+                            view! {
+                                <FilesPanel
+                                    rooms=rooms
+                                    state=attachments
+                                    writes_allowed=Signal::derive(move || {
+                                        local_store_write_gate(rooms.access.get().as_ref())
+                                    })
                                 />
                             }.into_any()
                         } else {
