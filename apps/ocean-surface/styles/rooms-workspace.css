@@ -224,6 +224,48 @@
 
 /* ── Left rail — room list item ───────────────────────────────────── */
 
+/* Workspace-root group (group_rail_rooms in rooms_workspace/room_list.rs):
+   structure, not a card. The header labels the options (role="group" +
+   aria-labelledby) and is never a disclosure: no hover, focus ring or caret.
+   Full roots wrap rather than truncate or case-fold so distinct roots stay
+   distinguishable without hover. */
+.rooms-workspace__group {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.rooms-workspace__group + .rooms-workspace__group {
+  margin-top: 6px;
+}
+
+.rooms-workspace__group-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 12px 4px;
+  color: var(--fg-3);
+  font-family: var(--font);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.rooms-workspace__group-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.rooms-workspace__group-count {
+  flex: 0 0 auto;
+  color: var(--fg-3);
+  font-size: 10px;
+  font-weight: 400;
+}
+
 .rooms-workspace__room {
   appearance: none;
   display: flex;

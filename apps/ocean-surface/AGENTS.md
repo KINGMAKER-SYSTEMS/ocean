@@ -490,6 +490,16 @@ ships today and are updated slice by slice.
   older daemons; when set, the header shows its folder name read-only
   (`title` = full root). A room turn's folder is agent folder, then room
   folder, then `workspace_root`, else `workspace_unavailable`.
+- The Rooms rail groups rooms by `Room.workspace_root` (`group_rail_rooms` in
+  `room_list.rs`; derived, never stored): first-seen root order, daemon order
+  within a group, unbound rooms last under "Other rooms". Each group is a static
+  `role="group"` labelled by a non-interactive header showing the full,
+  case-preserved root (wrapping, never a basename or ellipsis) and a live count.
+  Headers are not buttons and groups never collapse, so the listbox keeps one
+  roving tab stop and Arrow/Home/End over the flattened grouped order
+  (`rail_room_keys`). Header ids derive from the root, not list position. A
+  shared root is a folder binding, not a daemon Project identity; do not call
+  these project groups.
 - Rooms UI lives in `src/rooms_workspace/` (team-platform P5): `mod.rs`
   owns `RoomsWorkspace`, its shared signals, and the transcript; child
   components are `RoomListRail` (`room_list.rs`), `ChannelComposer`
