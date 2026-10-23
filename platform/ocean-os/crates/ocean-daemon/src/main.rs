@@ -29776,6 +29776,9 @@ prunable gitdir file points to non-existent location
             assert!(state.requests.read().await.is_empty());
         }
         let token = ocean_core::mint_decision_token();
+        // Subscribed before the invoke so the post-commit hint for the reply
+        // row cannot be missed (see `await_pending_outbox_row`).
+        let access_wakes = state.room_access_wakes.test_subscribe();
         let (status, queued) = operator_room_http_request(app, axum::http::Method::POST, &path,
             Some(json!({"invoked_by":SOVEREIGN_MEMBER,"message_seq":authored.seq,"decision_token":token})), &[]).await;
         assert_eq!(status, StatusCode::ACCEPTED);
@@ -29818,10 +29821,48 @@ prunable gitdir file points to non-existent location
             ))
         );
         drop(requests);
-        let outbox = with_rooms(&state, |s| s.pending_outbox(&room)).unwrap();
+        let outbox = await_pending_outbox_row(&state, &room, access_wakes).await;
         assert_eq!(outbox.len(), 1);
         assert_eq!(outbox[0].author_member_id, SOVEREIGN_MEMBER_AGENT);
         assert!(!serde_json::to_string(&outbox).unwrap().contains(&token));
+    }
+
+    /// Await a federated room turn's reply reaching the outbox.
+    ///
+    /// `spawn_room_agent_turn` settles the request registry `Completed` when
+    /// the runtime prompt returns, THEN drains its run watcher, THEN commits
+    /// the reply through `enqueue_authorized_federated_agent_message` and
+    /// settles the work card `Done`. The registry state therefore promises
+    /// nothing about the outbox row; a reader that polls `Completed` and reads
+    /// the outbox at once sees an empty outbox under scheduler load (1 in 3
+    /// parallel suite runs). The enqueue publishes a `RoomAccessWakeBus` hint
+    /// only after its SQLite transaction committed, so this rereads the
+    /// durable row on every hint from a receiver the caller subscribed BEFORE
+    /// the invoke (a hint published between a reread and the next `recv` is
+    /// already buffered; a lagged receiver just rereads), bounded by a
+    /// deadline. The caller still asserts the row's exact shape.
+    #[cfg(unix)]
+    async fn await_pending_outbox_row(
+        state: &AppState,
+        room: &RoomKey,
+        mut access_wakes: broadcast::Receiver<persistent_rooms::RoomAccessWakeHint>,
+    ) -> Vec<ocean_core::RoomOutboxItem> {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let outbox = with_rooms(state, |s| s.pending_outbox(room)).unwrap();
+                if !outbox.is_empty() {
+                    break outbox;
+                }
+                match access_wakes.recv().await {
+                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => {
+                        panic!("room access wake bus closed before the reply reached the outbox")
+                    }
+                }
+            }
+        })
+        .await
+        .expect("federated agent reply must become a Pending outbox row after the request settles")
     }
 
     /// PR D: the work card a room invoke starts names the exact daemon

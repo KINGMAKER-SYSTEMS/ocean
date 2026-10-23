@@ -110,6 +110,17 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   (`PermissionPolicyInputs::explicit`) so the test needs no process env at
   all; `permission_settings_handlers_resolve_from_process_env` is the one
   env-touching proof that the handlers still read the real environment.
+- Test ordering for room turns: `spawn_room_agent_turn` settles the request
+  registry `Completed` when the runtime prompt returns, then drains its run
+  watcher, then commits the reply (transcript row for Local rooms, outbox row
+  for federated rooms) and settles the work card `Done`. The registry state
+  promises nothing about the reply row, so a fixture that observed
+  `Completed` must await the row itself: subscribe to the matching wake bus
+  (`room_access_wakes.test_subscribe()` for the outbox, `room_wakes` for the
+  transcript) before the invoke, reread SQLite on every hint under a deadline
+  (`await_pending_outbox_row` in `main.rs` tests), or poll the row with a
+  deadline as the `p2c_` fixtures do. Never read the row right after the
+  registry poll, and never fix this with a sleep.
 - `call-voice` turns are always `HarnessProfile::Voice`, `yolo: false`, and
   `PromptControl::without_tools()`, regardless of global or persisted YOLO.
 - `POST /v1/voice/stt` remains the credential-owning batch transcription seam
