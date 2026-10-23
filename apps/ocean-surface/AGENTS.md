@@ -864,6 +864,50 @@ ships today and are updated slice by slice.
   oversize/invalid reply, lost-ack → unknown), `cargo test owner_mutation`,
   `cargo test room_consent`, `cargo clippy --all-targets -- -D warnings`.
 
+### Coding plans (web identity M3)
+
+- `src/coding_plans.rs` is the panel for this daemon's Claude/Codex/ChatGPT
+  plan logins over the daemon's five operator-gated routes
+  (`platform/ocean-os/crates/ocean-daemon/src/provider_auth.rs`:
+  `GET /v1/auth/providers`, `POST …/{provider}/login`,
+  `GET|DELETE …/{provider}/login/{attempt_id}`, `POST …/{provider}/logout`).
+  It renders what the daemon reports (status, `source` hint, expiry only
+  once passed, a pending `login` adopted on open) and collects intent; it
+  never holds a token. The monorepo proxy fronts one daemon, so sentences
+  name "the machine running this Ocean" rather than a picked device. Reached
+  from the header `⋯` overflow row and the ⌘K `coding-plans` command, both
+  calling `CodingPlansState::show`; `tests/unheld_coding_plans_controls.rs`
+  pins the overflow row (the phone's only door) and the `supported` gate.
+- Transport is the one seam `call`, mirroring the Room owner mutations:
+  web/PWA sends a same-origin fetch and the proxy attaches the operator key
+  (`crates/ocean-surface-proxy/src/coding_plans.rs`: exact five shapes,
+  dot-segment refusal, 4 KiB body cap, key via `owner_operator_key` so
+  `OCEAN_SURFACE_AUTH=off` attaches nothing and the daemon keeps refusing;
+  upstream built fresh so Cookie/Origin/Referer/forged operator headers never
+  pass); Tauri calls `host::coding_plan_request(kind, provider, attempt)` with
+  a fixed `kind` (`list`, `login_start`, `login_poll`, `login_cancel`,
+  `logout`) and the shell (`crates/ocean-tauri/src/coding_plans.rs`) builds
+  the method and path itself over the shared `daemon_transport.rs`
+  (`Method::Delete` added for cancel; ids restricted to `[A-Za-z0-9_-]{1,64}`).
+  The Chrome extension has neither, so `coding_plans::supported()` hides the
+  command, the overflow row and the panel there.
+- Sign-in opens a blank tab synchronously in the click (popup-blocker safe,
+  `opener` severed) and points it at `authorize_url` once the daemon
+  answers; on Tauri `host::open_external_url` hands the URL to the OS
+  browser. The panel then polls the attempt every 2 s, bounded by 300 polls
+  or 5 consecutive transport failures; attempts retired on those bounds are
+  never re-adopted from the list. Closing, cancelling or a newer intent
+  retires the loop by generation; a list reply publishes only for the newest
+  refresh ticket. Sign-out is confirmed in place and hidden for
+  environment-sourced credentials. Every refusal code (`login_unavailable`,
+  `operator_credential_unavailable`/`_missing`, `unknown_attempt`,
+  `unknown_provider`, `logout_failed`, the proxy's 502) and every attempt
+  failure classification renders as a sentence, never the code. The
+  same-machine caveat is stated once per attempt: the provider redirects to
+  the daemon machine's localhost, so a browser elsewhere cannot finish it.
+- Verification: `cargo test -p ocean-surface-ui coding_plans`, the proxy's
+  `cargo test coding_plan`, `cd crates/ocean-tauri && cargo test coding_plan`.
+
 ## Workspace Files lifecycle
 
 - Native empty Files exposes the host folder picker as pane-local browsing; picking never rewrites daemon session cwd. Session/cwd intent changes retire picked roots, previews, tree caches and asynchronous results synchronously, including A-B-A; disposal rejects late picker/watch/read completions.

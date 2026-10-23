@@ -37,6 +37,8 @@ use sha2::{Digest, Sha256};
 use tower_http::{services::ServeDir, trace::TraceLayer};
 use tracing_subscriber::EnvFilter;
 
+mod coding_plans;
+
 const DEFAULT_DAEMON_URL: &str = "http://127.0.0.1:4780";
 const DEFAULT_LIVEKIT_ROOM_ID: &str = "project:surface-main";
 const DEFAULT_VOICE_PROFILE: &str = "leo";
@@ -486,6 +488,16 @@ fn build_app(state: Arc<AppState>, dist: &std::path::Path) -> Router {
         // Daemon owner identity (team-platform P2): every room author derives
         // from it; the browser never mints an identity.
         .route("/v1/me", get(proxy_me_get).put(proxy_me_put))
+        // Coding plans (web identity M3): this daemon's Claude/Codex plan
+        // logins, operator key attached server side. Exact shapes; see
+        // `coding_plans`.
+        .route("/v1/auth/providers", get(proxy_coding_plans))
+        .route(
+            "/v1/auth/providers/{*rest}",
+            get(proxy_coding_plans)
+                .post(proxy_coding_plans)
+                .delete(proxy_coding_plans),
+        )
         .route("/v1/fs/dirs", get(proxy_fs_dirs))
         // Routes the surface has always called and the daemon has always
         // served, which this table simply never carried. In the shipped PWA
@@ -1349,6 +1361,12 @@ async fn proxy_me_put(State(state): State<Arc<AppState>>, body: Bytes) -> impl I
         Err(unavailable) => return unavailable.into_response(),
     };
     proxy_send_json_as(&state, reqwest::Method::PUT, "/v1/me", body, operator_key).await
+}
+
+/// This daemon's coding-plan routes (web identity M3); the allowlist and
+/// operator-key handling live in [`coding_plans`].
+async fn proxy_coding_plans(State(state): State<Arc<AppState>>, req: Request) -> Response {
+    coding_plans::forward(&state, req).await
 }
 
 /// Reverse-proxy GET /v1/agents (named agent identity picker, TASK-9/TASK-11).
@@ -2921,6 +2939,164 @@ mod tests {
             upstream,
             _dist: dist,
         }
+    }
+
+    /// The five coding-plan shapes reach the daemon through the real router
+    /// with the proxy's own operator key and nothing the browser sent; any
+    /// other shape under `/v1/auth/providers` is refused here, the lane stays
+    /// behind the login, and a proxy without login attaches nothing.
+    #[tokio::test]
+    async fn coding_plan_routes_forward_only_the_server_side_key() {
+        use serde_json::Value;
+        async fn echo(req: Request<Body>) -> axum::Json<Value> {
+            let headers = req.headers();
+            axum::Json(serde_json::json!({
+                "method": req.method().as_str(),
+                "path": req.uri().path(),
+                "operator": headers.get("x-ocean-operator").and_then(|v| v.to_str().ok()),
+                "cookie": headers.contains_key(header::COOKIE),
+                "origin": headers.contains_key(header::ORIGIN),
+                "referer": headers.contains_key(header::REFERER),
+            }))
+        }
+        let upstream = Router::new()
+            .route("/v1/auth/providers", get(echo))
+            .route("/v1/auth/providers/{p}/login", post(echo))
+            .route("/v1/auth/providers/{p}/logout", post(echo))
+            .route("/v1/auth/providers/{p}/login/{a}", get(echo).delete(echo));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+
+        let credential_dir = tempfile::tempdir().expect("credential tempdir");
+        let key_path = credential_dir.path().join("operator.key");
+        std::fs::write(&key_path, "proxy-owned-authority\n").unwrap();
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let dist = tempfile::tempdir().expect("dist tempdir");
+
+        for login in [true, false] {
+            let mut state = auth_test_state();
+            let inner = Arc::get_mut(&mut state).expect("sole state owner");
+            inner.daemon_url = format!("http://{addr}");
+            inner.operator_key_path = key_path.clone();
+            inner.http_json = reqwest::Client::builder()
+                .no_proxy()
+                .timeout(std::time::Duration::from_secs(2))
+                .build()
+                .unwrap();
+            if !login {
+                inner.basic_auth = None;
+            }
+            let app = build_app(state, dist.path());
+
+            for (method, uri) in [
+                ("GET", "/v1/auth/providers"),
+                ("POST", "/v1/auth/providers/claude/login"),
+                ("GET", "/v1/auth/providers/claude/login/abc123"),
+                ("DELETE", "/v1/auth/providers/claude/login/abc123"),
+                ("POST", "/v1/auth/providers/codex/logout"),
+            ] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method(method)
+                            .uri(uri)
+                            .header(header::COOKIE, "ocean_session=test-session")
+                            .header("x-ocean-operator", "browser-forged")
+                            .header(header::ORIGIN, "https://evil.example")
+                            .header(header::REFERER, "https://evil.example/page")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response.status(),
+                    StatusCode::OK,
+                    "login={login} {method} {uri}"
+                );
+                let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                let seen: Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(seen["method"], method);
+                assert_eq!(seen["path"], uri);
+                let expected = login.then_some("proxy-owned-authority");
+                assert_eq!(
+                    seen["operator"].as_str(),
+                    expected,
+                    "login={login} {method} {uri}"
+                );
+                assert_eq!(seen["cookie"], false);
+                assert_eq!(seen["origin"], false);
+                assert_eq!(seen["referer"], false);
+            }
+
+            // Outside the five shapes: refused here, never forwarded.
+            for (method, uri) in [
+                ("PUT", "/v1/auth/providers/claude/login/abc"),
+                ("POST", "/v1/auth/providers"),
+                ("GET", "/v1/auth/providers/claude/logout"),
+                ("POST", "/v1/auth/providers/%2e%2e/login"),
+            ] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method(method)
+                            .uri(uri)
+                            .header(header::COOKIE, "ocean_session=test-session")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert!(
+                    response.status().is_client_error(),
+                    "login={login} {method} {uri}: {}",
+                    response.status()
+                );
+            }
+        }
+
+        // The whole lane stays behind the login.
+        let mut state = auth_test_state();
+        let inner = Arc::get_mut(&mut state).expect("sole state owner");
+        inner.daemon_url = format!("http://{addr}");
+        inner.operator_key_path = key_path.clone();
+        let app = build_app(state, dist.path());
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/auth/providers")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        // An unreadable key fails closed before forwarding, as JSON the page
+        // can turn into a sentence.
+        let mut state = auth_test_state();
+        let inner = Arc::get_mut(&mut state).expect("sole state owner");
+        inner.daemon_url = format!("http://{addr}");
+        inner.operator_key_path = credential_dir.path().join("absent.key");
+        let app = build_app(state, dist.path());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/auth/providers")
+                    .header(header::COOKIE, "ocean_session=test-session")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let seen: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(seen["error"], "operator_credential_unavailable");
     }
 
     /// Owner mutations through the authenticated proxy carry the daemon's Room
