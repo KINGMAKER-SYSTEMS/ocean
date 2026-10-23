@@ -160,7 +160,7 @@ pub enum CredentialSource {
     OceanAuthFile {
         path: String,
     },
-    /// Codex CLI auth JSON (`OCEAN_CODEX_AUTH_FILE` / `$HOME/.codex/auth.json`),
+    /// Codex CLI auth JSON (`OCEAN_CODEX_AUTH_FILE` / selected home `.codex/auth.json`),
     /// used as a fallback when the Ocean `openai-codex` OAuth block is absent or
     /// expired.
     CodexCliAuthFile {
@@ -338,7 +338,8 @@ pub struct ProviderEnv {
     pub vars: BTreeMap<String, String>,
     pub auth_file: Option<PathBuf>,
     /// Codex CLI auth JSON path (`OCEAN_CODEX_AUTH_FILE`, else
-    /// `$HOME/.codex/auth.json`). Fallback credential source for `openai-codex`
+    /// selected home `.codex/auth.json`). Windows falls back to USERPROFILE.
+    /// Fallback credential source for `openai-codex`
     /// when the Ocean auth-file OAuth block is absent or expired.
     pub codex_auth_file: Option<PathBuf>,
 }
@@ -637,7 +638,7 @@ struct CodexAuth {
 /// Resolve Codex auth from the first source with a usable OAuth access token:
 /// 1. A valid (non-expired) `openai-codex` OAuth block in the Ocean auth file.
 /// 2. The Codex CLI auth JSON at `OCEAN_CODEX_AUTH_FILE` (or
-///    `$HOME/.codex/auth.json` when unset); shape
+///    selected home `.codex/auth.json` when unset; Windows accepts USERPROFILE); shape
 ///    `{ "tokens": { "access_token": "...", "account_id": "..." } }`.
 ///
 /// The Ocean auth file is the configured Ocean credential store, so a read or
@@ -1863,25 +1864,67 @@ fn unix_epoch_secs() -> i64 {
         .unwrap_or(0)
 }
 
+/// Shared Ocean state/auth directory selection. Explicit Ocean and XDG paths
+/// win; Windows also accepts USERPROFILE when HOME is absent or not absolute.
+/// No filesystem access or cwd fallback occurs here. Consumers that historically
+/// support a cwd fallback retain that decision themselves.
+pub fn default_config_dir() -> Option<PathBuf> {
+    config_dir_with(
+        std::env::var_os("OCEAN_CONFIG_DIR").as_deref(),
+        std::env::var_os("XDG_CONFIG_HOME").as_deref(),
+        std::env::var_os("HOME").as_deref(),
+        std::env::var_os("USERPROFILE").as_deref(),
+    )
+}
+
+fn config_dir_with(
+    ocean: Option<&std::ffi::OsStr>,
+    xdg: Option<&std::ffi::OsStr>,
+    home: Option<&std::ffi::OsStr>,
+    profile: Option<&std::ffi::OsStr>,
+) -> Option<PathBuf> {
+    ocean
+        .map(PathBuf::from)
+        .or_else(|| xdg.map(|path| PathBuf::from(path).join("ocean-rs")))
+        .or_else(|| home_dir_with(home, profile).map(|path| path.join(".config/ocean-rs")))
+}
+
+pub(crate) fn home_dir_with(
+    home: Option<&std::ffi::OsStr>,
+    profile: Option<&std::ffi::OsStr>,
+) -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        [home, profile]
+            .into_iter()
+            .flatten()
+            .map(PathBuf::from)
+            .find(|path| path.is_absolute())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = profile;
+        home.map(PathBuf::from)
+    }
+}
+
 fn default_ocean_auth_file() -> Option<PathBuf> {
-    if let Some(config) = std::env::var_os("OCEAN_CONFIG_DIR") {
-        return Some(PathBuf::from(config).join("auth.json"));
-    }
-    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
-        return Some(PathBuf::from(xdg).join("ocean-rs").join("auth.json"));
-    }
-    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config/ocean-rs/auth.json"))
+    default_config_dir().map(|path| path.join("auth.json"))
 }
 
 /// Default Codex CLI auth file: `OCEAN_CODEX_AUTH_FILE` when set, otherwise
-/// `$HOME/.codex/auth.json` (the Codex CLI's own default location). Mirrors the
-/// `auth_file` resolution pattern — the path is populated (when HOME is set) and
-/// the reader checks existence.
+/// `.codex/auth.json` under the selected home directory (HOME, or Windows
+/// USERPROFILE). Explicit Ocean path overrides retain precedence; the reader
+/// checks existence without importing or writing the external credential file.
 fn default_codex_auth_file() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("OCEAN_CODEX_AUTH_FILE") {
         return Some(PathBuf::from(path));
     }
-    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex/auth.json"))
+    home_dir_with(
+        std::env::var_os("HOME").as_deref(),
+        std::env::var_os("USERPROFILE").as_deref(),
+    )
+    .map(|home| home.join(".codex/auth.json"))
 }
 
 /// Read and parse an auth JSON file. Read/parse failures are surfaced as
@@ -3304,5 +3347,72 @@ mod tests {
             resolve_credential_origin(&env, &ProviderId::ClaudeCode).unwrap(),
             Some(CredentialOrigin::Env)
         );
+    }
+}
+
+#[cfg(test)]
+mod profile_path_tests {
+    use super::*;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn profile_config_overrides_keep_their_existing_precedence() {
+        let ocean = OsStr::new("explicit-ocean");
+        let xdg = OsStr::new("explicit-xdg");
+        assert_eq!(
+            config_dir_with(Some(ocean), Some(xdg), None, None),
+            Some(PathBuf::from(ocean))
+        );
+        assert_eq!(
+            config_dir_with(None, Some(xdg), None, None),
+            Some(PathBuf::from(xdg).join("ocean-rs"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_profile_supplies_default_state_and_credentials_without_home() {
+        let profile = OsStr::new(r"C:\Users\Coworker");
+        let selected = home_dir_with(None, Some(profile)).unwrap();
+        assert_eq!(selected, PathBuf::from(profile));
+        assert_eq!(
+            config_dir_with(None, None, None, Some(profile)),
+            Some(selected.join(".config/ocean-rs"))
+        );
+        let explicit_home = OsStr::new(r"D:\Ocean Home");
+        assert_eq!(
+            home_dir_with(Some(explicit_home), Some(profile)),
+            Some(PathBuf::from(explicit_home))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_profile_refuses_relative_and_empty_implicit_homes() {
+        let profile = OsStr::new(r"C:\Users\Coworker");
+        for bad in ["", "relative", r"C:relative", r"\drive-relative"] {
+            assert_eq!(
+                home_dir_with(Some(OsStr::new(bad)), Some(profile)),
+                Some(PathBuf::from(profile))
+            );
+            assert_eq!(home_dir_with(None, Some(OsStr::new(bad))), None);
+        }
+        assert_eq!(config_dir_with(None, None, None, None), None);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn profile_unix_home_and_missing_home_behavior_are_unchanged() {
+        let home = OsStr::new("/users/fixture");
+        assert_eq!(
+            home_dir_with(Some(home), Some(OsStr::new("ignored"))),
+            Some(PathBuf::from(home))
+        );
+        assert_eq!(home_dir_with(None, Some(OsStr::new("ignored"))), None);
+        assert_eq!(
+            config_dir_with(None, None, Some(home), None),
+            Some(PathBuf::from(home).join(".config/ocean-rs"))
+        );
+        assert_eq!(config_dir_with(None, None, None, None), None);
     }
 }

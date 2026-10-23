@@ -1,6 +1,6 @@
 //! Daemon boot-path — health re-probe, autostart eligibility, binary discovery,
-//! and launchd-aware process start. All platform-sensitive logic (launchctl,
-//! process-group detach) is gated so the module compiles on Linux too.
+//! and launchd-aware process start. Discovery uses each platform's executable
+//! suffix and PATH separator; launchd ownership remains macOS-only.
 //!
 //! The health-monitor loop lives in `app::run` (it owns the async context and
 //! the action channel); this module is the pure-logic engine underneath.
@@ -135,6 +135,26 @@ pub fn autostart_eligible(url: &str) -> bool {
 
 // ── binary discovery ────────────────────────────────────────────────────────────
 
+const DAEMON_BINARY: &str = if cfg!(windows) {
+    "ocean-daemon.exe"
+} else {
+    "ocean-daemon"
+};
+
+fn executable_candidate(path: &Path) -> Option<PathBuf> {
+    if path.is_file() {
+        return Some(path.to_path_buf());
+    }
+    #[cfg(windows)]
+    if path.extension().is_none() {
+        let exe = path.with_extension("exe");
+        if exe.is_file() {
+            return Some(exe);
+        }
+    }
+    None
+}
+
 /// Discover the `ocean-daemon` binary. Order:
 /// 1. `OCEAN_DAEMON_BIN` env var (absolute or PATH-relative).
 /// 2. Sibling `ocean-daemon` next to `current_exe`.
@@ -149,8 +169,10 @@ pub fn discover_binary_with(
     // 1. Env override.
     if let Some(bin) = env_bin {
         let p = PathBuf::from(bin);
-        if p.is_absolute() && p.exists() {
-            return Some(p);
+        if p.is_absolute() {
+            if let Some(found) = executable_candidate(&p) {
+                return Some(found);
+            }
         }
         // Relative — try PATH resolution.
         if let Some(found) = which_in_path(bin, path_env) {
@@ -161,26 +183,25 @@ pub fn discover_binary_with(
     // 2. Sibling next to current_exe.
     if let Some(exe) = current_exe {
         if let Some(parent) = exe.parent() {
-            let sibling = parent.join("ocean-daemon");
-            if sibling.exists() {
+            let sibling = parent.join(DAEMON_BINARY);
+            if sibling.is_file() {
                 return Some(sibling);
             }
         }
     }
 
     // 3. PATH walk.
-    which_in_path("ocean-daemon", path_env)
+    which_in_path(DAEMON_BINARY, path_env)
 }
 
 /// Walk `PATH` for a named executable. Returns the first existing file.
 fn which_in_path(name: &str, path_env: Option<&str>) -> Option<PathBuf> {
     let path = path_env.unwrap_or("");
-    for dir in path.split(':') {
-        if dir.is_empty() {
+    for dir in std::env::split_paths(path) {
+        if dir.as_os_str().is_empty() {
             continue;
         }
-        let candidate = PathBuf::from(dir).join(name);
-        if candidate.is_file() {
+        if let Some(candidate) = executable_candidate(&dir.join(name)) {
             return Some(candidate);
         }
     }
@@ -248,11 +269,29 @@ pub fn launchd_job_installed() -> bool {
     }
 }
 
-/// Home directory. Falls back to `/tmp` if `HOME` is unset (containers, etc.).
+/// Neutral daemon cwd and log home. Windows uses its native user profile.
 fn home_dir() -> PathBuf {
-    std::env::var("HOME")
+    #[cfg(windows)]
+    {
+        windows_home_with(
+            std::env::var_os("USERPROFILE").as_deref(),
+            std::env::temp_dir(),
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("/tmp"))
+    }
+}
+
+#[cfg(windows)]
+fn windows_home_with(profile: Option<&std::ffi::OsStr>, temporary: PathBuf) -> PathBuf {
+    profile
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/tmp"))
+        .filter(|path| path.is_absolute())
+        .unwrap_or(temporary)
 }
 
 /// Log directory under home.
@@ -469,7 +508,7 @@ mod tests {
     fn discover_sibling_found() {
         let tmp = env::temp_dir().join("oceantui-test-sibling");
         fs::create_dir_all(&tmp).unwrap();
-        let sibling = tmp.join("ocean-daemon");
+        let sibling = tmp.join(DAEMON_BINARY);
         fs::write(&sibling, b"fake").unwrap();
         let fake_exe = tmp.join("ocean-tui");
         fs::write(&fake_exe, b"fake").unwrap();
@@ -496,12 +535,69 @@ mod tests {
     fn discover_path_walk() {
         let tmp = env::temp_dir().join("oceantui-test-path");
         fs::create_dir_all(&tmp).unwrap();
-        let bin = tmp.join("ocean-daemon");
+        let bin = tmp.join(DAEMON_BINARY);
         fs::write(&bin, b"fake").unwrap();
 
         let found = discover_binary_with(None, None, Some(&tmp.to_string_lossy()));
         assert_eq!(found, Some(bin.clone()));
         fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn path_walk_uses_native_separators_and_skips_directories() {
+        let tmp = env::temp_dir().join(format!("oceantui-path-list-{}", std::process::id()));
+        let first = tmp.join("not a binary");
+        let second = tmp.join("real binaries");
+        fs::create_dir_all(first.join(DAEMON_BINARY)).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        let binary = second.join(DAEMON_BINARY);
+        fs::write(&binary, b"fake").unwrap();
+        let path = env::join_paths([&first, &second]).unwrap();
+        assert_eq!(
+            discover_binary_with(None, None, path.to_str()),
+            Some(binary)
+        );
+        fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_override_resolves_exe_without_a_suffix() {
+        let tmp = env::temp_dir().join(format!("oceantui-win-exe-{}", std::process::id()));
+        fs::create_dir_all(&tmp).unwrap();
+        let binary = tmp.join("custom-daemon.exe");
+        fs::write(&binary, b"fake").unwrap();
+        let stem = tmp.join("custom-daemon");
+        assert_eq!(
+            discover_binary_with(stem.to_str(), None, None),
+            Some(binary.clone())
+        );
+        assert_eq!(
+            discover_binary_with(Some("custom-daemon"), None, tmp.to_str()),
+            Some(binary)
+        );
+        fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_home_uses_profile_or_a_native_temporary_path() {
+        use std::ffi::OsStr;
+        let temporary = PathBuf::from(r"C:\Users\test\AppData\Local\Temp");
+        let profile = OsStr::new(r"C:\Users\test");
+        assert_eq!(
+            windows_home_with(Some(profile), temporary.clone()),
+            PathBuf::from(profile)
+        );
+        assert_eq!(windows_home_with(None, temporary.clone()), temporary);
+        assert_eq!(
+            windows_home_with(Some(OsStr::new("")), temporary.clone()),
+            temporary
+        );
+        assert_eq!(
+            windows_home_with(Some(OsStr::new("relative")), temporary.clone()),
+            temporary
+        );
     }
 
     // ── rate-limit guard ───────────────────────────────────────────────────

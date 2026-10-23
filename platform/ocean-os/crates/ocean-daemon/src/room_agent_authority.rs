@@ -64,6 +64,12 @@ const PHASE1_SAFE_CAPABILITIES: &[&str] = &[];
 #[derive(Debug)]
 pub(super) struct MapOnly<T>(T);
 
+impl<T> MapOnly<T> {
+    pub(super) fn into_inner(self) -> T {
+        self.0
+    }
+}
+
 impl<'de, T: Deserialize<'de>> Deserialize<'de> for MapOnly<T> {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         struct MapOnlyVisitor<T>(std::marker::PhantomData<T>);
@@ -383,6 +389,47 @@ fn capture_package_snapshot_with(
     })
 }
 
+#[cfg(windows)]
+fn open_snapshot_root(path: &FsPath) -> Result<File, ApiError> {
+    crate::windows_skill_file::open_directory(path)
+        .map_err(|error| map_windows_snapshot_error(error, true))
+}
+
+#[cfg(windows)]
+fn open_snapshot_directory_at(
+    parent: &File,
+    name: &str,
+    package_root: bool,
+) -> Result<File, ApiError> {
+    crate::windows_skill_file::open_directory_at(parent, name)
+        .map_err(|error| map_windows_snapshot_error(error, package_root))
+}
+
+#[cfg(windows)]
+fn open_snapshot_entry_at(parent: &File, name: &str) -> Result<File, ApiError> {
+    crate::windows_skill_file::open_entry_at(parent, name)
+        .map_err(|error| map_windows_snapshot_error(error, false))
+}
+
+#[cfg(windows)]
+fn map_windows_snapshot_error(error: std::io::Error, package_root: bool) -> ApiError {
+    if package_root && error.kind() == std::io::ErrorKind::NotFound {
+        ApiError::not_found("agent_package_not_found")
+    } else {
+        ApiError::conflict("agent_package_unavailable")
+    }
+}
+
+#[cfg(windows)]
+fn snapshot_directory_names(directory: &File, remaining: usize) -> Result<Vec<String>, ApiError> {
+    use crate::windows_skill_file::DirectoryReadError;
+    crate::windows_skill_file::directory_names(directory, remaining).map_err(|error| match error {
+        DirectoryReadError::Limit => ApiError::conflict("agent_package_limit_exceeded"),
+        DirectoryReadError::InvalidName => ApiError::conflict("agent_package_path_unavailable"),
+        DirectoryReadError::Unavailable => ApiError::conflict("agent_package_unavailable"),
+    })
+}
+
 #[cfg(unix)]
 fn open_snapshot_root(path: &FsPath) -> Result<File, ApiError> {
     use std::os::unix::fs::OpenOptionsExt as _;
@@ -400,7 +447,7 @@ fn open_snapshot_root(path: &FsPath) -> Result<File, ApiError> {
         })
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn open_snapshot_root(_path: &FsPath) -> Result<File, ApiError> {
     Err(ApiError::conflict("agent_package_snapshot_unsupported"))
 }
@@ -581,17 +628,17 @@ fn snapshot_entry_name(bytes: &[u8]) -> Result<&str, ApiError> {
     Ok(name)
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn snapshot_directory_names(_directory: &File, _remaining: usize) -> Result<Vec<String>, ApiError> {
     Err(ApiError::conflict("agent_package_snapshot_unsupported"))
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn open_snapshot_entry_at(_parent: &File, _name: &str) -> Result<File, ApiError> {
     Err(ApiError::conflict("agent_package_snapshot_unsupported"))
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn open_snapshot_directory_at(
     _parent: &File,
     _name: &str,

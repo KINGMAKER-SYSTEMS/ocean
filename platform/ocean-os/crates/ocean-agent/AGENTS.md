@@ -51,6 +51,9 @@ transcripts by session id.
   attempt never read. `AgentRuntime::steer` refuses with `Closed` when no
   steerable turn runs on the session. Room, subagent and direct turns carry no
   inbox and cannot be steered.
+  (PR #129 reconciliation: the candidate's turn-bound registry archive,
+  checkpoint-custody receipts, and `SteeringSnapshotChanged` detail retries were
+  an independent #148 solution, superseded by main's #156 daemon-side ledger.)
 - A failed, cancelled or timed-out turn reports the usage of the rounds it
   completed, read from the checkpointed assistant messages, with the last
   completed round's request as its context measurement. Those rounds were
@@ -98,6 +101,10 @@ transcripts by session id.
 - `agentdir::resolve_snapshot` parses runtime fields only from the caller's
   immutable relative-path byte map and never reopens the live tree. The caller
   owns confined capture and hashes the same bytes it passes to the parser.
+- `config_dir_from_env` delegates directory selection to
+  `ocean_providers::default_config_dir`, keeping state and default auth under
+  the same Windows profile. Only when that returns None does Agent retain
+  its historical relative `.ocean-rs` fallback.
 - `AgentRuntime::config_dir()` is the read-only daemon authority captured at construction; daemon-owned adapters must use it instead of re-reading process-global config environment during requests.
 - Do not add new instruction sources without tests proving ancestor/nested cwd behavior.
 - Project ownership resolution must compare canonical roots after the cheap exact

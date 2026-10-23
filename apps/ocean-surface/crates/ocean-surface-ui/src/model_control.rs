@@ -101,6 +101,97 @@ fn option_text(models: &[ModelInfo], id: &str, fallback: &ModelInfo) -> String {
     }
 }
 
+/// Native startup intent is available before the daemon's model API exists.
+/// Once connected, the ordinary composer control below owns model selection.
+#[component]
+pub fn NativeStartup(
+    status: RwSignal<Option<crate::host::DaemonStatus>>,
+    #[prop(optional)] compact: bool,
+) -> impl IntoView {
+    let setup = RwSignal::new(None::<crate::host::DaemonSetup>);
+    let selected = RwSignal::new(String::new());
+    let error = RwSignal::new(None::<String>);
+    let pending = RwSignal::new(false);
+    let attempted = RwSignal::new(false);
+    let starting = move || {
+        status
+            .get()
+            .is_some_and(|status| status.state == "starting")
+    };
+    let busy = move || pending.get() || starting();
+    wasm_bindgen_futures::spawn_local(async move {
+        match crate::host::daemon_setup().await {
+            Ok(Some(value)) => {
+                let _ = selected.try_set(value.selected.clone().unwrap_or_default());
+                let _ = setup.try_set(Some(value));
+            }
+            Ok(None) => {}
+            Err(message) => {
+                let _ = error.try_set(Some(message));
+            }
+        }
+    });
+    Effect::new(move |_| {
+        if starting() {
+            attempted.set(true);
+        }
+        if attempted.get()
+            && !pending.get()
+            && status
+                .get()
+                .is_some_and(|status| matches!(status.state.as_str(), "stopped" | "unreachable"))
+        {
+            error.set(Some("Ocean couldn't start.".into()));
+        }
+    });
+    view! {
+        <section class="ocean-startup" class:ocean-startup--compact=compact aria-label="Ocean startup">
+            <form class="ocean-startup__form" on:submit=move |event| {
+                event.prevent_default();
+                if busy() || setup.get_untracked().is_none() { return; }
+                let model = if setup.get_untracked().is_some_and(|value| value.needs_model) {
+                    selected.get_untracked()
+                } else { String::new() };
+                if setup.get_untracked().is_some_and(|value| value.needs_model) && model.is_empty() { return; }
+                error.set(None);
+                pending.set(true);
+                attempted.set(false);
+                wasm_bindgen_futures::spawn_local(async move {
+                    if let Err(message) = crate::host::daemon_start_with_model((!model.is_empty()).then_some(model)).await {
+                        let _ = error.try_set(Some(message));
+                        let _ = attempted.try_set(false);
+                    }
+                    let _ = pending.try_set(false);
+                });
+            }>
+                <Show when=move || !compact>
+                    <h2>{move || if starting() { "Opening Ocean…" } else { "Open Ocean" }}</h2>
+                </Show>
+                <Show when=move || setup.get().is_some_and(|value| value.needs_model)>
+                    <label class="ocean-startup__field">
+                        <span>"Initial model"</span>
+                        <select required disabled=busy prop:value=move || selected.get()
+                            on:change=move |event| selected.set(event_target_value(&event))>
+                            <option value="" disabled>"Choose a model"</option>
+                            <For each=move || setup.get().map(|value| value.models).unwrap_or_default()
+                                key=|model| model.id.clone() children=move |model| {
+                                view! { <option value=model.id>{model.label}</option> }
+                            } />
+                        </select>
+                    </label>
+                </Show>
+                <button type="submit" class="ocean-startup__start" disabled=move || busy() || setup.get().is_none()
+                    || (setup.get().is_some_and(|value| value.needs_model) && selected.get().is_empty())>
+                    {move || if busy() { "Opening…" } else { "Start Ocean" }}
+                </button>
+                <Show when=move || error.get().is_some()>
+                    <p class="ocean-startup__error" role="alert">{move || error.get()}</p>
+                </Show>
+            </form>
+        </section>
+    }
+}
+
 #[component]
 pub fn ModelControl(daemon: Daemon) -> impl IntoView {
     let models = daemon.models;
@@ -114,7 +205,12 @@ pub fn ModelControl(daemon: Daemon) -> impl IntoView {
             .unwrap_or_else(|| current.get().unwrap_or_default())
     };
     view! {
-        <details class="ocean-model-control" on:keydown=move |event| {
+        <details class="ocean-model-control" on:toggle=move |event: web_sys::Event| {
+            if event.current_target().and_then(|target| target.dyn_into::<web_sys::Element>().ok())
+                .is_some_and(|details| details.has_attribute("open")) {
+                daemon.with_value(|daemon| daemon.fetch_models());
+            }
+        } on:keydown=move |event| {
             if event.key() == "Escape" {
                 if let Some(target) = event.target().and_then(|target| target.dyn_into::<web_sys::Element>().ok()) {
                     if let Ok(Some(details)) = target.closest("details") {

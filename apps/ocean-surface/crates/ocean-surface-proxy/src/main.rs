@@ -13,9 +13,11 @@
 //! Run: `cargo run -p ocean-surface-proxy -- --dist ./dist --bind 0.0.0.0:8790`
 //! Then point a browser at http://<host>:8790/.
 
+#[cfg(unix)]
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr};
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
@@ -101,6 +103,29 @@ impl AppState {
     }
 }
 
+fn profile_home(
+    home: Option<std::ffi::OsString>,
+    profile: Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        [home, profile]
+            .into_iter()
+            .flatten()
+            .map(PathBuf::from)
+            .find(|path| path.is_absolute())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = profile;
+        home.map(PathBuf::from)
+    }
+}
+
+fn current_home() -> Option<PathBuf> {
+    profile_home(std::env::var_os("HOME"), std::env::var_os("USERPROFILE"))
+}
+
 fn ocean_config_dir() -> PathBuf {
     if let Some(path) = std::env::var_os("OCEAN_CONFIG_DIR") {
         return PathBuf::from(path);
@@ -108,8 +133,8 @@ fn ocean_config_dir() -> PathBuf {
     if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
         return PathBuf::from(xdg).join("ocean-rs");
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home).join(".config").join("ocean-rs");
+    if let Some(home) = current_home() {
+        return home.join(".config").join("ocean-rs");
     }
     PathBuf::from(".ocean-rs")
 }
@@ -118,8 +143,8 @@ fn session_secret_path() -> PathBuf {
     if let Some(path) = std::env::var_os("OCEAN_SURFACE_SESSION_SECRET_FILE") {
         return PathBuf::from(path);
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home)
+    if let Some(home) = current_home() {
+        return home
             .join(".config")
             .join("ocean-surface")
             .join("session-secret");
@@ -127,6 +152,7 @@ fn session_secret_path() -> PathBuf {
     PathBuf::from(".ocean-surface-session-secret")
 }
 
+#[cfg(unix)]
 fn read_mode_0600_secret(path: &FsPath, label: &str) -> anyhow::Result<String> {
     let link = std::fs::symlink_metadata(path)
         .with_context(|| format!("{label} unavailable at {}", path.display()))?;
@@ -154,6 +180,35 @@ fn read_mode_0600_secret(path: &FsPath, label: &str) -> anyhow::Result<String> {
     Ok(value.to_owned())
 }
 
+#[cfg(windows)]
+fn read_mode_0600_secret(path: &FsPath, label: &str) -> anyhow::Result<String> {
+    let mut file = ocean_observatory::auth::windows_file::open(path)
+        .with_context(|| format!("opening {label}"))?;
+    let mut value = String::new();
+    file.read_to_string(&mut value)
+        .with_context(|| format!("reading {label}"))?;
+    let value = value.trim();
+    if value.is_empty() {
+        anyhow::bail!("{label} is empty");
+    }
+    Ok(value.to_owned())
+}
+
+#[cfg(unix)]
+fn create_session_secret_file(path: &FsPath) -> std::io::Result<std::fs::File> {
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+}
+
+#[cfg(windows)]
+fn create_session_secret_file(path: &FsPath) -> std::io::Result<std::fs::File> {
+    ocean_observatory::auth::windows_file::create(path)
+}
+
 fn load_or_create_session_secret(path: &FsPath) -> anyhow::Result<String> {
     if path.exists() {
         return read_mode_0600_secret(path, "surface session secret");
@@ -166,13 +221,7 @@ fn load_or_create_session_secret(path: &FsPath) -> anyhow::Result<String> {
     getrandom::fill(&mut bytes)
         .map_err(|e| anyhow::anyhow!("OS randomness required for session secret: {e}"))?;
     let secret = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
-    match OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)
-    {
+    match create_session_secret_file(path) {
         Ok(mut file) => {
             file.write_all(secret.as_bytes())?;
             file.write_all(b"\n")?;
@@ -210,6 +259,7 @@ fn read_observer_token(path: &FsPath) -> Result<String, String> {
 
 /// Read a daemon-minted local credential file without following symlinks,
 /// requiring a non-empty mode-0600 regular file.
+#[cfg(unix)]
 fn read_local_credential(path: &FsPath, what: &str) -> Result<String, String> {
     let link =
         std::fs::symlink_metadata(path).map_err(|error| format!("{what} unavailable: {error}"))?;
@@ -235,6 +285,11 @@ fn read_local_credential(path: &FsPath, what: &str) -> Result<String, String> {
         return Err(format!("{what} is empty"));
     }
     Ok(token.to_owned())
+}
+
+#[cfg(windows)]
+fn read_local_credential(path: &FsPath, what: &str) -> Result<String, String> {
+    read_mode_0600_secret(path, what).map_err(|_| format!("{what} unavailable"))
 }
 
 /// Header the daemon reads the Room operator credential from.
@@ -2517,6 +2572,7 @@ mod tests {
         read_observer_token, session_auth_gate, sse_no_buffer_headers, wasm_headers, AppState,
         CALL_PLACE_DAEMON_PATH, WASM_CACHE_CONTROL,
     };
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
@@ -2532,13 +2588,70 @@ mod tests {
     use base64::Engine;
     use tower::ServiceExt; // for `oneshot`
 
+    // Room attachments through the wildcard forwarder (the raw-bytes upload
+    // lane and the header-preserving download lane): its own file too.
+    mod room_attachments_route;
+
     // `POST .../close` through the proxy (Rooms DoD 4.3): its own file, so the
     // many open slices on this module do not collide with it.
     mod room_close_route;
 
-    // Room attachments through the wildcard forwarder (the raw-bytes upload
-    // lane and the header-preserving download lane): its own file too.
-    mod room_attachments_route;
+    fn write_private_fixture(path: &std::path::Path, value: &str) {
+        use std::io::Write;
+        let mut file = super::create_session_secret_file(path).unwrap();
+        file.write_all(value.as_bytes()).unwrap();
+        file.sync_all().unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_proxy_profile_uses_absolute_home_or_userprofile() {
+        use std::ffi::OsString;
+        let profile = OsString::from(r"C:\Users\Coworker");
+        assert_eq!(
+            super::profile_home(None, Some(profile.clone())),
+            Some(PathBuf::from(&profile))
+        );
+        assert_eq!(
+            super::profile_home(Some("relative".into()), Some(profile)),
+            Some(PathBuf::from(r"C:\Users\Coworker"))
+        );
+        assert_eq!(
+            super::profile_home(
+                Some(r"D:\Explicit".into()),
+                Some(r"C:\Users\Coworker".into())
+            ),
+            Some(PathBuf::from(r"D:\Explicit"))
+        );
+        assert_eq!(super::profile_home(None, Some("relative".into())), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_proxy_secret_is_private_and_survives_restart_without_repairing_unsafe_files() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("session-secret");
+        let first = super::load_or_create_session_secret(&path).unwrap();
+        assert!(!first.is_empty());
+        assert_eq!(super::load_or_create_session_secret(&path).unwrap(), first);
+        assert_eq!(read_observer_token(&path).unwrap(), first);
+        let original = std::fs::read(&path).unwrap();
+        let hardlink = root.path().join("hardlink");
+        std::fs::hard_link(&path, &hardlink).unwrap();
+        assert!(super::load_or_create_session_secret(&path).is_err());
+        assert!(read_observer_token(&path).is_err());
+        std::fs::remove_file(&hardlink).unwrap();
+        let link = root.path().join("symlink");
+        std::os::windows::fs::symlink_file(&path, &link).unwrap();
+        assert!(read_observer_token(&link).is_err());
+        assert!(super::load_or_create_session_secret(&link).is_err());
+        let loose = root.path().join("inherited");
+        std::fs::write(&loose, b"synthetic-inherited").unwrap();
+        assert!(super::load_or_create_session_secret(&loose).is_err());
+        assert_eq!(std::fs::read(&loose).unwrap(), b"synthetic-inherited");
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert!(read_observer_token(root.path()).is_err());
+    }
 
     /// Build a router that returns a tiny body for any path, wrapped in the
     /// `wasm_headers` layer, so we can assert the layer's header rewriting per
@@ -2582,8 +2695,7 @@ mod tests {
         tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
         let credential_dir = tempfile::tempdir().expect("tempdir");
         let token_path = credential_dir.path().join("observatory-token");
-        std::fs::write(&token_path, "server-side-observer\n").unwrap();
-        std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        write_private_fixture(&token_path, "server-side-observer\n");
         let mut state = auth_test_state();
         let inner = Arc::get_mut(&mut state).expect("sole state owner");
         inner.daemon_url = format!("http://{addr}");
@@ -2647,7 +2759,7 @@ mod tests {
         // of their own; counting those would let a production route be deleted
         // while a fixture that happens to register the same path kept this
         // guard green.
-        let src = include_str!("main.rs");
+        let src = include_str!("main.rs").replace("\r\n", "\n");
         let production = src
             .split("#[cfg(test)]")
             .next()
@@ -3269,8 +3381,7 @@ mod tests {
             let mut state = auth_test_state();
             let fixture_state = Arc::get_mut(&mut state).unwrap();
             let key_path = fixture._dist.path().join("operator.key");
-            std::fs::write(&key_path, "fixture-operator-key\n").unwrap();
-            std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            write_private_fixture(&key_path, "fixture-operator-key\n");
             fixture_state.operator_key_path = key_path;
             fixture_state.daemon_url = format!("http://{}/", fixture.address);
             fixture_state.http_json = reqwest::Client::builder()
@@ -3720,6 +3831,7 @@ mod tests {
         upstream.await.unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn observer_token_reader_requires_mode_0600_regular_file() {
         let directory = tempfile::tempdir().expect("tempdir");
@@ -4223,7 +4335,7 @@ mod tests {
     /// buffered forward on `state.http` fails here rather than shipping.
     #[test]
     fn untimed_client_is_used_only_by_streaming_handlers() {
-        let src = include_str!("main.rs");
+        let src = include_str!("main.rs").replace("\r\n", "\n");
         // Needle assembled at runtime so it cannot match this test's own text.
         let untimed = format!("state.{}{}", "http", ".");
         let streaming_handlers = [

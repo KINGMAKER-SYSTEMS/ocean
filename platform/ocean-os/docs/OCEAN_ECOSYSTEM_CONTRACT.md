@@ -154,6 +154,8 @@ The **Auth** column names what a caller must present BEYOND reaching the daemon.
 
 | Method | Path | Purpose | Auth |
 | --- | --- | --- | --- |
+| `GET` | `/v1/rooms/connection` | Read the operator-owned first team-service selection (configured origin and status; never a credential or token). | `X-Ocean-Operator` |
+| `PUT` | `/v1/rooms/connection` | Set the first team-service origin `{ origin }` exactly once, guarded: refuses an already-configured connection, an existing federation, an invalid origin, and an unavailable service; activation happens at daemon restart, not here. | `X-Ocean-Operator` |
 | `GET` | `/v1/rooms/persistent` | List open rooms as one bounded page (`?limit=&cursor=`, with `next_cursor` and `has_more`), most recently updated first, plus per-room `read_states` and the additive owner-local `muted`. | Loopback trust only; the read-cursor principal is daemon-derived, never caller-supplied |
 | `POST` | `/v1/rooms/persistent` | Create a room from `{ key, name, trigger_policy?, workspace_root? }`; a policy enabling `on_ci_failure` is refused (400 `trigger_policy_unwired`) and a `workspace_root` that does not resolve to an existing absolute directory is 400 `invalid_workspace_root`. | Loopback trust only |
 | `GET` | `/v1/rooms/persistent/{key}` | Fetch one OPEN room: its bounded first transcript page with `has_more`/`next_seq`, access projection, retirement aliases and `agent_owners`; a soft-closed room is 404. | Loopback trust only |

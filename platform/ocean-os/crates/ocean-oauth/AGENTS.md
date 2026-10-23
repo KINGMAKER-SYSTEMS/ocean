@@ -20,7 +20,8 @@ This crate owns browser OAuth 2.0 + PKCE login for provider subscriptions: bind 
 - This crate performs fresh logins and sign-out. Token refresh lives in `ocean-agent::oauth_refresh` / `ocean-protocol::oauth` — never duplicate it here.
 - Token endpoints honor the same env overrides as the refresh pass: `OCEAN_OAUTH_ANTHROPIC_TOKEN_URL`, `OCEAN_OAUTH_OPENAI_TOKEN_URL`, `OCEAN_OAUTH_CHATGPT_TOKEN_URL`.
 - Auth-file writers fresh-read/merge under `ocean-providers::lock_auth_file` and
-  use its guard-bound unique create-new publisher, Unix0600 at creation. Lock
+  use its guard-bound unique create-new publisher, Unix0600 or protected
+  current-user-only Windows ACLs at creation. Lock
   failure/timeout refuses the write; unrelated provider blocks survive. Login
   completion runs blocking custody off the async worker, after token exchange.
 - Pre-rename failures preserve the old file. Post-rename directory-sync failure

@@ -97,9 +97,11 @@ use ocean_core::{
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
+mod room_connection;
 mod room_profile;
 mod room_resources;
 mod room_retirement;
+pub use room_connection::{InitialRoomConnection, RoomConnectionState};
 pub use room_profile::{
     CredentialSlot, PutRoomProfileInput, RepoRef, RoomProfile, ToolRef, ToolRefKind,
 };
@@ -2350,6 +2352,8 @@ impl SqliteRoomStore {
             "#,
         )?;
         // Rooms Phase 2b tables (idempotent; see `room_profile.rs`).
+        self.conn
+            .execute_batch(room_connection::ROOM_CONNECTION_DDL)?;
         self.conn.execute_batch(room_profile::ROOM_PROFILE_DDL)?;
         self.conn.execute_batch(room_resources::ROOM_RESOURCE_DDL)?;
         self.conn

@@ -52,6 +52,22 @@ pub(super) const OUTBOUND_MESSAGE_BODY_LIMIT: usize = 8 * 1024;
 const SENDER_SCAN_INTERVAL: Duration = Duration::from_secs(2);
 const BACKOFF_MAX: Duration = Duration::from_secs(60);
 
+#[derive(Debug, Serialize)]
+pub(super) struct ConnectionStatus {
+    origin: Option<String>,
+    configured: bool,
+    restart_required: bool,
+    can_initialize: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ConnectionError {
+    InvalidOrigin,
+    AlreadyConfigured,
+    ExistingFederation,
+    Unavailable,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BridgeError {
     InvalidConfig,
@@ -353,6 +369,25 @@ struct FederationClient {
 }
 
 impl FederationClient {
+    fn select_configuration(
+        environment: Option<Self>,
+        saved: Option<Self>,
+    ) -> Result<Option<Self>, BridgeError> {
+        match (environment, saved) {
+            (Some(environment), Some(saved)) if environment.base != saved.base => {
+                Err(BridgeError::InvalidConfig)
+            }
+            (Some(environment), _) => Ok(Some(environment)),
+            (None, saved) => Ok(saved),
+        }
+    }
+
+    fn from_saved(rooms: &RoomStoreHandle) -> Result<Option<Self>, BridgeError> {
+        let saved = with_rooms_handle(rooms, |store| store.room_connection())
+            .map_err(|_| BridgeError::Store)?;
+        saved.origin.as_deref().map(Self::new).transpose()
+    }
+
     fn from_env() -> Result<Option<Self>, BridgeError> {
         let raw = match std::env::var(FEDERATION_URL_ENV) {
             Ok(raw) if !raw.trim().is_empty() => raw,
@@ -551,7 +586,13 @@ impl FederationSupervisor {
         trigger_tx: mpsc::UnboundedSender<FederatedTriggerDispatch>,
         shutdown: CancellationToken,
     ) -> Self {
-        let (client, invalid_config) = match FederationClient::from_env() {
+        let selected = FederationClient::from_env().and_then(|environment| {
+            FederationClient::select_configuration(
+                environment,
+                FederationClient::from_saved(&rooms)?,
+            )
+        });
+        let (client, invalid_config) = match selected {
             Ok(client) => (client, false),
             Err(_) => (None, true),
         };
@@ -572,6 +613,73 @@ impl FederationSupervisor {
             shutdown,
             scan_interval: SENDER_SCAN_INTERVAL,
         })
+    }
+
+    /// Configuration is not an authenticated service connection. This read
+    /// exposes no token, invitation, member identity or existing Room contents.
+    pub(super) fn connection_status(&self) -> Result<ConnectionStatus, ConnectionError> {
+        if self.inner.invalid_config {
+            return Err(ConnectionError::Unavailable);
+        }
+        let saved = with_rooms_handle(&self.inner.rooms, |store| store.room_connection())
+            .map_err(|_| ConnectionError::Unavailable)?;
+        let configured = self.inner.client.is_some();
+        let restart_required = !configured && saved.origin.is_some();
+        let can_initialize =
+            !configured && self.inner.owner_token.is_none() && saved.can_initialize;
+        Ok(ConnectionStatus {
+            origin: self
+                .inner
+                .client
+                .as_ref()
+                .map(|client| client.base.to_string())
+                .or(saved.origin),
+            configured,
+            restart_required,
+            can_initialize,
+        })
+    }
+
+    /// Select only the first origin of an unconfigured node. Existing origin,
+    /// owner credentials, or stored federation authority cannot be redirected.
+    /// Activation stays at process startup; this does not reconnect live tasks.
+    pub(super) fn initialize_connection(
+        &self,
+        raw: &str,
+    ) -> Result<ConnectionStatus, ConnectionError> {
+        if raw.len() > 2048 || raw.trim() != raw || raw.chars().any(char::is_control) {
+            return Err(ConnectionError::InvalidOrigin);
+        }
+        let client = FederationClient::new(raw).map_err(|_| ConnectionError::InvalidOrigin)?;
+        if self.inner.invalid_config {
+            return Err(ConnectionError::Unavailable);
+        }
+        if self.inner.client.is_some() || self.inner.owner_token.is_some() {
+            return Err(ConnectionError::AlreadyConfigured);
+        }
+        let origin = client.base.to_string();
+        if origin.len() > 2048 {
+            return Err(ConnectionError::InvalidOrigin);
+        }
+        let result = with_rooms_handle(&self.inner.rooms, |store| {
+            store.initialize_room_connection(&origin)
+        })
+        .map_err(|_| ConnectionError::Unavailable)?;
+        match result {
+            ocean_store::InitialRoomConnection::Created
+            | ocean_store::InitialRoomConnection::Unchanged => Ok(ConnectionStatus {
+                origin: Some(origin),
+                configured: false,
+                restart_required: true,
+                can_initialize: false,
+            }),
+            ocean_store::InitialRoomConnection::AlreadyConfigured => {
+                Err(ConnectionError::AlreadyConfigured)
+            }
+            ocean_store::InitialRoomConnection::ExistingFederation => {
+                Err(ConnectionError::ExistingFederation)
+            }
+        }
     }
 
     #[cfg(test)]
@@ -1256,6 +1364,13 @@ impl FederationSupervisor {
     }
 
     pub(super) async fn redeem_invite(&self, code: &str) -> Result<RedeemedInvite, IntentError> {
+        // A first-time desktop must select its service before creating private
+        // pending authority. Otherwise a failed unconfigured join would prevent
+        // safe initial service selection. Configured-but-offline retries retain
+        // the existing durable redemption path.
+        if self.inner.client.is_none() {
+            return Err(IntentError::Unavailable);
+        }
         let code = code.trim();
         if code.is_empty() {
             return Err(IntentError::Invalid);
@@ -4230,6 +4345,82 @@ mod tests {
     use tokio_stream::wrappers::ReceiverStream;
 
     static ENV_LOCK: StdMutex<()> = StdMutex::new(());
+
+    fn connection_supervisor() -> FederationSupervisor {
+        FederationSupervisor::test_disabled(
+            Arc::new(StdMutex::new(
+                ocean_store::SqliteRoomStore::open_in_memory().unwrap(),
+            )),
+            RoomWakeBus::default(),
+            RoomAccessWakeBus::default(),
+            RoomReadCursorWakeBus::default(),
+            CancellationToken::new(),
+        )
+    }
+
+    #[test]
+    fn room_connection_saved_origin_is_selected_only_at_startup() {
+        let supervisor = connection_supervisor();
+        let saved = supervisor
+            .initialize_connection("https://TEAM.example:443")
+            .unwrap();
+        assert_eq!(saved.origin.as_deref(), Some("https://team.example/"));
+        assert!(saved.restart_required);
+        assert!(
+            supervisor.inner.client.is_none(),
+            "saving must not reconnect active tasks"
+        );
+        let loaded = FederationClient::from_saved(&supervisor.inner.rooms)
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.base.as_str(), "https://team.example/");
+        let selected = FederationClient::select_configuration(None, Some(loaded))
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected.base.as_str(), "https://team.example/");
+    }
+
+    #[test]
+    fn room_connection_preserves_legacy_environment_but_refuses_a_conflicting_pin() {
+        let client = || FederationClient::new("https://team.example").unwrap();
+        assert!(FederationClient::select_configuration(Some(client()), None)
+            .unwrap()
+            .is_some());
+        assert!(
+            FederationClient::select_configuration(Some(client()), Some(client()))
+                .unwrap()
+                .is_some()
+        );
+        let different = FederationClient::new("https://other.example").unwrap();
+        assert!(matches!(
+            FederationClient::select_configuration(Some(different), Some(client())),
+            Err(BridgeError::InvalidConfig)
+        ));
+    }
+
+    #[test]
+    fn room_connection_cannot_retarget_existing_owner_credentials_or_invalid_configuration() {
+        let mut supervisor = connection_supervisor();
+        Arc::get_mut(&mut supervisor.inner).unwrap().owner_token =
+            Some("fixture-owner-token".into());
+        assert!(!supervisor.connection_status().unwrap().can_initialize);
+        assert!(matches!(
+            supervisor.initialize_connection("https://team.example"),
+            Err(ConnectionError::AlreadyConfigured)
+        ));
+        Arc::get_mut(&mut supervisor.inner).unwrap().owner_token = None;
+        Arc::get_mut(&mut supervisor.inner).unwrap().invalid_config = true;
+        assert!(matches!(
+            supervisor.initialize_connection("https://team.example"),
+            Err(ConnectionError::Unavailable)
+        ));
+        assert!(
+            with_rooms_handle(&supervisor.inner.rooms, |store| store.room_connection())
+                .unwrap()
+                .origin
+                .is_none()
+        );
+    }
 
     #[test]
     fn p2c_room_keys_and_control_member_invariants_are_strict() {
