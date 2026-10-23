@@ -151,7 +151,8 @@ fn session_fetch_ticket_is_current(current: u64, claimed: u64) -> bool {
 
 /// RFC 3986 query-component encoding for daemon-owned pagination cursors.
 /// Keeping this pure makes reserved-character behavior testable off-WASM.
-fn percent_encode_query_component(value: &str) -> String {
+/// Shared with the room-list pager (`rooms::RoomListPaging`).
+pub(crate) fn percent_encode_query_component(value: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut encoded = String::with_capacity(value.len());
     for byte in value.bytes() {

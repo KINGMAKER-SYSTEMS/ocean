@@ -431,9 +431,10 @@ ships today and are updated slice by slice.
   open is explicitly not transcript polling: it runs once per open, stops at
   the first exhausted page, a non-advancing page, or 50 pages, is cancelled by
   the room generation on switch, and is the only production `/transcript`
-  reader. Do not add "load older", room-list paging, or any backward paging
-  here; a failed page lands the open on the rows held and the tail's durable
-  replay delivers the rest in order.
+  reader. Do not add "load older" or any backward paging here (the rail's
+  forward room-list paging is a separate user control; see the room-list
+  paging bullet below); a failed page lands the open on the rows held and the
+  tail's durable replay delivers the rest in order.
 - Room live-follow consumes scroll intent captured by the transcript's own
   scroll events (`transcript_follow_pinned`), not post-render geometry, so a
   tall append still follows a pinned reader and never yanks a scrolled one.
@@ -595,6 +596,32 @@ ships today and are updated slice by slice.
   (`rail_room_keys`). Header ids derive from the root, not list position. A
   shared root is a folder binding, not a daemon Project identity; do not call
   these project groups.
+- Room-list paging (OCEAN-250): `GET /v1/rooms/persistent` serves one bounded
+  page (`limit` default 100, max 1000; `next_cursor` / `has_more`). The rail
+  renders the daemon-default first page with no query and, while the daemon
+  reports `has_more`, ends with one "Load more rooms" button
+  (`.rooms-workspace__left-more`) after the last workspace group and outside
+  the listbox: a plain tab stop, never an option, so the roving tab stop and
+  the `rail_room_keys` order are unchanged. `Rooms::fetch_rooms_more` sends
+  `?cursor=` for one page at a time (disabled while in flight) and
+  `rooms::RoomListPaging::absorb` appends it in daemon order, dropping ids the
+  rail already holds and dropping the whole page when the list ticket or the
+  pending cursor moved underneath it; an empty or non-advancing page ends
+  paging. Every refetch (create, close, the 8 s silent refresh) sends `?limit=`
+  for the depth the rail has been extended to (clamped to 1000), so a refresh
+  never shrinks the rail back to one page. Forward only; the daemon's
+  `has_more` is the only gate (never a local guess at page size), and older
+  daemons that omit the pair decode as one complete page. Guarded by
+  `load_more_rooms_follows_the_groups_outside_the_listbox` in `room_list.rs`
+  and the `RoomListPaging` tests in `rooms.rs`.
+- Transcript rows whose `author_kind` is `agent` carry an "agent" badge beside
+  the name (`.rooms-workspace__msg-kind`, `format::author_kind_badge`) in the
+  timeline, the thread root and thread replies. It is the mention suggestion's
+  kind label reused: the class shares `.rooms-workspace__mention-kind`'s rule
+  in `styles/rooms-workspace.css` (tokens only, no new colours). Humans and
+  every other kind stay unlabelled, compact system rows never carry it, and
+  grouped rows hide it with the name. `tests/rooms_agent_badge.rs` pins the
+  three emit sites, the shared rule and the agent-only gate.
 - Rooms UI lives in `src/rooms_workspace/` (team-platform P5): `mod.rs`
   owns `RoomsWorkspace`, its shared signals, and the transcript; child
   components are `RoomListRail` (`room_list.rs`), `ChannelComposer`
