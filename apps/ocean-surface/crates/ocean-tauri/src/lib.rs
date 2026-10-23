@@ -27,6 +27,7 @@ use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
+mod coding_plans;
 mod daemon_transport;
 mod owner_mutation;
 mod room_consent;
@@ -1869,6 +1870,7 @@ pub fn run() {
         .manage(owner_mutation::OwnerMutationState(
             operator_transport.clone(),
         ))
+        .manage(coding_plans::CodingPlansState(operator_transport.clone()))
         .manage(room_consent::ConsentState(Arc::new(
             room_consent::ConsentBroker::new(operator_transport),
         )))
@@ -2222,6 +2224,7 @@ pub fn run() {
             ui_debug_resize,
             open_external_url,
             owner_mutation::room_owner_mutation,
+            coding_plans::coding_plan_request,
             room_consent::room_consent_preview,
             room_consent::room_consent_authorize,
             room_consent::room_consent_cancel,

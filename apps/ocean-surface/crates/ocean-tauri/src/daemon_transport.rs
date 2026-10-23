@@ -193,6 +193,7 @@ pub(crate) enum Method {
     Get,
     Post,
     Put,
+    Delete,
 }
 
 impl Method {
@@ -201,6 +202,7 @@ impl Method {
             Self::Get => "GET",
             Self::Post => "POST",
             Self::Put => "PUT",
+            Self::Delete => "DELETE",
         }
     }
 }

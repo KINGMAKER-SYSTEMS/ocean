@@ -1665,6 +1665,9 @@ pub fn App() -> impl IntoView {
         show_rooms.set(opening);
     };
     let rooms = Rooms::new(&daemon);
+    // Coding plans (web identity M3): this daemon's Claude/Codex plan
+    // logins. Opened from the header overflow and ⌘K.
+    let coding_plans = crate::coding_plans::CodingPlansState::new(daemon.url);
 
     let open_council = Callback::new(move |()| {
         let next = council_open_visibility();
@@ -1871,6 +1874,18 @@ pub fn App() -> impl IntoView {
             slash: Some("/rooms"),
             enabled: always,
             run: Callback::new(move |_| toggle_rooms()),
+        });
+        // Hosts with no privileged transport (the Chrome extension) never
+        // offer a panel whose every request the daemon would refuse.
+        let coding_plans_supported = crate::coding_plans::supported();
+        registry.register(Command {
+            id: "coding-plans",
+            title: "Coding plans".into(),
+            hint: Some("Claude and Codex sign-in on this machine".into()),
+            scope: CommandScope::App,
+            slash: None,
+            enabled: Signal::derive(move || coding_plans_supported),
+            run: Callback::new(move |_| coding_plans.show()),
         });
         registry.register(Command {
             id: "open-council",
@@ -2692,6 +2707,19 @@ pub fn App() -> impl IntoView {
                             >
                                 {move || if show_rooms.get() { "Direct messages" } else { "Rooms" }}
                             </button>
+                            <Show when=crate::coding_plans::supported>
+                                <button
+                                    class="ocean-more__item"
+                                    type="button"
+                                    role="menuitem"
+                                    on:click=move |_| {
+                                        if let Some(d) = more_ref.get() { let _ = d.remove_attribute("open"); }
+                                        coding_plans.show();
+                                    }
+                                >
+                                    "Coding plans"
+                                </button>
+                            </Show>
                             <Show when=crate::daemon::running_as_extension>
                                 <button
                                     class="ocean-more__item"
@@ -3107,6 +3135,14 @@ pub fn App() -> impl IntoView {
             </Show>
 
             <SessionsPanel daemon=daemon_for_panel open=show_sessions />
+
+            // Coding plans (web identity M3): a self-contained dialog that
+            // consumes its own Escape rather than joining the reveal rail's
+            // close-exactly-one chain. Absent on hosts with no privileged
+            // transport (the extension).
+            <Show when=crate::coding_plans::supported>
+                <crate::coding_plans::CodingPlansPanel state=coding_plans />
+            </Show>
 
             // Workspace pane: THE right-side surface on every host, tabbed
             // (Files · previews · Browser · Repo). position:fixed (see

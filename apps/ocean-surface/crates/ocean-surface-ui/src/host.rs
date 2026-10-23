@@ -163,6 +163,26 @@ fn classify_link_target(href: &str) -> LinkTarget {
     }
 }
 
+/// Hand an `http(s)` URL to the OS default browser from the native shell.
+/// `false` off-Tauri (the caller opens its own tab there), for any URL the
+/// link classifier would not treat as external, and when the shell refuses.
+pub async fn open_external_url(url: &str) -> bool {
+    if !running_in_tauri() || classify_link_target(url) != LinkTarget::External {
+        return false;
+    }
+    let args = Object::new();
+    if Reflect::set(&args, &JsValue::from_str("url"), &JsValue::from_str(url)).is_err() {
+        return false;
+    }
+    match tauri_invoke("open_external_url", &args).await {
+        Ok(_) => true,
+        Err(err) => {
+            log::warn!("native opener: open_external_url rejected: {err:?}");
+            false
+        }
+    }
+}
+
 /// Intercept a rendered Markdown link inside the native shell and hand it to
 /// the OS default browser. WKWebView does not reliably honor `target="_blank"`
 /// for these dynamically injected anchors — but only *external* links are
@@ -734,6 +754,40 @@ pub async fn room_owner_mutation(
         Err(err) => Err(err
             .as_string()
             .unwrap_or_else(|| "owner mutation failed".into())),
+    })
+}
+
+/// Send one of the five coding-plan routes (`kind`: `list`, `login_start`,
+/// `login_poll`, `login_cancel`, `logout`; web identity M3) through the
+/// native shell, which reads the daemon's operator key on the Rust side and
+/// attaches it, as for the owner mutations above. The page never sees the
+/// key and never picks the method, path or headers. `None` off Tauri;
+/// `Some(Err)` when the shell refused the request or could not reach the
+/// daemon.
+pub async fn coding_plan_request(
+    kind: &str,
+    provider: Option<&str>,
+    attempt: Option<&str>,
+) -> Option<Result<OwnerMutationReply, String>> {
+    if !running_in_tauri() {
+        return None;
+    }
+    let opt = |v: Option<&str>| v.map_or(JsValue::NULL, JsValue::from_str);
+    let args = Object::new();
+    for (name, value) in [
+        ("kind", JsValue::from_str(kind)),
+        ("provider", opt(provider)),
+        ("attempt", opt(attempt)),
+    ] {
+        if Reflect::set(&args, &JsValue::from_str(name), &value).is_err() {
+            return Some(Err("coding plan arguments".into()));
+        }
+    }
+    Some(match tauri_invoke("coding_plan_request", &args).await {
+        Ok(val) => Ok(jsval_to::<OwnerMutationReply>(&val)),
+        Err(err) => Err(err
+            .as_string()
+            .unwrap_or_else(|| "coding plan request failed".into())),
     })
 }
 
