@@ -1089,19 +1089,22 @@ impl Iterator for BlobNames {
 /// from before temp creation through SQL/rollback; cleanup takes exclusive
 /// custody before live store revalidation. Always acquire this before rooms.
 static PUBLICATION: std::sync::RwLock<()> = std::sync::RwLock::new(());
+/// Exclusive cleanup custody. Named so maintenance can take its acquisition as
+/// a parameter: the daemon tries and defers, fixtures may wait.
+pub(super) type CleanupGuard = std::sync::RwLockWriteGuard<'static, ()>;
 pub(super) fn publication_guard() -> std::sync::RwLockReadGuard<'static, ()> {
     PUBLICATION
         .read()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
-pub(super) fn try_cleanup_guard() -> Option<std::sync::RwLockWriteGuard<'static, ()>> {
+pub(super) fn try_cleanup_guard() -> Option<CleanupGuard> {
     match PUBLICATION.try_write() {
         Ok(guard) => Some(guard),
         Err(std::sync::TryLockError::Poisoned(error)) => Some(error.into_inner()),
         Err(std::sync::TryLockError::WouldBlock) => None,
     }
 }
-pub(super) fn cleanup_guard() -> std::sync::RwLockWriteGuard<'static, ()> {
+pub(super) fn cleanup_guard() -> CleanupGuard {
     PUBLICATION
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
