@@ -498,10 +498,43 @@ ships today and are updated slice by slice.
     extension proxy login, so these actions keep the daemon's authority error
     there.
 - The room header has exactly one primary action (Join when not joined) and
-  one overflow (`room_overflow.rs`): Share, Agents, Mute/Unmute, Leave. Agents opens the
+  one overflow (`room_overflow.rs`): Members, Share, Agents, Mute/Unmute, Leave,
+  Close room…. Agents opens the
   per-room agent settings panel (instructions overlay + model) over
   `GET/PUT .../agents/{agent_id}/settings`; these settings are local to this
   Ocean. New secondary room actions go into this overflow, not the header.
+- Closing a room (DoD 4.3, `room_close.rs`; ported from
+  Risingtides-dev/ocean-surface#229): the overflow's `Close room…` item renders
+  only for a viewer the daemon's member lane would accept — `identity_id` (the
+  `/v1/me` owner, non-empty after trimming) on `Room.participants` as a
+  non-`Agent`/`System` row (`close_offered`; `Human`, `Bot`, `Tool` pass) — and
+  only ARMS a modal (`RoomCloseDialog`) whose focused default is `Keep room
+  open`; the modal's own button fires, re-checking the rule at dispatch
+  (`dispatch_check`). `RoomCloseState` and the dialog live at `RoomsWorkspace`
+  scope, outside the header closure that every `open_room` write rebuilds, so a
+  roster frame cannot re-enable the button or unmount a close in flight
+  (`tests/unheld_room_close.rs`). The fire sends
+  `POST /v1/rooms/persistent/{key}/close?actor_id=<me>`, the daemon's MEMBER
+  lane only, on every host: the operator lane (`X-Ocean-Operator`) is
+  deliberately not roster-checked, so close is not an owner-mutation route and
+  the proxy injects nothing (`cargo test -p ocean-surface-proxy room_close`);
+  the Tauri operator transport is not used for the same reason. Reply contract
+  (`classify_close`): `200 {ok:true, closed:true}` is closed; this daemon's
+  close route answers a not-open room with the store's `UnknownRoom` as a JSON
+  `404 {ok:false}` WITHOUT the `room_not_open` marker its read routes carry, so
+  a 404 that decodes (marker or `ok:false`) means the room already closed,
+  while an EMPTY 404 or a 405 is a daemon or proxy without the route; 502/504
+  and a transport error say the close MAY have landed (the daemon commits
+  before it answers; a retry of a landed close reads as already closed);
+  `403 forged_closer`, the roster 403 (no code), 400 and 5xx each get their own
+  sentence. Main has no soft-closed audit view, so both closed outcomes land on
+  the rail: `Rooms::close_room` retires the tail through the shared reset path
+  and `fetch_rooms` drops the row; focus is handed to the rail listbox's tab
+  stop when it fell to `<body>`. The modal traps Tab (`tab_trap`), holds focus
+  on itself while both buttons are disabled in flight, dismisses on Escape
+  (`prevent_default`, so the workspace and window handlers stand down) or the
+  scrim, and returns focus to the overflow trigger. For any non-`Local` access
+  state the copy says the close is local and other nodes keep their copy.
 - Room create (`RoomListRail`) carries an optional workspace (PR F): a
   native `<select>` under the name input defaults to "No workspace" and lists
   the daemon project catalogue's absolute `ProjectInfo.workspace_root`s

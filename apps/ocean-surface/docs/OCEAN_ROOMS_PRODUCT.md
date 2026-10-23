@@ -170,11 +170,26 @@ applies the returned access projection behind the room-generation guard.
 
 ### 5. Leaving / Closing
 
-Closing a room on the surface (`close_room`) bumps the room generation and
-clears transcript, access and tail state in one synchronous reset; the daemon
-keeps the room and its transcript. Leaving the roster is the participants
-DELETE above. The daemon's `POST /v1/rooms/persistent/{key}/close` (soft
-close) is not called by this surface.
+Leaving the open room on the surface (`close_room`) bumps the room generation
+and clears transcript, access and tail state in one synchronous reset; the
+daemon keeps the room and its transcript. Leaving the roster is the
+participants DELETE above.
+
+Closing the room itself is the overflow's "Close room…" item (`room_close.rs`),
+offered only to a roster member with a loaded identity. After confirmation it
+fires the daemon's member lane:
+
+```
+POST /v1/rooms/persistent/{key}/close?actor_id=<owner participant id>
+-> 200 { "ok": true, "closed": true }
+```
+
+The proxy injects nothing (no operator key); the daemon checks the actor
+against the roster inside the closing transaction and refuses an Agent or
+System id (`403 forged_closer`). A 404 means the room was already closed. The
+room is then frozen, not gone: `GET /v1/rooms/persistent/{key}` 404s, every
+write refuses, open tails end, and the room leaves the rail; this surface has
+no soft-closed audit view.
 
 ---
 
@@ -508,6 +523,7 @@ operator key; the page only asks the shell for them.
 | `POST` | `/v1/rooms/persistent/{key}/messages` | Send a message (`rooms.rs`) |
 | `POST` | `/v1/rooms/persistent/{key}/outbox/retry` | Retry a failed federated send (`rooms.rs`) |
 | `PATCH` | `/v1/rooms/persistent/{key}/read-cursor` | Advance the reader's durable read cursor (`rooms.rs`) |
+| `POST` | `/v1/rooms/persistent/{key}/close?actor_id=` | Close the room as a roster member (`room_close.rs`) |
 | `POST` | `/v1/rooms/persistent/{key}/participants` | Join as the owner; add an agent on browser hosts (`rooms.rs`) |
 | `DELETE` | `/v1/rooms/persistent/{key}/participants/{id}` | Leave (`rooms.rs`) |
 | `POST` | `/v1/rooms/persistent/{key}/members/agents` | Register an agent into a federated room (`rooms.rs`) |
