@@ -9,6 +9,18 @@ on:
         description: Build the Windows candidate without publishing
         type: boolean
         default: false
+      windows_surface_probe:
+        description: Test and build the Windows browser proxy without publishing
+        type: boolean
+        default: false
+      windows_native_probe:
+        description: Test and build the Windows native shell without publishing
+        type: boolean
+        default: false
+      desktop_candidate:
+        description: Build unsigned Mac and Windows desktop installers without publishing
+        type: boolean
+        default: false
   push:
     tags: ["v*"]
 
@@ -22,7 +34,7 @@ env:
 jobs:
   validate:
     name: validate package (macos-arm64)
-    if: github.event_name == 'push' || !inputs.windows_probe
+    if: github.event_name == 'push' || (!inputs.windows_probe && !inputs.windows_surface_probe && !inputs.windows_native_probe && !inputs.desktop_candidate)
     runs-on: macos-latest
     timeout-minutes: 60
     defaults:
@@ -442,7 +454,9 @@ jobs:
           test "$published_integrity" = "$LOCAL_NPM_INTEGRITY"
 
           registry_max() {
-            npm view "$package" versions --json | node -e '
+            # A first publish has only version-X.Y.Z, not latest yet. Query
+            # through the verified version to read the complete version list.
+            npm view "$package@$version" versions --json | node -e '
               let input = "";
               process.stdin.setEncoding("utf8");
               process.stdin.on("data", chunk => input += chunk);
@@ -530,16 +544,196 @@ jobs:
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: platform/ocean-os -> target
+      - name: Test Windows profile defaults
+        run: cargo test --locked -p ocean-providers profile
+      - name: Test Windows provider credential publication
+        run: |
+          cargo test --locked -p ocean-providers auth_file -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p ocean-oauth store -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Test Windows credential security
         run: cargo test --locked -p ocean-observatory auth
-      - name: Build Windows daemon and TUI
-        run: cargo build --locked --release -p ocean-daemon -p ocean-tui
+      - name: Build Windows daemon, TUI and MCP bridge
+        run: cargo build --locked --release -p ocean-daemon -p ocean-tui -p ocean-mcp
+      - name: Test Windows MCP bridge
+        run: cargo test --locked --release -p ocean-mcp --bin ocean-mcp --test server_e2e
       - name: Test Windows file and operator security
         run: cargo test --locked --release -p ocean-daemon --test windows_file_security
-      - name: Verify both executable outputs
+      - name: Test Windows daemon discovery
         run: |
-          foreach ($binary in @('ocean-daemon.exe', 'ocean-tui.exe')) {
+          rustc --edition=2021 --test crates/ocean-tui/src/shell/daemon_boot.rs -o target/windows-daemon-boot-tests.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./target/windows-daemon-boot-tests.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Boot Windows daemon in an isolated profile
+        run: python ../../.github/test-daemon-startup.py target/release/ocean-daemon.exe $env:GITHUB_SHA --mcp target/release/ocean-mcp.exe
+      - name: Test Windows Room package capture
+        run: python ../../.github/test-room-package.py target/release/ocean-daemon.exe $env:GITHUB_SHA
+      - name: Verify executable outputs
+        run: |
+          foreach ($binary in @('ocean-daemon.exe', 'ocean-tui.exe', 'ocean-mcp.exe')) {
             $path = Join-Path 'target/release' $binary
             if (!(Test-Path -PathType Leaf $path)) { throw "Missing $path" }
             Get-FileHash -Algorithm SHA256 $path
           }
+
+  windows-surface-probe:
+    name: test browser proxy (windows-x64)
+    if: github.event_name == 'workflow_dispatch' && inputs.windows_surface_probe
+    runs-on: windows-2025
+    timeout-minutes: 30
+    concurrency:
+      group: windows-surface-candidate-${{ github.ref }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: apps/ocean-surface
+        shell: pwsh
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Install repository-pinned Rust toolchain
+        run: |
+          $match = Select-String -Path rust-toolchain.toml -Pattern '^channel = "([^"]+)"'
+          $toolchain = $match.Matches.Groups[1].Value
+          if (!$toolchain) { throw 'Missing Rust toolchain pin' }
+          rustup toolchain install "$toolchain" --profile minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "RUSTUP_TOOLCHAIN=$toolchain" >> $env:GITHUB_ENV
+      - name: Cache cargo and target
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: apps/ocean-surface -> target
+      - name: Test Windows Surface proxy
+        run: cargo test --locked -p ocean-surface-proxy
+      - name: Build Windows Surface proxy
+        run: cargo build --locked --release -p ocean-surface-proxy
+
+  windows-native-probe:
+    name: test native Rooms (windows-x64)
+    if: github.event_name == 'workflow_dispatch' && inputs.windows_native_probe
+    runs-on: windows-2025
+    timeout-minutes: 45
+    concurrency:
+      group: windows-native-${{ github.ref }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: apps/ocean-surface
+        shell: pwsh
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Install repository-pinned Rust toolchain
+        run: |
+          $match = Select-String -Path rust-toolchain.toml -Pattern '^channel = "([^"]+)"'
+          $toolchain = $match.Matches.Groups[1].Value
+          if (!$toolchain) { throw 'Missing Rust toolchain pin' }
+          rustup toolchain install "$toolchain" --profile minimal --target wasm32-unknown-unknown
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "RUSTUP_TOOLCHAIN=$toolchain" >> $env:GITHUB_ENV
+      - name: Cache cargo and target
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: |
+            apps/ocean-surface -> target
+            apps/ocean-surface/crates/ocean-tauri -> target
+      - name: Install Trunk
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
+        with:
+          tool: trunk@0.21.14
+      - name: Build the actual web bundle
+        run: |
+          Remove-Item Env:NO_COLOR -ErrorAction SilentlyContinue
+          trunk build --locked
+      - name: Test native shell and Room consent
+        working-directory: apps/ocean-surface/crates/ocean-tauri
+        run: cargo test --locked --release --lib
+      - name: Build native executable
+        working-directory: apps/ocean-surface/crates/ocean-tauri
+        run: |
+          cargo build --locked --release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $bytes = [System.IO.File]::ReadAllBytes((Join-Path $PWD 'target/release/ocean-tauri.exe'))
+          if ($bytes.Length -lt 64 -or [BitConverter]::ToUInt16($bytes, 0) -ne 0x5a4d) {
+            throw 'Native output is not a Windows executable'
+          }
+          $pe = [BitConverter]::ToInt32($bytes, 60)
+          if ($pe -lt 0 -or $pe -gt ($bytes.Length - 94) -or [BitConverter]::ToUInt32($bytes, $pe) -ne 0x4550) {
+            throw 'Invalid PE header in native output'
+          }
+          if ([BitConverter]::ToUInt16($bytes, $pe + 92) -ne 2) {
+            throw 'Desktop release would open a console window'
+          }
+          Write-Output 'Windows GUI subsystem verified'
+
+  desktop-candidate:
+    name: desktop candidate (${{ matrix.target }})
+    if: github.event_name == 'workflow_dispatch' && inputs.desktop_candidate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    concurrency:
+      group: desktop-candidate-${{ matrix.target }}-${{ github.ref }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Install repository-pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          toolchain="$(awk -F '"' '/^channel = / { print $2; exit }' apps/ocean-surface/rust-toolchain.toml)"
+          test -n "$toolchain"
+          rustup toolchain install "$toolchain" --profile minimal --target wasm32-unknown-unknown
+          echo "RUSTUP_TOOLCHAIN=$toolchain" >> "$GITHUB_ENV"
+      - name: Cache cargo and target
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: |
+            platform/ocean-os -> target
+            apps/ocean-surface -> target
+            apps/ocean-surface/crates/ocean-tauri -> target
+      - name: Install Trunk
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
+        with:
+          tool: trunk@0.21.14
+          fallback: none
+      - name: Check packaging fixtures
+        run: python -B -m unittest discover -s apps/ocean-surface/packaging -p 'test_*.py'
+      - name: Build and inspect native installer
+        run: python -B apps/ocean-surface/packaging/build_desktop.py --target '${{ matrix.target }}'
+      - name: Exercise Windows install and update refusal
+        if: runner.os == 'Windows'
+        run: python -B .github/test-windows-installer.py 'apps/ocean-surface/target/desktop/${{ github.sha }}/${{ matrix.target }}/artifacts' '${{ github.sha }}'
+      - name: Upload unsigned candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ocean-desktop-${{ matrix.target }}-${{ github.sha }}
+          path: apps/ocean-surface/target/desktop/${{ github.sha }}/${{ matrix.target }}/artifacts/*
+          if-no-files-found: error
+          retention-days: 14

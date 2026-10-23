@@ -9,6 +9,7 @@
 
 use leptos::prelude::*;
 
+mod accounts;
 mod agent_events_reset;
 mod app;
 mod call;
@@ -41,6 +42,7 @@ mod rooms_workspace;
 mod search;
 mod sessions;
 mod slash_menu;
+mod team_connection;
 mod transcript;
 mod tts;
 mod voice;

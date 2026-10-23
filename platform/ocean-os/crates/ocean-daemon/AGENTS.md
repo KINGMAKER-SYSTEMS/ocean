@@ -23,13 +23,32 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   identifiers; never log callback descriptions or arbitrary error chains.
 
 - Daemon health is `GET /health`, not `/v1/health`.
-- `windows_skill_file.rs` supplies the Windows skill reader's no-follow open.
+- `room_connection.rs` owns operator-only `GET/PUT /v1/rooms/connection`.
+  First setup accepts one bounded, canonical service origin through the existing
+  federation URL validator; strict object bodies reject duplicate/unknown fields.
+  The store atomically refuses existing federation history, credentials or pending
+  invitations, and never replaces a saved origin. A configured client, invalid
+  startup configuration or existing owner token also refuses initialization.
+  Saving requires an explicit daemon restart and does not claim connectivity.
+  Startup preserves legacy environment configuration; a saved origin pins the
+  destination and a conflicting environment origin fails closed. No membership,
+  token, live-task, provider or Bedrock-schema mutation belongs to this route.
+  An unconfigured invite redemption refuses before creating pending authority;
+  configured-but-offline redemption keeps its existing durable retry behavior.
+  Verify `cargo test --locked -p ocean-daemon room_connection -- --test-threads=1`
+  and the store connection/migration fixtures, with isolated auth/config paths.
+- `windows_skill_file.rs` supplies Windows skill and Room-package no-follow opens.
   Accept only absolute local-drive paths; retain directory handles and open each
   component relative to its parent, refusing every reparse point and alternate
   stream. Do not weaken this to final-component checks or resolve-then-reopen.
   Native fixtures live in `tests/windows_file_security.rs` and include the actual
   sources, including operator-key load and header authority; run `cargo test --locked --release -p ocean-daemon --test windows_file_security`
-  on Windows. This does not enable the separate Room package/attachment paths.
+  on Windows. Room package capture also enumerates UTF-16 names through retained
+  directory handles with a bounded aligned buffer, strict name decoding and an
+  explicit entry limit. Enumerated children use exact names without case folding;
+  package maps retain their common digest and byte/depth/entry ceilings. No path
+  is reopened after enumeration to acquire directory authority. Attachments and
+  scoped resource files remain separate unsupported Windows paths.
 - `identity.rs` owns credential-free `GET /v1/identity`: resolve strict top-level
   `member.toml` in the daemon config directory at request time, then validated
   `OCEAN_MEMBER_ID`, otherwise explicit null identity. Malformed/duplicate/
@@ -229,6 +248,11 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
 - `AgentEvent::TurnCheckpoint` is an internal persistence signal consumed by `ocean-agent`; daemon bridges must filter it rather than exposing transcript deltas on SSE.
 - Mid-turn steering: `agent_turn` opens the turn's steering registration before spawning and drops it right after `prompt_with_lease` returns (before `TurnFinished`), so every accepted steer is either delivered (bridged as `steering_delivered`, which the bridge drains before `TurnFinished`) or refused. `POST /v1/agent/sessions/{id}/steer {text}` answers `202 {steer_id}`, `409 no_active_turn` (nothing steerable running, including room and other non-operator operations), `429 steering_full`, `400` blank, `413` over 32 KiB. It passes the same cross-site write guard as turns; the Observatory and the legacy mirror never carry steering text.
 - Steer outcome ledger (#148): `AppState::steering_outcomes` records every accepted steer bound to the session's live request id; the turn bridge records each delivery before relaying it, and the turn task settles still-pending entries as dropped after the bridge drains but BEFORE the terminal registry transition, so a snapshot can never see the turn terminal with its steer outcomes undecided. `GET /v1/sessions/{id}` exposes the terminal records (`steering`, oldest first, bounded per session — pending entries are never exposed) plus `finished_requests` (terminal request ids, most-recent first, bounded) so a reconnecting client reconciles pending rows and a stale Stop target by steer_id/turn identity. The ledger is in-memory: a restart loses it and clients must treat a missing record as explicitly unresolved, never guess by text or resend blindly.
+  (PR #129 reconciliation: the desktop candidate's #148 daemon variant — client-minted
+  steer ids with `steer_for_turn` admission, per-turn receipt snapshots on the session
+  detail, and the typed 503 `session_snapshot_changed` churn guard — was an
+  independent solution of #148 and is superseded by this #156 ledger; do not
+  reintroduce or blend the two designs.)
 - The Track-0 projection routes (`GET /v1/rooms`, detail, snapshot, events) are retired. Preserve `/v1/rooms/persistent/*` and `/v1/rooms/{room_id}/livekit-token`; these are separate durable-collaboration and media contracts.
 - The explicit method/path set in `app_router`, `banner_routes()`, and the operator-guide HTTP quick reference must remain identical. The room-route table in `docs/OCEAN_ECOSYSTEM_CONTRACT.md` must list exactly the `/v1/rooms` registrations of `room_routes()`, each once, in registration order, with a source-backed purpose and auth rule per row, and `docs/ARCHITECTURE.md`'s two route counts must equal the router's; `router_contract_room_route_table_and_architecture_counts_are_in_parity` pins both, so a room route is added or changed together with its table row and the counts. The table's Auth column is behaviour too: `router_contract_operator_gates_match_the_room_route_table` drives every `/v1/rooms` mutation through the router without the operator header and holds each row's operator claim against the answer, pinning the operator-ungated mutations (`OPERATOR_UNGATED_ROOM_MUTATIONS`) and the per-reader rows (`PER_READER_ROOM_STATE_ROUTES`). Preserve Axum's default 404/405 fallback and the global layer order: HTTP tracing outside Host allowlist outside CORS outside browser-write guard outside route dispatch.
 - `github.rs` owns exactly five public, read-only `GET /v1/repo/github/{project_id}/*` projections: pulls, one pull, full-head-SHA checks, reviews, and commits. Resolve only the registered workspace-root `origin`; accept only exact GitHub remote forms; never send credentials or `Authorization`; and add no aggregate or write route. Preserve route-owned sanitized extractor errors, two-phase byte/field/vector bounds, Link-only pagination, full-SHA Moka singleflight caches (256 entries/60s), pinned GitHub headers, and bounded kill-on-drop git stdout handling.

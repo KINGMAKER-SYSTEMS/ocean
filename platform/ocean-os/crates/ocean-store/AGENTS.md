@@ -23,6 +23,12 @@ participant retirement. One database file (`rooms.db`), one owning crate.
 
 ### Schema (private; consumers use APIs, never SQL)
 
+- `src/room_connection.rs` owns the singleton initial team-service origin.
+  Initialization is an IMMEDIATE transaction, refuses any existing federation
+  credential, access history or pending redemption, and never replaces an origin.
+  Exact retries are unchanged. The daemon must separately validate the URL and
+  operator authority and preserve environment overrides; this store API performs
+  no networking, activation or credential migration. Local owner/Room state survives.
 - `rooms`, `participants`, `messages` — durable rooms, rosters and transcripts.
   `messages.attachment_id` is nullable; migration preserves existing rows.
 - `room_agent_owners` records local attribution; `room_local_roles` separately

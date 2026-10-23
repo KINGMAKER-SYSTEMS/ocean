@@ -3638,6 +3638,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "axum",
+ "clap",
  "eventsource-stream",
  "futures-util",
  "ocean-protocol",
@@ -3748,6 +3750,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "fs2",
+ "ocean-observatory",
  "serde",
  "serde_json",
  "tempfile",

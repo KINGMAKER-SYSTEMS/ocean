@@ -147,7 +147,7 @@ pub(crate) async fn room_owner_mutation(
         .map_err(|_| "owner mutation failed".to_string())?
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 mod tests {
     use super::*;
     use crate::daemon_transport::test_support::*;
@@ -254,7 +254,7 @@ mod tests {
         assert!(!error.contains(KEY));
         let private = key_file(dir.path(), 0o600);
         let link = dir.path().join("link.key");
-        std::os::unix::fs::symlink(&private, &link).unwrap();
+        credential_symlink(&private, &link);
         assert_eq!(
             send(&transport(port, &link), &mutation, "{}").unwrap_err(),
             "operator_credential_not_regular"
