@@ -600,6 +600,7 @@ PUT    /v1/me                             rename the owner { display_name } (1-6
 GET    /v1/rooms/persistent               list persistent rooms (each room carries additive owner-local "muted")
 POST   /v1/rooms/persistent               create a room { key, name, trigger_policy?, workspace_root? }
 GET    /v1/rooms/persistent/{key}         room + transcript
+PATCH  /v1/rooms/persistent/{key}         update mutable metadata { name?, trigger_policy?, workspace_root? }; an absent field is unchanged, trigger_policy: null clears the policy, an unknown field is a 400 invalid_request; 200 { room }, 404 unknown/closed room. workspace_root binds or REBINDS the room's workspace after creation, on the same canonicalization and the same 400 invalid_workspace_root create answers — workspace_root: null (or a blank string, matching create) unbinds. Absent is unchanged rather than a clear precisely because an unbound room's agent turns all fail closed with 503 workspace_unavailable, so a plain rename must never silently switch a room's agents off. A policy enabling on_ci_failure is refused exactly as create refuses it (400 trigger_policy_unwired, nothing written)
 POST   /v1/rooms/persistent/{key}/close  soft-close; flush final marker and cancel this Room’s active turns
 GET    /v1/rooms/persistent/{key}/agents  read bindings; no operator key required
 POST   /v1/rooms/persistent/{key}/agents  authorize existing owned agent; operator header required
