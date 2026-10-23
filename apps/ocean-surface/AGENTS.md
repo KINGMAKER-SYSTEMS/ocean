@@ -416,6 +416,19 @@ ships today and are updated slice by slice.
   Do not restore transcript polling or consume the global agent-event stream.
   The tail is the sole forward-ingest path: join, leave, agent add and post
   responses never re-read `/transcript` (`tests/room_history_follow.rs`).
+- The open response serves the OLDEST rows capped at the daemon's
+  `MAX_TRANSCRIPT_LIMIT` with `has_more` / `next_seq` (OCEAN-249). `open_room`
+  follows `/transcript?after_seq=&limit=` pages (`rooms::OpenCatchUp`) until
+  the daemon reports no more rows, then publishes the whole transcript once
+  and starts the tail from its real frontier, so a long room opens on its
+  newest, contiguous rows with follow pinned, one read advance, and the unread
+  divider computed over the full history. This bounded one-time catch-up on
+  open is explicitly not transcript polling: it runs once per open, stops at
+  the first exhausted page, a non-advancing page, or 50 pages, is cancelled by
+  the room generation on switch, and is the only production `/transcript`
+  reader. Do not add "load older", room-list paging, or any backward paging
+  here; a failed page lands the open on the rows held and the tail's durable
+  replay delivers the rest in order.
 - Room live-follow consumes scroll intent captured by the transcript's own
   scroll events (`transcript_follow_pinned`), not post-render geometry, so a
   tall append still follows a pinned reader and never yanks a scrolled one.
