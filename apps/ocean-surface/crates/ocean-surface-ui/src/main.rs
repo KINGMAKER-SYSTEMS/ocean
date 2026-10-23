@@ -13,6 +13,7 @@ mod agent_events_reset;
 mod app;
 mod call;
 mod canvas;
+mod coding_plans;
 mod components;
 mod council;
 mod daemon;

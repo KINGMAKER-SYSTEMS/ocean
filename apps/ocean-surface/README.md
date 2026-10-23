@@ -175,6 +175,31 @@ xAI key.
 
 `GET /api/config` reports `has_auth`; the UI fetches it on boot so no URL or credential is ever typed in the browser.
 
+## Coding plans — this machine's Claude and Codex logins
+
+The daemon's subscription logins are reachable from the browser through five
+exact routes the proxy forwards to it
+(`crates/ocean-surface-proxy/src/coding_plans.rs`; daemon contract in
+`platform/ocean-os/crates/ocean-daemon/src/provider_auth.rs`):
+
+| Route | Answers |
+|---|---|
+| `GET /v1/auth/providers` | per-provider status (`signed_in` / `expired` / `signed_out` / `unknown`), never a token |
+| `POST /v1/auth/providers/{provider}/login` | starts a browser login: `attempt_id`, `authorize_url` |
+| `GET` / `DELETE /v1/auth/providers/{provider}/login/{attempt_id}` | poll / cancel |
+| `POST /v1/auth/providers/{provider}/logout` | removes that provider's credential from the machine |
+
+The daemon requires its operator key on all of them. The proxy attaches the
+daemon's own key server side for the signed-in operator session — never to
+the browser, and nothing with `OCEAN_SURFACE_AUTH=off` — and builds the
+upstream request fresh, so the browser's Cookie, Origin and Referer never
+reach the daemon. An unreadable key answers `503
+operator_credential_unavailable`. The Tauri shell attaches the key natively
+(`crates/ocean-tauri/src/coding_plans.rs`); the Chrome extension has no
+privileged transport and does not show the panel. Finishing a login needs a
+browser on the machine that runs the daemon, because Claude and Codex
+redirect to that machine's `localhost`.
+
 ## Roadmap
 
 - Done: web/PWA chat, SSE transcript, model picker, session picker, proxy,
