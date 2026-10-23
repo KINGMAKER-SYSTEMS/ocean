@@ -1,6 +1,6 @@
-//! The room header's single overflow menu (team-platform P4): share, per-room
-//! agent settings, leave, close (DoD 4.3). Secondary actions live here, never
-//! as a row of header buttons.
+//! The room header's single overflow menu (team-platform P4): members, files,
+//! share, per-room agent settings, mute, leave, close (DoD 4.3). Secondary
+//! actions live here, never as a row of header buttons.
 
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
@@ -50,6 +50,8 @@ pub fn RoomOverflow(
     rooms: Rooms,
     joined: bool,
     on_members: Callback<()>,
+    /// Opens the right rail's Files mode (room context files).
+    on_files: Callback<()>,
     trigger_ref: NodeRef<leptos::html::Button>,
     /// The close confirmation's state (`RoomsWorkspace`-scoped, so a header
     /// rebuild cannot drop a close in flight). The `Close room…` item only
@@ -103,6 +105,20 @@ pub fn RoomOverflow(
                         }
                     >
                         "Members"
+                    </button>
+                    // Room context files: the list opens in the right rail
+                    // (the same reveal convention as Members); the attach
+                    // control itself lives in the composer.
+                    <button
+                        class="room-overflow__item"
+                        role="menuitem"
+                        type="button"
+                        on:click=move |_| {
+                            open.set(false);
+                            on_files.run(());
+                        }
+                    >
+                        "Files"
                     </button>
                     {move || can_share().then(|| view! {
                         <button

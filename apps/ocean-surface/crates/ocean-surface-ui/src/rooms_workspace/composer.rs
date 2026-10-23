@@ -1,8 +1,10 @@
-//! Channel composer: send admission, draft clearing, and failed-outbox matching.
+//! Channel composer: send admission, draft clearing, failed-outbox matching,
+//! and the room-file attach control.
 
 use leptos::prelude::*;
 
 use super::access::access_allows_writes;
+use super::attachments::{upload_control_enabled, RoomAttachmentsState};
 use super::mentions::MentionState;
 use crate::rooms::{OutboxItemState, Rooms};
 
@@ -45,9 +47,17 @@ pub(super) fn outbox_matches_failed_message(
             == thread_parent_seq
 }
 
-/// Channel composer row (input, mention popup, send) plus the room status
-/// line. Draft, in-flight latch, and mention state are owned by
-/// `RoomsWorkspace` so they survive the center rail re-rendering.
+/// Channel composer row (attach, input, mention popup, send) plus the room
+/// status line. Draft, in-flight latch, mention state and the attachments
+/// state are owned by `RoomsWorkspace` so they survive the center rail
+/// re-rendering.
+///
+/// The attach control takes `attach_allowed` — the workspace's
+/// `local_store_write_gate` ruling — rather than the composer's own
+/// `access_allows_writes`: an upload lands in this daemon's store and is never
+/// enqueued for a peer, so a link that is down or coming back does not hold
+/// it the way it holds a message. The paperclip only forwards the gesture to
+/// the input `AttachmentInput` mounts at workspace scope.
 #[component]
 pub(super) fn ChannelComposer(
     rooms: Rooms,
@@ -55,7 +65,16 @@ pub(super) fn ChannelComposer(
     send_in_flight: RwSignal<bool>,
     mention: MentionState,
     on_send: Callback<()>,
+    attachments: RoomAttachmentsState,
+    attach_allowed: Signal<bool>,
 ) -> impl IntoView {
+    let can_attach = move || {
+        upload_control_enabled(
+            attach_allowed.get(),
+            attachments.uploading.get(),
+            rooms.open_key.get().as_deref(),
+        )
+    };
     view! {
         <div class="rooms-workspace__composer">
             <form
@@ -65,6 +84,32 @@ pub(super) fn ChannelComposer(
                     on_send.run(());
                 }
             >
+                <button
+                    class="rooms-workspace__composer-attach"
+                    type="button"
+                    aria-label=move || {
+                        if attachments.uploading.get() {
+                            "Uploading a room file"
+                        } else {
+                            "Attach a file to this room"
+                        }
+                    }
+                    title=move || {
+                        if attachments.uploading.get() {
+                            "Uploading\u{2026}"
+                        } else {
+                            "Attach a context file to this room (up to 8 MB)"
+                        }
+                    }
+                    aria-busy=move || attachments.uploading.get().to_string()
+                    disabled=move || !can_attach()
+                    on:click=move |_| {
+                        attachments.error.set(None);
+                        attachments.open_picker();
+                    }
+                >
+                    <crate::icons::Paperclip />
+                </button>
                 <input
                     class="rooms-workspace__composer-input"
                     type="text"
@@ -95,6 +140,15 @@ pub(super) fn ChannelComposer(
                     {move || if send_in_flight.get() { "Sending…" } else { "Send" }}
                 </button>
             </form>
+
+            // A file refusal (too large, no usable name, the daemon's typed
+            // code) lands here, beside the control that caused it, whether
+            // or not the Files rail is open.
+            {move || {
+                attachments.error.get().map(|error| view! {
+                    <div class="rooms-workspace__files-error" role="alert">{error}</div>
+                })
+            }}
 
             {move || {
                 let s = rooms.status.get();

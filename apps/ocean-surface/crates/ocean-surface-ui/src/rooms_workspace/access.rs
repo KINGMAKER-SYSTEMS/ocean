@@ -38,6 +38,41 @@ pub(super) fn access_allows_thread_writes(access: Option<&RoomAccessProjection>)
     matches!(access.map(|a| a.state), Some(RoomAccessState::Local))
 }
 
+/// Whether a write that lands in THIS daemon's local store may proceed under
+/// this access projection — the rail-local counterpart of
+/// [`access_allows_writes`], and deliberately more permissive than it.
+///
+/// The two gates ask different questions. [`access_allows_writes`] asks "can
+/// this write reach a peer?", which is the right question for the composer
+/// and for anything that mints or drives federation: a message that never
+/// leaves is a lie about what was said. A room attachment is not that kind of
+/// write: it lands through the daemon's own store handle and announces itself
+/// on the local event stream, and the daemon's attachment module names the
+/// federation outbox nowhere. A link that is down or coming back cannot make
+/// such a write unlandable, so `Connecting` and `Recovering` keep the Files
+/// controls writable.
+///
+/// `Revoked` stays held. The daemon would accept the write too, but the
+/// operator has been removed from the room, and offering to add a file to a
+/// room you no longer stand in is offering an action that cannot mean
+/// anything to you again. Unknown access stays held for the weaker version of
+/// the same reason: it may yet resolve to `Revoked`, and a control that flips
+/// to disabled once the projection lands is worse than one that waits for it.
+///
+/// Matched exhaustively without a wildcard on purpose — a new access state
+/// must be ruled on here rather than quietly inheriting "writable".
+pub(super) fn local_store_write_gate(access: Option<&RoomAccessProjection>) -> bool {
+    match access.map(|projection| projection.state) {
+        Some(
+            RoomAccessState::Local
+            | RoomAccessState::Connecting
+            | RoomAccessState::Live
+            | RoomAccessState::Recovering,
+        ) => true,
+        Some(RoomAccessState::Revoked) | None => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::test_support::test_access;
@@ -113,6 +148,43 @@ mod tests {
         assert!(!access_allows_thread_writes(Some(&test_access(
             RoomAccessState::Live
         ))));
+    }
+
+    /// The rail-local gate stated per state, and stated as a difference from
+    /// the composer's so the divergence is pinned rather than re-derived from
+    /// two matrices. They part company on exactly the two non-terminal
+    /// states: a write that has to reach a peer cannot land while the link is
+    /// down or coming back, and a write that lands in this daemon's store is
+    /// untouched by either.
+    #[test]
+    fn every_access_state_pins_the_local_store_write_gate() {
+        // Unknown access is the one place the two gates must never diverge:
+        // nothing is known about the room yet, and a control that flips to
+        // disabled once the projection lands is worse than one that waits.
+        assert!(!local_store_write_gate(None));
+        assert!(!access_allows_writes(None));
+
+        let cases = [
+            (RoomAccessState::Local, true),
+            (RoomAccessState::Connecting, true),
+            (RoomAccessState::Live, true),
+            (RoomAccessState::Recovering, true),
+            (RoomAccessState::Revoked, false),
+        ];
+        for (state, writable) in cases {
+            let access = test_access(state);
+            assert_eq!(local_store_write_gate(Some(&access)), writable, "{state:?}");
+
+            let diverges = matches!(
+                state,
+                RoomAccessState::Connecting | RoomAccessState::Recovering
+            );
+            assert_eq!(
+                local_store_write_gate(Some(&access)) != access_allows_writes(Some(&access)),
+                diverges,
+                "{state:?}"
+            );
+        }
     }
 
     #[test]
