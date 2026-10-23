@@ -14723,6 +14723,7 @@ env = { FIXTURE = "1" }
         // ocean-store module is caught by the file-count check below.
         let sources = [
             include_str!("../../ocean-store/src/lib.rs"),
+            include_str!("../../ocean-store/src/room_connection.rs"),
             include_str!("../../ocean-store/src/room_profile.rs"),
             include_str!("../../ocean-store/src/room_resources.rs"),
             include_str!("../../ocean-store/src/room_retirement.rs"),

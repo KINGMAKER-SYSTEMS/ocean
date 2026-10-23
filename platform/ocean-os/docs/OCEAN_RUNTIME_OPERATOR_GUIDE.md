@@ -597,6 +597,8 @@ POST   /v1/permissions/{id}/decision      allow/deny a mutating-tool request
 # Rooms — persistent lifecycle (SQLite-backed; survives restarts)
 GET    /v1/me                             daemon owner identity { participant_id, display_name }; id = member.toml / OCEAN_MEMBER_ID member id, else minted once from OCEAN_OWNER_NAME / USER
 PUT    /v1/me                             rename the owner { display_name } (1-64 chars); requires X-Ocean-Operator; id is stable; renames the owner's Human roster rows
+GET    /v1/rooms/connection                            operator-owned first team-service selection (configured origin + status; no credentials)
+PUT    /v1/rooms/connection                            set the first team-service origin {origin} once; refuses already-configured/existing federation; requires X-Ocean-Operator; activates at restart
 GET    /v1/rooms/persistent               list persistent rooms (each room carries additive owner-local "muted")
 POST   /v1/rooms/persistent               create a room { key, name, trigger_policy?, workspace_root? }
 GET    /v1/rooms/persistent/{key}         room + transcript
