@@ -3865,7 +3865,9 @@ pub(crate) fn invocation_error_text(code: &str) -> String {
         "room_not_found" => "This room is closed.",
         "activation_policy_refused" => "This agent does not accept explicit invocations.",
         "credential_slot_missing" => "This agent needs a credential this Ocean does not have.",
-        "room_turn_capacity" => "Ocean is busy. Try again shortly.",
+        // Definitive for this (agent, message): `may_invoke` blocks any
+        // repeat attempt, so the text promises no retry (#102).
+        "room_turn_capacity" => "Ocean is busy.",
         code if code.starts_with("agent_package_") => "Ocean could not load that agent folder.",
         _ => "Ocean could not invoke the agent.",
     }
@@ -5997,6 +5999,17 @@ mod tests {
         assert!(may_invoke(&list, "agent-x", 5));
         assert!(may_invoke(&list, "agent-y", 4));
 
+        // A refusal is equally final, so its text promises no retry (#102).
+        let refused = vec![invocation(
+            "agent-x",
+            4,
+            InvocationState::Refused("room_turn_capacity".into()),
+        )];
+        assert!(
+            !may_invoke(&refused, "agent-x", 4),
+            "a refused invocation never retries"
+        );
+
         let ack = serde_json::json!({
             "ok": true, "status": "queued", "admission_id": "adm",
             "request_id": "req-1", "generation": "3", "session_id": "sess-1"
@@ -6117,7 +6130,7 @@ mod tests {
                 "That message is no longer in this room.",
             ),
             ("room_not_found", "This room is closed."),
-            ("room_turn_capacity", "Ocean is busy. Try again shortly."),
+            ("room_turn_capacity", "Ocean is busy."),
             (
                 "agent_package_unavailable",
                 "Ocean could not load that agent folder.",
