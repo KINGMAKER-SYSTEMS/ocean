@@ -1,0 +1,35 @@
+{
+  "bindings": [
+    {
+      "activation_policy": "mention",
+      "agent_definition_digest": "sha256:0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+      "agent_definition_revision": "1.2.0",
+      "agent_member_id": "researcher",
+      "agent_package_id": "kingmaker/researcher",
+      "authorized_at": "2026-10-23T12:00:00.123456Z",
+      "context_policy": "room_recent",
+      "display_name": "Researcher",
+      "effective_capabilities": [],
+      "generation": "1",
+      "memory_scope": "room",
+      "operator_intersection_capabilities": [
+        "room.read"
+      ],
+      "owner_eligible": false,
+      "owner_member_id": "john",
+      "requested_capabilities": [
+        "room.post",
+        "room.read"
+      ],
+      "revoked_at": null,
+      "room_capability_grants": [
+        "room.read"
+      ],
+      "room_id": "wire-room",
+      "status": "active"
+    }
+  ],
+  "ok": true,
+  "owner_eligible": false,
+  "owner_member_id": null
+}

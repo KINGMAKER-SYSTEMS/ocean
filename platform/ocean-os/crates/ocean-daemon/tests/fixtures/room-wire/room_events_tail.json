@@ -1,0 +1,241 @@
+{
+  "room_access": [
+    {
+      "data": {
+        "state": "local"
+      }
+    }
+  ],
+  "room_agent_run": [
+    {
+      "data": {
+        "agent_id": "researcher",
+        "room_id": "wire-room",
+        "run_id": "run-1-queued",
+        "session_id": "session-researcher-1",
+        "started_at": "2026-10-23T12:00:00.123456Z",
+        "state": "queued",
+        "thread_root_seq": 2,
+        "tool_count": 0,
+        "trigger_seq": 2,
+        "updated_at": "2026-10-23T12:00:00.123456Z"
+      }
+    },
+    {
+      "data": {
+        "agent_id": "researcher",
+        "request_id": "req-run-2-thinking",
+        "room_id": "wire-room",
+        "run_id": "run-2-thinking",
+        "session_id": "session-researcher-1",
+        "started_at": "2026-10-23T12:00:00.123456Z",
+        "state": "thinking",
+        "thread_root_seq": 2,
+        "tool_count": 0,
+        "trigger_seq": 2,
+        "updated_at": "2026-10-23T12:00:00.123456Z"
+      }
+    },
+    {
+      "data": {
+        "agent_id": "researcher",
+        "label": "Reading notes.txt",
+        "request_id": "req-run-3-running-tool",
+        "room_id": "wire-room",
+        "run_id": "run-3-running-tool",
+        "session_id": "session-researcher-1",
+        "started_at": "2026-10-23T12:00:00.123456Z",
+        "state": "running_tool",
+        "thread_root_seq": 2,
+        "tool_count": 2,
+        "trigger_seq": 2,
+        "updated_at": "2026-10-23T12:00:00.123456Z"
+      }
+    },
+    {
+      "data": {
+        "agent_id": "researcher",
+        "pending_permission": {
+          "permission_id": "perm-1",
+          "tool": "bash",
+          "tool_label": "Run the test suite"
+        },
+        "request_id": "req-run-4-awaiting-permission",
+        "room_id": "wire-room",
+        "run_id": "run-4-awaiting-permission",
+        "session_id": "session-researcher-1",
+        "started_at": "2026-10-23T12:00:00.123456Z",
+        "state": "awaiting_permission",
+        "thread_root_seq": 2,
+        "tool_count": 3,
+        "trigger_seq": 2,
+        "updated_at": "2026-10-23T12:00:00.123456Z"
+      }
+    },
+    {
+      "data": {
+        "agent_id": "researcher",
+        "answer_seq": 4,
+        "request_id": "req-run-5-awaiting-reply",
+        "room_id": "wire-room",
+        "run_id": "run-5-awaiting-reply",
+        "session_id": "session-researcher-1",
+        "started_at": "2026-10-23T12:00:00.123456Z",
+        "state": "awaiting_reply",
+        "thread_root_seq": 2,
+        "tool_count": 0,
+        "trigger_seq": 2,
+        "updated_at": "2026-10-23T12:00:00.123456Z"
+      }
+    },
+    {
+      "data": {
+        "agent_id": "researcher",
+        "files_changed": [
+          "crates/ocean-daemon/src/main.rs"
+        ],
+        "reply_seq": 4,
+        "request_id": "req-run-6-done",
+        "room_id": "wire-room",
+        "run_id": "run-6-done",
+        "session_id": "session-researcher-1",
+        "started_at": "2026-10-23T12:00:00.123456Z",
+        "state": "done",
+        "summary": "Fixed the flaky test.",
+        "thread_root_seq": 2,
+        "tool_count": 5,
+        "trigger_seq": 2,
+        "updated_at": "2026-10-23T12:00:00.123456Z"
+      }
+    },
+    {
+      "data": {
+        "agent_id": "researcher",
+        "reason": "provider unavailable",
+        "request_id": "req-run-7-failed",
+        "room_id": "wire-room",
+        "run_id": "run-7-failed",
+        "session_id": "session-researcher-1",
+        "started_at": "2026-10-23T12:00:00.123456Z",
+        "state": "failed",
+        "thread_root_seq": 2,
+        "tool_count": 0,
+        "trigger_seq": 2,
+        "updated_at": "2026-10-23T12:00:00.123456Z"
+      }
+    },
+    {
+      "data": {
+        "agent_id": "researcher",
+        "request_id": "req-run-8-cancelled",
+        "room_id": "wire-room",
+        "run_id": "run-8-cancelled",
+        "session_id": "session-researcher-1",
+        "started_at": "2026-10-23T12:00:00.123456Z",
+        "state": "cancelled",
+        "thread_root_seq": 2,
+        "tool_count": 0,
+        "trigger_seq": 2,
+        "updated_at": "2026-10-23T12:00:00.123456Z"
+      }
+    }
+  ],
+  "room_message": [
+    {
+      "data": {
+        "author_id": "john",
+        "author_kind": "human",
+        "body": "John joined",
+        "created_at": "2026-10-23T12:00:00.123456Z",
+        "federated": null,
+        "kind": "participant_joined",
+        "seq": 0
+      },
+      "id": "0"
+    },
+    {
+      "data": {
+        "author_id": "researcher",
+        "author_kind": "agent",
+        "body": "Researcher joined",
+        "created_at": "2026-10-23T12:00:00.123456Z",
+        "federated": null,
+        "kind": "participant_joined",
+        "seq": 1
+      },
+      "id": "1"
+    },
+    {
+      "data": {
+        "author_id": "john",
+        "author_kind": "human",
+        "body": "Hello room",
+        "created_at": "2026-10-23T12:00:00.123456Z",
+        "federated": null,
+        "kind": "message",
+        "seq": 2
+      },
+      "id": "2"
+    },
+    {
+      "data": {
+        "author_id": "john",
+        "author_kind": "human",
+        "body": "Following up in the thread.",
+        "created_at": "2026-10-23T12:00:00.123456Z",
+        "federated": null,
+        "kind": "message",
+        "seq": 3,
+        "thread_parent_seq": 2
+      },
+      "id": "3"
+    },
+    {
+      "data": {
+        "author_id": "researcher",
+        "author_kind": "agent",
+        "body": "On it.",
+        "created_at": "2026-10-23T12:00:00.123456Z",
+        "federated": null,
+        "kind": "message",
+        "seq": 4,
+        "session_id": "session-researcher-1",
+        "thread_parent_seq": 2
+      },
+      "id": "4"
+    },
+    {
+      "data": {
+        "attachment_id": "0123456789abcdef0123456789abcdef",
+        "author_id": "system",
+        "author_kind": "system",
+        "body": "john attached 'notes.txt' (19 bytes)",
+        "created_at": "2026-10-23T12:00:00.123456Z",
+        "federated": null,
+        "kind": "system",
+        "seq": 5
+      },
+      "id": "5"
+    },
+    {
+      "data": {
+        "author_id": "system",
+        "author_kind": "system",
+        "body": "[room agent authority audit] researcher",
+        "created_at": "2026-10-23T12:00:00.123456Z",
+        "federated": null,
+        "kind": "system",
+        "seq": 6
+      },
+      "id": "6"
+    }
+  ],
+  "room_read_cursor": [
+    {
+      "data": {
+        "read_seq": "2",
+        "room_id": "wire-room"
+      }
+    }
+  ]
+}

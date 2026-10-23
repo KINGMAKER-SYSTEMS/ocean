@@ -1,0 +1,57 @@
+{
+  "closed": false,
+  "has_more": false,
+  "next_seq": null,
+  "ok": true,
+  "transcript": [
+    {
+      "author_id": "john",
+      "author_kind": "human",
+      "body": "Hello room",
+      "created_at": "2026-10-23T12:00:00.123456Z",
+      "federated": null,
+      "kind": "message",
+      "seq": 2
+    },
+    {
+      "author_id": "john",
+      "author_kind": "human",
+      "body": "Following up in the thread.",
+      "created_at": "2026-10-23T12:00:00.123456Z",
+      "federated": null,
+      "kind": "message",
+      "seq": 3,
+      "thread_parent_seq": 2
+    },
+    {
+      "author_id": "researcher",
+      "author_kind": "agent",
+      "body": "On it.",
+      "created_at": "2026-10-23T12:00:00.123456Z",
+      "federated": null,
+      "kind": "message",
+      "seq": 4,
+      "session_id": "session-researcher-1",
+      "thread_parent_seq": 2
+    },
+    {
+      "attachment_id": "0123456789abcdef0123456789abcdef",
+      "author_id": "system",
+      "author_kind": "system",
+      "body": "john attached 'notes.txt' (19 bytes)",
+      "created_at": "2026-10-23T12:00:00.123456Z",
+      "federated": null,
+      "kind": "system",
+      "seq": 5
+    },
+    {
+      "author_id": "system",
+      "author_kind": "system",
+      "body": "[room agent authority audit] researcher",
+      "created_at": "2026-10-23T12:00:00.123456Z",
+      "federated": null,
+      "kind": "system",
+      "seq": 6
+    }
+  ]
+}

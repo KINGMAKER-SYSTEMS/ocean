@@ -7530,3 +7530,8 @@ mod tests {
         );
     }
 }
+
+/// The room wire contract, decoded from the daemon-generated fixtures under
+/// `platform/ocean-os/crates/ocean-daemon/tests/fixtures/room-wire/`.
+#[cfg(test)]
+pub(crate) mod wire_fixtures;

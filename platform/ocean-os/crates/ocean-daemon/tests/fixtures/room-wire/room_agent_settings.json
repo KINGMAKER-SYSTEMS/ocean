@@ -1,0 +1,7 @@
+{
+  "ok": true,
+  "settings": {
+    "instructions": "Keep answers short.",
+    "model": "fake-ok"
+  }
+}

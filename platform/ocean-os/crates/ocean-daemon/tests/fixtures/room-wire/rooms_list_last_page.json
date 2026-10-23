@@ -1,0 +1,27 @@
+{
+  "has_more": false,
+  "next_cursor": null,
+  "ok": true,
+  "read_states": [
+    {
+      "room_id": "wire-annex"
+    }
+  ],
+  "rooms": [
+    {
+      "created_at": "2026-10-23T12:00:00.123456Z",
+      "id": "wire-annex",
+      "muted": true,
+      "name": "Wire Annex",
+      "participants": [],
+      "trigger_policy": {
+        "on_build_failure": false,
+        "on_ci_failure": false,
+        "on_component_event": false,
+        "on_mention": true,
+        "on_thread_reply": false
+      },
+      "updated_at": "2026-10-23T12:00:00.123456Z"
+    }
+  ]
+}

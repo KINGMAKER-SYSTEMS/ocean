@@ -5601,6 +5601,10 @@ mod tests {
     use serde_json::Value;
     use tower::ServiceExt;
 
+    /// The room wire contract the Surface decodes, pinned as regenerable JSON
+    /// fixtures under `tests/fixtures/room-wire/` (see the module header).
+    mod wire_fixtures;
+
     /// OCEAN-260: PATCH can bind a room's workspace after creation, unbind it,
     /// and leave it alone — the same absent/`null`/present contract
     /// `trigger_policy` draws, because collapsing absent into `null` here would
