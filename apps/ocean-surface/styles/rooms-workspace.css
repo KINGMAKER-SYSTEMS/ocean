@@ -513,6 +513,119 @@
   color: var(--fg);
 }
 
+/* ── Center rail — close confirmation (DoD 4.3) ───────────────────────
+   Armed by the header overflow's `Close room…` item (`.room-overflow__*`,
+   rooms-cards.css). Closing is irreversible, which is why it sits one menu
+   deep and then behind a modal whose focused default is the safe choice.
+   Above the compact left-rail drawer (400) and the mobile nav (410). */
+
+.rooms-workspace__close-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 440;
+  background: var(--scrim);
+}
+
+.rooms-workspace__close-dialog {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 445;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(440px, 92vw);
+  max-height: min(70vh, 520px);
+  overflow-y: auto;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-lg);
+}
+
+.rooms-workspace__close-title {
+  margin: 0;
+  color: var(--fg);
+  font-size: 14px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.rooms-workspace__close-warn {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--err);
+  border-radius: var(--radius-sm);
+  color: var(--err);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.rooms-workspace__close-note {
+  margin: 0;
+  color: var(--fg-2);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.rooms-workspace__close-error {
+  padding: 7px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--err-soft);
+  color: var(--fg);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.rooms-workspace__close-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.rooms-workspace__close-keep,
+.rooms-workspace__close-fire {
+  appearance: none;
+  height: var(--ctl-h);
+  padding: 0 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.rooms-workspace__close-fire {
+  color: var(--err);
+}
+
+.rooms-workspace__close-fire:hover:not(:disabled) {
+  background: var(--err-soft);
+  border-color: var(--border-strong);
+}
+
+.rooms-workspace__close-keep:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+:is(.rooms-workspace__close-dialog, .rooms-workspace__close-keep,
+   .rooms-workspace__close-fire):focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+:is(.rooms-workspace__close-keep, .rooms-workspace__close-fire):disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 /* ── Center rail — transcript ─────────────────────────────────────── */
 
 .rooms-workspace__transcript {
