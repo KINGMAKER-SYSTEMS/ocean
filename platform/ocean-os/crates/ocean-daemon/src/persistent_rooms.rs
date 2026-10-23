@@ -994,26 +994,36 @@ pub(super) struct RoomCreateRequest {
     pub(super) workspace_root: Option<String>,
 }
 
-/// `POST /v1/rooms/persistent` — create a persistent room.
-pub(super) async fn room_create(
-    State(state): State<AppState>,
-    Json(req): Json<RoomCreateRequest>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    // Confirmed build rows restore the original hint path. CI is marker-only;
-    // preserve legacy flags on reads but refuse new CI activation.
-    if req
-        .trigger_policy
-        .as_ref()
-        .is_some_and(|policy| policy.on_ci_failure)
-    {
-        return (
+/// Confirmed build rows restore the original hint path. CI is marker-only;
+/// preserve legacy flags on reads but refuse new CI activation. One function
+/// for create and update, so the PATCH route can never become the back door
+/// that stores a trigger this daemon does not fire.
+fn ci_trigger_unwired_response(
+    policy: &RoomTriggerPolicy,
+) -> Option<(StatusCode, Json<serde_json::Value>)> {
+    policy.on_ci_failure.then(|| {
+        (
             StatusCode::BAD_REQUEST,
             Json(json!({
                 "ok": false,
                 "code": "trigger_policy_unwired",
                 "error": "CI triggers are unavailable on this daemon",
             })),
-        );
+        )
+    })
+}
+
+/// `POST /v1/rooms/persistent` — create a persistent room.
+pub(super) async fn room_create(
+    State(state): State<AppState>,
+    Json(req): Json<RoomCreateRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if let Some(refusal) = req
+        .trigger_policy
+        .as_ref()
+        .and_then(ci_trigger_unwired_response)
+    {
+        return refusal;
     }
     let key = RoomKey::new(req.key.trim());
     let workspace_root = match canonical_submitted_workspace_root(req.workspace_root) {
@@ -1032,6 +1042,122 @@ pub(super) async fn room_create(
     match result {
         Ok(rec) => (
             StatusCode::CREATED,
+            Json(json!({ "ok": true, "room": rec.room })),
+        ),
+        Err(e) => room_store_error_response(e),
+    }
+}
+
+/// Keep "field absent" distinguishable from an explicit `"trigger_policy":
+/// null`. Plain `Option` collapses both to `None`, but the store's update
+/// contract is `Option<Option<_>>` — absent leaves the policy alone, `null`
+/// clears it — and collapsing them would turn "don't touch my policy" into
+/// "delete it".
+fn double_option_trigger_policy<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<RoomTriggerPolicy>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<RoomTriggerPolicy>::deserialize(deserializer).map(Some)
+}
+
+/// The same absent-vs-`null` distinction [`double_option_trigger_policy`] draws,
+/// for the workspace binding. A plain `Option` would collapse "leave my binding
+/// alone" into "unbind me", which for this field means silently turning a
+/// working room's agents off.
+fn double_option_workspace_root<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RoomUpdateRequest {
+    /// New human-readable room name. Absent ⇒ unchanged.
+    #[serde(default)]
+    pub(super) name: Option<String>,
+    /// Absent ⇒ unchanged; explicit `null` ⇒ clear the policy.
+    #[serde(default, deserialize_with = "double_option_trigger_policy")]
+    pub(super) trigger_policy: Option<Option<RoomTriggerPolicy>>,
+    /// Bind or unbind the room's workspace directory after creation (OCEAN-260).
+    /// Absent ⇒ unchanged; explicit `null` (or a blank string, matching create)
+    /// ⇒ unbind; a string binds after the same canonicalization create runs and
+    /// earns the same 400 `invalid_workspace_root` when it does not resolve to
+    /// an existing absolute directory on the daemon's host.
+    ///
+    /// Until this field existed a room created unbound could never be bound:
+    /// every room-bound agent turn in it failed closed with
+    /// `workspace_unavailable` for the life of the room, and the only repair
+    /// was a new room and a lost transcript.
+    #[serde(default, deserialize_with = "double_option_workspace_root")]
+    pub(super) workspace_root: Option<Option<String>>,
+}
+
+/// `PATCH /v1/rooms/persistent/{key}` — update a room's mutable metadata
+/// (name, trigger policy and/or workspace binding) after creation. Body
+/// parsing mirrors the read-cursor PATCH (typed 400, never an extractor
+/// rejection), and unknown fields are rejected rather than ignored, so a
+/// typo'd field name can never read as "leave everything unchanged".
+///
+/// The trigger-policy refusal is exactly create's: this daemon refuses a
+/// policy enabling `on_ci_failure`, and the update route must not be the back
+/// door that stores it. An explicit `null` (clear) is fine. Open rooms only —
+/// the store's `update` writes nothing to a soft-closed room and the typed
+/// store mapping answers 404, the same answer `GET` gives.
+pub(super) async fn room_update(
+    State(state): State<AppState>,
+    Path(raw_key): Path<String>,
+    body: axum::body::Bytes,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let req: RoomUpdateRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(_) => return invalid_request_response(),
+    };
+    if let Some(refusal) = req
+        .trigger_policy
+        .as_ref()
+        .and_then(|policy| policy.as_ref())
+        .and_then(ci_trigger_unwired_response)
+    {
+        return refusal;
+    }
+    // Same canonicalization create runs, and the same frozen refusal body: a
+    // binding must resolve NOW to one canonical absolute directory on this host,
+    // so neither a relative path nor a later process cwd can become execution
+    // authority. `Some(None)` (explicit null) and a blank string both unbind,
+    // matching create's treatment of a blank value; absent leaves the binding
+    // alone.
+    let workspace_root = match req
+        .workspace_root
+        .map(canonical_submitted_workspace_root)
+        .transpose()
+    {
+        Ok(workspace_root) => workspace_root,
+        Err(()) => return invalid_workspace_root_response(),
+    };
+    let trimmed = raw_key.trim();
+    if trimmed.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": "invalid room key; must be non-empty" })),
+        );
+    }
+    let key = RoomKey::new(trimmed);
+    let result = with_rooms(&state, |reg| {
+        reg.update(
+            &key,
+            req.name,
+            req.trigger_policy,
+            workspace_root,
+            Utc::now(),
+        )
+    });
+    match result {
+        Ok(rec) => (
+            StatusCode::OK,
             Json(json!({ "ok": true, "room": rec.room })),
         ),
         Err(e) => room_store_error_response(e),
@@ -5474,6 +5600,310 @@ mod tests {
     use ocean_store::ActivationPolicy;
     use serde_json::Value;
     use tower::ServiceExt;
+
+    /// OCEAN-260: PATCH can bind a room's workspace after creation, unbind it,
+    /// and leave it alone — the same absent/`null`/present contract
+    /// `trigger_policy` draws, because collapsing absent into `null` here would
+    /// turn every unrelated rename into a silent unbind, and an unbound room's
+    /// agent turns all fail closed.
+    ///
+    /// Before this field a room created unbound could never be bound: the only
+    /// repair was a new room and a lost transcript.
+    #[tokio::test]
+    async fn room_update_binds_unbinds_and_preserves_the_workspace_root() {
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _restore = TestEnvRestore::capture(&["OCEAN_CONFIG_DIR", "OCEAN_MODEL", "OCEAN_YOLO"]);
+        let tmp = tempfile::tempdir().unwrap();
+        let state = fake_convene_state(&tmp);
+        let key = RoomKey::new("workspace-update-room");
+        with_rooms(&state, |store| {
+            store.create(key.clone(), "Workspace Update", None, Utc::now())
+        })
+        .unwrap();
+
+        let workspace = tmp.path().join("bind-target");
+        std::fs::create_dir(&workspace).unwrap();
+        let canonical = std::fs::canonicalize(&workspace)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+
+        // A room created without a binding starts unbound.
+        let stored = with_rooms(&state, |store| store.get(&key))
+            .unwrap()
+            .expect("room exists");
+        assert_eq!(stored.room.workspace_root, None);
+
+        // Bind. The stored value is the CANONICAL path, not what was submitted:
+        // a noncanonical spelling that resolves to the right directory must not
+        // land verbatim, because agent execution revalidates canonicality and
+        // would then refuse the room it just bound.
+        let noncanonical = workspace.join("..").join("bind-target");
+        let (status, body) = room_update(
+            State(state.clone()),
+            Path(key.as_str().to_string()),
+            Bytes::from(
+                serde_json::to_vec(&json!({"workspace_root": noncanonical.to_string_lossy()}))
+                    .unwrap(),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body.0["ok"], json!(true));
+        assert_eq!(body.0["room"]["workspace_root"], json!(canonical));
+        // The binding must be the one agent execution will actually accept.
+        assert_eq!(
+            persisted_room_workspace(&canonical).as_deref(),
+            Some(canonical.as_str())
+        );
+
+        // Absent leaves the binding alone.
+        let (status, body) = room_update(
+            State(state.clone()),
+            Path(key.as_str().to_string()),
+            Bytes::from_static(br#"{"name":"Renamed"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body.0["room"]["name"], json!("Renamed"));
+        assert_eq!(body.0["room"]["workspace_root"], json!(canonical));
+
+        // A relative path and a nonexistent absolute one both earn the frozen
+        // create-time refusal body, and neither disturbs the stored binding.
+        for rejected in [
+            json!({"workspace_root": "."}),
+            json!({"workspace_root": tmp.path().join("not-here").to_string_lossy()}),
+        ] {
+            let (status, body) = room_update(
+                State(state.clone()),
+                Path(key.as_str().to_string()),
+                Bytes::from(serde_json::to_vec(&rejected).unwrap()),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                body.0,
+                json!({"ok": false, "error": "invalid_workspace_root"})
+            );
+            let stored = with_rooms(&state, |store| store.get(&key))
+                .unwrap()
+                .expect("room exists");
+            assert_eq!(
+                stored.room.workspace_root.as_deref(),
+                Some(canonical.as_str())
+            );
+        }
+
+        // Explicit null unbinds.
+        let (status, body) = room_update(
+            State(state.clone()),
+            Path(key.as_str().to_string()),
+            Bytes::from_static(br#"{"workspace_root":null}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body.0["room"]["workspace_root"], serde_json::Value::Null);
+        let stored = with_rooms(&state, |store| store.get(&key))
+            .unwrap()
+            .expect("room exists");
+        assert_eq!(stored.room.workspace_root, None);
+        assert_eq!(stored.room.name, "Renamed", "the rename survived");
+
+        // A blank string unbinds too, matching create's treatment of a blank
+        // value rather than storing whitespace as a binding.
+        with_rooms(&state, |store| {
+            store.update(&key, None, None, Some(Some(canonical.clone())), Utc::now())
+        })
+        .unwrap();
+        let (status, body) = room_update(
+            State(state.clone()),
+            Path(key.as_str().to_string()),
+            Bytes::from_static(br#"{"workspace_root":"   "}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body.0["room"]["workspace_root"], serde_json::Value::Null);
+    }
+
+    /// The PATCH room contract in one pass: a present `trigger_policy`
+    /// replaces the stored one, an absent field leaves it untouched, and an
+    /// explicit `null` clears it — the three wire shapes the double-Option
+    /// deserializer exists to keep apart.
+    #[tokio::test]
+    async fn room_update_distinguishes_absent_null_and_present_trigger_policy() {
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _restore = TestEnvRestore::capture(&["OCEAN_CONFIG_DIR", "OCEAN_MODEL", "OCEAN_YOLO"]);
+        let tmp = tempfile::tempdir().unwrap();
+        let state = fake_convene_state(&tmp);
+        let key = RoomKey::new("policy-update-room");
+        with_rooms(&state, |store| {
+            store.create(key.clone(), "Policy Update", None, Utc::now())
+        })
+        .unwrap();
+
+        let (status, body) = room_update(
+            State(state.clone()),
+            Path(key.as_str().to_string()),
+            Bytes::from_static(
+                br#"{"trigger_policy":{"on_mention":true,"on_build_failure":true,"on_ci_failure":false}}"#,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body.0["ok"], json!(true));
+        assert_eq!(body.0["room"]["trigger_policy"]["on_mention"], json!(true));
+        assert_eq!(
+            body.0["room"]["trigger_policy"]["on_build_failure"],
+            json!(true)
+        );
+        assert_eq!(
+            body.0["room"]["trigger_policy"]["on_ci_failure"],
+            json!(false)
+        );
+
+        let (status, body) = room_update(
+            State(state.clone()),
+            Path(key.as_str().to_string()),
+            Bytes::from_static(br#"{"name":"Renamed"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body.0["room"]["name"], json!("Renamed"));
+        assert_eq!(
+            body.0["room"]["trigger_policy"]["on_build_failure"],
+            json!(true)
+        );
+        assert_eq!(
+            body.0["room"]["trigger_policy"]["on_ci_failure"],
+            json!(false)
+        );
+
+        let (status, body) = room_update(
+            State(state.clone()),
+            Path(key.as_str().to_string()),
+            Bytes::from_static(br#"{"trigger_policy":null}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body.0["room"]["trigger_policy"], serde_json::Value::Null);
+        let stored = with_rooms(&state, |store| store.get(&key))
+            .unwrap()
+            .expect("room exists");
+        assert!(stored.room.trigger_policy.is_none());
+        assert_eq!(stored.room.name, "Renamed");
+    }
+
+    /// The failure edges: an unknown room and a soft-closed room both 404
+    /// through the store's typed mapping (the same answer `GET` gives), and a
+    /// typo'd field or malformed JSON is the same typed 400 the read-cursor
+    /// PATCH answers — never a silent "nothing changed".
+    #[tokio::test]
+    async fn room_update_unknown_closed_rooms_and_bad_bodies_are_typed_errors() {
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _restore = TestEnvRestore::capture(&["OCEAN_CONFIG_DIR", "OCEAN_MODEL", "OCEAN_YOLO"]);
+        let tmp = tempfile::tempdir().unwrap();
+        let state = fake_convene_state(&tmp);
+
+        let (status, body) = room_update(
+            State(state.clone()),
+            Path("missing-room".to_string()),
+            Bytes::from_static(br#"{"name":"New Name"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body.0["ok"], json!(false));
+
+        let closed = RoomKey::new("closed-room");
+        with_rooms(&state, |store| {
+            store.create(closed.clone(), "Closed", None, Utc::now())?;
+            store.close(&closed)?;
+            Ok::<_, ocean_store::RoomStoreError>(())
+        })
+        .unwrap();
+        let (status, body) = room_update(
+            State(state.clone()),
+            Path(closed.as_str().to_string()),
+            Bytes::from_static(br#"{"name":"New Name"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body.0["ok"], json!(false));
+        let stored = with_rooms(&state, |store| store.get_including_closed(&closed))
+            .unwrap()
+            .expect("closed room is retained");
+        assert_eq!(stored.room.name, "Closed", "a closed room is never written");
+
+        let (status, body) = room_update(
+            State(state.clone()),
+            Path("missing-room".to_string()),
+            Bytes::from_static(br#"{"trigger_polcy":{}}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body.0, json!({"ok": false, "error": "invalid_request"}));
+
+        let (status, body) = room_update(
+            State(state),
+            Path("missing-room".to_string()),
+            Bytes::from_static(b"not json"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body.0, json!({"ok": false, "error": "invalid_request"}));
+    }
+
+    /// The same refusal on PATCH that create answers: the update route must
+    /// not be the back door that stores a CI trigger this daemon never fires.
+    /// A refused PATCH leaves the stored policy untouched, and the wired shape
+    /// passes.
+    #[tokio::test]
+    async fn room_update_refuses_ci_activation_exactly_as_create_does() {
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _restore = TestEnvRestore::capture(&["OCEAN_CONFIG_DIR", "OCEAN_MODEL", "OCEAN_YOLO"]);
+        let tmp = tempfile::tempdir().unwrap();
+        let state = fake_convene_state(&tmp);
+        let key = RoomKey::new("unwired-update");
+        let created_policy = RoomTriggerPolicy {
+            on_mention: true,
+            ..Default::default()
+        };
+        with_rooms(&state, |store| {
+            store.create(
+                key.clone(),
+                "Unwired Update",
+                Some(created_policy.clone()),
+                Utc::now(),
+            )
+        })
+        .unwrap();
+
+        let (status, body) = room_update(
+            State(state.clone()),
+            Path(key.as_str().to_string()),
+            Bytes::from_static(br#"{"trigger_policy":{"on_mention":true,"on_ci_failure":true}}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body.0["code"], json!("trigger_policy_unwired"));
+        let stored = with_rooms(&state, |store| store.get(&key))
+            .unwrap()
+            .expect("room exists");
+        assert_eq!(stored.room.trigger_policy, Some(created_policy));
+
+        let (status, body) = room_update(
+            State(state.clone()),
+            Path(key.as_str().to_string()),
+            Bytes::from_static(
+                br#"{"trigger_policy":{"on_mention":true,"on_build_failure":true,"on_ci_failure":false}}"#,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body.0["room"]["trigger_policy"]["on_build_failure"],
+            json!(true)
+        );
+    }
 
     #[tokio::test]
     async fn room_create_holds_unwired_flags_without_touching_legacy_policy() {
