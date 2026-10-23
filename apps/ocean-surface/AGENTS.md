@@ -154,7 +154,11 @@ token to browser code, bundle it, or cache it in client storage.
 - Honor additive `ready` metadata: disable explicitly disconnected provider
   entries, retain compatibility when an older daemon omits readiness, and
   preserve pinned ids while the catalog loads. Readiness proves credentials,
-  not provider entitlement or successful inference.
+  not provider entitlement or successful inference. Option rows re-read their
+  entry (readiness, label) from the live `models` signal inside the row body —
+  a keyed `For` never re-runs same-key children, so capturing at mount freezes
+  the row — keeping `For` keys as model ids (#144): a same-id catalog refresh
+  must flip the rendered disabled state and label without an identity change.
 - Use additive daemon `effort_levels` metadata for model-specific choices,
   including max on current models. Older daemons retain the existing fallback
   vocabulary based on the wire model even for qualified saved ids. Explicit
