@@ -513,18 +513,21 @@ pub(super) fn RoomListRail(
                                         let muted = room.muted;
                                         // Muted rooms stay quiet in the list;
                                         // their mentions still reach the inbox.
-                                        let unread = move || {
+                                        // Memo, not a closure: both the bold
+                                        // modifier and the dot read it.
+                                        let unread = Memo::new(move |_| {
                                             !muted && rooms.read_summaries.with(|summaries| {
                                                 crate::rooms::room_has_durable_unread(
                                                     summaries.get(&key_unread),
                                                 )
                                             })
-                                        };
+                                        });
                                         view! {
                                             <button
                                                 class="rooms-workspace__room"
                                                 class:is-active=active
                                                 class:is-muted=muted
+                                                class:rooms-workspace__room--unread=move || unread.get()
                                                 type="button"
                                                 role="option"
                                                 id=room_option_dom_id(&room.id)
@@ -539,7 +542,7 @@ pub(super) fn RoomListRail(
                                                 <span class="rooms-workspace__room-name">
                                                     {room.name.clone()}
                                                 </span>
-                                                <Show when=move || unread()>
+                                                <Show when=move || unread.get()>
                                                     <span
                                                         class="rooms-workspace__room-unread"
                                                         role="img"
