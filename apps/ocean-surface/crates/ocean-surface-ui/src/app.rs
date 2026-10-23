@@ -4004,12 +4004,18 @@ mod tests {
         assert!(!window_escape_should_handle("Enter", false));
     }
 
+    /// The Rooms rail (`rooms_workspace/room_list.rs`) renders its list as
+    /// `.rooms-workspace__left-list` inside the flex-column
+    /// `.rooms-workspace__left`; the list must stay a shrinkable, scrolling
+    /// flex child so long room lists never push the create field and status
+    /// line outside the viewport. The first (base) rule carries the contract;
+    /// the later compact override only restyles padding.
     #[test]
     fn rooms_list_flex_child_can_shrink_and_scroll() {
-        let css = include_str!("../../../styles/panels.css");
+        let css = include_str!("../../../styles/rooms-workspace.css");
         let start = css
-            .find(".rooms-panel__list {")
-            .expect("rooms list production selector");
+            .find(".rooms-workspace__left-list {")
+            .expect("rooms rail list production selector");
         let block = &css[start..start + css[start..].find('}').expect("selector closes")];
         assert!(block.contains("min-height: 0;"));
         assert!(block.contains("overflow-y: auto;"));
