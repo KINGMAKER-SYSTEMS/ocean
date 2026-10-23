@@ -925,6 +925,75 @@ commit an organization-owned browser key or restore a compiled-in default.
   passthrough, and refusal of both routes before upstream access without a
   valid existing proxy session. Do not use live daemon/browser state.
 
+### Upstream paths and the auth-off cross-site gate (ocean-surface#230 port)
+
+What the client sends is what the daemon gets, or nothing. The daemon behind
+the proxy has no auth of its own for most routes, so the proxy's route table
+and these checks are the real allow-list of browser-reachable authority.
+
+- Every forward builds its upstream URL with `upstream_url(daemon_url, path,
+  query)`, which parses the URL and refuses (`400
+  {"ok":false,"error":"upstream_path_rewritten"}`) unless the parsed path is
+  byte-for-byte the path the proxy decided to forward. The `url` crate
+  normalises on parse (dot segments collapse, `\` becomes `/`, tab/newline
+  vanish), and each of those once let an approved path arrive upstream as a
+  different route. Callers hand the returned `reqwest::Url` to the client, so
+  the value checked is the value sent. Never add a forwarder that formats a
+  `String` URL and passes `&url` to reqwest. In `proxy_send_json_as` and
+  `proxy_rooms_persistent` the check runs before the operator key is
+  attached, so a refused path never carries the credential.
+- `has_dot_segment` refuses, per `/`-segment and after one percent-decode,
+  `.`, `..`, and any backslash (raw `\`, `%5C`, `%5c`). Answer: `400` plain
+  text `invalid path`. hyper accepts a raw `\` in the request target, and the
+  segment split did not see it as a separator while the URL parser did:
+  `GET /v1/rooms/persistent/team\..\..\..\agent\sessions` reached
+  `/v1/agent/sessions`. It runs on the raw wildcard paths (rooms-persistent,
+  longhouse), on every captured `{id}`, and on the GitHub template captures.
+- A captured `{id}` is percent-DECODED by axum, so it is rebuilt with
+  `daemon_path_with_segment(prefix, id, suffix)`: dot-checked, then
+  re-encoded into exactly one segment (sessions, agent sessions, projects,
+  session messages and steer, permission decision, request cancel, LiveKit
+  room id). Formatting a capture raw let `%2F` become a second segment and
+  `%3F` start a query.
+- Wildcard families forward the RAW request path (`req.uri().path()`), never
+  the decoded `{*rest}` capture.
+- Both halves are needed and each is tested alone
+  (`src/tests/path_csrf.rs`): `%5C` is not rewritten by the parser (only the
+  dot guard stops it), and a future normalisation rule is stopped only by the
+  parse-and-compare. The tests drive the production router over `oneshot`
+  AND a real TCP socket against a recording upstream, so "refused" means an
+  empty upstream log.
+- Legitimate clients are unaffected: the Surface bundle percent-encodes ids
+  and room keys with the unreserved alphabet (`rooms::encode`,
+  `daemon::encode_path_segment`) and query values with `encodeURIComponent`,
+  so its paths parse back to themselves. Tauri, the VS Code extension and the
+  Chrome extension reach the daemon directly and never cross this proxy.
+  Fail-closed side effects: a hand-built request target carrying bytes the
+  parser re-encodes (non-ASCII, spaces) is refused rather than forwarded
+  re-encoded, and a room key or id containing a backslash is unreachable.
+- Auth-off (`OCEAN_SURFACE_AUTH=off`, loopback-only by contract):
+  `auth_off_cross_site_gate`, layered inside the session gate, runs
+  `auth_off_mutation_source_allowed` on EVERY non-GET/HEAD request under
+  `/v1/` and `/api/`. Every supplied Origin/Referer must be `http(s)` and
+  name the exact loopback Host that received the request (case-insensitive;
+  another loopback spelling or another port is a different origin); a
+  request with neither header is admitted (local scripts/CLIs). Refusal:
+  `403 {"ok":false,"error":"cross_site_mutation_refused"}`. Why all of them:
+  every proxied POST is reachable without a CORS preflight (a `<form>` or
+  `no-cors` fetch), the forwarders stamp `application/json` on whatever body
+  arrives, and close needs no body at all. `/csp-report`, `/login`, `/logout`
+  are outside it. Reads are never gated.
+- Auth-on: no Origin check. The session cookie is `SameSite=Strict`, so a
+  cross-site request arrives unauthenticated and the auth gate answers 401;
+  keep it Strict. A tunnel or tailnet name is how auth-on is legitimately
+  reached, so Host is not a gate there.
+- Not ported from ocean-surface#230: the session-actor binding and room-owner
+  gate (a multi-device, roster-user proxy model this proxy does not have), the
+  JSON content-type lane, and the auth-off every-request loopback-Host
+  (DNS-rebinding) refusal, which is a reads-side defence separate from the
+  CSRF gate and would turn any non-loopback auth-off reach into a 403 outage.
+- Verify: `cargo test -p ocean-surface-proxy path_csrf`.
+
 ## Build / Check
 
 ```sh
