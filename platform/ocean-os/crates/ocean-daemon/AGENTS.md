@@ -427,6 +427,13 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   loop stopped. No timeout may admit overlapping blocking cleanup.
 - Verify focused `room_maintenance::`, `room_attachments::` and router-contract
   tests plus locked daemon compilation; fixtures use hooks/clocks, never sleeps.
+- Cleanup custody acquisition is a sweep parameter. The daemon passes
+  `try_cleanup_guard` and defers a busy publisher; fixtures pass the awaited
+  `cleanup_guard` because the custody lock is one per process and every fixture
+  in the test binary shares it, so a tried acquisition would let a neighbouring
+  fixture's upload or retention pass turn an assertion about what the sweep
+  removes into a silent skip. Only the deferral fixture keeps the production
+  acquisition. Do not reintroduce a hardcoded try in the orphan pass.
 
 ### Reviewed package consent manifest (ocean-private #55)
 

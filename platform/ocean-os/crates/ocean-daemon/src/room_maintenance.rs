@@ -343,6 +343,10 @@ pub(super) struct SweepOutcome {
 /// `now` is a parameter and not `Utc::now()` so retention is testable against a
 /// fixed clock: a test that had to sleep past a real window could only ever
 /// exercise a window of zero days, which is the one value that means "off".
+///
+/// Cleanup custody is awaited, not tried. Deferral is production behavior with
+/// its own fixture; here it would only let a neighbouring fixture's custody
+/// decide whether this sweep removed anything.
 #[cfg(test)]
 pub(super) fn run_sweep(
     rooms: &RoomStoreHandle,
@@ -351,18 +355,39 @@ pub(super) fn run_sweep(
     now: DateTime<Utc>,
 ) -> SweepOutcome {
     let mut outcome = SweepOutcome::default();
-    run_sweep_into(rooms, blob_root, config, now, &mut outcome, &mut |_| {});
+    run_sweep_into(
+        rooms,
+        blob_root,
+        config,
+        now,
+        &mut outcome,
+        &mut awaited_custody,
+        &mut |_| {},
+    );
     outcome
+}
+
+/// Exclusive cleanup custody that waits for a busy publisher instead of
+/// deferring. Fixtures pass this wherever the assertion is about what the sweep
+/// removes or refuses, so a concurrent fixture's upload or retention pass in the
+/// same process cannot turn that assertion into a silent skip. The one fixture
+/// that asserts deferral passes the production try-acquisition instead.
+#[cfg(test)]
+fn awaited_custody() -> Option<crate::room_attachments::CleanupGuard> {
+    Some(crate::room_attachments::cleanup_guard())
 }
 
 /// The caller owns this accumulator outside its unwind boundary. Every known
 /// committed count survives a later panic; incomplete counts are lower bounds.
+/// `custody` is the orphan pass's per-candidate custody acquisition; see
+/// [`run_orphan_gc_at`].
 fn run_sweep_into(
     rooms: &RoomStoreHandle,
     blob_root: &Path,
     config: &MaintenanceConfig,
     now: DateTime<Utc>,
     outcome: &mut SweepOutcome,
+    custody: &mut dyn FnMut() -> Option<crate::room_attachments::CleanupGuard>,
     stage_changed: &mut dyn FnMut(MaintenanceStage),
 ) {
     let orphan_started = std::time::SystemTime::now();
@@ -382,6 +407,7 @@ fn run_sweep_into(
         config,
         outcome,
         orphan_started,
+        custody,
         |_| {},
         |_| {},
     ) {
@@ -500,12 +526,24 @@ fn run_retention(
 
 /// Classifications are refreshed under publication exclusion and the store guard
 /// immediately before removal. The directory walk never authorizes deletion.
+///
+/// `custody` acquires exclusive cleanup custody for each candidate. The daemon
+/// passes the try-acquisition and defers a busy publisher; fixtures pass
+/// [`awaited_custody`] because the custody lock is one per process and shared
+/// by every fixture in the test binary, so a tried acquisition would turn a
+/// neighbouring fixture's upload into a silent skip here.
+///
+/// Four of the eight parameters are fixture seams (the clock, the custody
+/// acquisition and two observation points); bundling them would only rename
+/// positional closures.
+#[allow(clippy::too_many_arguments)]
 fn run_orphan_gc_at(
     rooms: &RoomStoreHandle,
     blob_root: &Path,
     config: &MaintenanceConfig,
     outcome: &mut SweepOutcome,
     started: std::time::SystemTime,
+    mut custody: impl FnMut() -> Option<crate::room_attachments::CleanupGuard>,
     mut before_candidate: impl FnMut(&Path),
     mut after_capture: impl FnMut(&Path),
 ) -> Result<(), String> {
@@ -531,7 +569,7 @@ fn run_orphan_gc_at(
         let path = blob_root.join(&name);
         before_candidate(&path);
         // Busy publication is a reason to defer cleanup, never to infer orphanhood.
-        let Some(_custody) = crate::room_attachments::try_cleanup_guard() else {
+        let Some(_custody) = custody() else {
             continue;
         };
         let Some(metadata) = gc_inspected(
@@ -913,6 +951,7 @@ async fn sweep_once(
                 &config,
                 Utc::now(),
                 outcome,
+                &mut crate::room_attachments::try_cleanup_guard,
                 stage_changed,
             );
         },
@@ -1082,6 +1121,7 @@ mod tests {
                     &config,
                     now,
                     outcome,
+                    &mut awaited_custody,
                     &mut |stage| {
                         changed(stage);
                         if stage == MaintenanceStage::OrphanGc {
@@ -1803,6 +1843,7 @@ mod tests {
             },
             &mut outcome,
             std::time::SystemTime::now(),
+            awaited_custody,
             |_| {
                 seed_room(&rooms, &key, Utc::now());
                 with_rooms_handle(&rooms, |store| {
@@ -1854,6 +1895,8 @@ mod tests {
             &MaintenanceConfig::default(),
             &mut outcome,
             started,
+            // The production acquisition: this fixture asserts the deferral.
+            crate::room_attachments::try_cleanup_guard,
             |_| {},
             |_| {},
         )
@@ -1880,6 +1923,9 @@ mod tests {
             &MaintenanceConfig::default(),
             &mut outcome,
             started,
+            // Awaited, so the committed row and not another deferral is what
+            // keeps the file.
+            awaited_custody,
             |_| {},
             |_| {},
         )
@@ -1911,6 +1957,7 @@ mod tests {
             &MaintenanceConfig::default(),
             &mut outcome,
             started,
+            awaited_custody,
             |_| {},
             |_| {},
         )
@@ -1943,6 +1990,7 @@ mod tests {
             },
             &mut outcome,
             std::time::SystemTime::now(),
+            awaited_custody,
             |_| {},
             |path| {
                 std::fs::rename(path, &moved).unwrap();
