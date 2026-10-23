@@ -1,4 +1,4 @@
-time: [12:08 pm EDT] [21-10-26]
+time: [12:08] [21-10-26]
 agent: [Codex] [factory coordinator]
 worktree: [codex/factory-dmg-attach-recovery]
 type: [bug report] [refactor]

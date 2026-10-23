@@ -1,4 +1,4 @@
-time: [12:30 pm EDT] [21-10-26]
+time: [12:30] [21-10-26]
 agent: [Codex] [factory builder]
 worktree: [codex/factory-account-readiness]
 type: [bug report] [refactor]

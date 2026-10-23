@@ -1,4 +1,4 @@
-time: [12:57pm EDT] [21-10-26]
+time: [12:57] [21-10-26]
 agent: [Codex] [factory integration builder]
 worktree: [codex/factory-desktop-integration]
 type: [handoff] [workflow]

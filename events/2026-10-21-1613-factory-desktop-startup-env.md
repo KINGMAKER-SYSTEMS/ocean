@@ -1,4 +1,4 @@
-time: [12:13 pm EDT] [21-10-26]
+time: [12:13] [21-10-26]
 agent: [Codex] [factory coordinator]
 worktree: [codex/factory-desktop-startup-env]
 type: [bug report] [refactor]
