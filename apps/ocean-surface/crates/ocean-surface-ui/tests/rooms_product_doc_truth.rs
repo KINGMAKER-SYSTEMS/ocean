@@ -37,7 +37,7 @@ const ACCESS_STATES: [&str; 5] = ["local", "connecting", "live", "recovering", "
 const ACCESS_LINE_NON_STATES: [&str; 5] = ["access", "id", "outbox", "seq", "state"];
 
 /// The audit's specific ghosts, independent of formatting.
-const GHOSTS: [(&str, &str); 4] = [
+const GHOSTS: [(&str, &str); 6] = [
     ("`Remote`", "there is no remote access state"),
     ("`remote`", "there is no remote access state"),
     (
@@ -47,6 +47,14 @@ const GHOSTS: [(&str, &str); 4] = [
     (
         "rooms-panel__list",
         "the rail list is `.rooms-workspace__left-list`; `.rooms-panel__list` has no emitter",
+    ),
+    (
+        "sends no `trigger_policy`",
+        "every create carries `RoomTriggerPolicy::create_default()` (`CreateRoomBody::new`)",
+    ),
+    (
+        "sends neither",
+        "the create body always carries the canonical wake policy; only the PATCH route is unused",
     ),
 ];
 
@@ -305,6 +313,85 @@ fn daemon_routes() -> Option<BTreeMap<String, BTreeSet<String>>> {
         rest = &after[end..];
     }
     Some(routes)
+}
+
+/// The wake policy `CreateRoomBody::new` attaches to every create, as the
+/// daemon receives it: every flag present, `on_schedule` absent. Asserted
+/// against production `rooms.rs` below, never trusted alone.
+fn canonical_wake_policy() -> serde_json::Value {
+    serde_json::json!({
+        "on_mention": true,
+        "on_thread_reply": true,
+        "on_component_event": false,
+        "on_build_failure": false,
+        "on_ci_failure": false,
+    })
+}
+
+/// The JSON body of the doc's "### 1. Creating a Room" request: the first
+/// fenced block after that heading, minus its `POST …` request line and `->`
+/// response lines.
+fn doc_create_body(doc: &str) -> serde_json::Value {
+    let section = doc
+        .split_once("### 1. Creating a Room")
+        .expect("the product doc keeps a `### 1. Creating a Room` section")
+        .1;
+    let block = section
+        .split_once("```\n")
+        .expect("the create section opens a fenced block")
+        .1
+        .split_once("\n```")
+        .expect("the create section's fenced block closes")
+        .0;
+    let body = block
+        .lines()
+        .filter(|line| !line.starts_with("POST ") && !line.starts_with("->"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    serde_json::from_str(&body)
+        .unwrap_or_else(|e| panic!("{DOC}'s create body is not the JSON the surface sends: {e}"))
+}
+
+/// Surface-created rooms carry the canonical wake policy. ocean-core never
+/// convenes on an absent policy ("no trigger policy configured"), so the
+/// `None` the rail once passed made every room created here invoke-only while
+/// the Ocean MCP instructions, this doc and the TUI all said "mention an agent
+/// with @name to wake it". The default is `RoomTriggerPolicy::create_default`
+/// (the "+ New room" policy in `OCEAN_ROOMS_DESIGN_DIRECTION.md` and the Gate 1
+/// create flow), attached by `CreateRoomBody::new` so no caller can drop it;
+/// the doc's create body must show exactly that object.
+#[test]
+fn product_doc_create_body_carries_the_wake_policy_rooms_rs_sends() {
+    let rooms: String = production(&read("crates/ocean-surface-ui/src/rooms.rs"))
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    assert!(
+        rooms.contains(
+            "pubfncreate_default()->Self{Self{on_mention:true,on_thread_reply:true,\
+             on_component_event:false,on_build_failure:false,on_ci_failure:false,\
+             on_schedule:None,}}"
+        ),
+        "RoomTriggerPolicy::create_default in src/rooms.rs is no longer on_mention + \
+         on_thread_reply with everything else off; update {DOC}, canonical_wake_policy() \
+         and this needle together",
+    );
+    assert!(
+        rooms.contains("trigger_policy:RoomTriggerPolicy::create_default(),"),
+        "CreateRoomBody::new must attach RoomTriggerPolicy::create_default(); a create \
+         without a policy is invoke-only",
+    );
+
+    let doc = read(DOC);
+    assert_eq!(
+        doc_create_body(&doc)["trigger_policy"],
+        canonical_wake_policy(),
+        "{DOC}'s create body must show exactly the trigger_policy CreateRoomBody::new sends",
+    );
+    assert!(
+        doc.contains("`RoomTriggerPolicy::create_default()`"),
+        "{DOC} must name RoomTriggerPolicy::create_default() as the policy every create carries",
+    );
 }
 
 #[test]
