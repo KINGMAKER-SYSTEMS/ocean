@@ -1,10 +1,11 @@
 //! The room header's single overflow menu (team-platform P4): share, per-room
-//! agent settings, leave. Secondary actions live here, never as a row of
-//! header buttons.
+//! agent settings, leave, close (DoD 4.3). Secondary actions live here, never
+//! as a row of header buttons.
 
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
+use crate::room_close::{close_offered, RoomCloseState};
 use crate::rooms::{
     fetch_agent_settings, save_agent_settings, RoomAgentSettings, RoomParticipant,
     RoomParticipantKind, Rooms,
@@ -50,12 +51,19 @@ pub fn RoomOverflow(
     joined: bool,
     on_members: Callback<()>,
     trigger_ref: NodeRef<leptos::html::Button>,
+    /// The close confirmation's state (`RoomsWorkspace`-scoped, so a header
+    /// rebuild cannot drop a close in flight). The `Close room…` item only
+    /// arms it; the dialog itself is mounted by the workspace.
+    close: RoomCloseState,
 ) -> impl IntoView {
     let open = RwSignal::new(false);
     let settings_open = RwSignal::new(false);
     let can_share =
         move || crate::rooms_workspace::access_allows_sharing(rooms.access.get().as_ref());
     let has_agents = move || !room_agents(rooms).is_empty();
+    // The daemon's member lane, mirrored (`room_close::close_offered`): the
+    // item is absent, not disabled, for anyone the daemon would refuse.
+    let can_close = move || close_offered(rooms.identity_id.get(), rooms.open_room.get().as_ref());
 
     view! {
         <div class="room-overflow">
@@ -150,6 +158,22 @@ pub fn RoomOverflow(
                             }
                         >
                             "Leave"
+                        </button>
+                    })}
+                    // Closing the room for everyone (DoD 4.3). Two doors deep:
+                    // this item only ARMS the confirmation; its own button
+                    // fires. Last, because it is the one that cannot be undone.
+                    {move || can_close().then(|| view! {
+                        <button
+                            class="room-overflow__item room-overflow__item--danger"
+                            role="menuitem"
+                            type="button"
+                            on:click=move |_| {
+                                open.set(false);
+                                close.arm();
+                            }
+                        >
+                            "Close room\u{2026}"
                         </button>
                     })}
                 </div>
