@@ -966,7 +966,6 @@ mod tests {
     async fn resource_authority_retains_turn_custody_and_preview_permissions() {
         use crate::tests::{isolated_room_fixture_state, TestEnvRestore, AUTO_CONVENE_ENV_LOCK};
         use ocean_agent::{RoomResourceAuthority, RoomResourceError, RoomResourceOp};
-        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _restore = TestEnvRestore::capture(&[
             "OCEAN_AUTH_FILE",
@@ -1196,7 +1195,6 @@ mod tests {
     #[tokio::test]
     async fn grant_route_replays_after_root_removal_and_expiry() {
         use crate::tests::{isolated_room_fixture_state, TestEnvRestore, AUTO_CONVENE_ENV_LOCK};
-        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _restore = TestEnvRestore::capture(&[
             "OCEAN_AUTH_FILE",

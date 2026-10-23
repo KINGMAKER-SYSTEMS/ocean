@@ -302,7 +302,7 @@ use slack_canvas_fulfillment::{
     CanvasFulfillmentQuery, CANVAS_FULFILLMENT_TTL,
 };
 #[cfg(test)]
-use yolo_settings::{resolve_request_yolo, yolo_enabled, YoloSetRequest};
+use yolo_settings::{yolo_env_enabled, PermissionPolicyInputs, YoloSetRequest};
 
 #[derive(Clone)]
 struct AppState {
@@ -9758,24 +9758,31 @@ mod tests {
         assert!(unresolved.role_unresolved);
     }
 
-    /// Serializes every test that mutates the process-global env this module
-    /// reads for the YOLO resolution (`OCEAN_YOLO`, `OCEAN_CONFIG_DIR`). Rust
-    /// runs unit tests on parallel threads sharing one process env, so without
-    /// this lock two env-touching yolo tests can interleave and read each
-    /// other's writes. A tokio (non-poisoning) mutex: async tests may hold the
-    /// guard across `.await` without tripping `clippy::await_holding_lock`, and
-    /// a panicking test never cascades poison into spurious failures here.
-    static YOLO_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    /// The single lock for every test in this binary that mutates the
+    /// process-global environment the daemon reads at request time
+    /// (`OCEAN_CONFIG_DIR`, `OCEAN_YOLO`, `OCEAN_MODEL`, auth-file and
+    /// agents-dir overrides). Rust runs unit tests on parallel threads sharing
+    /// one process env, so two env-touching tests interleave and read each
+    /// other's writes unless they serialize here. Hold the guard for the whole
+    /// test, declare the `TestEnvRestore` AFTER it so the restore runs before
+    /// the lock is released, and prefer an explicit-input seam (see
+    /// `PermissionPolicyInputs`) so a test needs no process env at all.
+    /// `AUTO_CONVENE_ENV_LOCK` is this same mutex under its historical name;
+    /// never take both names in one test (a tokio mutex is not reentrant).
+    /// A tokio (non-poisoning) mutex: async tests may hold the guard across
+    /// `.await` without tripping `clippy::await_holding_lock`, and a panicking
+    /// test never cascades poison into spurious failures here.
+    pub(super) static PROCESS_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     /// Blocking flavor for non-async `#[test]`s (no runtime to stall).
-    fn yolo_env_guard() -> tokio::sync::MutexGuard<'static, ()> {
-        YOLO_ENV_LOCK.blocking_lock()
+    pub(super) fn process_env_guard() -> tokio::sync::MutexGuard<'static, ()> {
+        PROCESS_ENV_LOCK.blocking_lock()
     }
 
     /// Awaiting flavor for async contexts — `blocking_lock` panics inside a
     /// tokio runtime.
-    pub(super) async fn yolo_env_guard_async() -> tokio::sync::MutexGuard<'static, ()> {
-        YOLO_ENV_LOCK.lock().await
+    pub(super) async fn process_env_guard_async() -> tokio::sync::MutexGuard<'static, ()> {
+        PROCESS_ENV_LOCK.lock().await
     }
 
     /// An empty canvas-fulfillment store for the `gc_registries` tests that only
@@ -12852,7 +12859,7 @@ mod tests {
         // `OCEAN_MODEL`); hold the env lock ONLY across that build, then drop it
         // before the SSE awaits below so the env stays free for other tests.
         let state = {
-            let _g = yolo_env_guard_async().await;
+            let _g = process_env_guard_async().await;
             permission_test_state()
         };
         let shutdown = state.shutdown.clone();
@@ -13158,7 +13165,7 @@ mod tests {
     /// already failed to terminate — never racing a healthy drain.
     #[test]
     fn hard_ceiling_defaults_past_grace() {
-        let _g = yolo_env_guard();
+        let _g = process_env_guard();
         // Clear overrides so we read the documented defaults.
         std::env::remove_var("OCEAN_SHUTDOWN_GRACE_SECS");
         std::env::remove_var("OCEAN_SHUTDOWN_HARD_CEILING_SECS");
@@ -14711,7 +14718,6 @@ mod tests {
 
     #[tokio::test]
     async fn model_catalog_list_preserves_picker_shape_and_readiness_fields() {
-        let _guard = yolo_env_guard_async().await;
         let _convene_guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let state = permission_test_state();
         let (provider, model) = state.runtime.current_model();
@@ -14874,7 +14880,7 @@ mod tests {
     /// the process-global `OCEAN_MAX_CONCURRENT_TURNS`.
     #[test]
     fn max_concurrent_turns_resolves_env_override() {
-        let _guard = yolo_env_guard();
+        let _guard = process_env_guard();
 
         std::env::remove_var("OCEAN_MAX_CONCURRENT_TURNS");
         assert_eq!(max_concurrent_turns(), DEFAULT_MAX_CONCURRENT_TURNS);
@@ -15943,28 +15949,26 @@ mod tests {
 
     /// `OCEAN_YOLO` parsing: default/empty/garbage = gated (false); the
     /// documented truthy spellings = bypass (true). This is the operator opt-in
-    /// switch; it must default safe.
+    /// switch; it must default safe. Pure parse over explicit values: no process
+    /// env is touched.
     #[test]
     fn ocean_yolo_env_defaults_off_and_opts_in_explicitly() {
-        let _guard = yolo_env_guard();
-        // Serialize env mutation within this test; restore the prior value.
-        let prior = env::var("OCEAN_YOLO").ok();
-
-        env::remove_var("OCEAN_YOLO");
-        assert!(!yolo_enabled(), "unset OCEAN_YOLO must gate (default off)");
+        assert!(
+            !yolo_env_enabled(None),
+            "unset OCEAN_YOLO must gate (default off)"
+        );
 
         for off in ["", "0", "false", "no", "off", "nonsense"] {
-            env::set_var("OCEAN_YOLO", off);
-            assert!(!yolo_enabled(), "OCEAN_YOLO={off:?} must stay gated");
+            assert!(
+                !yolo_env_enabled(Some(off)),
+                "OCEAN_YOLO={off:?} must stay gated"
+            );
         }
         for on in ["1", "true", "TRUE", "Yes", "on"] {
-            env::set_var("OCEAN_YOLO", on);
-            assert!(yolo_enabled(), "OCEAN_YOLO={on:?} must opt into bypass");
-        }
-
-        match prior {
-            Some(v) => env::set_var("OCEAN_YOLO", v),
-            None => env::remove_var("OCEAN_YOLO"),
+            assert!(
+                yolo_env_enabled(Some(on)),
+                "OCEAN_YOLO={on:?} must opt into bypass"
+            );
         }
     }
 
@@ -16003,19 +16007,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    #[tokio::test]
-    async fn yolo_settings_get_reports_persisted_effective_and_env_override() {
-        let _guard = yolo_env_guard_async().await;
-        let _convene_guard = AUTO_CONVENE_ENV_LOCK.lock().await;
-        let prior_yolo = env::var("OCEAN_YOLO").ok();
-        let prior_cfg = env::var("OCEAN_CONFIG_DIR").ok();
-        let tmp = std::env::temp_dir().join(format!("ocean-yolo-get-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&tmp).unwrap();
-        env::set_var("OCEAN_CONFIG_DIR", &tmp);
-        env::remove_var("OCEAN_YOLO");
-        ocean_agent::persist_yolo_pref(&tmp, true);
+    #[test]
+    fn yolo_settings_get_reports_persisted_effective_and_env_override() {
+        let tmp = tempfile::tempdir().unwrap();
+        ocean_agent::persist_yolo_pref(tmp.path(), true);
 
-        let Json(body) = yolo_setting_get().await;
+        let body = PermissionPolicyInputs::explicit(tmp.path(), None).yolo_snapshot();
         assert_eq!(
             body,
             json!({
@@ -16026,8 +16023,7 @@ mod tests {
             })
         );
 
-        env::set_var("OCEAN_YOLO", "0");
-        let Json(body) = yolo_setting_get().await;
+        let body = PermissionPolicyInputs::explicit(tmp.path(), Some("0")).yolo_snapshot();
         assert_eq!(
             body,
             json!({
@@ -16037,30 +16033,13 @@ mod tests {
                 "env_override": false,
             })
         );
-
-        match prior_yolo {
-            Some(v) => env::set_var("OCEAN_YOLO", v),
-            None => env::remove_var("OCEAN_YOLO"),
-        }
-        match prior_cfg {
-            Some(v) => env::set_var("OCEAN_CONFIG_DIR", v),
-            None => env::remove_var("OCEAN_CONFIG_DIR"),
-        }
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    #[tokio::test]
-    async fn yolo_settings_set_persists_before_resolving_effective_and_reports_mask() {
-        let _guard = yolo_env_guard_async().await;
-        let _convene_guard = AUTO_CONVENE_ENV_LOCK.lock().await;
-        let prior_yolo = env::var("OCEAN_YOLO").ok();
-        let prior_cfg = env::var("OCEAN_CONFIG_DIR").ok();
-        let tmp = std::env::temp_dir().join(format!("ocean-yolo-set-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&tmp).unwrap();
-        env::set_var("OCEAN_CONFIG_DIR", &tmp);
-        env::set_var("OCEAN_YOLO", "0");
+    #[test]
+    fn yolo_settings_set_persists_before_resolving_effective_and_reports_mask() {
+        let tmp = tempfile::tempdir().unwrap();
 
-        let Json(body) = yolo_setting_set(Json(YoloSetRequest { enabled: true })).await;
+        let body = PermissionPolicyInputs::explicit(tmp.path(), Some("0")).persist_yolo(true);
         assert_eq!(
             body,
             json!({
@@ -16070,10 +16049,9 @@ mod tests {
                 "env_override": false,
             })
         );
-        assert_eq!(ocean_agent::load_yolo_pref(&tmp), Some(true));
+        assert_eq!(ocean_agent::load_yolo_pref(tmp.path()), Some(true));
 
-        env::remove_var("OCEAN_YOLO");
-        let Json(body) = yolo_setting_set(Json(YoloSetRequest { enabled: false })).await;
+        let body = PermissionPolicyInputs::explicit(tmp.path(), None).persist_yolo(false);
         assert_eq!(
             body,
             json!({
@@ -16083,178 +16061,175 @@ mod tests {
                 "env_override": null,
             })
         );
-        assert_eq!(ocean_agent::load_yolo_pref(&tmp), Some(false));
-
-        match prior_yolo {
-            Some(v) => env::set_var("OCEAN_YOLO", v),
-            None => env::remove_var("OCEAN_YOLO"),
-        }
-        match prior_cfg {
-            Some(v) => env::set_var("OCEAN_CONFIG_DIR", v),
-            None => env::remove_var("OCEAN_CONFIG_DIR"),
-        }
-        let _ = std::fs::remove_dir_all(&tmp);
+        assert_eq!(ocean_agent::load_yolo_pref(tmp.path()), Some(false));
     }
 
-    #[tokio::test]
-    async fn permission_settings_roundtrip_all_three_modes_and_report_env_mask() {
-        let _guard = yolo_env_guard_async().await;
-        let _convene_guard = AUTO_CONVENE_ENV_LOCK.lock().await;
-        let prior_yolo = env::var("OCEAN_YOLO").ok();
-        let prior_cfg = env::var("OCEAN_CONFIG_DIR").ok();
-        let tmp =
-            std::env::temp_dir().join(format!("ocean-permission-mode-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&tmp).unwrap();
-        env::set_var("OCEAN_CONFIG_DIR", &tmp);
-        env::remove_var("OCEAN_YOLO");
+    /// The three-state policy round-trips through the settings seam and the
+    /// legacy `OCEAN_YOLO` value masks it exactly as documented. Every input is
+    /// explicit (a disposable directory plus the raw env value), so this test
+    /// holds no lock and cannot observe another test's `OCEAN_CONFIG_DIR` or
+    /// `OCEAN_YOLO` writes; the process-env wiring of the axum handlers is
+    /// proven separately by `permission_settings_handlers_resolve_from_process_env`.
+    #[test]
+    fn permission_settings_roundtrip_all_three_modes_and_report_env_mask() {
+        let tmp = tempfile::tempdir().unwrap();
+        let no_env = PermissionPolicyInputs::explicit(tmp.path(), None);
 
         for mode in [
             PermissionMode::Manual,
             PermissionMode::Automatic,
             PermissionMode::SkipAll,
         ] {
-            let Json(body) =
-                permission_settings_set(Json(ocean_core::PermissionSettingsRequest { mode })).await;
+            let body = no_env.persist_mode(mode);
             assert_eq!(body.persisted, Some(mode));
             assert_eq!(body.effective, mode);
             assert_eq!(body.env_override, None);
 
-            let Json(read_back) = permission_settings_get().await;
+            let read_back = no_env.settings_snapshot();
             assert_eq!(read_back, body);
             assert_eq!(
-                ocean_agent::load_yolo_pref(&tmp),
+                ocean_agent::load_yolo_pref(tmp.path()),
                 Some(mode == PermissionMode::SkipAll),
                 "legacy yolo mirror must track skip-all only"
             );
         }
 
-        ocean_agent::persist_permission_mode(&tmp, PermissionMode::Manual).unwrap();
-        env::set_var("OCEAN_YOLO", "1");
-        let Json(forced_skip) = permission_settings_get().await;
+        ocean_agent::persist_permission_mode(tmp.path(), PermissionMode::Manual).unwrap();
+        let forced_skip =
+            PermissionPolicyInputs::explicit(tmp.path(), Some("1")).settings_snapshot();
         assert_eq!(forced_skip.persisted, Some(PermissionMode::Manual));
         assert_eq!(forced_skip.effective, PermissionMode::SkipAll);
         assert_eq!(forced_skip.env_override, Some(PermissionMode::SkipAll));
 
-        ocean_agent::persist_permission_mode(&tmp, PermissionMode::SkipAll).unwrap();
-        env::set_var("OCEAN_YOLO", "0");
-        let Json(forced_safe) = permission_settings_get().await;
+        ocean_agent::persist_permission_mode(tmp.path(), PermissionMode::SkipAll).unwrap();
+        let forced_safe =
+            PermissionPolicyInputs::explicit(tmp.path(), Some("0")).settings_snapshot();
         assert_eq!(forced_safe.persisted, Some(PermissionMode::SkipAll));
         assert_eq!(forced_safe.effective, PermissionMode::Automatic);
         assert_eq!(forced_safe.env_override, Some(PermissionMode::Automatic));
 
-        env::set_var("OCEAN_YOLO", "1");
-        let Json(same_as_saved) = permission_settings_get().await;
+        let same_as_saved =
+            PermissionPolicyInputs::explicit(tmp.path(), Some("1")).settings_snapshot();
         assert_eq!(same_as_saved.effective, PermissionMode::SkipAll);
         assert_eq!(
             same_as_saved.env_override, None,
             "matching env and saved modes are not an override"
         );
-
-        match prior_yolo {
-            Some(v) => env::set_var("OCEAN_YOLO", v),
-            None => env::remove_var("OCEAN_YOLO"),
-        }
-        match prior_cfg {
-            Some(v) => env::set_var("OCEAN_CONFIG_DIR", v),
-            None => env::remove_var("OCEAN_CONFIG_DIR"),
-        }
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    #[test]
+    fn permission_settings_report_persistence_failure_instead_of_false_success() {
+        let tmp = tempfile::tempdir().unwrap();
+        let not_a_dir = tmp.path().join("not-a-directory");
+        std::fs::write(&not_a_dir, b"not a directory").unwrap();
+
+        let body = PermissionPolicyInputs::explicit(not_a_dir.join("child"), None)
+            .persist_mode(PermissionMode::Manual);
+        assert!(!body.ok, "an unwritable preference must not report success");
+        assert!(body.error.as_deref().is_some_and(|error| !error.is_empty()));
+        assert_ne!(body.persisted, Some(PermissionMode::Manual));
+    }
+
+    /// The axum handlers resolve their inputs from the process environment:
+    /// `OCEAN_CONFIG_DIR` selects the preference directory and `OCEAN_YOLO` is
+    /// the legacy override. This is the one test in the family that touches
+    /// process env, so it holds the single process-env lock for its whole body
+    /// and restores on drop (`TestEnvRestore` declared after the guard); every
+    /// policy table lives in the explicit-input tests above.
     #[tokio::test]
-    async fn permission_settings_report_persistence_failure_instead_of_false_success() {
-        let _guard = yolo_env_guard_async().await;
-        let _convene_guard = AUTO_CONVENE_ENV_LOCK.lock().await;
-        let prior_yolo = env::var("OCEAN_YOLO").ok();
-        let prior_cfg = env::var("OCEAN_CONFIG_DIR").ok();
-        let tmp = std::env::temp_dir().join(format!(
-            "ocean-permission-unwritable-{}",
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::write(&tmp, b"not a directory").unwrap();
-        env::set_var("OCEAN_CONFIG_DIR", tmp.join("child"));
+    async fn permission_settings_handlers_resolve_from_process_env() {
+        let _guard = process_env_guard_async().await;
+        let _restore = TestEnvRestore::capture(&["OCEAN_CONFIG_DIR", "OCEAN_YOLO"]);
+        let tmp = tempfile::tempdir().unwrap();
+        env::set_var("OCEAN_CONFIG_DIR", tmp.path());
         env::remove_var("OCEAN_YOLO");
 
         let Json(body) = permission_settings_set(Json(ocean_core::PermissionSettingsRequest {
             mode: PermissionMode::Manual,
         }))
         .await;
-        assert!(!body.ok, "an unwritable preference must not report success");
-        assert!(body.error.as_deref().is_some_and(|error| !error.is_empty()));
-        assert_ne!(body.persisted, Some(PermissionMode::Manual));
+        assert!(body.ok);
+        assert_eq!(body.persisted, Some(PermissionMode::Manual));
+        assert_eq!(body.effective, PermissionMode::Manual);
+        assert_eq!(body.env_override, None);
+        assert_eq!(
+            ocean_agent::load_permission_mode(tmp.path()),
+            Some(PermissionMode::Manual),
+            "the handler must persist into OCEAN_CONFIG_DIR"
+        );
 
-        match prior_yolo {
-            Some(v) => env::set_var("OCEAN_YOLO", v),
-            None => env::remove_var("OCEAN_YOLO"),
-        }
-        match prior_cfg {
-            Some(v) => env::set_var("OCEAN_CONFIG_DIR", v),
-            None => env::remove_var("OCEAN_CONFIG_DIR"),
-        }
-        let _ = std::fs::remove_file(&tmp);
+        env::set_var("OCEAN_YOLO", "1");
+        let Json(masked) = permission_settings_get().await;
+        assert_eq!(masked.persisted, Some(PermissionMode::Manual));
+        assert_eq!(masked.effective, PermissionMode::SkipAll);
+        assert_eq!(masked.env_override, Some(PermissionMode::SkipAll));
+
+        let Json(legacy) = yolo_setting_get().await;
+        assert_eq!(
+            legacy,
+            json!({
+                "ok": true,
+                "persisted": false,
+                "effective": true,
+                "env_override": true,
+            })
+        );
+
+        env::remove_var("OCEAN_YOLO");
+        let Json(legacy_set) = yolo_setting_set(Json(YoloSetRequest { enabled: true })).await;
+        assert_eq!(
+            legacy_set,
+            json!({
+                "ok": true,
+                "persisted": true,
+                "effective": true,
+                "env_override": null,
+            })
+        );
+        assert_eq!(
+            ocean_agent::load_permission_mode(tmp.path()),
+            Some(PermissionMode::SkipAll),
+            "the legacy adapter must write the three-state file too"
+        );
     }
 
-    /// OCEAN-YOLO precedence: `effective_yolo()` resolves env → persisted → off.
+    /// OCEAN-YOLO precedence: effective yolo resolves env → persisted → off.
     /// - persisted=true + no env ⇒ effective true (the personal default sticks);
     /// - `OCEAN_YOLO=0` overrides persisted=true ⇒ effective off (env wins);
     /// - `OCEAN_YOLO=1` ⇒ effective true even with persisted=false;
     /// - nothing set (no env, no file) ⇒ effective off (the safety default).
     #[test]
     fn effective_yolo_precedence_env_over_persisted_over_off() {
-        let _guard = yolo_env_guard();
-        // Also serialize against the auto-convene tests, the other suite that
-        // mutates `OCEAN_CONFIG_DIR`/`OCEAN_YOLO` process-globally. Acquire it
-        // AFTER the yolo lock; no path takes these in the reverse order, so this
-        // can't deadlock.
-        let _convene_guard = AUTO_CONVENE_ENV_LOCK.blocking_lock();
-        let prior_yolo = env::var("OCEAN_YOLO").ok();
-        let prior_cfg = env::var("OCEAN_CONFIG_DIR").ok();
-
-        let tmp = std::env::temp_dir().join(format!("ocean-yolo-prec-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&tmp).unwrap();
-        env::set_var("OCEAN_CONFIG_DIR", &tmp);
+        let tmp = tempfile::tempdir().unwrap();
+        let resolve = |yolo_env: Option<&str>| {
+            PermissionPolicyInputs::explicit(tmp.path(), yolo_env).effective_yolo()
+        };
 
         // Nothing set anywhere ⇒ off (safety default).
-        env::remove_var("OCEAN_YOLO");
-        assert!(!effective_yolo(), "no env + no persisted ⇒ off");
+        assert!(!resolve(None), "no env + no persisted ⇒ off");
 
         // Persisted true, no env ⇒ the personal default takes effect.
-        ocean_agent::persist_yolo_pref(&tmp, true);
-        env::remove_var("OCEAN_YOLO");
-        assert!(effective_yolo(), "persisted true + no env ⇒ on");
+        ocean_agent::persist_yolo_pref(tmp.path(), true);
+        assert!(resolve(None), "persisted true + no env ⇒ on");
 
         // OCEAN_YOLO=0 overrides persisted true ⇒ env wins, gated.
-        env::set_var("OCEAN_YOLO", "0");
         assert!(
-            !effective_yolo(),
+            !resolve(Some("0")),
             "OCEAN_YOLO=0 must override persisted true"
         );
 
         // OCEAN_YOLO=1 overrides persisted false ⇒ env wins, bypass.
-        ocean_agent::persist_yolo_pref(&tmp, false);
-        env::set_var("OCEAN_YOLO", "1");
+        ocean_agent::persist_yolo_pref(tmp.path(), false);
         assert!(
-            effective_yolo(),
+            resolve(Some("1")),
             "OCEAN_YOLO=1 must override persisted false"
         );
 
         // Unrecognized env ⇒ falls through to persisted (false here).
-        env::set_var("OCEAN_YOLO", "maybe");
         assert!(
-            !effective_yolo(),
+            !resolve(Some("maybe")),
             "garbage env falls through to persisted false"
         );
-
-        // Restore env.
-        match prior_yolo {
-            Some(v) => env::set_var("OCEAN_YOLO", v),
-            None => env::remove_var("OCEAN_YOLO"),
-        }
-        match prior_cfg {
-            Some(v) => env::set_var("OCEAN_CONFIG_DIR", v),
-            None => env::remove_var("OCEAN_CONFIG_DIR"),
-        }
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// OCEAN-224: the fail-fast predicate truth table. A voice turn is
@@ -16290,19 +16265,18 @@ mod tests {
     /// accepted and silently stalling on a permission prompt no spoken interface
     /// can answer. We drive the real `agent_voice` handler with yolo forced off;
     /// the rejection path returns BEFORE the runtime is touched, so this is a
-    /// fast, deterministic assertion of the no-silent-stall contract.
+    /// fast, deterministic assertion of the no-silent-stall contract. The
+    /// handler reads operator policy from process env, so this test holds the
+    /// single process-env lock and restores on drop.
     #[tokio::test]
     async fn voice_turn_without_token_and_no_yolo_fails_fast_not_hang() {
-        let _guard = yolo_env_guard_async().await;
-        let _convene_guard = AUTO_CONVENE_ENV_LOCK.lock().await;
-        let prior_yolo = env::var("OCEAN_YOLO").ok();
-        let prior_cfg = env::var("OCEAN_CONFIG_DIR").ok();
+        let _guard = process_env_guard_async().await;
+        let _restore = TestEnvRestore::capture(&["OCEAN_CONFIG_DIR", "OCEAN_YOLO"]);
 
         // Force operator policy OFF: no persisted file (fresh config dir) and
         // OCEAN_YOLO explicitly off, so `effective_yolo()` is false.
-        let tmp = std::env::temp_dir().join(format!("ocean-voice-224-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&tmp).unwrap();
-        env::set_var("OCEAN_CONFIG_DIR", &tmp);
+        let tmp = tempfile::tempdir().unwrap();
+        env::set_var("OCEAN_CONFIG_DIR", tmp.path());
         env::set_var("OCEAN_YOLO", "0");
         assert!(!effective_yolo(), "test precondition: yolo must be off");
 
@@ -16331,17 +16305,6 @@ mod tests {
             "the error must name BOTH escape hatches (enable yolo / send a \
              decision_token) so the caller can act; got: {err:?}"
         );
-
-        // Restore env.
-        match prior_yolo {
-            Some(v) => env::set_var("OCEAN_YOLO", v),
-            None => env::remove_var("OCEAN_YOLO"),
-        }
-        match prior_cfg {
-            Some(v) => env::set_var("OCEAN_CONFIG_DIR", v),
-            None => env::remove_var("OCEAN_CONFIG_DIR"),
-        }
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// OCEAN-224: a voice turn that DOES carry a `decision_token` is answerable
@@ -16360,79 +16323,59 @@ mod tests {
 
     /// OCEAN-160 (P0): the legacy `POST /v1/prompt` (and its async sibling
     /// `POST /v1/requests`) must NOT trust the wire `yolo` flag to escalate.
-    /// `resolve_request_yolo` is the handler's yolo resolver; it must ignore the
-    /// client-supplied flag and return exactly `effective_yolo()` (operator
-    /// policy: env → persisted → off) in every state.
+    /// `resolve_request_mode` is the handler's policy resolver; it must ignore
+    /// the client-supplied flag and return exactly the effective operator policy
+    /// (env → persisted → off) in every state.
     ///
     /// The load-bearing assertion is the first block: operator policy OFF +
     /// wire `yolo: true` ⇒ STILL off. That is the auth-bypass the ticket closes.
     #[test]
     fn resolve_request_yolo_ignores_wire_flag() {
-        let _guard = yolo_env_guard();
-        let _convene_guard = AUTO_CONVENE_ENV_LOCK.blocking_lock();
-        let prior_yolo = env::var("OCEAN_YOLO").ok();
-        let prior_cfg = env::var("OCEAN_CONFIG_DIR").ok();
-
-        let tmp = std::env::temp_dir().join(format!("ocean-yolo-wire-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&tmp).unwrap();
-        env::set_var("OCEAN_CONFIG_DIR", &tmp);
+        let tmp = tempfile::tempdir().unwrap();
+        let resolve = |yolo_env: Option<&str>, wire_yolo: bool| {
+            PermissionPolicyInputs::explicit(tmp.path(), yolo_env).resolve_request_mode(wire_yolo)
+                == PermissionMode::SkipAll
+        };
 
         // Operator policy OFF (no env, no persisted). A wire `yolo: true` must
         // NOT flip the bypass on — this is the OCEAN-160 vuln, closed.
-        env::remove_var("OCEAN_YOLO");
         assert!(
-            !resolve_request_yolo(true),
+            !resolve(None, true),
             "wire yolo=true must NOT bypass the gate when operator policy is off (OCEAN-160)"
         );
         assert!(
-            !resolve_request_yolo(false),
+            !resolve(None, false),
             "wire yolo=false with policy off stays off"
         );
 
         // Operator opted in via persisted default ⇒ on, independent of the wire
         // flag (a legitimate operator default still works, both inputs).
-        ocean_agent::persist_yolo_pref(&tmp, true);
-        env::remove_var("OCEAN_YOLO");
+        ocean_agent::persist_yolo_pref(tmp.path(), true);
         assert!(
-            resolve_request_yolo(false),
+            resolve(None, false),
             "persisted operator default true is honored even with wire yolo=false"
         );
         assert!(
-            resolve_request_yolo(true),
+            resolve(None, true),
             "persisted operator default true stays on with wire yolo=true"
         );
 
         // Operator opted in via env ⇒ on regardless of wire flag.
-        ocean_agent::persist_yolo_pref(&tmp, false);
-        env::set_var("OCEAN_YOLO", "1");
-        assert!(
-            resolve_request_yolo(false),
-            "OCEAN_YOLO=1 ⇒ on (wire false)"
-        );
-        assert!(resolve_request_yolo(true), "OCEAN_YOLO=1 ⇒ on (wire true)");
+        ocean_agent::persist_yolo_pref(tmp.path(), false);
+        assert!(resolve(Some("1"), false), "OCEAN_YOLO=1 ⇒ on (wire false)");
+        assert!(resolve(Some("1"), true), "OCEAN_YOLO=1 ⇒ on (wire true)");
 
         // env explicitly OFF must override even a wire true.
-        env::set_var("OCEAN_YOLO", "0");
         assert!(
-            !resolve_request_yolo(true),
+            !resolve(Some("0"), true),
             "OCEAN_YOLO=0 must keep the gate on even with wire yolo=true"
         );
 
-        // resolve_request_yolo is exactly effective_yolo, flag aside.
-        env::remove_var("OCEAN_YOLO");
-        ocean_agent::persist_yolo_pref(&tmp, true);
-        assert_eq!(resolve_request_yolo(true), effective_yolo());
-        assert_eq!(resolve_request_yolo(false), effective_yolo());
-
-        match prior_yolo {
-            Some(v) => env::set_var("OCEAN_YOLO", v),
-            None => env::remove_var("OCEAN_YOLO"),
-        }
-        match prior_cfg {
-            Some(v) => env::set_var("OCEAN_CONFIG_DIR", v),
-            None => env::remove_var("OCEAN_CONFIG_DIR"),
-        }
-        let _ = std::fs::remove_dir_all(&tmp);
+        // resolve_request_mode is exactly the effective policy, flag aside.
+        ocean_agent::persist_yolo_pref(tmp.path(), true);
+        let inputs = PermissionPolicyInputs::explicit(tmp.path(), None);
+        assert_eq!(inputs.resolve_request_mode(true), inputs.effective_mode());
+        assert_eq!(inputs.resolve_request_mode(false), inputs.effective_mode());
     }
 
     // --- OCEAN-130: fake-tool provider drives the full block→decide→proceed
@@ -16621,13 +16564,11 @@ mod tests {
 
     // ---- Auto-convene end-to-end (OCEAN-111) -------------------------------
 
-    /// Serialize the runtime-building auto-convene tests: they mutate process
-    /// env (`OCEAN_MODEL`/`OCEAN_CONFIG_DIR`) to select the Fake provider, and
-    /// env is process-global, so two of them racing would clobber each other.
-    /// A tokio (non-poisoning) mutex so async tests can hold the guard across
-    /// `.await` without tripping `clippy::await_holding_lock`.
-    pub(super) static AUTO_CONVENE_ENV_LOCK: tokio::sync::Mutex<()> =
-        tokio::sync::Mutex::const_new(());
+    /// Historical name for the one process-env lock, `PROCESS_ENV_LOCK`: the
+    /// runtime-building fixtures below mutate `OCEAN_MODEL`/`OCEAN_CONFIG_DIR`/
+    /// `OCEAN_YOLO`, the same variables the settings handlers read, so both
+    /// families serialize on one mutex. Never take both names in one test.
+    pub(super) use self::PROCESS_ENV_LOCK as AUTO_CONVENE_ENV_LOCK;
 
     /// Panic-safe restoration for process-global environment changed while
     /// constructing deterministic test runtimes.
@@ -17497,7 +17438,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn at_mention_queues_turn_and_posts_reply_back() {
-        let _yolo_guard = yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _env = TestEnvRestore::capture(&[
             "OCEAN_AUTH_FILE",
@@ -17731,7 +17671,6 @@ mod tests {
     /// directory and its `owning_project` is the registered project.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn bound_room_convene_resolves_its_project() {
-        let _yolo_guard = yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _env = TestEnvRestore::capture(&[
             "OCEAN_AUTH_FILE",
@@ -17877,7 +17816,6 @@ mod tests {
     /// This pins that unbound rooms are not silently swept into some project.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn unbound_room_convene_fails_closed_without_session_or_reply() {
-        let _yolo_guard = yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _env = TestEnvRestore::capture(&[
             "OCEAN_AUTH_FILE",
@@ -17991,7 +17929,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn post_admission_refusal_keeps_the_admitted_generation_attribution() {
-        let _yolo_guard = yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _env = TestEnvRestore::capture(&[
             "OCEAN_AUTH_FILE",
@@ -24589,7 +24526,7 @@ mod tests {
 
     /// Dedicated lock serializing the `OCEAN_LONGHOUSE_PREPARE` env mutation in the
     /// tests below (process env is global; parallel test threads would race it),
-    /// mirroring `YOLO_ENV_LOCK` (tokio mutex: async-holdable, non-poisoning).
+    /// mirroring `PROCESS_ENV_LOCK` (tokio mutex: async-holdable, non-poisoning).
     static LONGHOUSE_PREPARE_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     /// Blocking flavor for non-async `#[test]`s (no runtime to stall).
@@ -25971,7 +25908,7 @@ mod tests {
         // `permission_test_state` mutates process env; hold the lock only across
         // the build, then drop it before the awaits below.
         let state = {
-            let _g = yolo_env_guard_async().await;
+            let _g = process_env_guard_async().await;
             permission_test_state()
         };
 
@@ -26084,7 +26021,7 @@ mod tests {
         use tower::ServiceExt; // for `oneshot`
 
         let state = {
-            let _g = yolo_env_guard_async().await;
+            let _g = process_env_guard_async().await;
             permission_test_state()
         };
         // Bump gc_failures on AppState (the GC loop's `record_gc_failure` does the
@@ -26230,7 +26167,7 @@ mod tests {
         use tower::ServiceExt; // for `oneshot`
 
         let state = {
-            let _g = yolo_env_guard_async().await;
+            let _g = process_env_guard_async().await;
             permission_test_state()
         };
         // Bump the counters on AppState (the SSE handlers' `Lagged` arm does the
@@ -29066,7 +29003,6 @@ prunable gitdir file points to non-existent location
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn room_sovereign_two_nodes_consent_only_to_their_own_agents() {
-        let _yolo = yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _env = TestEnvRestore::capture(&[
             "OCEAN_AUTH_FILE",
@@ -29328,7 +29264,6 @@ prunable gitdir file points to non-existent location
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn room_sovereign_member_consent_requires_current_exact_federation_proofs() {
-        let _yolo = yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _env = TestEnvRestore::capture(&[
             "OCEAN_AUTH_FILE",
@@ -29506,7 +29441,6 @@ prunable gitdir file points to non-existent location
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn room_sovereign_member_reconsent_status_and_revoke_cancel_exact_generations() {
-        let _yolo = yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _env = TestEnvRestore::capture(&[
             "OCEAN_AUTH_FILE",
@@ -29686,7 +29620,6 @@ prunable gitdir file points to non-existent location
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn room_sovereign_member_lifetime_revalidates_roster_and_credentials() {
-        let _yolo = yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _env = TestEnvRestore::capture(&[
             "OCEAN_AUTH_FILE",
@@ -29800,7 +29733,6 @@ prunable gitdir file points to non-existent location
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn room_sovereign_member_explicit_invoke_keeps_session_and_token_authority() {
-        let _yolo = yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _env = TestEnvRestore::capture(&[
             "OCEAN_AUTH_FILE",
@@ -29904,7 +29836,6 @@ prunable gitdir file points to non-existent location
         use http_body_util::BodyExt;
         use tower::ServiceExt as _;
 
-        let _yolo = yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _env = TestEnvRestore::capture(&[
             "OCEAN_AUTH_FILE",
@@ -30019,7 +29950,6 @@ prunable gitdir file points to non-existent location
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn room_sovereign_member_tool_approval_requires_its_turn_token_and_current_custody() {
-        let _yolo = yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _env = TestEnvRestore::capture(&[
             "OCEAN_AUTH_FILE",
@@ -30258,7 +30188,6 @@ prunable gitdir file points to non-existent location
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn room_reviewed_digest_authorize_refuses_changed_preview_without_side_effects() {
-        let _yolo_guard = yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _env = TestEnvRestore::capture(&[
             "OCEAN_AUTH_FILE",
@@ -30397,7 +30326,6 @@ prunable gitdir file points to non-existent location
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn room_reviewed_digest_reauthorize_preserves_live_generation_until_fresh_consent() {
-        let _yolo_guard = yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _env = TestEnvRestore::capture(&[
             "OCEAN_AUTH_FILE",
@@ -30538,7 +30466,6 @@ prunable gitdir file points to non-existent location
         use http_body_util::BodyExt as _;
         use tower::ServiceExt as _;
 
-        let _yolo_guard = yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _env = TestEnvRestore::capture(&[
             "OCEAN_AUTH_FILE",
@@ -30854,7 +30781,6 @@ prunable gitdir file points to non-existent location
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn local_room_agent_bootstrap_is_authenticated_previewable_and_non_authorizing() {
-        let _yolo_guard = yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _env = TestEnvRestore::capture(&[
             "OCEAN_AUTH_FILE",

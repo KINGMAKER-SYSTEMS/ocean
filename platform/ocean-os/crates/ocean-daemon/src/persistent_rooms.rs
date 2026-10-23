@@ -6379,7 +6379,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn p6_room_search_validates_query_and_returns_newest_chat_first() {
-        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _env = TestEnvRestore::capture(&[
             "OCEAN_AUTH_FILE",
@@ -6444,7 +6443,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn p6_room_search_refuses_queries_over_the_length_cap() {
-        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _env = TestEnvRestore::capture(&[
             "OCEAN_AUTH_FILE",
@@ -6494,7 +6492,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn p6_inbox_scans_only_the_most_recently_active_rooms() {
-        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _env = TestEnvRestore::capture(&[
             "OCEAN_AUTH_FILE",
@@ -6568,7 +6565,6 @@ mod tests {
 
     #[tokio::test]
     async fn p6_inbox_roster_lookup_does_not_hydrate_old_transcript() {
-        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _env = TestEnvRestore::capture(&[
             "OCEAN_AUTH_FILE",
@@ -6607,7 +6603,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn p6_inbox_lists_mentions_and_replies_to_the_owner_newest_first() {
-        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _env = TestEnvRestore::capture(&[
             "OCEAN_AUTH_FILE",
@@ -6691,7 +6686,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn p6_search_and_inbox_project_unbounded_author_ids() {
-        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _env = TestEnvRestore::capture(&[
             "OCEAN_AUTH_FILE",
@@ -6731,7 +6725,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn p6_room_prefs_get_put_and_list_carries_muted() {
-        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _env = TestEnvRestore::capture(&[
             "OCEAN_AUTH_FILE",
@@ -7927,7 +7920,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn g3_thread_reply_deduplicates_dispatch_and_attributes_agent_reply() {
-        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _env = TestEnvRestore::capture(&[
             "OCEAN_AUTH_FILE",
@@ -8576,7 +8568,6 @@ mod tests {
     }
 
     async fn sovereign_federated_dispatch_fixture(local_role: ocean_core::FederatedRoomRole) {
-        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
         let _env = AUTO_CONVENE_ENV_LOCK.lock().await;
         let tmp = tempfile::tempdir().unwrap();
         let _restore = TestEnvRestore::capture(&[
@@ -8706,7 +8697,6 @@ mod tests {
 
     #[tokio::test]
     async fn p2c_unresolved_and_stale_dispatches_emit_no_turn_and_only_denial_audits() {
-        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
         let _env = AUTO_CONVENE_ENV_LOCK.lock().await;
         let tmp = tempfile::tempdir().unwrap();
         let _restore = TestEnvRestore::capture(&[
@@ -9096,7 +9086,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn room_tail_join_leave_and_auto_convene_audit_are_live() {
-        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _env = TestEnvRestore::capture(&[
             "OCEAN_AUTH_FILE",
@@ -10046,7 +10035,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn valid_folder_applies_instructions_model_allowlist_and_caps() {
-        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _env = TestEnvRestore::capture(&[
             "OCEAN_AUTH_FILE",
@@ -10142,7 +10130,6 @@ env = { FIXTURE = "1" }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn empty_data_only_agentdef_is_resolved_and_queued() {
-        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _env = TestEnvRestore::capture(&[
             "OCEAN_AUTH_FILE",
@@ -10228,7 +10215,6 @@ env = { FIXTURE = "1" }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn p3_mention_produces_one_agent_run_that_ends_done_with_reply() {
-        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _env = TestEnvRestore::capture(&[
             "OCEAN_AUTH_FILE",
@@ -10326,7 +10312,6 @@ env = { FIXTURE = "1" }
 
     #[tokio::test]
     async fn p4_mutations_require_explicit_room_operator_before_lookup() {
-        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _env = TestEnvRestore::capture(&[
             "OCEAN_AUTH_FILE",
@@ -10441,7 +10426,6 @@ env = { FIXTURE = "1" }
 
     #[tokio::test]
     async fn p4_room_permission_decision_is_bound_to_the_exact_pending_request() {
-        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _env = TestEnvRestore::capture(&[
             "OCEAN_AUTH_FILE",
@@ -10564,7 +10548,6 @@ env = { FIXTURE = "1" }
 
     #[tokio::test]
     async fn p4_room_model_override_falls_back_to_admitted_package() {
-        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _env = TestEnvRestore::capture(&[
             "OCEAN_AUTH_FILE",
@@ -10647,7 +10630,6 @@ env = { FIXTURE = "1" }
 
     #[tokio::test]
     async fn p4_room_tools_refuse_cancelled_and_stale_generation_writes() {
-        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _env = TestEnvRestore::capture(&[
             "OCEAN_AUTH_FILE",
@@ -10782,7 +10764,6 @@ env = { FIXTURE = "1" }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn p4_settings_tools_and_thread_reply_resume_a_parked_run() {
-        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _env = TestEnvRestore::capture(&[
             "OCEAN_AUTH_FILE",
@@ -10945,7 +10926,6 @@ env = { FIXTURE = "1" }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn p4_answer_resumption_claims_once_and_survives_refused_admission() {
-        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _env = TestEnvRestore::capture(&[
             "OCEAN_AUTH_FILE",
@@ -11094,7 +11074,6 @@ env = { FIXTURE = "1" }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn p4_answer_claim_settles_when_the_posting_request_is_dropped() {
-        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _env = TestEnvRestore::capture(&[
             "OCEAN_AUTH_FILE",
@@ -11218,7 +11197,6 @@ env = { FIXTURE = "1" }
 
     #[tokio::test]
     async fn p4_run_persistence_failure_refuses_successor_admission() {
-        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _env = TestEnvRestore::capture(&[
             "OCEAN_AUTH_FILE",
@@ -11323,7 +11301,6 @@ env = { FIXTURE = "1" }
 
     #[tokio::test]
     async fn p4_run_persistence_failure_does_not_terminate_or_park_room_ask() {
-        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _env = TestEnvRestore::capture(&[
             "OCEAN_AUTH_FILE",
@@ -11460,7 +11437,6 @@ env = { FIXTURE = "1" }
 
     #[tokio::test]
     async fn p4_successor_work_card_is_durable_before_the_turn_start_returns() {
-        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _env = TestEnvRestore::capture(&[
             "OCEAN_AUTH_FILE",
@@ -11559,7 +11535,6 @@ env = { FIXTURE = "1" }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn p3_owner_cancel_of_a_room_turn_ends_the_card_cancelled_not_failed() {
-        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _env = TestEnvRestore::capture(&[
             "OCEAN_AUTH_FILE",
@@ -11655,7 +11630,6 @@ env = { FIXTURE = "1" }
 
     #[tokio::test]
     async fn p3_runtime_sink_persists_tool_progress_and_keeps_finished_card_terminal() {
-        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _env = TestEnvRestore::capture(&[
             "OCEAN_AUTH_FILE",
@@ -13555,7 +13529,6 @@ env = { FIXTURE = "1" }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn room_tail_close_after_final_catch_up_still_sends_the_marker() {
-        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _restore = TestEnvRestore::capture(&[
             "OCEAN_CONFIG_DIR",
@@ -13597,7 +13570,6 @@ env = { FIXTURE = "1" }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn closing_a_room_freezes_it_and_says_who_did_it() {
-        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
         let _env = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _restore = TestEnvRestore::capture(&[
             "OCEAN_CONFIG_DIR",
@@ -13780,7 +13752,6 @@ env = { FIXTURE = "1" }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_refused_close_leaves_the_room_exactly_as_it_was() {
-        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
         let _env = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _restore = TestEnvRestore::capture(&[
             "OCEAN_CONFIG_DIR",
@@ -13894,7 +13865,6 @@ env = { FIXTURE = "1" }
 
     #[tokio::test]
     async fn a_close_between_replay_and_openness_check_still_sends_the_marker() {
-        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
         let _env = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _restore = TestEnvRestore::capture(&[
             "OCEAN_CONFIG_DIR",
@@ -13945,7 +13915,6 @@ env = { FIXTURE = "1" }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn closing_a_room_ends_the_message_tail_after_the_marker() {
-        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
         let _env = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _restore = TestEnvRestore::capture(&[
             "OCEAN_CONFIG_DIR",
@@ -14140,7 +14109,6 @@ env = { FIXTURE = "1" }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn actual_room_success_releases_capacity_without_capability_clone_custody() {
-        let _yolo = crate::tests::yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _restore = TestEnvRestore::capture(&[
             "OCEAN_CONFIG_DIR",
@@ -14217,7 +14185,6 @@ env = { FIXTURE = "1" }
 
     #[tokio::test]
     async fn abort_before_first_poll_restores_room_capacity_and_settles_once() {
-        let _yolo = crate::tests::yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _restore = TestEnvRestore::capture(&[
             "OCEAN_CONFIG_DIR",
@@ -14364,7 +14331,6 @@ env = { FIXTURE = "1" }
 
     #[tokio::test]
     async fn error_terminal_restores_capacity_and_ends_saved_authority_once() {
-        let _yolo = crate::tests::yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _restore = TestEnvRestore::capture(&[
             "OCEAN_CONFIG_DIR",
@@ -14491,7 +14457,6 @@ env = { FIXTURE = "1" }
 
     #[tokio::test]
     async fn registration_refusal_cancels_saved_capabilities_and_restores_capacity() {
-        let _yolo = crate::tests::yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _restore = TestEnvRestore::capture(&[
             "OCEAN_CONFIG_DIR",
@@ -14571,7 +14536,6 @@ env = { FIXTURE = "1" }
 
     #[tokio::test]
     async fn unresolved_required_slot_refuses_before_registration_optional_slot_does_not() {
-        let _yolo = crate::tests::yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _restore = TestEnvRestore::capture(&[
             "OCEAN_CONFIG_DIR",
@@ -14639,7 +14603,6 @@ env = { FIXTURE = "1" }
 
     #[tokio::test]
     async fn create_route_canonicalizes_valid_roots_and_refuses_invalid_without_rows() {
-        let _yolo = crate::tests::yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _restore = TestEnvRestore::capture(&[
             "OCEAN_CONFIG_DIR",
@@ -14821,7 +14784,6 @@ env = { FIXTURE = "1" }
             assert_eq!(plain["body"], PLAIN, "{route} rewrote an ordinary body");
         }
 
-        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _restore = TestEnvRestore::capture(&[
             "OCEAN_CONFIG_DIR",

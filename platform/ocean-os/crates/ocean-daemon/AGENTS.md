@@ -98,6 +98,18 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
 - Global approval policy is exposed at `GET/POST /v1/settings/permissions` with
   manual, automatic (default), and skip-all modes; the legacy yolo endpoint
   remains a compatibility adapter and request-wire `yolo` remains inert.
+  `yolo_settings::PermissionPolicyInputs` captures `OCEAN_CONFIG_DIR` and
+  `OCEAN_YOLO` once per request; handlers are thin wrappers over it.
+- Test isolation for process env: unit tests share one process environment,
+  so a test that writes `OCEAN_CONFIG_DIR`, `OCEAN_YOLO`, `OCEAN_MODEL` or any
+  other variable the daemon reads at request time holds the single
+  `crate::tests::PROCESS_ENV_LOCK` (`process_env_guard[_async]()`, historical
+  alias `AUTO_CONVENE_ENV_LOCK`, never both in one test) for its whole body and
+  declares a `TestEnvRestore` after the guard so the restore runs before the
+  lock is released. Prefer resolving policy through an explicit-input seam
+  (`PermissionPolicyInputs::explicit`) so the test needs no process env at
+  all; `permission_settings_handlers_resolve_from_process_env` is the one
+  env-touching proof that the handlers still read the real environment.
 - `call-voice` turns are always `HarnessProfile::Voice`, `yolo: false`, and
   `PromptControl::without_tools()`, regardless of global or persisted YOLO.
 - `POST /v1/voice/stt` remains the credential-owning batch transcription seam
