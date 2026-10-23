@@ -74,20 +74,31 @@ fn model_choices(mut models: Vec<ModelInfo>) -> Vec<ModelInfo> {
     models
 }
 
-fn model_option(models: &[ModelInfo], id: &str) -> (bool, String) {
-    let Some(model) = models.iter().find(|model| model.id == id) else {
-        return (true, id.to_owned());
+/// The live catalog entry for a rendered option id, falling back to the
+/// mount-time snapshot when the id is (about to be) diffed out.
+fn current_entry<'a>(models: &'a [ModelInfo], id: &str, fallback: &'a ModelInfo) -> &'a ModelInfo {
+    models
+        .iter()
+        .find(|model| model.id == id)
+        .unwrap_or(fallback)
+}
+
+fn option_unavailable(models: &[ModelInfo], id: &str, fallback: &ModelInfo) -> bool {
+    current_entry(models, id, fallback).ready == Some(false)
+}
+
+fn option_text(models: &[ModelInfo], id: &str, fallback: &ModelInfo) -> String {
+    let model = current_entry(models, id, fallback);
+    let label = if model.label.is_empty() {
+        id.to_owned()
+    } else {
+        model.label.clone()
     };
-    let label = model_label(std::slice::from_ref(model), id);
-    let unavailable = model.ready == Some(false);
-    (
-        unavailable,
-        if unavailable {
-            format!("{label} · connect {}", model.provider)
-        } else {
-            label
-        },
-    )
+    if model.ready == Some(false) {
+        format!("{label} · connect {}", model.provider)
+    } else {
+        label
+    }
 }
 
 /// Native startup intent is available before the daemon's model API exists.
@@ -239,12 +250,24 @@ pub fn ModelControl(daemon: Daemon) -> impl IntoView {
                             </option>
                         </Show>
                         <For each=move || model_choices(models.get()) key=|model| model.id.clone() children=move |model| {
+                            // `<For>` never re-runs `children` for a key it has
+                            // already seen, so keying by id alone froze each
+                            // option's label/readiness at first paint: a same-id
+                            // catalog refresh (fetch_models after login or model
+                            // swap) flipped `ready` without re-rendering the row.
+                            // The row body therefore re-reads the live catalog
+                            // entry from the `models` signal; the captured
+                            // `model` is only the mount-time fallback.
                             let id = model.id.clone();
-                            let lookup_id = id.clone();
-                            let option = Memo::new(move |_| model_option(&models.get(), &lookup_id));
+                            let disabled_id = id.clone();
+                            let selected_id = id.clone();
+                            let text_id = id.clone();
+                            let mount = model.clone();
                             view! {
-                                <option value=id.clone() disabled=move || option.get().0 prop:selected=move || selected.get().is_some_and(|selected| choice_id(&models.get(), &selected) == id)>
-                                    {move || option.get().1}
+                                <option value=id.clone()
+                                    disabled=move || option_unavailable(&models.get(), &disabled_id, &mount)
+                                    prop:selected=move || selected.get().is_some_and(|selected| choice_id(&models.get(), &selected) == selected_id)>
+                                    {move || option_text(&models.get(), &text_id, &model)}
                                 </option>
                             }
                         } />
@@ -278,33 +301,6 @@ pub fn ModelControl(daemon: Daemon) -> impl IntoView {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn model_readiness_option_reacts_without_replacing_its_identity() {
-        let owner = Owner::new();
-        owner.with(|| {
-            let models = RwSignal::new(vec![
-                serde_json::from_value::<ModelInfo>(serde_json::json!({
-                    "id": "codex/model", "label": "Model", "provider": "codex", "ready": false
-                }))
-                .unwrap(),
-            ]);
-            // This memo is retained by the keyed option when the id stays equal.
-            let option = Memo::new(move |_| model_option(&models.get(), "codex/model"));
-            assert_eq!(option.get(), (true, "Model · connect codex".into()));
-            models.update(|models| {
-                models[0].ready = Some(true);
-                models[0].label = "Connected model".into();
-            });
-            assert_eq!(option.get(), (false, "Connected model".into()));
-            models.update(|models| models[0].ready = Some(false));
-            assert_eq!(
-                option.get(),
-                (true, "Connected model · connect codex".into())
-            );
-        });
-        owner.cleanup();
-    }
 
     #[test]
     fn new_always_thinking_models_do_not_offer_off_or_minimal() {
@@ -413,5 +409,75 @@ mod tests {
             "custom-pinned-model"
         );
         assert_eq!(model_label(&[], ""), "Default model");
+    }
+
+    fn one_route_catalog(ready: Option<bool>, label: &str) -> Vec<ModelInfo> {
+        serde_json::from_value(serde_json::json!([
+            {"id":"openai-codex/gpt-6.1-sol", "provider":"openai-codex", "label":label, "ready":ready}
+        ]))
+        .unwrap()
+    }
+
+    #[test]
+    fn same_id_refresh_updates_option_readiness_and_label() {
+        let id = "openai-codex/gpt-6.1-sol";
+        // Mount-time capture: a disconnected route renders disabled with the
+        // connect hint. Regression for #144: the old row froze these at first
+        // paint because the keyed <For> never re-ran its children closure.
+        let mounted = one_route_catalog(Some(false), "GPT-6.1 Sol");
+        let mount = &mounted[0];
+        assert!(option_unavailable(&mounted, id, mount));
+        assert_eq!(
+            option_text(&mounted, id, mount),
+            "GPT-6.1 Sol · connect openai-codex"
+        );
+        // fetch_models replaces the whole catalog; a same-id ready flip must be
+        // observed by the row, not the mount-time snapshot.
+        let connected = one_route_catalog(Some(true), "GPT-6.1 Sol");
+        assert!(!option_unavailable(&connected, id, mount));
+        assert_eq!(option_text(&connected, id, mount), "GPT-6.1 Sol");
+        // And the reverse: a same-id ready->false refresh re-disables the row.
+        let disconnected_again = one_route_catalog(Some(false), "GPT-6.1 Sol");
+        assert!(option_unavailable(&disconnected_again, id, mount));
+        assert_eq!(
+            option_text(&disconnected_again, id, mount),
+            "GPT-6.1 Sol · connect openai-codex"
+        );
+        // A refreshed label is observed too.
+        let relabeled = one_route_catalog(Some(true), "GPT-6.1 Sol (Codex)");
+        assert_eq!(option_text(&relabeled, id, mount), "GPT-6.1 Sol (Codex)");
+        // Older daemons omit readiness: the row stays enabled.
+        let legacy = one_route_catalog(None, "GPT-6.1 Sol");
+        assert!(!option_unavailable(&legacy, id, mount));
+        assert_eq!(option_text(&legacy, id, mount), "GPT-6.1 Sol");
+        // Identity: while the refreshed catalog no longer lists the id (the
+        // keyed row is diffing out), the mount snapshot keeps its own value
+        // instead of rewriting the option to a different model.
+        assert!(option_unavailable(&[], id, mount));
+        assert_eq!(
+            option_text(&[], id, mount),
+            "GPT-6.1 Sol · connect openai-codex"
+        );
+    }
+
+    #[test]
+    fn models_signal_refresh_flips_rendered_option_state() {
+        // The <For> row closures read the live `models` signal, so a whole-vec
+        // replacement (the exact write fetch_models performs) flips same-id
+        // option state without a key change.
+        let owner = Owner::new();
+        owner.set();
+        let models = RwSignal::new(one_route_catalog(Some(false), "GPT-6.1 Sol"));
+        let id = "openai-codex/gpt-6.1-sol".to_string();
+        let mount = models.get_untracked()[0].clone();
+        let mount_text = mount.clone();
+        let text_id = id.clone();
+        let unavailable = move || option_unavailable(&models.get(), &id, &mount);
+        let text = move || option_text(&models.get(), &text_id, &mount_text);
+        assert!(unavailable());
+        assert_eq!(text(), "GPT-6.1 Sol · connect openai-codex");
+        models.set(one_route_catalog(Some(true), "GPT-6.1 Sol"));
+        assert!(!unavailable());
+        assert_eq!(text(), "GPT-6.1 Sol");
     }
 }
