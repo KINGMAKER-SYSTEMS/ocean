@@ -76,7 +76,7 @@ Root GitHub Actions builds for the public Ocean monorepo.
 ## Work Guidance
 
 - Native status checks are `Build Ocean` and `Build Surface`.
-- Record history in the canonical monorepo `events.md`, not in this folder.
+- Record history in a new canonical root `events/YYYY-MM-DD-HHMM-<branch-slug>.md` entry. Existing event files and legacy `events.md` are immutable.
 
 ## Verification
 

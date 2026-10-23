@@ -77,9 +77,6 @@ impl Daemon {
         let url = self.base.join(path)?;
         ensure!(url.origin() == self.base.origin(), "invalid daemon route");
         let mut request = self.http.request(method, url).query(query);
-        if path == "/v1/prompt" {
-            request = request.timeout(Duration::from_secs(600));
-        }
         if let Some(body) = body {
             request = request.json(&body);
         }
@@ -110,7 +107,7 @@ impl Daemon {
         let value: Value = serde_json::from_slice(&bytes).context("invalid daemon JSON reply")?;
         ensure!(value.is_object(), "invalid daemon reply shape");
         ensure!(
-            value.get("ok") != Some(&Value::Bool(false)) || path == "/v1/prompt",
+            value.get("ok") != Some(&Value::Bool(false)),
             "daemon refused request"
         );
         Ok(value)
@@ -215,15 +212,6 @@ struct Post {
     room: String,
     body: String,
     thread_parent_seq: Option<u64>,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Prompt {
-    prompt: String,
-    cwd: Option<String>,
-    session_id: Option<String>,
-    yolo: Option<bool>,
-    max_turns: Option<u32>,
 }
 
 fn page_query(page: &Page, maximum: u32) -> Result<Vec<(&'static str, String)>> {
@@ -417,29 +405,10 @@ async fn call_tool(daemon: &Daemon, name: &str, args: Value) -> Result<Value> {
                 "has_more": reply.get("has_more"), "next_cursor": reply.get("next_cursor")}),
             )
         }
+        // Refuse stale host configurations as well as omitting discovery.
+        // Direct turns need a bounded, submitter-owned permission flow first.
         "ocean_prompt" => {
-            let prompt: Prompt = serde_json::from_value(args)?;
-            ensure!(!prompt.prompt.trim().is_empty(), "prompt is empty");
-            ensure!(
-                prompt.max_turns.is_none_or(|n| (1..=64).contains(&n)),
-                "invalid max_turns"
-            );
-            let cwd = prompt
-                .cwd
-                .map(std::path::PathBuf::from)
-                .map_or_else(std::env::current_dir, Ok)?;
-            ensure!(
-                cwd.is_absolute() && cwd.is_dir(),
-                "cwd must name an existing absolute folder"
-            );
-            let reply = daemon.request(Method::POST, "/v1/prompt", &[], Some(json!({
-                "prompt": prompt.prompt, "cwd": cwd, "session_id": prompt.session_id,
-                "yolo": prompt.yolo.unwrap_or(false), "max_turns": prompt.max_turns, "client_type": "cli"
-            }))).await?;
-            Ok(fields(
-                &reply,
-                &["ok", "session_id", "request_id", "stdout", "stderr", "code"],
-            ))
+            bail!("Direct prompts are unavailable through MCP; use Ocean's CLI or app.")
         }
         _ => bail!("unknown tool"),
     }
@@ -459,7 +428,6 @@ fn definitions() -> Value {
         ("ocean_room_resources", "Read contributed folder metadata, never local paths or credential values.", json!({"room":room}), vec!["room"]),
         ("ocean_agents", "List the daemon's available agent package metadata.", json!({}), vec![]),
         ("ocean_sessions", "List recent daemon sessions. Follow next_cursor for more.", json!({"limit":limit,"cursor":cursor}), vec![]),
-        ("ocean_prompt", "Run one daemon-owned turn. Default cwd is this bridge's working directory. yolo defaults false and must be explicitly authorized by the user.", json!({"prompt":{"type":"string"},"cwd":{"type":"string"},"session_id":{"type":"string"},"yolo":{"type":"boolean"},"max_turns":{"type":"integer","minimum":1,"maximum":64}}), vec!["prompt"]),
     ];
     json!(tools.into_iter().map(|(name, description, properties, required)| json!({
         "name":name,"description":description,"inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false}
@@ -501,21 +469,10 @@ async fn handle(daemon: &Daemon, incoming: Value) -> Option<Value> {
                 .cloned()
                 .unwrap_or_else(|| json!({}));
             let (text, failed) = match call_tool(daemon, name, args).await {
-                Ok(mut v) => {
-                    let mut text = serde_json::to_string_pretty(&v).unwrap_or_default();
-                    if name == "ocean_prompt" && text.chars().count() > MAX_TEXT {
-                        // Keep the completed turn's identity and outcome; never
-                        // encourage replay just because its output is large.
-                        for (key, limit) in [("stdout", 6000), ("stderr", 2000)] {
-                            if let Some(value) = v.get(key).and_then(Value::as_str) {
-                                v[key] = Value::String(value.chars().take(limit).collect());
-                            }
-                        }
-                        v["output_truncated"] = Value::Bool(true);
-                        text = serde_json::to_string_pretty(&v).unwrap_or_default();
-                    }
-                    (text, v.get("ok") == Some(&Value::Bool(false)))
-                }
+                Ok(v) => (
+                    serde_json::to_string_pretty(&v).unwrap_or_default(),
+                    v.get("ok") == Some(&Value::Bool(false)),
+                ),
                 Err(e) => (format!("{e:#}"), true),
             };
             // Never return truncated JSON as if it were a complete room/page.

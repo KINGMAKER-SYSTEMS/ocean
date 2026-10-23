@@ -33,6 +33,12 @@ This crate owns shared protocol types used across Ocean clients, daemon, runtime
   credential.
 - The closed Track-0 `RoomId` projection family is retired. Durable room contracts use the open `RoomKey` model; do not recreate projection DTOs without a new audited API design.
 
+- Session detail optionally carries bounded boot-local steering turn snapshots:
+  exact turn and steer IDs, ended proof, and pending/delivered/unconsumed/unknown outcomes.
+  Omission remains backward-compatible and means unknown, never unconsumed. These are
+  reconciliation evidence, not authorization or persistent session schema. Verify
+  cargo test -p ocean-core steering_session_snapshot --locked.
+
 ### Federation types
 
 - `RoomMessage.federated` and optional `attachment_id` remain additive,

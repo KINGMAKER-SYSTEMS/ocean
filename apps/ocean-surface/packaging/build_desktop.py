@@ -236,19 +236,40 @@ def windows_dependency_tool():
 def mount_image(image, temporary):
     mount = temporary / "mounted"
     mount.mkdir()
-    run(["hdiutil", "attach", image, "-readonly", "-nobrowse", "-mountpoint", mount], timeout=60)
+    try:
+        run(["hdiutil", "attach", image, "-readonly", "-nobrowse", "-mountpoint", mount], timeout=60)
+    except BaseException as attach_error:
+        # A failed command can have mounted the volume before losing its reply.
+        # The image may also be mounted elsewhere; only our unique mount is ours.
+        try:
+            if image_attached(image, mount):
+                detach_image(mount, image)
+        except Exception as cleanup_error:
+            attach_error.add_note(f"Disk-image cleanup could not be confirmed: {cleanup_error}")
+        raise
     try:
         yield mount / "Ocean.app"
     finally:
         detach_image(mount, image)
 
 
-def image_attached(image):
+def image_attached(image, mount):
     info = plistlib.loads(run(["hdiutil", "info", "-plist"], capture=True, timeout=15).encode())
-    images = info.get("images")
+    images = info.get("images") if isinstance(info, dict) else None
     if not isinstance(images, list) or any(not isinstance(item, dict) for item in images):
         raise RuntimeError("Couldn't verify disk-image cleanup")
-    return any(os.path.realpath(item.get("image-path", "")) == os.path.realpath(image) for item in images)
+    for item in images:
+        image_path = item.get("image-path")
+        if not isinstance(image_path, str) or os.path.realpath(image_path) != os.path.realpath(image):
+            continue
+        entities = item.get("system-entities")
+        if not isinstance(entities, list) or any(not isinstance(entity, dict) for entity in entities):
+            raise RuntimeError("Couldn't verify disk-image mount ownership")
+        for entity in entities:
+            mount_point = entity.get("mount-point")
+            if isinstance(mount_point, str) and os.path.realpath(mount_point) == os.path.realpath(mount):
+                return True
+    return False
 
 
 def detach_image(mount, image):
@@ -261,13 +282,13 @@ def detach_image(mount, image):
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
             # A command timeout is not proof that the detach failed. Inspect
             # disk-image authority before retrying the same owned mount.
-            if not image_attached(image):
+            if not image_attached(image, mount):
                 return
             time.sleep(1)
     try:
         run(["hdiutil", "detach", "-force", mount], timeout=15)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        if image_attached(image):
+        if image_attached(image, mount):
             raise
 
 

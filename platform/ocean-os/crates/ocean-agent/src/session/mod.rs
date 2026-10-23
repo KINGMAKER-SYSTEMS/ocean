@@ -1204,6 +1204,7 @@ pub(crate) fn session_detail(session: Session) -> SessionDetail {
         .collect::<Vec<_>>();
 
     SessionDetail {
+        steering: None,
         id: session.id,
         created_ms: session.created_ms,
         updated_ms: session.updated_ms,

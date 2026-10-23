@@ -500,6 +500,7 @@ pub fn Transcript(daemon: Daemon) -> impl IntoView {
             // Prompts typed while the turn above was running (or while the
             // daemon reported the session busy). They sit below the live row
             // and each becomes an ordinary user turn when it is sent.
+            <SteeringPrompts daemon=daemon_for_queue.clone() />
             <QueuedPrompts daemon=daemon_for_queue />
             // Quiet return affordance: content is growing below while the
             // user reads history. Zero-height sticky dock — no layout shift,
@@ -548,6 +549,39 @@ fn TurnView(
                 None => ().into_any(),
             }}
         </div>
+    }
+}
+
+/// Messages steered into the running turn and not yet delivered, oldest first.
+/// Same dashed bubble as a queued row, labelled for when it will be read and
+/// with no remove control: once the daemon accepts a steer it cannot be taken
+/// back. Each disappears when the daemon delivers it (it reappears above as a
+/// user turn at the point it landed) or falls back to the queue.
+#[component]
+fn SteeringPrompts(daemon: Daemon) -> impl IntoView {
+    let steering = daemon.steering_prompts;
+    view! {
+        <For
+            each=move || steering.get()
+            key=|row| row.id
+            children=move |row| {
+                let id = row.id;
+                let unresolved = Memo::new(move |_| steering.with(|rows|
+                    rows.iter().find(|row| row.id == id).is_some_and(|row| row.unresolved)));
+                view! {
+                    <div class="turn turn--queued turn--steering">
+                        <div class="turn--user">
+                            <div class="turn__body">
+                                <div class="turn__queued-text">{row.display}</div>
+                                <div class="turn__queued-meta">
+                                    <span class="turn__queued-label">{move || if unresolved.get() { "Steering · outcome unknown" } else { "Steering · next step" }}</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                }
+            }
+        />
     }
 }
 

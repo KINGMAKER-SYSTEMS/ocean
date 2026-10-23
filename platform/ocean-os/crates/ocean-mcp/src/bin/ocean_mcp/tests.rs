@@ -86,10 +86,6 @@ async fn respond(State(records): State<Records>, request: Request) -> axum::resp
         json!({"ok":true,"credential_slots":[{"name":"KEY","status":"missing","required":true,"value":"never expose"}]})
     } else if path == "/v1/sessions" {
         json!({"ok":true,"sessions":[{"id":"s","title":"Work","turns":7,"model":"fixture","workspace_root":"/workspace"}],"has_more":true,"next_cursor":"next"})
-    } else if path == "/v1/prompt" && body["prompt"] == "large" {
-        json!({"ok":true,"session_id":"retained-session","request_id":"retained-request","stdout":"x".repeat(MAX_TEXT + 1),"stderr":"","code":0})
-    } else if path == "/v1/prompt" {
-        json!({"ok":false,"session_id":"s","stdout":"","stderr":"fixture refused","code":1})
     } else {
         return StatusCode::NOT_FOUND.into_response();
     };
@@ -257,15 +253,50 @@ async fn session_turn_count_and_cursor_match_current_daemon() {
 }
 
 #[tokio::test]
-async fn prompt_preserves_daemon_permission_default_and_failed_turn_is_an_mcp_error() {
+async fn direct_prompts_are_unadvertised_and_refused_before_daemon_contact() {
     let f = fixture().await;
-    let reply = handle(&f.daemon, json!({"jsonrpc":"2.0","id":"turn","method":"tools/call","params":{"name":"ocean_prompt","arguments":{"prompt":"test"}}})).await.unwrap();
-    assert_eq!(reply["result"]["isError"], true);
-    let records = f.records.lock().unwrap();
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0].2["yolo"], false);
-    assert_eq!(records[0].2["client_type"], "cli");
-    assert!(records[0].2.get("create_if_missing").is_none());
+    let listed = handle(
+        &f.daemon,
+        json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
+    )
+    .await
+    .unwrap();
+    assert!(listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|tool| tool["name"] != "ocean_prompt"));
+
+    for arguments in [
+        json!({}),
+        Value::Null,
+        json!("malformed"),
+        json!({"prompt":"write a file"}),
+        json!({"prompt":"write a file","yolo":true}),
+        json!({"prompt":"write a file","decision_token":"caller-supplied"}),
+    ] {
+        let reply = handle(
+            &f.daemon,
+            json!({"jsonrpc":"2.0","id":"turn","method":"tools/call",
+                "params":{"name":"ocean_prompt","arguments":arguments}}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(reply["result"]["isError"], true);
+        assert!(reply["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Direct prompts are unavailable"));
+    }
+    let omitted = handle(
+        &f.daemon,
+        json!({"jsonrpc":"2.0","id":"omitted","method":"tools/call",
+            "params":{"name":"ocean_prompt"}}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(omitted["result"]["isError"], true);
+    assert!(f.records.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -288,19 +319,4 @@ async fn notifications_and_invalid_requests_never_execute_a_tool() {
     let reply = handle(&f.daemon, json!({"id":1,"method":"tools/call","params":{"name":"ocean_room_join","arguments":{"room":"team"}}})).await.unwrap();
     assert_eq!(reply["error"]["code"], -32600);
     assert!(f.records.lock().unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn large_completed_turn_keeps_identity_and_truthful_truncation_without_retry() {
-    let f = fixture().await;
-    let reply = handle(&f.daemon, json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"ocean_prompt","arguments":{"prompt":"large"}}})).await.unwrap();
-    assert_eq!(reply["result"]["isError"], false);
-    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
-    assert!(text.len() < MAX_TEXT);
-    let result: Value = serde_json::from_str(text).unwrap();
-    assert_eq!(result["session_id"], "retained-session");
-    assert_eq!(result["request_id"], "retained-request");
-    assert_eq!(result["output_truncated"], true);
-    assert_eq!(result["ok"], true);
-    assert_eq!(f.records.lock().unwrap().len(), 1);
 }

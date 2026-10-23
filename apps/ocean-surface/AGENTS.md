@@ -95,21 +95,54 @@ Native surface direction:
   Surface. A user-selected catalog route is stored under the desktop app's
   own config directory and supplied only as `OCEAN_DEFAULT_MODEL` to its child.
   Existing environment defaults and daemon-persisted model choices take
-  precedence. The desktop never writes daemon configuration or picks a model
+  precedence. Blank `OCEAN_MODEL` is removed from the child even without a
+  desktop selection, allowing the daemon's persisted/default model to resolve.
+  Nonblank explicit choices and existing defaults remain authoritative.
+  The desktop never writes daemon configuration or picks a model
   silently. Corrupt/nonregular desktop settings fail visibly without replacement.
   The startup form exists only while native supervision is offline. Initial
   native status must resolve before mounting Rooms; a later disconnect preserves
   the conversation and unsent draft, refuses direct-chat submission, and shows
   a compact restart action. Offline headers expose
   no ready indicators. Ordinary connected model/effort controls remain unchanged.
-  Successful startup refreshes
-  model/project state and reconnects the focused session. Verify with native
+  Successful startup refreshes model/project state and reconnects the focused
+  session with a fresh authoritative projection on the replacement SSE generation.
+  Retire prior sync polling without switching focus or clearing the unsent draft;
+  an old restoration/recovery reply must not replace the new projection. Full
+  session reads claim a separate projection epoch before fetching; only the
+  latest read may commit or trigger caller retry/status/poll cleanup, even within
+  one SSE generation without a new activity frame. Permission-only reconciliation
+  retains its independent epoch and cannot retire a transcript read. Every admitted
+  session metadata, transcript, tool or pinned-component mutation advances the
+  activity fence before changing snapshot-owned state; wrong-session and suppressed
+  frames do not. Admitted steering deliveries bypass the ordinary reducer and must
+  advance the same fence immediately before appending their user transcript row;
+  pending steer removal does not permit an older snapshot to erase delivery.
+  Initial hydration and SSE recovery share four immediate activity-race
+  retries, then one epoch/focus-guarded recovery waiting for 250ms of quiet before
+  another read. Streaming stays visible, recovery stays pending visibly, and a pause
+  or terminal frame permits convergence without replaying ambiguous deltas. Verify
+  live-content preservation/coalescing with UI `cargo test -p ocean-surface-ui projection_content`,
+  ordering with UI `cargo test -p ocean-surface-ui projection_epoch`, and recovery
+  with UI `cargo test -p ocean-surface-ui native_reconnect`, native
   `cargo test --lib startup_model`, native daemon tests, and the real WASM build.
 - Native daemon start resolves the operator's `OCEAN_DAEMON_BIN`, then the
   installed executable sibling, then the platform binary on PATH. No IPC
   argument may select an executable. Explicit start/restart remains unchanged.
   Children run from the absolute home/profile (or OS temporary directory),
   never the app's inherited workspace; Windows children have no console window.
+  Explicit nonempty relative runtime state/auth/input path overrides are anchored
+  to the app's launch directory before changing child cwd. Resolve that directory
+  lazily, once, only for relative executable/path overrides; unavailable inherited
+  cwd must not reject absolute or PATH launches, and required relative paths fail
+  without a substitute base. Absolute paths and
+  blank runtime sentinels retain their meaning. The native host environment and
+  operating-system home remain unchanged. The allowlist in `lib.rs` covers Ocean
+  and XDG state, Ocean/Codex/Claude auth, room/title databases, agent/plugin/
+  assistant/skill roots and prompt capture. SQLite `:memory:`, in-memory `file:`
+  URIs (including parsed `mode=memory`) and absolute `file:` URIs retain their
+  original bytes; relative disk `file:` URIs fail before spawn and require an
+  explicit absolute URI. Verify with `cargo test --lib daemon_child`.
   Home/profile also owns native daemon logs. Verify native launch with
   `cargo test --lib daemon_` from `crates/ocean-tauri`.
   A native-process `OCEAN_DAEMON_LOG` may select an absolute log file for
@@ -209,7 +242,10 @@ token to browser code, bundle it, or cache it in client storage.
   current state. New intent retires older list replies. Reads poll only while a
   login is pending; mutations never retry automatically. Credential availability
   means Connected, not verified provider inference. Model readiness refreshes
-  after projected account changes.
+  after projected account changes and when the model disclosure opens, including
+  after browser login completes with Accounts closed. Opening does not select a
+  provider or continue the closed dialog's poll. Latest model requests share a
+  generation guard and require the same resolved endpoint before publication.
 - Verify native `cargo test --lib provider_accounts`, UI `cargo test -p
   ocean-surface-ui accounts`, the real WASM bundle and rendered native dialog.
 
@@ -256,7 +292,12 @@ token to browser code, bundle it, or cache it in client storage.
 - Honor additive `ready` metadata: disable explicitly disconnected provider
   entries, retain compatibility when an older daemon omits readiness, and
   preserve pinned ids while the catalog loads. Readiness proves credentials,
-  not provider entitlement or successful inference.
+  not provider entitlement or successful inference. Option rows re-read their
+  entry (readiness, label) from the live `models` signal inside the row body —
+  a keyed `For` never re-runs same-key children, so capturing at mount freezes
+  the row — keeping `For` keys as model ids (#144): a same-id catalog refresh
+  must flip the rendered disabled state and label without an identity change,
+  and refreshes leave drafts, model overrides and reasoning effort intact.
 - Use additive daemon `effort_levels` metadata for model-specific choices,
   including max on current models. Older daemons retain the existing fallback
   vocabulary based on the wire model even for qualified saved ids. Explicit
@@ -274,9 +315,31 @@ token to browser code, bundle it, or cache it in client storage.
   active-turn action. Its model panel is anchored to the compact composer.
   Browser float mode uses Ocean's background; native overlay transparency is
   gated through the existing `host::running_in_tauri` seam.
+- Enter during a steerable turn sends text with a CSPRNG UUID and the captured
+  originating turn to the existing steer route. Pending rows retain exact
+  session/turn/steer identity before the POST; identical text never correlates
+  delivery. Definitive refusal or an admitted unconsumed receipt queues once.
+  The daemon's exact 413/ok:false/oversized-steering error is a pre-admission
+  refusal: preserve the full attached-context wire prompt and compact display
+  in that once-only queue fallback. Generic/malformed/proxy 413 stays unknown.
+  Lost/malformed acknowledgements and missing/restarted/evicted receipt evidence
+  retain the existing row as outcome unknown, without resending. Full projection
+  admission (focus, SSE generation, projection epoch and activity revision) owns
+  reconciliation: delivered receipts remove rows without adding transcript text,
+  pending stays pending, and matching ended-turn proof clears only that old Stop
+  target. Bounded delivered IDs suppress late SSE already represented by a snapshot.
+  Ambiguous deliveries after hydration refresh the authoritative transcript instead
+  of appending; durable observed-event IDs settle only after the admitted post-event
+  read. ACK, finish and delayed-delivery recovery use the shared owning projection
+  caller. Typed snapshot churn retries four times with guarded delays, then exposes
+  failure and unresolved rows; retired callers never publish or retry.
+  Turn finish requests receipt reconciliation, never blind requeue. New Session,
+  session switch and explicit Stop keep their existing local queue-clear behavior.
+  Verify with UI cargo test -p ocean-surface-ui steering_ and the real WASM bundle.
+
 - The main composer never refuses a send because a turn is running. A prompt
-  sent while `streaming` is true, while earlier prompts are queued, or while the
-  head of the queue is waiting out a busy daemon goes into
+  that cannot steer (see above), sent while earlier prompts are queued, or
+  while the head of the queue is waiting out a busy daemon goes into
   `Daemon::queued_prompts` (oldest first) and renders as a dimmed, dashed
   `turn--queued` row below the live-activity row with a remove control; it
   becomes an ordinary user turn when `drain_queued_prompt` sends it, which the
@@ -421,6 +484,17 @@ Web surface session UI:
   daemon-owned running/Stop projection and continuing the scoped SSE tail.
   Never quarantine a live session behind client-side detail polling,
   `detail syncing…`, or a manual refresh control.
+- The daemon's `event: error` reset frame on `GET /v1/agent/events`
+  (published `agent_events_error`: `live_lag`, `anchor_unavailable`,
+  `malformed_anchor`, `reset_required`) shares its name with the DOM
+  connection-error event, so gloo reports it as a `ConnectionError`.
+  `src/agent_events_reset.rs` tells the two apart (a reset frame is a
+  `MessageEvent` with data; a transport error is a plain `Event`), and
+  `Daemon::connect` polls that subscription first, leaves the connection once
+  on a reset and takes the existing reconnect path (fresh projection, fresh
+  `EventSource`, no stale anchor). A plain transport error stays with gloo's
+  handling. `tests/unheld_agent_stream_reset.rs` pins that wiring; its table
+  records which mutations the compiler holds and which only the guard does.
 - Token telemetry consumes the daemon's additive `TurnFinished` provider
   footprint and cache-read/cache-write breakdowns. The provider total is
   authoritative; cache buckets may already be included in input and total, so

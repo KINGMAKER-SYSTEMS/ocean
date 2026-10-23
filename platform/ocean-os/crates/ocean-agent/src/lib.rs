@@ -395,6 +395,116 @@ pub struct SessionOperationLease {
     _guard: tokio::sync::OwnedMutexGuard<()>,
 }
 
+#[derive(Debug)]
+pub struct SteeringSnapshotChanged;
+impl std::fmt::Display for SteeringSnapshotChanged {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("session steering changed during snapshot")
+    }
+}
+impl std::error::Error for SteeringSnapshotChanged {}
+
+type SteeringRegistry = Arc<std::sync::Mutex<SteeringRegistryState>>;
+
+#[derive(Debug, Default)]
+struct SteeringRegistryState {
+    active: HashMap<SessionId, SteeringTurn>,
+    closed: std::collections::VecDeque<(SessionId, SteeringTurn)>,
+}
+
+#[derive(Debug, Clone)]
+struct SteeringTurn {
+    turn_id: String,
+    ended: bool,
+    inbox: Arc<ocean_runtime::SteeringInbox>,
+}
+
+impl SteeringRegistryState {
+    const MAX_CLOSED: usize = 16;
+
+    fn archive(&mut self, session_id: SessionId, mut turn: SteeringTurn, ended: bool) {
+        turn.ended = ended;
+        turn.inbox.close();
+        self.closed.push_back((session_id, turn));
+        while self.closed.len() > Self::MAX_CLOSED {
+            self.closed.pop_front();
+        }
+    }
+}
+
+/// Owns exactly one turn registration. Close and archive before the daemon
+/// exposes terminal-turn proof. A newer registration is never removed.
+#[derive(Debug)]
+pub struct SteeringRegistration {
+    registry: SteeringRegistry,
+    session_id: SessionId,
+    inbox: Arc<ocean_runtime::SteeringInbox>,
+}
+
+impl SteeringRegistration {
+    pub fn inbox(&self) -> Arc<ocean_runtime::SteeringInbox> {
+        Arc::clone(&self.inbox)
+    }
+}
+
+impl Drop for SteeringRegistration {
+    fn drop(&mut self) {
+        let mut registry = self.registry.lock().unwrap_or_else(|p| p.into_inner());
+        if registry
+            .active
+            .get(&self.session_id)
+            .is_some_and(|current| Arc::ptr_eq(&current.inbox, &self.inbox))
+        {
+            let turn = registry
+                .active
+                .remove(&self.session_id)
+                .expect("matched registration");
+            registry.archive(self.session_id, turn, true);
+        } else {
+            self.inbox.close();
+            if let Some((_, turn)) = registry
+                .closed
+                .iter_mut()
+                .find(|(_, turn)| Arc::ptr_eq(&turn.inbox, &self.inbox))
+            {
+                turn.ended = true;
+            }
+        }
+    }
+}
+
+/// Publish only the ordered batch covered by this durable checkpoint.
+fn save_steering_checkpoint(
+    config_dir: &std::path::Path,
+    session: &session::Session,
+    inbox: Option<&ocean_runtime::SteeringInbox>,
+    deliveries: &mut Vec<AgentEvent>,
+    sink: Option<&tokio::sync::mpsc::UnboundedSender<AgentEvent>>,
+) -> anyhow::Result<()> {
+    let ids: Vec<_> = deliveries
+        .iter()
+        .filter_map(|event| {
+            if let AgentEvent::SteeringDelivered { id, .. } = event {
+                Some(id.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+    let save = || session::save(config_dir, session).map(|_| ());
+    if let Some(inbox) = inbox {
+        inbox.save_and_acknowledge(&ids, save)?;
+    } else {
+        save()?;
+    }
+    for delivered in deliveries.drain(..) {
+        if let Some(sink) = sink {
+            let _ = sink.send(delivered);
+        }
+    }
+    Ok(())
+}
+
 impl SessionOperationLease {
     pub fn session_id(&self) -> SessionId {
         self.id
@@ -432,6 +542,10 @@ pub struct AgentRuntime {
     /// created on demand and kept for the process lifetime (one cheap Arc<Mutex>
     /// per session ever touched — negligible).
     session_locks: Arc<std::sync::Mutex<HashMap<SessionId, Arc<tokio::sync::Mutex<()>>>>>,
+    /// Open mid-turn steering inboxes, one per session whose operator turn is
+    /// running (see [`AgentRuntime::open_steering`]). Entries live exactly as
+    /// long as the turn's [`SteeringRegistration`].
+    steering: SteeringRegistry,
     /// Lifecycle hooks from `<config_dir>/ocean.toml` (`[[hooks.Stop]]`).
     ///
     /// This is the plugin-agnostic wake/engagement seam: at turn end the runtime
@@ -523,6 +637,7 @@ impl AgentRuntime {
             capabilities: Arc::new(CapabilityRegistry::builtin_only()),
             memory_factory: None,
             session_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            steering: SteeringRegistry::default(),
             hooks,
             provider_quarantine: Arc::new(ProviderRefusalQuarantine::default()),
             #[cfg(test)]
@@ -676,6 +791,141 @@ impl AgentRuntime {
     /// Try to acquire the shared mutation lane without queueing. Interactive
     /// admission and compaction use this so a busy session returns conflict
     /// before any model call or lifecycle claim.
+    /// Open a steering inbox for the operator turn about to run on
+    /// `session_id`, replacing (and closing) any stale one. Hold the returned
+    /// registration for exactly the turn's lifetime.
+    pub fn open_steering(&self, session_id: SessionId) -> SteeringRegistration {
+        self.open_steering_for_turn(session_id, uuid::Uuid::new_v4().to_string())
+    }
+
+    pub fn open_steering_for_turn(
+        &self,
+        session_id: SessionId,
+        turn_id: String,
+    ) -> SteeringRegistration {
+        let inbox = Arc::new(ocean_runtime::SteeringInbox::new());
+        let mut registry = self.steering.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(previous) = registry.active.remove(&session_id) {
+            registry.archive(session_id, previous, false);
+        }
+        registry.active.insert(
+            session_id,
+            SteeringTurn {
+                turn_id,
+                ended: false,
+                inbox: Arc::clone(&inbox),
+            },
+        );
+        SteeringRegistration {
+            registry: Arc::clone(&self.steering),
+            session_id,
+            inbox,
+        }
+    }
+
+    pub fn steer(
+        &self,
+        session_id: SessionId,
+        message: ocean_runtime::SteeringMessage,
+    ) -> Result<(), ocean_runtime::SteerRefusal> {
+        self.steer_for_turn(session_id, None, message)
+    }
+
+    /// Admission checks the immutable turn identity and pushes under the same
+    /// registration custody. A delayed request can never target a successor.
+    pub fn steer_for_turn(
+        &self,
+        session_id: SessionId,
+        expected_turn: Option<&str>,
+        message: ocean_runtime::SteeringMessage,
+    ) -> Result<(), ocean_runtime::SteerRefusal> {
+        let registry = self.steering.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(expected) = expected_turn {
+            let id_in_other_turn = registry
+                .active
+                .get(&session_id)
+                .into_iter()
+                .chain(
+                    registry
+                        .closed
+                        .iter()
+                        .filter(|(id, _)| *id == session_id)
+                        .map(|(_, turn)| turn),
+                )
+                .any(|turn| {
+                    turn.turn_id != expected
+                        && turn
+                            .inbox
+                            .receipts()
+                            .iter()
+                            .any(|(id, _)| *id == message.id)
+                });
+            if id_in_other_turn {
+                return Err(ocean_runtime::SteerRefusal::Conflict);
+            }
+            let turn = registry
+                .active
+                .get(&session_id)
+                .filter(|turn| turn.turn_id == expected)
+                .or_else(|| {
+                    registry
+                        .closed
+                        .iter()
+                        .rev()
+                        .find(|(id, turn)| *id == session_id && turn.turn_id == expected)
+                        .map(|(_, turn)| turn)
+                });
+            return turn
+                .ok_or(ocean_runtime::SteerRefusal::WrongTurn)?
+                .inbox
+                .push(message);
+        }
+        registry
+            .active
+            .get(&session_id)
+            .ok_or(ocean_runtime::SteerRefusal::Closed)?
+            .inbox
+            .push(message)
+    }
+
+    pub fn session_steering_snapshot(
+        &self,
+        session_id: SessionId,
+    ) -> Vec<ocean_core::SteeringTurnSnapshot> {
+        let registry = self.steering.lock().unwrap_or_else(|p| p.into_inner());
+        let project = |turn: &SteeringTurn, ended| ocean_core::SteeringTurnSnapshot {
+            turn_id: turn.turn_id.clone(),
+            ended,
+            receipts: turn
+                .inbox
+                .receipts()
+                .into_iter()
+                .map(|(steer_id, outcome)| {
+                    use ocean_runtime::SteeringOutcome as RuntimeOutcome;
+                    ocean_core::SteeringReceipt {
+                        steer_id,
+                        outcome: match outcome {
+                            RuntimeOutcome::Pending => ocean_core::SteeringOutcome::Pending,
+                            RuntimeOutcome::InFlight => ocean_core::SteeringOutcome::Unknown,
+                            RuntimeOutcome::Delivered => ocean_core::SteeringOutcome::Delivered,
+                            RuntimeOutcome::Unconsumed => ocean_core::SteeringOutcome::Unconsumed,
+                        },
+                    }
+                })
+                .collect(),
+        };
+        let mut snapshots: Vec<_> = registry
+            .closed
+            .iter()
+            .filter(|(id, _)| *id == session_id)
+            .map(|(_, turn)| project(turn, turn.ended))
+            .collect();
+        if let Some(turn) = registry.active.get(&session_id) {
+            snapshots.push(project(turn, false));
+        }
+        snapshots
+    }
+
     pub fn try_session_operation(
         &self,
         id: SessionId,
@@ -1799,16 +2049,39 @@ impl AgentRuntime {
     }
 
     pub fn session_detail(&self, id: SessionId) -> anyhow::Result<SessionDetail> {
-        session::detail(&self.config_dir, id)
+        self.session_detail_optional(id)?.ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "session not found").into()
+        })
     }
 
-    /// Read a persisted session while preserving the distinction between a
-    /// missing id and an unreadable/corrupt session file. Config-style HTTP
-    /// adapters need this three-way result so only a genuinely absent session
-    /// becomes 404; storage and decode failures remain internal errors.
+    /// Receipts bracket the persisted transcript read. Save and receipt update
+    /// share inbox custody; an intervening transition retries rather than
+    /// pairing old receipts with newly persisted steering text.
+    fn session_detail_with_steering(
+        &self,
+        id: SessionId,
+        mut read: impl FnMut() -> anyhow::Result<Option<SessionDetail>>,
+    ) -> anyhow::Result<Option<SessionDetail>> {
+        for _ in 0..4 {
+            let before = self.session_steering_snapshot(id);
+            let mut detail = read()?;
+            let after = self.session_steering_snapshot(id);
+            if before == after {
+                if let Some(detail) = &mut detail {
+                    detail.steering = Some(after);
+                }
+                return Ok(detail);
+            }
+        }
+        Err(SteeringSnapshotChanged.into())
+    }
+
+    /// Preserve absence separately from unreadable/corrupt storage.
     pub fn session_detail_optional(&self, id: SessionId) -> anyhow::Result<Option<SessionDetail>> {
-        session::load_resumable(&self.config_dir, id)
-            .map(|session| session.map(session::session_detail))
+        self.session_detail_with_steering(id, || {
+            session::load_resumable(&self.config_dir, id)
+                .map(|session| session.map(session::session_detail))
+        })
     }
 
     /// Read the persisted model/provider and explicit-pin provenance in one
@@ -2616,6 +2889,7 @@ impl AgentRuntime {
             requested_model: _,
             requested_provider: _,
             reroute_reason: _,
+            steering,
         } = control;
         // Resolve the toolset for this turn through the capability registry —
         // built-ins plus any connected MCP/skill providers, deduped first-wins.
@@ -2737,6 +3011,9 @@ impl AgentRuntime {
             // Stamp the session onto every runtime AgentEvent so the daemon SSE
             // bridge can route by session natively (OCEAN-54).
             .with_session_id(session_id.to_string());
+        if let Some(inbox) = steering.as_ref() {
+            cfg = cfg.with_steering(Arc::clone(inbox));
+        }
         // Per-turn reasoning override (OCEAN-41): when the turn carries an
         // explicit `thinking_level`, apply it to *this* turn's config only. The
         // runtime's global `thinking_level` is untouched, so the next turn falls
@@ -2814,7 +3091,15 @@ impl AgentRuntime {
         // and replay tool side effects). On a connect-failure the loop sees only
         // control events, so this stays `false` and failover is allowed.
         let mut streamed_output = false;
+        let mut steering_deliveries = Vec::new();
         while let Some(ev) = rx.recv().await {
+            if matches!(&ev, AgentEvent::SteeringDelivered { .. }) {
+                // Ordered delivery events belong to the next checkpoint only.
+                // The runtime may already have drained a later batch.
+                streamed_output = true;
+                steering_deliveries.push(ev);
+                continue;
+            }
             if let Some(sink) = event_sink.as_ref() {
                 let _ = sink.send(ev.clone());
             }
@@ -2871,7 +3156,13 @@ impl AgentRuntime {
                         tracing::info_span!("checkpoint", messages = persisted.len());
                     let _checkpoint = checkpoint_span.enter();
                     session.replace_messages(persisted);
-                    session::save(&self.config_dir, &session)?;
+                    save_steering_checkpoint(
+                        &self.config_dir,
+                        &session,
+                        steering.as_deref(),
+                        &mut steering_deliveries,
+                        event_sink.as_ref(),
+                    )?;
                 }
                 _ => {}
             }
@@ -3311,6 +3602,13 @@ pub struct PromptControl {
     /// reroute-created session to the requested ROUTE, not the substitute.
     pub requested_provider: Option<String>,
     pub reroute_reason: Option<String>,
+    /// Mid-turn steering inbox for this operator turn (see
+    /// `ocean_runtime::AgentConfig::steering`). The daemon owns it: it creates
+    /// one per turn, registers it for its steer route, and closes it when the
+    /// turn ends. One inbox serves every attempt of the turn, so a pre-stream
+    /// failover retry delivers what the failed attempt never could. `None`
+    /// for every turn that cannot be steered (rooms, subagents, direct calls).
+    pub steering: Option<Arc<ocean_runtime::SteeringInbox>>,
 }
 
 /// Narrow a turn's toolset to `allowlist` (folder-as-agent tool restriction).
@@ -3488,7 +3786,15 @@ impl PromptControl {
             requested_model: None,
             requested_provider: None,
             reroute_reason: None,
+            steering: None,
         }
+    }
+
+    /// Let the operator steer this turn through `inbox` (see
+    /// [`PromptControl::steering`]).
+    pub fn with_steering(mut self, inbox: Arc<ocean_runtime::SteeringInbox>) -> Self {
+        self.steering = Some(inbox);
+        self
     }
 
     /// Append turn-bound tools (see [`PromptControl::extra_tools`]).
@@ -6825,6 +7131,290 @@ done
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn steering_reaches_only_the_session_with_an_open_turn() {
+        let rt = runtime(
+            temp_config_dir("steering-registry"),
+            provider_config(ProviderId::OpenAi, "test-model", true),
+        );
+        let busy = SessionId::new_v4();
+        let idle = SessionId::new_v4();
+        let msg = |id: &str| ocean_runtime::SteeringMessage {
+            id: id.into(),
+            text: "note".into(),
+        };
+
+        assert_eq!(
+            rt.steer(busy, msg("before")),
+            Err(ocean_runtime::SteerRefusal::Closed),
+            "no turn registered yet"
+        );
+        let registration = rt.open_steering(busy);
+        let inbox = registration.inbox();
+        assert_eq!(rt.steer(busy, msg("during")), Ok(()));
+        assert_eq!(
+            rt.steer(idle, msg("elsewhere")),
+            Err(ocean_runtime::SteerRefusal::Closed),
+            "another session's turn is not this one"
+        );
+        assert_eq!(inbox.take_pending().len(), 1);
+
+        drop(registration);
+        assert!(inbox.is_closed(), "ending the turn closes its inbox");
+        assert_eq!(
+            rt.steer(busy, msg("after")),
+            Err(ocean_runtime::SteerRefusal::Closed),
+            "a finished turn refuses steering"
+        );
+    }
+
+    #[test]
+    fn a_stale_registration_never_unregisters_a_newer_turn() {
+        let rt = runtime(
+            temp_config_dir("steering-registry"),
+            provider_config(ProviderId::OpenAi, "test-model", true),
+        );
+        let sid = SessionId::new_v4();
+        let old = rt.open_steering(sid);
+        let old_inbox = old.inbox();
+        let new = rt.open_steering(sid);
+        assert!(old_inbox.is_closed(), "replacing a stale inbox closes it");
+        drop(old);
+        assert_eq!(
+            rt.steer(
+                sid,
+                ocean_runtime::SteeringMessage {
+                    id: "x".into(),
+                    text: "still steerable".into()
+                }
+            ),
+            Ok(()),
+            "the old registration's drop must leave the new turn registered"
+        );
+        drop(new);
+    }
+
+    #[test]
+    fn steering_receipts_bind_turn_and_bound_closed_evidence() {
+        let rt = runtime(
+            temp_config_dir("steering-receipts"),
+            provider_config(ProviderId::OpenAi, "test-model", true),
+        );
+        let sid = SessionId::new_v4();
+        let msg = |id: &str, text: &str| ocean_runtime::SteeringMessage {
+            id: id.into(),
+            text: text.into(),
+        };
+        let first = rt.open_steering_for_turn(sid, "t1".into());
+        assert!(rt.steer_for_turn(sid, Some("t1"), msg("a", "same")).is_ok());
+        assert!(rt.steer_for_turn(sid, Some("t1"), msg("a", "same")).is_ok());
+        assert_eq!(
+            rt.steer_for_turn(sid, Some("t1"), msg("a", "different")),
+            Err(ocean_runtime::SteerRefusal::Conflict)
+        );
+        first.inbox().take_pending();
+        assert!(rt.steer_for_turn(sid, Some("t1"), msg("b", "same")).is_ok());
+        drop(first);
+        let next = rt.open_steering_for_turn(sid, "t2".into());
+        assert_eq!(
+            rt.steer_for_turn(sid, Some("t2"), msg("a", "same")),
+            Err(ocean_runtime::SteerRefusal::Conflict)
+        );
+        assert_eq!(
+            rt.steer_for_turn(sid, Some("t1"), msg("late", "note")),
+            Err(ocean_runtime::SteerRefusal::Closed)
+        );
+        assert!(next.inbox().take_pending().is_empty());
+        let proof = rt.session_steering_snapshot(sid);
+        assert!(proof[0].ended);
+        assert_eq!(
+            proof[0].receipts[0].outcome,
+            ocean_core::SteeringOutcome::Unknown
+        );
+        assert_eq!(
+            proof[0].receipts[1].outcome,
+            ocean_core::SteeringOutcome::Unconsumed
+        );
+        assert!(rt.steer_for_turn(sid, Some("t1"), msg("a", "same")).is_ok());
+        drop(next);
+        for n in 0..SteeringRegistryState::MAX_CLOSED {
+            drop(rt.open_steering_for_turn(sid, format!("new-{n}")));
+        }
+        assert_eq!(
+            rt.session_steering_snapshot(sid).len(),
+            SteeringRegistryState::MAX_CLOSED
+        );
+        assert_eq!(
+            rt.steer_for_turn(sid, Some("t1"), msg("a", "same")),
+            Err(ocean_runtime::SteerRefusal::WrongTurn)
+        );
+        assert_eq!(
+            rt.steer_for_turn(SessionId::new_v4(), Some("new-1"), msg("a", "same")),
+            Err(ocean_runtime::SteerRefusal::WrongTurn)
+        );
+    }
+
+    #[test]
+    fn steering_snapshot_retries_a_checkpoint_between_receipt_and_transcript_reads() {
+        let config_dir = temp_config_dir("steering-snapshot-order");
+        let rt = runtime(
+            config_dir.clone(),
+            provider_config(ProviderId::OpenAi, "test-model", true),
+        );
+        let mut session =
+            session::Session::new(&ocean_protocol::Model::anthropic_claude_sonnet_4_6());
+        session::save(&config_dir, &session).unwrap();
+        let registration = rt.open_steering_for_turn(session.id, "t1".into());
+        let inbox = registration.inbox();
+        inbox
+            .push(ocean_runtime::SteeringMessage {
+                id: "a".into(),
+                text: "same".into(),
+            })
+            .unwrap();
+        inbox.take_pending();
+        let mut reads = 0;
+        let detail = rt
+            .session_detail_with_steering(session.id, || {
+                reads += 1;
+                if reads == 1 {
+                    session.replace_messages(vec![Message::user_text("same")]);
+                    let mut events = vec![AgentEvent::SteeringDelivered {
+                        session_id: None,
+                        id: "a".into(),
+                        text: "same".into(),
+                    }];
+                    save_steering_checkpoint(
+                        &config_dir,
+                        &session,
+                        Some(&inbox),
+                        &mut events,
+                        None,
+                    )?;
+                }
+                session::detail(&config_dir, session.id).map(Some)
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            reads, 2,
+            "never pair pre-save receipts with post-save transcript"
+        );
+        assert_eq!(
+            detail.steering.unwrap()[0].receipts[0].outcome,
+            ocean_core::SteeringOutcome::Delivered
+        );
+        assert_eq!(detail.transcript[0].text, "same");
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn steering_snapshot_churn_is_bounded_and_restart_has_no_replay_proof() {
+        let config_dir = temp_config_dir("steering-snapshot-churn");
+        let rt = runtime(
+            config_dir.clone(),
+            provider_config(ProviderId::OpenAi, "test-model", true),
+        );
+        let sid = SessionId::new_v4();
+        assert!(rt.session_detail_optional(sid).unwrap().is_none());
+        let registration = rt.open_steering_for_turn(sid, "t1".into());
+        let inbox = registration.inbox();
+        let mut reads = 0;
+        let error = rt
+            .session_detail_with_steering(sid, || {
+                reads += 1;
+                inbox
+                    .push(ocean_runtime::SteeringMessage {
+                        id: reads.to_string(),
+                        text: "note".into(),
+                    })
+                    .unwrap();
+                Ok(None)
+            })
+            .unwrap_err();
+        assert_eq!(reads, 4);
+        assert_eq!(
+            error.to_string(),
+            "session steering changed during snapshot"
+        );
+        let restarted = runtime(
+            config_dir,
+            provider_config(ProviderId::OpenAi, "test-model", true),
+        );
+        assert!(restarted.session_steering_snapshot(sid).is_empty());
+        assert_eq!(
+            restarted.steer_for_turn(
+                sid,
+                Some("t1"),
+                ocean_runtime::SteeringMessage {
+                    id: "1".into(),
+                    text: "note".into()
+                }
+            ),
+            Err(ocean_runtime::SteerRefusal::WrongTurn)
+        );
+    }
+
+    #[test]
+    fn steering_checkpoint_publishes_only_saved_ordered_batch() {
+        use ocean_runtime::{SteeringInbox, SteeringMessage, SteeringOutcome};
+        let config_dir = temp_config_dir("steering-save-proof");
+        let model = ocean_protocol::Model::anthropic_claude_sonnet_4_6();
+        let mut session = session::Session::new(&model);
+        let inbox = SteeringInbox::new();
+        let event = |id: &str| AgentEvent::SteeringDelivered {
+            session_id: None,
+            id: id.into(),
+            text: id.into(),
+        };
+        inbox
+            .push(SteeringMessage {
+                id: "a".into(),
+                text: "a".into(),
+            })
+            .unwrap();
+        inbox.take_pending();
+        let mut batch = vec![event("a")];
+        // The runtime has already drained a later batch before the owner saves a.
+        inbox
+            .push(SteeringMessage {
+                id: "b".into(),
+                text: "b".into(),
+            })
+            .unwrap();
+        inbox.take_pending();
+        session.replace_messages(vec![Message::user_text("a")]);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        save_steering_checkpoint(&config_dir, &session, Some(&inbox), &mut batch, Some(&tx))
+            .unwrap();
+        assert!(
+            matches!(rx.try_recv().unwrap(), AgentEvent::SteeringDelivered { id, .. } if id == "a")
+        );
+        assert_eq!(
+            inbox.receipts(),
+            vec![
+                ("a".into(), SteeringOutcome::Delivered),
+                ("b".into(), SteeringOutcome::InFlight)
+            ]
+        );
+        let detail = session::detail(&config_dir, session.id).unwrap();
+        assert!(detail.transcript.iter().any(|row| row.text == "a"));
+        // A real filesystem save refusal publishes neither receipt nor SSE.
+        let refused = config_dir.join("not-a-directory");
+        std::fs::write(&refused, "occupied").unwrap();
+        let mut later = vec![event("b")];
+        session.replace_messages(vec![Message::user_text("a"), Message::user_text("b")]);
+        assert!(
+            save_steering_checkpoint(&refused, &session, Some(&inbox), &mut later, Some(&tx))
+                .is_err()
+        );
+        assert!(rx.try_recv().is_err());
+        assert_eq!(later.len(), 1);
+        inbox.close();
+        assert_eq!(inbox.receipts()[1].1, SteeringOutcome::InFlight);
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
     fn runtime(config_dir: PathBuf, provider_config: ProviderConfig) -> AgentRuntime {
         runtime_with_env(config_dir, provider_config, None)
     }
@@ -6845,6 +7435,7 @@ done
             capabilities: Arc::new(CapabilityRegistry::builtin_only()),
             memory_factory: None,
             session_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            steering: SteeringRegistry::default(),
             hooks: ocean_hooks::HooksConfig::default(),
             provider_quarantine: Arc::new(ProviderRefusalQuarantine::default()),
             test_env,

@@ -849,8 +849,13 @@ pub fn model_effort_levels(id: &str) -> &'static [&'static str] {
     ) {
         // These reason by default, cannot be switched off, and top out at `high`.
         &["minimal", "low", "medium", "high"]
-    } else if id.starts_with("glm-")
-        || id.starts_with("MiniMax-")
+    } else if id.starts_with("glm-") {
+        // Z.AI: `thinking: disabled` for off, top-level `reasoning_effort` for
+        // the rest. Low measured the same as off and nothing exceeded high, so
+        // only the three distinct settings are offered (see
+        // `glm_reasoning_effort` in ocean-protocol's OpenAI encoder).
+        &["off", "medium", "high"]
+    } else if id.starts_with("MiniMax-")
         || matches!(
             id,
             "kimi-k2.6" | "kimi-k2" | "gpt-4o" | "gpt-4o-mini" | "gemini-2.0-flash"
@@ -2610,10 +2615,12 @@ mod tests {
                 "{id}"
             );
         }
+        // GLM offers exactly the three settings that behave differently.
+        for id in ["glm-5.3", "glm-5.3-flash", "glm-4.6", "glm-4.5-flash"] {
+            assert_eq!(model_effort_levels(id), ["off", "medium", "high"], "{id}");
+        }
         // Routes whose encoder sends no effort parameter offer no control.
         for id in [
-            "glm-5.3",
-            "glm-4.5-flash",
             "MiniMax-M2.7",
             "kimi-k2.6",
             "kimi-k2",

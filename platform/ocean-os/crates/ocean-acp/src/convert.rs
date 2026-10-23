@@ -134,6 +134,7 @@ pub fn event_to_update(event: &AgentTurnEvent) -> Option<SessionUpdate> {
         | AgentTurnEvent::BrowserActivity { .. }
         | AgentTurnEvent::SurfacePatch { .. }
         | AgentTurnEvent::SlackCanvas { .. }
+        | AgentTurnEvent::SteeringDelivered { .. }
         | AgentTurnEvent::Extension { .. } => None,
     }
 }

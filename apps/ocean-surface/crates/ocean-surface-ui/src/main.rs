@@ -10,6 +10,7 @@
 use leptos::prelude::*;
 
 mod accounts;
+mod agent_events_reset;
 mod app;
 mod call;
 mod canvas;

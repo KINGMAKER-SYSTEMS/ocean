@@ -426,9 +426,35 @@ pub struct SessionToolContext {
     pub text: String,
 }
 
+/// Bounded, boot-local proof for an exact originating turn. Absence is unknown,
+/// including after restart or retention eviction; it never authorizes replay.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SteeringTurnSnapshot {
+    pub turn_id: String,
+    pub ended: bool,
+    pub receipts: Vec<SteeringReceipt>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SteeringReceipt {
+    pub steer_id: String,
+    pub outcome: SteeringOutcome,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SteeringOutcome {
+    Pending,
+    Delivered,
+    Unconsumed,
+    Unknown,
+}
+
 /// Detailed session transcript returned by `GET /v1/sessions/{id}`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionDetail {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steering: Option<Vec<SteeringTurnSnapshot>>,
     #[serde(alias = "session_id")]
     pub id: SessionId,
     pub created_ms: i64,
@@ -1709,6 +1735,31 @@ impl EventEnvelope {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn steering_session_snapshot_is_additive_and_keeps_explicit_unknown() {
+        let legacy = serde_json::json!({
+            "id": uuid::Uuid::new_v4(), "created_ms":0, "updated_ms":0,
+            "model":"test", "provider":"test", "turns":0, "title":"",
+            "state":"stored", "resumable":true
+        });
+        let mut detail: super::SessionDetail = serde_json::from_value(legacy).unwrap();
+        assert!(detail.steering.is_none());
+        detail.steering = Some(vec![super::SteeringTurnSnapshot {
+            turn_id: "t1".into(),
+            ended: true,
+            receipts: vec![super::SteeringReceipt {
+                steer_id: "s1".into(),
+                outcome: super::SteeringOutcome::Unknown,
+            }],
+        }]);
+        let wire = serde_json::to_value(&detail).unwrap();
+        assert_eq!(wire["steering"][0]["receipts"][0]["outcome"], "unknown");
+        assert_eq!(
+            serde_json::from_value::<super::SessionDetail>(wire).unwrap(),
+            detail
+        );
+    }
+
     use super::*;
 
     #[test]

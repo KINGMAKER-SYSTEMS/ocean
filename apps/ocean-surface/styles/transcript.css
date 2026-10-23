@@ -360,6 +360,12 @@
   color: var(--fg-2);
 }
 
+/* A steered message waits for the turn's next step: accent-tinted border so
+   it reads as "going into this turn", not "after it". */
+.turn--steering .turn__body {
+  border-color: var(--accent-ring);
+}
+
 .turn__queued-meta {
   display: flex;
   align-items: center;

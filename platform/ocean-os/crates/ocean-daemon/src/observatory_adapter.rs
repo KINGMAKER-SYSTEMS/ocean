@@ -238,6 +238,7 @@ impl ObservatoryAdapter {
             | AgentTurnEvent::ComponentUnmount { .. }
             | AgentTurnEvent::SurfacePatch { .. }
             | AgentTurnEvent::SlackCanvas { .. }
+            | AgentTurnEvent::SteeringDelivered { .. }
             | AgentTurnEvent::SessionConfigChanged { .. }
             | AgentTurnEvent::Extension { .. } => None,
         }

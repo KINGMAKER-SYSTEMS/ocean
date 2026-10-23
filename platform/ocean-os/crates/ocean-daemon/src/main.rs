@@ -789,6 +789,9 @@ fn app_router(origins: BrowserOrigins, hosts: AllowedHosts) -> Router<AppState> 
             "/v1/agent/sessions/{id}/messages",
             post(agent_session_message_append),
         )
+        // Mid-turn steering: deliver an operator message into the turn that
+        // is running on this session, at its next tool boundary.
+        .route("/v1/agent/sessions/{id}/steer", post(agent_session_steer))
         .route("/v1/events", get(events))
         .route("/v1/prompt", post(prompt))
         .route("/v1/requests", get(requests).post(create_request))
@@ -1633,6 +1636,7 @@ fn banner_routes() -> &'static [&'static str] {
         "PATCH /v1/agent/sessions/{id}/config",
         "GET /v1/agent/history/search",
         "POST /v1/agent/sessions/{id}/messages",
+        "POST /v1/agent/sessions/{id}/steer",
         "POST /v1/voice/realtime/client-secret",
         "POST /v1/voice/stt",
         "POST /v1/voice/tts",
@@ -5354,18 +5358,15 @@ async fn session(
     State(state): State<AppState>,
     Path(session_id): Path<SessionId>,
 ) -> (StatusCode, Json<SessionResponse>) {
-    match state.runtime.session_detail(session_id) {
-        Ok(mut session) => {
-            enrich_session_detail(&state, &mut session).await;
-            (
-                StatusCode::OK,
-                Json(SessionResponse {
-                    ok: true,
-                    session: Some(session),
-                    error: None,
-                }),
-            )
-        }
+    match coherent_session_detail(&state, session_id).await {
+        Ok(session) => (
+            StatusCode::OK,
+            Json(SessionResponse {
+                ok: true,
+                session: Some(session),
+                error: None,
+            }),
+        ),
         Err(error) if is_not_found(&error) => (
             StatusCode::NOT_FOUND,
             Json(SessionResponse {
@@ -5375,17 +5376,28 @@ async fn session(
             }),
         ),
         Err(error) => {
-            tracing::warn!(%session_id, error = %error, "failed to read session detail");
+            let (status, message) = session_detail_read_error(&error);
             (
-                StatusCode::INTERNAL_SERVER_ERROR,
+                status,
                 Json(SessionResponse {
                     ok: false,
                     session: None,
-                    error: Some("session could not be read".into()),
+                    error: Some(message.into()),
                 }),
             )
         }
     }
+}
+
+async fn coherent_session_detail(state: &AppState, id: SessionId) -> anyhow::Result<SessionDetail> {
+    for _ in 0..4 {
+        let mut detail = state.runtime.session_detail(id)?;
+        enrich_session_detail(state, &mut detail).await;
+        if detail.steering.as_ref() == Some(&state.runtime.session_steering_snapshot(id)) {
+            return Ok(detail);
+        }
+    }
+    Err(ocean_agent::SteeringSnapshotChanged.into())
 }
 
 async fn enrich_session_detail(state: &AppState, session: &mut SessionDetail) {
@@ -5398,21 +5410,41 @@ async fn enrich_session_detail(state: &AppState, session: &mut SessionDetail) {
     matching.sort_by_key(|status| status.updated_at.or(status.started_at));
     matching.reverse();
 
+    let ended: HashSet<_> = session
+        .steering
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .filter(|turn| turn.ended)
+        .map(|turn| turn.turn_id.as_str())
+        .collect();
+    let is_live = |status: &&RequestStatus| {
+        !status.state.is_terminal() && !ended.contains(status.request_id.to_string().as_str())
+    };
     session.active_requests = matching
         .iter()
-        .filter(|status| !status.state.is_terminal())
+        .filter(is_live)
         .map(|status| status.request_id)
         .collect();
     session.pending_permissions = matching
         .iter()
+        .filter(|status| !ended.contains(status.request_id.to_string().as_str()))
         .filter_map(|status| status.permission_id)
         .collect();
 
-    if let Some(active) = matching.iter().find(|status| !status.state.is_terminal()) {
+    if let Some(active) = matching.iter().find(is_live) {
         session.state = session_run_state(active.state);
         session.resumable = false;
     } else if let Some(latest) = matching.first() {
-        session.state = session_run_state(latest.state);
+        // Registration closure proves execution ended, not whether it succeeded.
+        // Bridge drain and request finalization may still be in progress.
+        session.state = if ended.contains(latest.request_id.to_string().as_str())
+            && !latest.state.is_terminal()
+        {
+            SessionRunState::Stored
+        } else {
+            session_run_state(latest.state)
+        };
         session.resumable = true;
     }
 
@@ -5629,6 +5661,22 @@ fn active_request_for_session(
                 session_run_state(status.state),
             )
         })
+}
+
+fn session_detail_read_error(error: &anyhow::Error) -> (StatusCode, &'static str) {
+    if error
+        .downcast_ref::<ocean_agent::SteeringSnapshotChanged>()
+        .is_some()
+    {
+        (StatusCode::SERVICE_UNAVAILABLE, "session_snapshot_changed")
+    } else if is_not_found(error) {
+        (StatusCode::NOT_FOUND, "session not found")
+    } else {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "session could not be read",
+        )
+    }
 }
 
 fn is_not_found(error: &anyhow::Error) -> bool {
@@ -6804,6 +6852,17 @@ async fn agent_turn(
                         delta,
                     });
                 }
+                // Mid-turn steering: the loop put an operator message into the
+                // transcript at a tool boundary. Relay it so the sender can
+                // show it where it landed and stop treating it as pending.
+                AgentEvent::SteeringDelivered { id, text, .. } => {
+                    bridge_bus.emit(AgentTurnEvent::SteeringDelivered {
+                        session_id: bridge_session_id,
+                        turn_id: bridge_turn_id,
+                        steer_id: id,
+                        text,
+                    });
+                }
                 // OCEAN-275 honesty: the failover that keeps a turn alive must
                 // also be visible — relay the reroute so surfaces can tell the
                 // operator "you asked for X, this turn ran on Y".
@@ -7188,6 +7247,15 @@ async fn agent_turn(
         Some((root, caps)) => control.with_agent_capabilities(root, caps),
         None => control,
     };
+    // Mid-turn steering: this turn's inbox, reachable through
+    // `POST /v1/agent/sessions/{id}/steer` for exactly as long as the turn
+    // runs. The registration moves into the turn task and is dropped the
+    // moment the prompt returns (or the task unwinds), closing the inbox so
+    // later steers are refused and the sender falls back to a new turn.
+    let steering = state
+        .runtime
+        .open_steering_for_turn(core_sid(session_id), turn_id.to_string());
+    let control = control.with_steering(steering.inbox());
     // ── fire-and-ack (OCEAN-410): spawn the turn, ACK immediately ──
     // The POST is an ACK carrying turn_id / session_id / event_id_prefix so the
     // client correlates the SSE stream (/v1/agent/events) that delivers ALL turn
@@ -7231,6 +7299,7 @@ async fn agent_turn(
             .prompt_with_lease(prompt_req, control, &session_lease)
             .instrument(turn_span)
             .await;
+        drop(steering);
         // Turn is done: drop the in-flight guard before the bridge drain and
         // post-processing so the gauge reflects only executing turns, then fold
         // this turn's wall_ms/ok into the metrics (OCEAN-303).
@@ -8189,15 +8258,18 @@ async fn agent_session(
                 }),
             )
         }
-        Err(_) => (
-            StatusCode::NOT_FOUND,
-            Json(AgentSessionResponse {
-                ok: false,
-                session: None,
-                turns: vec![],
-                error: Some("session not found".into()),
-            }),
-        ),
+        Err(error) => {
+            let (status, message) = session_detail_read_error(&error);
+            (
+                status,
+                Json(AgentSessionResponse {
+                    ok: false,
+                    session: None,
+                    turns: vec![],
+                    error: Some(message.into()),
+                }),
+            )
+        }
     }
 }
 
@@ -8389,6 +8461,91 @@ fn format_session_append(kind: Option<&str>, content: &str) -> String {
         Some("handoff") => format!("[voice handoff] {content}"),
         Some("planner_handoff") => format!("[voice planner handoff]\n\n{content}"),
         _ => content.to_string(),
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct SteerRequest {
+    text: String,
+    #[serde(default)]
+    steer_id: Option<Uuid>,
+    #[serde(default)]
+    turn_id: Option<Uuid>,
+}
+
+/// Longest steering message accepted, in bytes. A steer redirects work in
+/// progress; anything longer belongs in a turn of its own.
+const STEER_TEXT_MAX_BYTES: usize = 32 * 1024;
+
+/// Steer an operator message into the turn running on this session. The
+/// message joins the turn's inbox and the agent loop delivers it at the next
+/// tool boundary, as a user message after that round's tool results (or as
+/// one more round if the model was about to finish). Answers:
+///
+/// - `202 {ok, steer_id}`: accepted; `steering_delivered` with the same
+///   delivery follows only after its checkpoint saves. Reconnect through
+///   session-detail receipts; missing events never prove replay safe.
+/// - `409 no_active_turn`: nothing steerable is running here (no turn, a
+///   room or other non-operator operation, or the turn already ended).
+/// - `429 steering_full`: too many messages already waiting.
+/// - `400` blank text, `413` text over [`STEER_TEXT_MAX_BYTES`].
+async fn agent_session_steer(
+    State(state): State<AppState>,
+    Path(session_id): Path<AgentSessionId>,
+    Json(req): Json<SteerRequest>,
+) -> (StatusCode, Json<Value>) {
+    let text = req.text.trim();
+    if text.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": "text must not be empty" })),
+        );
+    }
+    if text.len() > STEER_TEXT_MAX_BYTES {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(json!({
+                "ok": false,
+                "error": "message is too long to steer; send it as a new turn"
+            })),
+        );
+    }
+    if req.steer_id.is_some() != req.turn_id.is_some() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": "steering_identity_required" })),
+        );
+    }
+    let steer_id = req.steer_id.unwrap_or_else(Uuid::new_v4).to_string();
+    let expected_turn = req.turn_id.map(|id| id.to_string());
+    let message = ocean_runtime::SteeringMessage {
+        id: steer_id.clone(),
+        text: text.to_string(),
+    };
+    match state
+        .runtime
+        .steer_for_turn(core_sid(session_id), expected_turn.as_deref(), message)
+    {
+        Ok(()) => (
+            StatusCode::ACCEPTED,
+            Json(json!({ "ok": true, "steer_id": steer_id })),
+        ),
+        Err(ocean_runtime::SteerRefusal::Closed) => (
+            StatusCode::CONFLICT,
+            Json(json!({ "ok": false, "error": "no_active_turn" })),
+        ),
+        Err(ocean_runtime::SteerRefusal::Conflict) => (
+            StatusCode::CONFLICT,
+            Json(json!({ "ok": false, "error": "steering_identity_conflict" })),
+        ),
+        Err(ocean_runtime::SteerRefusal::WrongTurn) => (
+            StatusCode::CONFLICT,
+            Json(json!({ "ok": false, "error": "steering_turn_unknown" })),
+        ),
+        Err(ocean_runtime::SteerRefusal::Full) => (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({ "ok": false, "error": "steering_full" })),
+        ),
     }
 }
 
@@ -9691,7 +9848,8 @@ mod tests {
             | AgentEvent::Unmount { .. }
             | AgentEvent::BrowserActivity { .. }
             | AgentEvent::SurfacePatch { .. }
-            | AgentEvent::SlackCanvas { .. } => RelayClass::Relayed,
+            | AgentEvent::SlackCanvas { .. }
+            | AgentEvent::SteeringDelivered { .. } => RelayClass::Relayed,
             // Intentionally NOT relayed (OCEAN-373) — structural turn/run markers
             // the daemon covers itself, or message payloads already streamed.
             AgentEvent::AgentStart { .. }
@@ -12251,6 +12409,7 @@ mod tests {
 
     fn detail_fixture(state: SessionRunState) -> SessionDetail {
         SessionDetail {
+            steering: None,
             id: SessionId::new_v4(),
             created_ms: 1_000,
             updated_ms: 5_000,
@@ -15246,6 +15405,196 @@ mod tests {
         assert!(sync.ok);
         assert_eq!(sync.snapshot.unwrap().session_id, session_id);
         assert!(sync.fence.unwrap().event_id.is_some());
+    }
+
+    #[tokio::test]
+    async fn steering_ended_proof_excludes_only_matching_live_request() {
+        let state = permission_test_state();
+        let mut detail = detail_fixture(SessionRunState::Stored);
+        detail.workspace_root = None;
+        let old = RequestId::new_v4();
+        let mut control = status(old, RequestState::Running);
+        control.status.session_id = Some(detail.id);
+        state.requests.write().await.insert(old, control);
+        detail.steering = Some(vec![ocean_core::SteeringTurnSnapshot {
+            turn_id: old.to_string(),
+            ended: true,
+            receipts: vec![],
+        }]);
+        enrich_session_detail(&state, &mut detail).await;
+        assert!(detail.active_requests.is_empty());
+        assert_eq!(
+            detail.state,
+            SessionRunState::Stored,
+            "ended is not succeeded"
+        );
+        let newer = RequestId::new_v4();
+        let mut control = status(newer, RequestState::Running);
+        control.status.session_id = Some(detail.id);
+        state.requests.write().await.insert(newer, control);
+        enrich_session_detail(&state, &mut detail).await;
+        assert_eq!(detail.active_requests, vec![newer]);
+        assert_eq!(detail.state, SessionRunState::Running);
+    }
+
+    #[tokio::test]
+    async fn steering_session_handlers_preserve_real_missing_and_corrupt_storage() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = permission_test_state();
+        state.runtime = Arc::new(AgentRuntime::with_config_dir(tmp.path().to_path_buf()).unwrap());
+        let id = AgentSessionId::new_v4();
+        for corrupt in [false, true] {
+            if corrupt {
+                std::fs::create_dir_all(tmp.path().join("sessions")).unwrap();
+                std::fs::write(
+                    tmp.path().join("sessions").join(format!("{id}.json")),
+                    b"not json",
+                )
+                .unwrap();
+            }
+            let expected = if corrupt {
+                StatusCode::INTERNAL_SERVER_ERROR
+            } else {
+                StatusCode::NOT_FOUND
+            };
+            let (status, Json(body)) = agent_session(
+                State(state.clone()),
+                Path(id),
+                Query(SessionDetailQuery::default()),
+            )
+            .await;
+            assert_eq!(status, expected);
+            assert!(!body.ok);
+            let (status, Json(body)) = session(State(state.clone()), Path(core_sid(id))).await;
+            assert_eq!(status, expected);
+            assert!(!body.ok);
+        }
+    }
+
+    #[test]
+    fn steering_snapshot_read_failure_is_not_reported_as_session_deletion() {
+        let missing = anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::NotFound));
+        assert_eq!(session_detail_read_error(&missing).0, StatusCode::NOT_FOUND);
+        assert_eq!(
+            session_detail_read_error(&ocean_agent::SteeringSnapshotChanged.into()),
+            (StatusCode::SERVICE_UNAVAILABLE, "session_snapshot_changed")
+        );
+        for error in [
+            anyhow::anyhow!("untyped internal failure"),
+            anyhow::anyhow!("private storage detail"),
+        ] {
+            assert_eq!(
+                session_detail_read_error(&error),
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "session could not be read"
+                )
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn steering_identity_admission_is_idempotent_and_never_targets_successor() {
+        let state = permission_test_state();
+        let sid = AgentSessionId::new_v4();
+        let turn = Uuid::new_v4();
+        let id = Uuid::new_v4();
+        let first = state
+            .runtime
+            .open_steering_for_turn(core_sid(sid), turn.to_string());
+        let submit = |text: &str, turn_id| {
+            agent_session_steer(
+                State(state.clone()),
+                Path(sid),
+                Json(SteerRequest {
+                    text: text.into(),
+                    steer_id: Some(id),
+                    turn_id,
+                }),
+            )
+        };
+        for _ in 0..2 {
+            assert_eq!(submit("same", Some(turn)).await.0, StatusCode::ACCEPTED);
+        }
+        assert_eq!(first.inbox().take_pending().len(), 1);
+        let (_, Json(conflict)) = submit("different", Some(turn)).await;
+        assert_eq!(conflict["error"], "steering_identity_conflict");
+        assert_eq!(submit("same", None).await.0, StatusCode::BAD_REQUEST);
+        drop(first);
+        let next = state
+            .runtime
+            .open_steering_for_turn(core_sid(sid), Uuid::new_v4().to_string());
+        assert_eq!(
+            submit("same", Some(turn)).await.0,
+            StatusCode::ACCEPTED,
+            "known duplicate remains an acknowledgement only"
+        );
+        assert!(next.inbox().take_pending().is_empty());
+        let (_, Json(unknown)) = agent_session_steer(
+            State(state.clone()),
+            Path(sid),
+            Json(SteerRequest {
+                text: "same".into(),
+                steer_id: Some(Uuid::new_v4()),
+                turn_id: Some(Uuid::new_v4()),
+            }),
+        )
+        .await;
+        assert_eq!(unknown["error"], "steering_turn_unknown");
+        assert!(next.inbox().take_pending().is_empty());
+    }
+
+    #[tokio::test]
+    async fn steer_reaches_only_a_running_turn_and_validates_its_text() {
+        let state = permission_test_state();
+        let sid = AgentSessionId::new_v4();
+        let steer = |text: &str| {
+            agent_session_steer(
+                State(state.clone()),
+                Path(sid),
+                Json(SteerRequest {
+                    text: text.into(),
+                    steer_id: None,
+                    turn_id: None,
+                }),
+            )
+        };
+
+        let (status, Json(body)) = steer("before any turn").await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"], "no_active_turn");
+
+        let registration = state.runtime.open_steering(core_sid(sid));
+        let inbox = registration.inbox();
+        let (status, Json(body)) = steer("  also run the linter  ").await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let steer_id = body["steer_id"].as_str().expect("steer id").to_string();
+        let pending = inbox.take_pending();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, steer_id, "the returned id names the message");
+        assert_eq!(pending[0].text, "also run the linter", "text is trimmed");
+
+        let (status, _) = steer("   ").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = steer(&"x".repeat(STEER_TEXT_MAX_BYTES + 1)).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+
+        for i in 0..ocean_runtime::SteeringInbox::MAX_PENDING {
+            let (status, _) = steer(&format!("note {i}")).await;
+            assert_eq!(status, StatusCode::ACCEPTED);
+        }
+        let (status, Json(body)) = steer("one too many").await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body["error"], "steering_full");
+
+        drop(registration);
+        let (status, Json(body)) = steer("after the turn").await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "a finished turn refuses steering"
+        );
+        assert_eq!(body["error"], "no_active_turn");
     }
 
     #[tokio::test]
@@ -26103,7 +26452,7 @@ mod tests {
         assert_eq!(admission_routes, expected_admission_routes);
         assert_eq!(
             banner.len(),
-            146,
+            147,
             "route baseline changed; review the manifest"
         );
 

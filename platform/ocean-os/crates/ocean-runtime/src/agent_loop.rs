@@ -543,6 +543,15 @@ pub async fn run_agent_with_history(
             return Err(AgentError::Cancelled);
         }
 
+        // Mid-turn steering: once a round has completed, deliver whatever the
+        // operator sent while it ran, as user messages after that round's tool
+        // results, and persist them right away. Never before the first round:
+        // a pre-stream failover re-runs this loop from the original history,
+        // so a message drained into the failed attempt would be lost.
+        if turn > 0 && deliver_steering(config, &events, &sid, &mut messages) {
+            emit_turn_checkpoint(&events, &sid, &messages, &mut checkpointed_messages);
+        }
+
         turn += 1;
         // Per-round span (OCEAN-274): one `round` under the `agent_loop` span per
         // provider→tools iteration of the turn. The provider call and each tool
@@ -930,6 +939,12 @@ pub async fn run_agent_with_history(
                 },
             );
             emit_turn_checkpoint(&events, &sid, &messages, &mut checkpointed_messages);
+            // The model is done, unless the operator steered while this round
+            // ran: then run one more round so the message is answered rather
+            // than dropped (delivered at the top of the loop).
+            if steering_waiting(config) {
+                continue 'outer;
+            }
             break 'outer;
         }
 
@@ -1238,8 +1253,24 @@ pub async fn run_agent_with_history(
             },
         );
         emit_turn_checkpoint(&events, &sid, &messages, &mut checkpointed_messages);
-        if any_terminate {
+        // A terminating tool ends the turn, unless the operator steered while
+        // it ran: their message supersedes the stop.
+        if any_terminate && !steering_waiting(config) {
             break;
+        }
+    }
+
+    // The loop is over (the model finished or the turn limit was hit). Close
+    // the inbox so the steer route refuses further messages; anything still
+    // waiting here missed the turn limit, and its sender re-sends it as a new
+    // turn when it sees the turn finish without delivering it.
+    if let Some(inbox) = config.steering.as_ref() {
+        let undelivered = inbox.close();
+        if !undelivered.is_empty() {
+            tracing::warn!(
+                count = undelivered.len(),
+                "turn ended at its round limit with steering messages undelivered"
+            );
         }
     }
 
@@ -1875,6 +1906,44 @@ fn emit_turn_checkpoint(
             messages: delta,
         },
     );
+}
+
+/// Move every waiting steering message into the transcript as a user message,
+/// announcing each with [`AgentEvent::SteeringDelivered`]. Returns whether
+/// anything was delivered.
+fn deliver_steering(
+    config: &AgentConfig,
+    sink: &Option<mpsc::UnboundedSender<AgentEvent>>,
+    session_id: &Option<String>,
+    messages: &mut Vec<Message>,
+) -> bool {
+    let Some(inbox) = config.steering.as_ref() else {
+        return false;
+    };
+    let waiting = inbox.take_pending();
+    let delivered = !waiting.is_empty();
+    for steer in waiting {
+        messages.push(Message::user_text(steer.text.clone()));
+        emit(
+            sink,
+            AgentEvent::SteeringDelivered {
+                session_id: session_id.clone(),
+                id: steer.id,
+                text: steer.text,
+            },
+        );
+    }
+    delivered
+}
+
+/// Whether the run must continue for steering: `true` while messages are
+/// waiting. When nothing is waiting this closes the inbox in the same step,
+/// so no message can be accepted after the loop decided to end.
+fn steering_waiting(config: &AgentConfig) -> bool {
+    config
+        .steering
+        .as_ref()
+        .is_some_and(|inbox| !inbox.close_if_idle())
 }
 
 fn emit(sink: &Option<mpsc::UnboundedSender<AgentEvent>>, ev: AgentEvent) {
