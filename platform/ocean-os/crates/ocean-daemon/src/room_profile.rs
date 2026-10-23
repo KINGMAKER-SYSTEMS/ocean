@@ -694,7 +694,6 @@ mod tests {
             SetResourceStatusInput,
         };
 
-        let _yolo_guard = crate::tests::yolo_env_guard_async().await;
         let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let _restore = TestEnvRestore::capture(&[
             "OCEAN_AUTH_FILE",
