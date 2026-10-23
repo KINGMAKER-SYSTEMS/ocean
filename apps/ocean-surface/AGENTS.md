@@ -330,6 +330,18 @@ Web surface session UI:
   daemon-owned running/Stop projection and continuing the scoped SSE tail.
   Never quarantine a live session behind client-side detail polling,
   `detail syncing…`, or a manual refresh control.
+- Snapshot hydration reconciles pending steering rows and the Stop target by
+  identity (#148). SSE is a live tail, so `steering_delivered` /
+  `turn_finished` frames missed in a gap never re-arrive: the projection
+  commit matches each accepted row against the daemon's `steering` outcome
+  records (`steer_id` + originating turn — never text), removes confirmed
+  deliveries without duplicating the transcript, queues confirmed drops once
+  ahead of the queue, keeps rows whose turn is still live pending, and pins
+  everything else `unresolved` (visible, never auto-requeued). A steer POST
+  that never returned an answer stays unresolved; an explicit HTTP refusal
+  still queues. A terminal snapshot naming the local turn in
+  `finished_requests` clears the preserved Stop target (the registration race
+  and older daemons keep the old preserve behavior).
 - The daemon's `event: error` reset frame on `GET /v1/agent/events`
   (published `agent_events_error`: `live_lag`, `anchor_unavailable`,
   `malformed_anchor`, `reset_required`) shares its name with the DOM

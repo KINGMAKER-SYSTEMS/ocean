@@ -34,7 +34,7 @@ use ocean_core::{
     PermissionMode, PermissionStatus, PermissionsResponse, ProjectRef, PromptRequest,
     RequestControlResponse, RequestCreateResponse, RequestId, RequestState, RequestStatus,
     RequestsResponse, RoomKey, RoomMessageKind, RoomParticipantKind, SessionDetail, SessionId,
-    SessionResponse, SessionRunState,
+    SessionResponse, SessionRunState, SteeringOutcome, SteeringOutcomeStatus,
 };
 use ocean_runtime::{AgentEvent, PermissionDecision as AgentPermissionDecision, PermissionPolicy};
 // Brings the `RoomStore` trait methods (create/get/list/append_message/…) into
@@ -305,6 +305,9 @@ struct AppState {
     agent_events: AgentEventBus,
     requests: RequestRegistry,
     permissions: PermissionRegistry,
+    /// Per-session terminal steer outcomes for `GET /v1/sessions/{id}`
+    /// (#148). See [`SteeringOutcomeRegistry`].
+    steering_outcomes: Arc<SteeringOutcomeRegistry>,
     /// Read-side projection of longhouse councils: a `topic_id -> TopicSnapshot`
     /// store folded from the events each council emits, so the quorum
     /// observability deck survives a refresh (OCEAN-58). Convergence is still
@@ -1195,6 +1198,7 @@ async fn main() -> anyhow::Result<()> {
         agent_events: agent_event_bus.clone(),
         requests: Arc::new(RwLock::new(HashMap::new())),
         permissions: Arc::new(RwLock::new(HashMap::new())),
+        steering_outcomes: Arc::new(SteeringOutcomeRegistry::default()),
         longhouse,
         rooms,
         room_operator,
@@ -5405,6 +5409,18 @@ async fn enrich_session_detail(state: &AppState, session: &mut SessionDetail) {
         .filter_map(|status| status.permission_id)
         .collect();
 
+    // #148: expose the session's terminal steer outcomes (the only delivery
+    // record — the transcript carries no steer identity) and its finished
+    // request ids (so a hydration can prove a locally-live Stop target names
+    // a turn the daemon already finished). `matching` is most-recent first.
+    session.steering = state.steering_outcomes.terminal_outcomes(session.id);
+    session.finished_requests = matching
+        .iter()
+        .filter(|status| status.state.is_terminal())
+        .map(|status| status.request_id)
+        .take(FINISHED_REQUESTS_RETAIN)
+        .collect();
+
     if let Some(active) = matching.iter().find(|status| !status.state.is_terminal()) {
         session.state = session_run_state(active.state);
         session.resumable = false;
@@ -6775,6 +6791,10 @@ async fn agent_turn(
     let bridge_project_id = lifecycle_project_id;
     let bridge_turn_id = turn_id;
     let bridge_session_id = session_id;
+    // #148: the bridge is the daemon's authoritative delivery witness — record
+    // each steer outcome BEFORE the relay, so a client fetching the session
+    // snapshot the moment the frame arrives can already reconcile by id.
+    let bridge_steering = Arc::clone(&state.steering_outcomes);
 
     let bridge = tokio::spawn(async move {
         let mut tool_call_ids: HashMap<String, ToolCallId> = HashMap::new();
@@ -6802,9 +6822,15 @@ async fn agent_turn(
                     });
                 }
                 // Mid-turn steering: the loop put an operator message into the
-                // transcript at a tool boundary. Relay it so the sender can
+                // transcript at a tool boundary. Record the delivery in the
+                // steer-outcome ledger (#148), then relay it so the sender can
                 // show it where it landed and stop treating it as pending.
                 AgentEvent::SteeringDelivered { id, text, .. } => {
+                    bridge_steering.record_delivered(
+                        bridge_session_id.inner(),
+                        &id,
+                        bridge_turn_id.inner(),
+                    );
                     bridge_bus.emit(AgentTurnEvent::SteeringDelivered {
                         session_id: bridge_session_id,
                         turn_id: bridge_turn_id,
@@ -7254,6 +7280,16 @@ async fn agent_turn(
         bg_state.metrics.record_turn(res.wall_ms, res.ok);
         // Wait for the bridge to drain (the sender has been dropped by now).
         let _ = bridge.await;
+        // The bridge has drained, so every steer delivery relay for this turn
+        // is already in the ledger. Anything still pending for this turn was
+        // handed back unread by the inbox close — settle it as dropped BEFORE
+        // the terminal registry transition below, so a snapshot can never
+        // observe the turn terminal while this turn's steer outcomes are
+        // undecided (#148). A panic above skips this; those entries stay
+        // pending and are never exposed, which clients read as unresolved.
+        bg_state
+            .steering_outcomes
+            .settle_turn(session_id.inner(), request_id);
         // Prefer real provider usage; fall back to a visible-text estimate only
         // when the provider reported no output tokens.
         let output_tokens = if res.usage.output > 0 {
@@ -8417,6 +8453,169 @@ struct SteerRequest {
 /// progress; anything longer belongs in a turn of its own.
 const STEER_TEXT_MAX_BYTES: usize = 32 * 1024;
 
+/// Terminal steer outcomes retained per session for
+/// [`SessionDetail::steering`] — far more than any realistic reconnect
+/// window needs, while a long session cannot grow the ledger unbounded.
+const STEERING_OUTCOME_RETAIN: usize = 64;
+
+/// Terminal request ids retained per session for
+/// [`SessionDetail::finished_requests`]. A surface's Stop target is at most
+/// the session's latest turn, so the most recent handful is decisive; the
+/// bound keeps a busy session's snapshot bounded.
+const FINISHED_REQUESTS_RETAIN: usize = 32;
+
+/// Lifecycle of one ledger entry, as the daemon currently knows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SteerLedgerStatus {
+    /// Accepted into a live turn's inbox; the agent loop has not decided.
+    /// Never exposed — a client must not treat it as any outcome.
+    Pending,
+    Delivered,
+    Dropped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SteerLedgerEntry {
+    steer_id: String,
+    turn_id: RequestId,
+    status: SteerLedgerStatus,
+}
+
+/// In-memory per-session ledger of mid-turn steer outcomes (#148).
+///
+/// The daemon mints a `steer_id` when the steer route accepts a message; the
+/// agent loop later either delivers it into the turn's transcript (relayed
+/// through the turn bridge as `AgentEvent::SteeringDelivered`) or discards it
+/// unread at turn end (`SteeringInbox::close` returns it and the loop drops
+/// it). Neither outcome is recorded anywhere else — the persisted transcript
+/// carries no steer identity — so without this ledger a client that missed
+/// the SSE frames (a reconnect gap) cannot tell a delivered steer from a
+/// dropped one except by guessing at text. `GET /v1/sessions/{id}` exposes
+/// the terminal records so surfaces reconcile by `steer_id` alone.
+///
+/// Std `Mutex` like the other daemon registries: every method is synchronous
+/// and the guard never crosses an `await`. Entries are in-memory only — a
+/// daemon restart loses them, and clients treat a missing record as
+/// explicitly unresolved rather than guessing.
+#[derive(Debug, Default)]
+struct SteeringOutcomeRegistry {
+    sessions: std::sync::Mutex<HashMap<SessionId, Vec<SteerLedgerEntry>>>,
+}
+
+impl SteeringOutcomeRegistry {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<SessionId, Vec<SteerLedgerEntry>>> {
+        // A poisoned lock only means a holder panicked mid-update; the map of
+        // plain entries is still coherent, so keep serving it.
+        self.sessions
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    /// Drop the oldest terminal entries beyond [`STEERING_OUTCOME_RETAIN`].
+    /// Pending entries are always kept — they are bounded by the inbox's own
+    /// per-turn cap and are settled by their turn's end.
+    fn prune(entries: &mut Vec<SteerLedgerEntry>) {
+        let terminal = entries
+            .iter()
+            .filter(|entry| entry.status != SteerLedgerStatus::Pending)
+            .count();
+        let mut drop_oldest = terminal.saturating_sub(STEERING_OUTCOME_RETAIN);
+        if drop_oldest == 0 {
+            return;
+        }
+        entries.retain(|entry| {
+            if drop_oldest > 0 && entry.status != SteerLedgerStatus::Pending {
+                drop_oldest -= 1;
+                false
+            } else {
+                true
+            }
+        });
+    }
+
+    /// Record an accepted steer, bound to the session's live turn so the
+    /// end-of-turn settle can decide its outcome.
+    fn record_accepted(&self, session: SessionId, steer_id: &str, turn: RequestId) {
+        let mut sessions = self.lock();
+        let entries = sessions.entry(session).or_default();
+        entries.push(SteerLedgerEntry {
+            steer_id: steer_id.to_string(),
+            turn_id: turn,
+            status: SteerLedgerStatus::Pending,
+        });
+        Self::prune(entries);
+    }
+
+    /// Mark `steer_id` delivered inside `turn`, recorded at the bridge relay
+    /// (the daemon's own delivery announcement is authoritative). A delivery
+    /// whose acceptance was never recorded — the relay outran the steer
+    /// route's live-turn lookup — is inserted directly.
+    fn record_delivered(&self, session: SessionId, steer_id: &str, turn: RequestId) {
+        let mut sessions = self.lock();
+        let entries = sessions.entry(session).or_default();
+        match entries.iter_mut().find(|entry| entry.steer_id == steer_id) {
+            Some(entry) => {
+                entry.status = SteerLedgerStatus::Delivered;
+                entry.turn_id = turn;
+            }
+            None => {
+                entries.push(SteerLedgerEntry {
+                    steer_id: steer_id.to_string(),
+                    turn_id: turn,
+                    status: SteerLedgerStatus::Delivered,
+                });
+            }
+        }
+        Self::prune(entries);
+    }
+
+    /// The turn ended: every entry still [`Pending`](SteerLedgerStatus::Pending)
+    /// for `(session, turn)` was handed back unread by the inbox close and
+    /// discarded by the loop — settle it as `Dropped`. Called after the turn's
+    /// bridge drained (all delivery relays already recorded) and before the
+    /// terminal registry transition, so a snapshot can never observe the turn
+    /// terminal with this turn's ledger unsettled. Terminal entries are
+    /// untouched, making a repeated settle idempotent.
+    fn settle_turn(&self, session: SessionId, turn: RequestId) {
+        if let Some(entries) = self.lock().get_mut(&session) {
+            for entry in entries.iter_mut() {
+                if entry.turn_id == turn && entry.status == SteerLedgerStatus::Pending {
+                    entry.status = SteerLedgerStatus::Dropped;
+                }
+            }
+            Self::prune(entries);
+        }
+    }
+
+    /// Terminal outcomes for the session snapshot, oldest first, bounded to
+    /// the most recent [`STEERING_OUTCOME_RETAIN`]. Pending entries are not
+    /// exposed: no record is a client's signal to keep the row pending (its
+    /// turn is live) or treat it unresolved (its turn is gone) — never a
+    /// guess.
+    fn terminal_outcomes(&self, session: SessionId) -> Vec<SteeringOutcome> {
+        let sessions = self.lock();
+        let Some(entries) = sessions.get(&session) else {
+            return Vec::new();
+        };
+        entries
+            .iter()
+            .filter_map(|entry| match entry.status {
+                SteerLedgerStatus::Delivered => Some(SteeringOutcome {
+                    steer_id: entry.steer_id.clone(),
+                    turn_id: entry.turn_id,
+                    status: SteeringOutcomeStatus::Delivered,
+                }),
+                SteerLedgerStatus::Dropped => Some(SteeringOutcome {
+                    steer_id: entry.steer_id.clone(),
+                    turn_id: entry.turn_id,
+                    status: SteeringOutcomeStatus::Dropped,
+                }),
+                SteerLedgerStatus::Pending => None,
+            })
+            .collect()
+    }
+}
+
 /// Steer an operator message into the turn running on this session. The
 /// message joins the turn's inbox and the agent loop delivers it at the next
 /// tool boundary, as a user message after that round's tool results (or as
@@ -8456,10 +8655,31 @@ async fn agent_session_steer(
         text: text.to_string(),
     };
     match state.runtime.steer(core_sid(session_id), message) {
-        Ok(()) => (
-            StatusCode::ACCEPTED,
-            Json(json!({ "ok": true, "steer_id": steer_id })),
-        ),
+        Ok(()) => {
+            // Bind the acceptance to the session's live turn so the
+            // end-of-turn settle can decide its outcome (#148). A missing
+            // live request (registry race at turn end) simply leaves no
+            // record — clients treat that as unresolved, never a guess.
+            let live_turn = state
+                .requests
+                .read()
+                .await
+                .values()
+                .find(|control| {
+                    control.status.session_id == Some(core_sid(session_id))
+                        && !control.status.state.is_terminal()
+                })
+                .map(|control| control.status.request_id);
+            if let Some(turn) = live_turn {
+                state
+                    .steering_outcomes
+                    .record_accepted(core_sid(session_id), &steer_id, turn);
+            }
+            (
+                StatusCode::ACCEPTED,
+                Json(json!({ "ok": true, "steer_id": steer_id })),
+            )
+        }
         Err(ocean_runtime::SteerRefusal::Closed) => (
             StatusCode::CONFLICT,
             Json(json!({ "ok": false, "error": "no_active_turn" })),
@@ -12347,6 +12567,8 @@ mod tests {
             resumable: true,
             active_requests: vec![],
             pending_permissions: vec![],
+            steering: vec![],
+            finished_requests: vec![],
             transcript: vec![
                 transcript_entry("user", "first ask", 1_000),
                 transcript_entry("assistant", "working on it", 2_000),
@@ -14606,6 +14828,7 @@ mod tests {
             agent_events: AgentEventBus::new(64),
             requests: Arc::new(RwLock::new(HashMap::new())),
             permissions: Arc::new(RwLock::new(HashMap::new())),
+            steering_outcomes: Arc::new(SteeringOutcomeRegistry::default()),
             longhouse: Arc::new(Mutex::new(ocean_longhouse::LonghouseRegistry::new())),
             rooms,
             room_operator: Arc::new(room_operator::OperatorIdentity::for_test(
@@ -15375,6 +15598,224 @@ mod tests {
             "a finished turn refuses steering"
         );
         assert_eq!(body["error"], "no_active_turn");
+    }
+
+    // ── Steer outcome ledger (#148) ──────────────────────────────────────
+    //
+    // The ledger is the only authoritative record of whether an accepted
+    // steer was delivered or discarded; these pin its identity rules, its
+    // hide-pending exposure contract, and the steer route's live-turn
+    // binding.
+
+    #[test]
+    fn steer_ledger_exposes_only_terminal_outcomes_in_order() {
+        let ledger = SteeringOutcomeRegistry::default();
+        let session = SessionId::new_v4();
+        let turn = RequestId::new_v4();
+
+        ledger.record_accepted(session, "steer-a", turn);
+        ledger.record_accepted(session, "steer-b", turn);
+        // Pending steers are never exposed: no record is a client's signal
+        // to keep the row pending or treat it unresolved — never a guess.
+        assert!(ledger.terminal_outcomes(session).is_empty());
+
+        // The delivery relay (the bridge) settles steer-a...
+        ledger.record_delivered(session, "steer-a", turn);
+        // ...the turn-end settle drops the still-pending steer-b.
+        ledger.settle_turn(session, turn);
+
+        let outcomes = ledger.terminal_outcomes(session);
+        assert_eq!(
+            outcomes,
+            vec![
+                SteeringOutcome {
+                    steer_id: "steer-a".into(),
+                    turn_id: turn,
+                    status: SteeringOutcomeStatus::Delivered,
+                },
+                SteeringOutcome {
+                    steer_id: "steer-b".into(),
+                    turn_id: turn,
+                    status: SteeringOutcomeStatus::Dropped,
+                },
+            ],
+            "oldest first, by outcome"
+        );
+
+        // A repeated settle is idempotent: terminal entries are untouched.
+        ledger.settle_turn(session, turn);
+        assert_eq!(ledger.terminal_outcomes(session).len(), 2);
+
+        // A delivery relay for a steer whose acceptance was never recorded
+        // (it outran the route's live-turn lookup) is inserted directly.
+        ledger.record_delivered(session, "steer-late", turn);
+        assert_eq!(ledger.terminal_outcomes(session).len(), 3);
+
+        // Sessions are isolated.
+        assert!(ledger.terminal_outcomes(SessionId::new_v4()).is_empty());
+    }
+
+    #[test]
+    fn steer_ledger_keeps_only_the_most_recent_terminal_outcomes() {
+        let ledger = SteeringOutcomeRegistry::default();
+        let session = SessionId::new_v4();
+        let turn = RequestId::new_v4();
+        for i in 0..(STEERING_OUTCOME_RETAIN + 10) {
+            let id = format!("steer-{i}");
+            ledger.record_accepted(session, &id, turn);
+            ledger.record_delivered(session, &id, turn);
+        }
+        let outcomes = ledger.terminal_outcomes(session);
+        assert_eq!(
+            outcomes.len(),
+            STEERING_OUTCOME_RETAIN,
+            "the per-session terminal bound holds"
+        );
+        assert_eq!(
+            outcomes.first().unwrap().steer_id,
+            format!("steer-{}", 10),
+            "the oldest terminal entries are the ones pruned"
+        );
+    }
+
+    #[tokio::test]
+    async fn steer_route_binds_acceptance_to_the_session_live_turn() {
+        let state = permission_test_state();
+        let session = SessionId::new_v4();
+        let turn = RequestId::new_v4();
+
+        // A live request for this session is what the route binds to.
+        let mut req = control_prompt_request(Some(turn), Some(session), None);
+        let _ = register_running_request(
+            &state.requests,
+            &mut req,
+            "agent turn running",
+            RequestState::Running,
+        )
+        .await;
+
+        let registration = state.runtime.open_steering(session);
+        let (status, Json(body)) = agent_session_steer(
+            State(state.clone()),
+            Path(sdk_sid(session)),
+            Json(SteerRequest {
+                text: "use tabs".into(),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let steer_id = body["steer_id"].as_str().unwrap().to_string();
+        assert!(
+            state
+                .steering_outcomes
+                .terminal_outcomes(session)
+                .is_empty(),
+            "the acceptance is pending, not exposed"
+        );
+
+        // Turn ends without delivering: the settle records the drop under the
+        // turn the route bound it to — the identity a reconnecting surface
+        // reconciles against.
+        state.steering_outcomes.settle_turn(session, turn);
+        let outcomes = state.steering_outcomes.terminal_outcomes(session);
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].steer_id, steer_id);
+        assert_eq!(outcomes[0].turn_id, turn);
+        assert_eq!(outcomes[0].status, SteeringOutcomeStatus::Dropped);
+        drop(registration);
+
+        // With no registered live request (registry race), a still-accepted
+        // steer simply leaves no record — clients read missing as unresolved.
+        let other = SessionId::new_v4();
+        let registration = state.runtime.open_steering(other);
+        let (status, _) = agent_session_steer(
+            State(state.clone()),
+            Path(sdk_sid(other)),
+            Json(SteerRequest {
+                text: "no record".into(),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert!(state.steering_outcomes.terminal_outcomes(other).is_empty());
+        drop(registration);
+    }
+
+    #[tokio::test]
+    async fn session_detail_splits_live_from_finished_and_exposes_steering() {
+        let state = permission_test_state();
+        let tmp = tempfile::tempdir().unwrap();
+        let (session_id, _, _) = state
+            .runtime
+            .create_session(tmp.path().to_str().unwrap(), Some("test".into()))
+            .unwrap();
+
+        // A finished turn, then a live one, most recent = live.
+        let done_turn = RequestId::new_v4();
+        let mut first = control_prompt_request(Some(done_turn), Some(session_id), None);
+        let _ = register_running_request(
+            &state.requests,
+            &mut first,
+            "finished turn",
+            RequestState::Running,
+        )
+        .await;
+        let _ = update_request_finished(
+            &state.requests,
+            done_turn,
+            Some(session_id),
+            RequestState::Completed,
+            "done".into(),
+            |_| {},
+        )
+        .await;
+        let live_turn = RequestId::new_v4();
+        let mut second = control_prompt_request(Some(live_turn), Some(session_id), None);
+        let _ = register_running_request(
+            &state.requests,
+            &mut second,
+            "live turn",
+            RequestState::Running,
+        )
+        .await;
+
+        // Two steer outcomes on the ledger for this session.
+        state
+            .steering_outcomes
+            .record_accepted(session_id, "steer-1", done_turn);
+        state
+            .steering_outcomes
+            .record_delivered(session_id, "steer-1", done_turn);
+        state
+            .steering_outcomes
+            .record_accepted(session_id, "steer-2", done_turn);
+        state.steering_outcomes.settle_turn(session_id, done_turn);
+
+        let mut detail = state.runtime.session_detail(session_id).unwrap();
+        enrich_session_detail(&state, &mut detail).await;
+
+        assert_eq!(detail.active_requests, vec![live_turn]);
+        assert_eq!(
+            detail.finished_requests,
+            vec![done_turn],
+            "terminal request ids are exposed for stale-Stop reconciliation"
+        );
+        assert_eq!(
+            detail.steering,
+            vec![
+                SteeringOutcome {
+                    steer_id: "steer-1".into(),
+                    turn_id: done_turn,
+                    status: SteeringOutcomeStatus::Delivered,
+                },
+                SteeringOutcome {
+                    steer_id: "steer-2".into(),
+                    turn_id: done_turn,
+                    status: SteeringOutcomeStatus::Dropped,
+                },
+            ],
+            "terminal steer outcomes ride the session snapshot"
+        );
     }
 
     #[tokio::test]
@@ -16558,6 +16999,7 @@ mod tests {
             agent_events: AgentEventBus::new(1024),
             requests: Arc::new(RwLock::new(HashMap::new())),
             permissions: Arc::new(RwLock::new(HashMap::new())),
+            steering_outcomes: Arc::new(SteeringOutcomeRegistry::default()),
             longhouse: Arc::new(Mutex::new(ocean_longhouse::LonghouseRegistry::new())),
             rooms,
             room_operator: Arc::new(room_operator::OperatorIdentity::for_test(
@@ -17074,6 +17516,7 @@ mod tests {
             agent_events: AgentEventBus::new(1024),
             requests: Arc::new(RwLock::new(HashMap::new())),
             permissions: Arc::new(RwLock::new(HashMap::new())),
+            steering_outcomes: Arc::new(SteeringOutcomeRegistry::default()),
             longhouse: Arc::new(Mutex::new(ocean_longhouse::LonghouseRegistry::new())),
             rooms,
             room_operator: Arc::new(room_operator::OperatorIdentity::for_test(
@@ -19036,6 +19479,7 @@ mod tests {
             agent_events: AgentEventBus::new(64),
             requests: Arc::new(RwLock::new(HashMap::new())),
             permissions: Arc::new(RwLock::new(HashMap::new())),
+            steering_outcomes: Arc::new(SteeringOutcomeRegistry::default()),
             longhouse: Arc::new(Mutex::new(ocean_longhouse::LonghouseRegistry::new())),
             rooms,
             room_operator: Arc::new(room_operator::OperatorIdentity::for_test(

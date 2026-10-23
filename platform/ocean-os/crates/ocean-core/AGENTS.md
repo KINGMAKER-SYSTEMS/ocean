@@ -31,6 +31,12 @@ This crate owns shared protocol types used across Ocean clients, daemon, runtime
   (`skip_serializing_if`), so run bodies stored before it still decode. It is
   the daemon request id a client may cancel, never a decision token or other
   credential.
+- `SessionDetail.steering` (terminal `SteeringOutcome` records, oldest first)
+  and `SessionDetail.finished_requests` (terminal request ids, most-recent
+  first) are additive, legacy-default empty (#148). They carry identity, not
+  content: clients reconcile mid-turn steer rows and Stop targets by
+  `steer_id`/turn id, never by text. Absent fields mean "no record", which a
+  client must treat as unresolved — never as delivered or dropped.
 - The closed Track-0 `RoomId` projection family is retired. Durable room contracts use the open `RoomKey` model; do not recreate projection DTOs without a new audited API design.
 
 ### Federation types
