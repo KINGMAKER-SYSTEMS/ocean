@@ -266,21 +266,21 @@
   box-shadow: var(--focus-ring);
 }
 
-:is(.sessions-panel__list, .rooms-panel__list, .room-stage__transcript) {
+:is(.sessions-panel__list, .room-stage__transcript) {
   scrollbar-width: thin;
   scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
 }
 
-:is(.sessions-panel__list, .rooms-panel__list, .room-stage__transcript)::-webkit-scrollbar {
+:is(.sessions-panel__list, .room-stage__transcript)::-webkit-scrollbar {
   width: 8px;
 }
 
-:is(.sessions-panel__list, .rooms-panel__list, .room-stage__transcript)::-webkit-scrollbar-thumb {
+:is(.sessions-panel__list, .room-stage__transcript)::-webkit-scrollbar-thumb {
   border-radius: var(--radius-pill);
   background: rgba(255, 255, 255, 0.12);
 }
 
-:is(.sessions-panel__list, .rooms-panel__list, .room-stage__transcript)::-webkit-scrollbar-thumb:hover {
+:is(.sessions-panel__list, .room-stage__transcript)::-webkit-scrollbar-thumb:hover {
   background: rgba(255, 255, 255, 0.22);
 }
 
@@ -906,13 +906,6 @@
 
 .rooms-panel__create-input {
   flex: 1 1 auto;
-}
-
-.rooms-panel__list {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  padding: 8px;
 }
 
 .rooms-panel__empty {
