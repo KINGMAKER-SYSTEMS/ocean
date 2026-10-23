@@ -690,6 +690,45 @@ ships today and are updated slice by slice.
   The line above the composer shows agents with a live run. Coworker typing
   presence is not built: it would cross Bedrock and needs an operator
   trust-boundary decision. Empty states carry no copy.
+- Room files (ported from Risingtides-dev/ocean-surface `attachments.rs`,
+  legacy main `1b88f862`; now `src/rooms_workspace/attachments.rs`): the
+  right rail's Files mode (Room options → Files; same reveal, Escape and
+  return-focus rules as Members) lists the open room's context files from
+  `GET /v1/rooms/persistent/{key}/attachments` and links each at
+  `GET .../attachments/{id}` with `<a download>` — the daemon serves a type
+  DERIVED from the bytes with `nosniff` + `Content-Disposition: attachment`,
+  so the declared type only picks a glyph and nothing is rendered inline. The
+  composer's paperclip and the panel's `+ file` forward to one hidden
+  `<input type=file>` mounted at `RoomsWorkspace` scope (`AttachmentInput`,
+  outside the `open_room` closure a roster write rebuilds); the pick POSTs
+  the file's raw bytes to `.../attachments?filename=&content_type=&uploader_id=`
+  — metadata in the QUERY, never multipart or a custom header (daemon CORS
+  allows only `content-type`/`authorization`) — with `uploader_id` = the
+  `/v1/me` owner, after the daemon's own guards run client-side first (8 MiB
+  cap, empty file, unusable name; an empty declared type is sent as
+  `application/octet-stream`). `RoomAttachmentsState` lives at workspace
+  scope: the admission Effect `reset()`s it (ticket bump retires in-flight
+  lists, the upload flag goes with the room, the Files mode closes like the
+  other rail modes), an upload completion re-validates `(generation, key)`
+  through `room_is_current`, and the list is re-read after a success (the
+  daemon's System marker row arrives on the tail but does not carry the
+  attachment). Both controls take `access::local_store_write_gate`
+  (Local/Connecting/Live/Recovering; Revoked and unknown held) — NOT
+  `access_allows_writes` — because the write lands in this daemon's store
+  and is never enqueued for a peer; identity is refused at the action, not
+  the control. `DELETE .../attachments/{id}` exists on the daemon and is not
+  called (the legacy surface designed no remove control). Web proxy
+  (`rooms_persistent_shape`): the upload lane forwards the raw body up to
+  `ATTACHMENT_UPLOAD_BODY_LIMIT` (8 MiB + 4096 slack, so a just-over-cap body
+  still earns the daemon's typed 413) under the declared content type, the
+  download lane relays Content-Type / Content-Disposition /
+  X-Content-Type-Options verbatim (re-stamping `application/json` would have
+  undone the daemon's XSS defence), every other shape keeps the 1 MiB JSON
+  ceiling, and no operator key is injected
+  (`cargo test -p ocean-surface-proxy room_attachments`). Guards:
+  `tests/room_attachments_contract.rs` (route literals in the query form,
+  CSS ↔ emitter parity, tokens-only CSS, workspace-scope mount, gate choice,
+  daemon-constant parity) and `tests/rooms_product_doc_truth.rs`.
 - In `styles/rooms-workspace.css` the "Layout & depth (canonical)" section is
   the final say on geometry, density, and depth; change values there rather
   than adding another override layer. Colors only from `tokens.css`.

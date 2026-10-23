@@ -395,6 +395,60 @@ It supports:
   elsewhere — accepted with Enter or Tab
 - One-level thread replies (`thread_parent_seq`), composed in `local` rooms only
 - The federated outbox's Pending/Failed state with retry on failure
+- A paperclip (`.rooms-workspace__composer-attach`) that attaches a context
+  file to the room (see "Room files")
+
+### Room files
+
+A room's context files live on the daemon (`room_attachments.rs`; the bytes
+sit beside `rooms.db`). The right rail's Files mode — Room options → Files,
+`rooms_workspace/attachments.rs` — lists them at a reading measure with its
+own `+ file` control, and the composer's paperclip attaches one from the
+conversation. Three routes, all through the proxy on the web and direct on
+Tauri:
+
+```
+GET  /v1/rooms/persistent/{key}/attachments
+-> { ok, attachments: [{ id, filename, content_type, byte_len, sha256,
+                         uploaded_by, uploaded_at }], closed }
+
+POST /v1/rooms/persistent/{key}/attachments?filename=&content_type=&uploader_id=
+<the file's raw bytes>
+-> 201 { ok, attachment }
+
+GET  /v1/rooms/persistent/{key}/attachments/{attachment_id}
+-> the bytes, under a content type DERIVED from them (PNG/JPEG/GIF/WebP, else
+   application/octet-stream), X-Content-Type-Options: nosniff and
+   Content-Disposition: attachment
+```
+
+The upload body is the picked file itself and every piece of metadata rides
+the query string — not multipart, not JSON, not a custom header (the daemon's
+CORS allows only `content-type` and `authorization`, so a custom header would
+pass under curl and die at the browser preflight). `uploader_id` is this
+daemon's owner (`GET /v1/me`); the daemon checks it against the roster inside
+the write and refuses an Agent or System identity with
+`403 forged_attachment_author`, and an off-roster id with the store's own 403.
+The daemon's guards are decided on the page first so the refusal is
+immediate: the 8 MiB cap (`413 attachment_too_large`, also what a body over
+the proxy's ceiling reads as), an empty file, a filename that sanitizes to
+nothing (`400 invalid_request`), and an empty declared type, which is sent as
+`application/octet-stream`. A success appends a System row ("alice attached
+'spec.md' (1234 bytes)") that the tail delivers like any other; the list is
+re-read after an upload rather than patched from it.
+
+The list is `.rooms-workspace__files-list` of `.rooms-workspace__file` links
+(`href` = the download route, `download` = the filename). The declared type
+only picks a glyph; the bytes are linked, never rendered inline on this
+surface. The attach controls gate on `local_store_write_gate`
+(`rooms_workspace/access.rs`) and refuse at the action while the owner
+identity is still loading. The daemon also serves
+`DELETE .../attachments/{attachment_id}`; this surface has no remove control
+and does not call it.
+
+The two controls are held only when the room is `revoked` or carries no
+projection yet — `connecting` and `recovering` keep them live, because an
+upload lands in this daemon's store and is never enqueued for a peer.
 
 ### Federated Rooms
 
@@ -525,9 +579,11 @@ carries no `session_id`, so a client can never attribute its post to a session.
 - **Not federated by default.** A room starts `local` to one daemon. It
   federates through Bedrock only when an invite is minted on it or redeemed
   into it.
-- **Not a file-sharing surface yet.** Room messages carry text. The daemon
-  serves room attachments (`/v1/rooms/persistent/{key}/attachments`), but this
-  surface does not call those routes.
+- **Not a file-sharing surface.** Room messages carry text. A room does hold
+  context files — the doc, the spec, the screenshot — through the daemon's
+  attachment routes (see "Room files"): listed in the right rail's Files mode
+  and downloaded by link. This surface never renders their bytes inline and
+  has no remove control.
 - **Not a project management tool.** No kanban, no issue tracker, no sprints.
   Rooms carry conversation and agent turns. Workflows that need structured
   tracking belong in the Longhouse or the agent session surface.
@@ -564,6 +620,9 @@ operator key; the page only asks the shell for them.
 | `GET` | `/v1/rooms/inbox` | Mentions inbox (`room_attention.rs`) |
 | `GET` | `/v1/rooms/persistent/{key}/search` | Room message search (`room_attention.rs`) |
 | `PUT` | `/v1/rooms/persistent/{key}/prefs` | Per-room mute (`room_attention.rs`) |
+| `GET` | `/v1/rooms/persistent/{key}/attachments` | List the room's context files (`rooms_workspace/attachments.rs`) |
+| `POST` | `/v1/rooms/persistent/{key}/attachments?filename=&content_type=&uploader_id=` | Upload one file as raw bytes, metadata in the query (`rooms_workspace/attachments.rs`) |
+| `GET` | `/v1/rooms/persistent/{key}/attachments/{attachment_id}` | Download the bytes, linked from the Files rail (`rooms_workspace/attachments.rs`) |
 | `GET` | `/v1/rooms/persistent/{key}/agents/preview/{package_id}` | Consent preview (Tauri shell) |
 | `POST` | `/v1/rooms/persistent/{key}/agents/bootstrap` | First local agent bootstrap (Tauri shell) |
 | `POST` | `/v1/rooms/persistent/{key}/agents` | Authorize a binding (Tauri shell) |
