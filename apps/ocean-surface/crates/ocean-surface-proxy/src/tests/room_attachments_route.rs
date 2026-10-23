@@ -287,11 +287,12 @@ fn attachment_lanes_are_classified_by_segment_shape() {
 /// The ceiling the upload lane buys: the daemon's 8 MiB cap plus its 4096
 /// byte slack, so a just-over-cap body reaches the daemon's typed 413. The
 /// JSON ceiling stays at 1 MiB for every other shape.
+const _: () = assert!(ATTACHMENT_UPLOAD_BODY_LIMIT > ROOMS_JSON_BODY_LIMIT);
+
 #[test]
 fn the_upload_ceiling_clears_the_daemon_cap_and_the_json_ceiling_does_not() {
     assert_eq!(ATTACHMENT_UPLOAD_BODY_LIMIT, 8 * 1024 * 1024 + 4096);
     assert_eq!(ROOMS_JSON_BODY_LIMIT, 1 << 20);
-    assert!(ATTACHMENT_UPLOAD_BODY_LIMIT > ROOMS_JSON_BODY_LIMIT);
 }
 
 #[test]
