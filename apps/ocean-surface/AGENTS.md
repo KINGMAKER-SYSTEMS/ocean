@@ -395,9 +395,10 @@ ships today and are updated slice by slice.
   `src/rooms.rs`), every `.rooms-*` class it names must be defined in
   `styles/` and emitted from production Rust (page or Tauri shell), and every
   route in its API table must be sent by the page or shell and, in the
-  monorepo, registered by `ocean-daemon`'s router with that method. Edit the
-  doc and this guard together; a backticked non-state word on a line that
-  mentions access goes in `ACCESS_LINE_NON_STATES`.
+  monorepo, registered by `ocean-daemon`'s router with that method; its
+  create body must show exactly the wake policy `CreateRoomBody::new`
+  attaches. Edit the doc and this guard together; a backticked non-state word
+  on a line that mentions access goes in `ACCESS_LINE_NON_STATES`.
 - The operator-authorized post-G3 product-depth program is governed by
   `docs/specs/2026-08-13-ocean-rooms-post-g3-product-depth.md`. A share link is
   only the admission rail; do not describe Rooms as complete before its
@@ -560,6 +561,22 @@ ships today and are updated slice by slice.
   explicit and resets after a successful create; it is never seeded from a
   session cwd, the focused chat's project, or `/tmp`, and a root no longer
   offered is not sent. `CreateRoomBody.workspace_root` is omitted when unset.
+  `CreateRoomBody.trigger_policy` is never omitted: `CreateRoomBody::new`
+  attaches `RoomTriggerPolicy::create_default()` (`on_mention` and
+  `on_thread_reply` on; `on_component_event`, `on_build_failure`,
+  `on_ci_failure` off; no `on_schedule`) to every create, so
+  `Rooms::create_room` takes only the name and folder and no create path can
+  send a policy-less body. That default is the "+ New room" policy in
+  `docs/OCEAN_ROOMS_DESIGN_DIRECTION.md` (Sidebar) and the Gate 1 create
+  flow; ocean-core never convenes on an absent policy, so the `None` the rail
+  used to pass made every Surface room invoke-only against the documented
+  "mention an agent to wake it" expectation. A mention still has to pass the
+  agent binding's activation policy (`mention` / `task_and_thread`; the
+  consent default is `explicit_only`). No policy UI here: a later control
+  writes through the daemon's `PATCH /v1/rooms/persistent/{key}`. Guarded by
+  `create_body_always_carries_the_canonical_wake_policy` (`rooms.rs`) and
+  `product_doc_create_body_carries_the_wake_policy_rooms_rs_sends`
+  (`tests/rooms_product_doc_truth.rs`).
   The daemon binds it once (absolute existing directory, canonicalized;
   otherwise 400 `invalid_workspace_root`, shown as "create failed: workspace
   folder not found on this Ocean" with the draft kept); the daemon's
