@@ -681,9 +681,12 @@ ships today and are updated slice by slice.
 - Rooms G1 is daemon-native text collaboration. LiveKit controls stay outside
   the room join, leave, roster, and transcript lifecycle until explicitly
   reintroduced behind a reviewed platform contract.
-- The rooms browser is a flex column; `.rooms-panel__list` keeps
-  `min-height: 0` with vertical overflow so long room lists scroll instead of
-  pushing status/actions outside the viewport.
+- The Rooms rail (`.rooms-workspace__left`, `styles/rooms-workspace.css`) is
+  a flex column; its list `.rooms-workspace__left-list` (rendered from
+  `rooms_workspace/room_list.rs`) keeps `min-height: 0` with `overflow-y:
+  auto` so long room lists scroll instead of pushing the create field and
+  status line outside the viewport. Guarded by
+  `rooms_list_flex_child_can_shrink_and_scroll` in `app.rs`.
 
 ### Native Room agent consent consumer (ocean-private #65)
 
