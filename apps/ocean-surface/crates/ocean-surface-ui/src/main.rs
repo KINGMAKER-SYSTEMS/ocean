@@ -31,6 +31,7 @@ mod observatory;
 mod palette;
 mod place_call;
 mod room_attention;
+mod room_close;
 mod room_markdown;
 mod room_messages;
 mod room_overflow;
