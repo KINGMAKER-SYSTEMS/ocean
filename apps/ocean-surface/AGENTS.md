@@ -385,6 +385,15 @@ activity, the room details drawer, agent authoring, the S0-S8 slice plan):
 `docs/OCEAN_ROOMS_DESIGN_DIRECTION.md`. It supersedes the rendering bullets of
 `docs/OCEAN_ROOMS_PRODUCT.md`; the contract bullets below describe main as it
 ships today and are updated slice by slice.
+- `docs/OCEAN_ROOMS_PRODUCT.md` is held to the code by
+  `tests/rooms_product_doc_truth.rs` (Rooms DoD 5.4): the access states it
+  names must be exactly `RoomAccessState`'s variants (read from
+  `src/rooms.rs`), every `.rooms-*` class it names must be defined in
+  `styles/` and emitted from production Rust (page or Tauri shell), and every
+  route in its API table must be sent by the page or shell and, in the
+  monorepo, registered by `ocean-daemon`'s router with that method. Edit the
+  doc and this guard together; a backticked non-state word on a line that
+  mentions access goes in `ACCESS_LINE_NON_STATES`.
 - The operator-authorized post-G3 product-depth program is governed by
   `docs/specs/2026-08-13-ocean-rooms-post-g3-product-depth.md`. A share link is
   only the admission rail; do not describe Rooms as complete before its
