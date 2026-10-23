@@ -26706,6 +26706,181 @@ mod tests {
         );
     }
 
+    /// Byte offset of the `method(` method-router call inside one `.route(...)`
+    /// call, with the same word-boundary rule as [`route_call_contains`], or
+    /// `None` when that method is not chained there.
+    fn route_call_position(call: &str, method: &str) -> Option<usize> {
+        let needle = format!("{method}(");
+        call.match_indices(&needle)
+            .map(|(index, _)| index)
+            .find(|&index| {
+                index == 0
+                    || !call.as_bytes()[index - 1].is_ascii_alphanumeric()
+                        && call.as_bytes()[index - 1] != b'_'
+            })
+    }
+
+    /// Whether `path` is a room route: `/v1/rooms` itself or anything below it.
+    /// `/v1/me` shares `room_routes()` but is the owner identity, not a room.
+    fn is_room_path(path: &str) -> bool {
+        path == "/v1/rooms" || path.starts_with("/v1/rooms/")
+    }
+
+    /// The `/v1/rooms` half of `source_registered_routes()`. The contract's
+    /// room-route table claims to be the WHOLE room surface, so the comparison
+    /// has to be against every registered room route rather than a hand-listed
+    /// subset — otherwise a new route could be added to neither side and the
+    /// table would still pass while lying.
+    fn registered_room_routes() -> std::collections::BTreeSet<String> {
+        source_registered_routes()
+            .into_iter()
+            .filter(|route| {
+                route
+                    .split_once(' ')
+                    .is_some_and(|(_, path)| is_room_path(path))
+            })
+            .collect()
+    }
+
+    /// `room_routes()`'s room registrations in the order the router chain
+    /// states them: `.route(...)` calls top to bottom, and within one call each
+    /// method router in the order it is chained, so `post(a).get(b)` reads
+    /// POST then GET. This is the order the contract table promises.
+    fn registered_room_routes_in_order() -> Vec<String> {
+        let source = include_str!("main.rs");
+        let section = source_section(source, "fn room_routes(", "fn longhouse_routes(");
+        let mut routes = Vec::new();
+        for call in route_calls(section) {
+            let path_start = call.find('"').expect("route call has a quoted path") + 1;
+            let path_end = path_start
+                + call[path_start..]
+                    .find('"')
+                    .expect("route path has a closing quote");
+            let path = &call[path_start..path_end];
+            if !is_room_path(path) {
+                continue;
+            }
+            let mut methods: Vec<(usize, &str)> = [
+                ("get", "GET"),
+                ("post", "POST"),
+                ("put", "PUT"),
+                ("patch", "PATCH"),
+                ("delete", "DELETE"),
+            ]
+            .into_iter()
+            .filter_map(|(rust_name, wire_name)| {
+                route_call_position(call, rust_name).map(|position| (position, wire_name))
+            })
+            .collect();
+            methods.sort_unstable();
+            routes.extend(
+                methods
+                    .into_iter()
+                    .map(|(_, wire_name)| format!("{wire_name} {path}")),
+            );
+        }
+        routes
+    }
+
+    /// Parse the room-route table out of `OCEAN_ECOSYSTEM_CONTRACT.md`, in
+    /// document order: any Markdown table row whose first cell is a wire
+    /// method and whose second is a `/v1/rooms` path. Prose mentioning a path
+    /// is ignored because it is not a table row, and the header/separator rows
+    /// are ignored because `Method` and `---` are not wire methods.
+    fn contract_room_route_table() -> Vec<String> {
+        let contract = include_str!("../../../docs/OCEAN_ECOSYSTEM_CONTRACT.md");
+        contract
+            .lines()
+            .filter_map(|line| {
+                let mut cells = line.trim().strip_prefix('|')?.split('|').map(str::trim);
+                let method = cells.next()?.trim_matches('`');
+                let path = cells.next()?.trim_matches('`');
+                (matches!(method, "GET" | "POST" | "PUT" | "PATCH" | "DELETE")
+                    && is_room_path(path))
+                .then(|| format!("{method} {path}"))
+            })
+            .collect()
+    }
+
+    /// The decimal number immediately following `marker` in `sentence`. Anchored
+    /// on the surrounding words rather than "the first number in the line" so
+    /// that ordinary prose gaining a digit cannot silently repoint the check at
+    /// the wrong number.
+    fn number_after(sentence: &str, marker: &str) -> usize {
+        let start = sentence.find(marker).unwrap_or_else(|| {
+            panic!("ARCHITECTURE.md's route-count sentence must contain {marker:?}")
+        }) + marker.len();
+        sentence[start..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect::<String>()
+            .parse()
+            .unwrap_or_else(|_| panic!("ARCHITECTURE.md must state a number after {marker:?}"))
+    }
+
+    /// The ecosystem contract lists ALL daemon room routes and
+    /// `ARCHITECTURE.md`'s route counts are true, both pinned executably.
+    ///
+    /// The sibling above pins the router against `GET /` discovery and the
+    /// operator guide. This one pins the remaining prose claims: the
+    /// contract's room-route table is exactly the router's `/v1/rooms`
+    /// registrations — same methods, same paths, each listed once, in
+    /// `room_routes()` registration order — and `ARCHITECTURE.md`'s stated
+    /// totals are the router's own counts rather than a number that was true
+    /// once. A route added to the router without a table row, a table row
+    /// the router does not register, and a row carrying the wrong method all
+    /// fail the first assertion with the two sets printed.
+    #[test]
+    fn router_contract_room_route_table_and_architecture_counts_are_in_parity() {
+        let registered = registered_room_routes();
+        let registered_in_order = registered_room_routes_in_order();
+        assert_eq!(
+            registered_in_order
+                .iter()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            registered,
+            "the ordered room_routes() parser and source_registered_routes() must agree"
+        );
+        assert_eq!(
+            registered_in_order.len(),
+            registered.len(),
+            "room_routes() must not register the same method and path twice"
+        );
+
+        let documented = contract_room_route_table();
+        assert_eq!(
+            documented
+                .iter()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            registered,
+            "every registered /v1/rooms route must appear in the ecosystem contract's \
+             room-route table, and every row of that table must be a registered route"
+        );
+        assert_eq!(
+            documented, registered_in_order,
+            "the ecosystem contract's room-route table must list each route once, in \
+             room_routes() registration order"
+        );
+
+        let architecture = include_str!("../../../docs/ARCHITECTURE.md");
+        let sentence = architecture
+            .lines()
+            .find(|line| line.contains("explicit method/path pairs"))
+            .expect("ARCHITECTURE.md states the router's registered route count");
+        assert_eq!(
+            number_after(sentence, "registers "),
+            source_registered_routes().len(),
+            "ARCHITECTURE.md's total route count must equal the router's own registrations"
+        );
+        assert_eq!(
+            number_after(sentence, "pairs, "),
+            registered.len(),
+            "ARCHITECTURE.md's room-route count must equal the router's own /v1/rooms registrations"
+        );
+    }
+
     #[test]
     fn router_contract_middleware_and_default_fallback_snapshot_is_explicit() {
         let source = include_str!("main.rs");
