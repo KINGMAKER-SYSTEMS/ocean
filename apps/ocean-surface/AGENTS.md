@@ -532,6 +532,15 @@ ships today and are updated slice by slice.
   the full durable sequence; never mark unseen conversation read to silence a dot.
   Deploy the Surface and daemon attention changes together; older daemon summaries
   can still count hidden audits in unopened rooms.
+- Unread rows also emit `rooms-workspace__room--unread` (bold name; muted rooms
+  never). The transcript's `rooms-workspace__unread-divider` sits above the first
+  visible root past `Rooms.unread_baseline`, which `open_room` locks from the
+  room-list `read_summaries` before the open resets or advances the cursor and
+  `close_room` clears; never derive it from `open_read_cursor` or keep it
+  workspace-local. Compare in the room's read space (`read_cursor.rs`):
+  transcript `seq` for `Local`, `global_sequence` for `Live` (rows without
+  federated metadata are history, not unread), no divider in other states or
+  without a baseline.
 - The timeline hides routine convene, bootstrap, admission and output audit
   rows (`room_messages::is_convene_audit`), including exact labels when the
   daemon omits an agent name; durable records stay untouched.

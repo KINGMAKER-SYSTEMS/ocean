@@ -42,8 +42,8 @@ use format::{avatar_identity_class, canonical_wire_clock_time, today_day_key};
 use members::MembersPanel;
 use mentions::{mention_roster, MentionState};
 use read_cursor::{
-    applied_read_seq, read_advance_needs_queue, read_advance_request, ready_read_target,
-    transcript_is_near_bottom, transcript_pass_action, transcript_read_hydrated,
+    applied_read_seq, first_unread_root_seq, read_advance_needs_queue, read_advance_request,
+    ready_read_target, transcript_is_near_bottom, transcript_pass_action, transcript_read_hydrated,
     ReadAdvanceRequest, TranscriptPassAction,
 };
 use room_list::RoomListRail;
@@ -266,6 +266,24 @@ pub fn RoomsWorkspace(
             .collect::<std::collections::HashSet<_>>()
     });
     let mobile_toggle_ref: NodeRef<leptos::html::Button> = NodeRef::new();
+
+    // Root row the "new messages" divider sits above, from the baseline
+    // `Rooms::open_room` locked for this room. Computed over the same visible
+    // roots as the timeline so a hidden audit row cannot swallow the divider.
+    let first_unread_seq = Memo::new(move |_| {
+        let baseline = match rooms.unread_baseline.get() {
+            Some((key, baseline)) if rooms.open_key.get().as_deref() == Some(key.as_str()) => {
+                baseline
+            }
+            _ => return None,
+        };
+        let roots: Vec<RoomMessage> = partition_thread_messages(&rooms.transcript.get(), 0)
+            .roots
+            .into_iter()
+            .filter(|m| !room_messages::is_convene_audit(m))
+            .collect();
+        first_unread_root_seq(&roots, baseline, rooms.access.get().as_ref())
+    });
 
     // ── Mention autosuggest state (channel + thread composers) ──
     let mention = MentionState::new(rooms);
@@ -889,6 +907,20 @@ pub fn RoomsWorkspace(
                                                 .map(|p| room_messages::is_grouped(p, &m))
                                                 .unwrap_or(false);
                                             view! {
+                                                // "New messages" line at the reader's
+                                                // left-off point, above the day/gap
+                                                // headers so it bounds what follows.
+                                                {move || {
+                                                    (first_unread_seq.get() == Some(root_seq)).then(|| view! {
+                                                        <div
+                                                            class="rooms-workspace__unread-divider"
+                                                            role="separator"
+                                                            aria-label="New messages"
+                                                        >
+                                                            "New"
+                                                        </div>
+                                                    })
+                                                }}
                                                 {day_label.map(|d| view! {
                                                     <div class="rooms-workspace__day-separator" data-day="true">{d}</div>
                                                 })}
