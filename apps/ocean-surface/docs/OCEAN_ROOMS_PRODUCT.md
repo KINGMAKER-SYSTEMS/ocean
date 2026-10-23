@@ -35,19 +35,31 @@ A human creates a room from the surface:
 
 ```
 POST /v1/rooms/persistent
-{ "key": "my-room", "name": "My Room", "trigger_policy": { ... }, "workspace_root": "/path/to/project" }
+{
+  "key": "my-room",
+  "name": "My Room",
+  "trigger_policy": {
+    "on_mention": true,
+    "on_thread_reply": true,
+    "on_component_event": false,
+    "on_build_failure": false,
+    "on_ci_failure": false
+  },
+  "workspace_root": "/path/to/project"
+}
 -> 201 { "ok": true, "room": { ... } }
 ```
 
-That is `CreateRoomBody` in `rooms.rs`; `trigger_policy` and `workspace_root`
-are omitted when unset. The `key` is derived from the name (`slugify`:
-lower-kebab); the daemon keys rooms by it and refuses a duplicate.
-`workspace_root` is optional — when set, agent turns in this room resolve their
-project and `cwd` from it. It is resolved on the machine running the daemon
-(an absolute existing directory, else 400 `invalid_workspace_root`). The daemon
-can rebind or unbind it later through `PATCH /v1/rooms/persistent/{key}`
-(`workspace_root`; `null` unbinds), which this surface does not call. This
-surface sends no `trigger_policy` (see "Agent Wake Policy").
+That is `CreateRoomBody` in `rooms.rs`. `trigger_policy` is never omitted: it
+is always `RoomTriggerPolicy::create_default()`, the object above (see "Agent
+Wake Policy"); `workspace_root` is omitted when unset. The `key` is derived
+from the name (`slugify`: lower-kebab); the daemon keys rooms by it and refuses
+a duplicate. `workspace_root` is optional — when set, agent turns in this room
+resolve their project and `cwd` from it. It is resolved on the machine running
+the daemon (an absolute existing directory, else 400 `invalid_workspace_root`).
+The daemon can rebind or unbind it later through
+`PATCH /v1/rooms/persistent/{key}` (`workspace_root`; `null` unbinds), which
+this surface does not call.
 
 Creating does not join: the roster starts empty, the surface opens the new
 room, and the header's Join action is the next step.
@@ -261,10 +273,17 @@ activation policy rather than this policy.
 
 The policy is set in the create body or edited through
 `PATCH /v1/rooms/persistent/{key} { "trigger_policy": … }` (`null` clears it;
-`on_ci_failure` is refused the same way). This surface sends neither, so rooms
-created here carry no policy and their agents run only through the explicit
-invoke below. The surface's `RoomTriggerPolicy` mirror in `rooms.rs` still
-lacks the two failure flags.
+`on_ci_failure` is refused the same way). Every room this surface creates
+carries `RoomTriggerPolicy::create_default()` in the create body: `on_mention`
+and `on_thread_reply` on, the other three flags off, no `on_schedule` — the
+"+ New room" policy fixed in `OCEAN_ROOMS_DESIGN_DIRECTION.md` (Sidebar) and
+the Gate 1 create flow. So in a room created here a bound agent wakes when a
+human @-mentions it or replies in a thread it rooted, provided its binding's
+activation policy admits that trigger (`mention` or `task_and_thread`; a
+binding minted with the consent default `explicit_only` still runs only
+through the explicit invoke below). This surface never calls the PATCH route
+and has no policy control; a later control would write through it. The
+`RoomTriggerPolicy` mirror in `rooms.rs` carries all five flags.
 
 ### Agent Turns in Rooms
 
@@ -514,16 +533,17 @@ An agent identity already registered with the daemon (visible in
 
 ### Configuring Agent Wake Behavior
 
-There is no wake-policy control in this surface. The daemon takes a policy in
-the create body or on `PATCH /v1/rooms/persistent/{key}`; this surface sends
-neither, so agents in rooms created here are woken by the explicit invoke on a
-message, not by mentions.
+There is no wake-policy control in this surface. Every room created here
+carries the canonical default (`on_mention` and `on_thread_reply`, see "Agent
+Wake Policy"), so a bound agent whose binding admits mentions wakes on `@id`
+without any setup; the daemon's `PATCH /v1/rooms/persistent/{key}` is where a
+later control would write, and this surface does not call it.
 
 ### Agent's First Turn in a Room
 
 1. Human writes a message in a room whose agent is bound (authorized), and
-   either mentions it in a room that carries `on_mention` or picks it in the
-   message's invoke menu.
+   either @-mentions it (every room created here carries `on_mention`) or
+   picks it in the message's invoke menu.
 2. The daemon admits the agent against its binding, resolves the turn folder
    from the room's `workspace_root` (an unbound room records
    `workspace_unavailable` instead) and runs the turn itself.
