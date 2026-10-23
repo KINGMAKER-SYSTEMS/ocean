@@ -1,0 +1,93 @@
+{
+  "connecting": {
+    "caller_member_id": "22222222-2222-4222-8222-222222222222",
+    "local_member_id": "22222222-2222-4222-8222-222222222222",
+    "state": "connecting"
+  },
+  "live": {
+    "caller_member_id": "22222222-2222-4222-8222-222222222222",
+    "last_confirmed_global_sequence": 42,
+    "local_member_id": "22222222-2222-4222-8222-222222222222",
+    "members": [
+      {
+        "actor_type": "user",
+        "derived_presence": "live",
+        "display_name": "Owner",
+        "joined_at": "2026-07-17T00:00:00Z",
+        "member_id": "11111111-1111-4111-8111-111111111111",
+        "role_in_room": "owner"
+      },
+      {
+        "actor_type": "user",
+        "derived_presence": "unavailable",
+        "display_name": "Joined Human",
+        "joined_at": "2026-07-17T00:00:00Z",
+        "member_id": "22222222-2222-4222-8222-222222222222",
+        "role_in_room": "member"
+      },
+      {
+        "actor_type": "agent",
+        "derived_presence": "live",
+        "display_name": "Researcher",
+        "joined_at": "2026-07-17T00:00:00Z",
+        "local_binding_available": true,
+        "member_id": "33333333-3333-4333-8333-000000000000",
+        "owner_member_id": "22222222-2222-4222-8222-222222222222",
+        "public_agent_descriptor": {
+          "description": "Reads the room and reports back.",
+          "display_name": "Researcher",
+          "model_alias": "fable",
+          "skills_count": 3,
+          "subagent_names": [
+            "scout"
+          ]
+        },
+        "role_in_room": "member"
+      }
+    ],
+    "outbox": [
+      {
+        "author_member_id": "22222222-2222-4222-8222-222222222222",
+        "client_event_id": "evt-pending",
+        "event_type": "chat.message",
+        "mention_member_ids": [
+          "33333333-3333-4333-8333-000000000000"
+        ],
+        "payload": {
+          "text": "pending on the wire"
+        },
+        "source_id": "ocean-wire",
+        "source_sequence": 10,
+        "state": "pending"
+      },
+      {
+        "author_member_id": "22222222-2222-4222-8222-222222222222",
+        "client_event_id": "evt-failed",
+        "event_type": "chat.message",
+        "mention_member_ids": [
+          "33333333-3333-4333-8333-000000000000"
+        ],
+        "payload": {
+          "text": "pending on the wire"
+        },
+        "source_id": "ocean-wire",
+        "source_sequence": 10,
+        "state": "failed"
+      }
+    ],
+    "state": "live"
+  },
+  "local": {
+    "state": "local"
+  },
+  "recovering": {
+    "caller_member_id": "22222222-2222-4222-8222-222222222222",
+    "last_confirmed_global_sequence": 7,
+    "local_member_id": "22222222-2222-4222-8222-222222222222",
+    "state": "recovering"
+  },
+  "revoked": {
+    "last_confirmed_global_sequence": 7,
+    "state": "revoked"
+  }
+}

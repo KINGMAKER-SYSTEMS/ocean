@@ -1,0 +1,23 @@
+{
+  "ok": true,
+  "room": {
+    "created_at": "2026-10-23T12:00:00.123456Z",
+    "id": "wire-room",
+    "name": "Wire Room",
+    "participants": [
+      {
+        "display_name": "John",
+        "id": "john",
+        "kind": "human"
+      }
+    ],
+    "trigger_policy": {
+      "on_build_failure": false,
+      "on_ci_failure": false,
+      "on_component_event": false,
+      "on_mention": true,
+      "on_thread_reply": true
+    },
+    "updated_at": "2026-10-23T12:00:00.123456Z"
+  }
+}

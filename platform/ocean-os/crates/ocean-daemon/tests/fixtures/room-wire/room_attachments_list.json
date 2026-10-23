@@ -1,0 +1,15 @@
+{
+  "attachments": [
+    {
+      "byte_len": 19,
+      "content_type": "text/plain",
+      "filename": "notes.txt",
+      "id": "0123456789abcdef0123456789abcdef",
+      "sha256": "6d95c4f39a3cc5cea4c9927eaf4b47bcfd02d911f2ced17a067ecb190953c74c",
+      "uploaded_at": "2026-10-23T12:00:00.123456Z",
+      "uploaded_by": "john"
+    }
+  ],
+  "closed": false,
+  "ok": true
+}

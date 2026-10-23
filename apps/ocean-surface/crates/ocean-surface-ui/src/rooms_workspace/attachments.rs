@@ -1026,4 +1026,41 @@ mod tests {
         // bytes are still fetched from the daemon's sniffed route.
         assert_eq!(kind_glyph("text/html"), kind_glyph("text/plain"));
     }
+
+    /// The daemon-generated attachment fixtures (see
+    /// `rooms/wire_fixtures.rs`) decode through the production folds: the
+    /// list yields its rows with every field the Files rail reads, and the
+    /// 201 upload body is a success.
+    #[test]
+    fn daemon_attachment_fixtures_decode_through_the_production_folds() {
+        use crate::rooms::wire_fixtures::{fixture_text, ATTACHMENT_FIXTURES};
+        assert_eq!(
+            ATTACHMENT_FIXTURES,
+            ["room_attachment_upload", "room_attachments_list"]
+        );
+
+        let rows = fold_list_response(200, &fixture_text("room_attachments_list"))
+            .expect("the attachments list decodes");
+        assert_eq!(
+            rows,
+            vec![RoomAttachment {
+                id: "0123456789abcdef0123456789abcdef".into(),
+                filename: "notes.txt".into(),
+                content_type: "text/plain".into(),
+                byte_len: 19,
+                sha256: "6d95c4f39a3cc5cea4c9927eaf4b47bcfd02d911f2ced17a067ecb190953c74c".into(),
+                uploaded_by: "john".into(),
+                uploaded_at: "2026-10-23T12:00:00.123456Z".into(),
+                on_behalf_of: None,
+            }]
+        );
+
+        let upload = fixture_text("room_attachment_upload");
+        assert_eq!(fold_upload_response(201, &upload), Ok(()));
+        // The upload echoes the same row shape the list serves.
+        let echoed: serde_json::Value = serde_json::from_str(&upload).unwrap();
+        let listed: serde_json::Value =
+            serde_json::from_str(&fixture_text("room_attachments_list")).unwrap();
+        assert_eq!(echoed["attachment"], listed["attachments"][0]);
+    }
 }

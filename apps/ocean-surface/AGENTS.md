@@ -729,6 +729,27 @@ ships today and are updated slice by slice.
   `tests/room_attachments_contract.rs` (route literals in the query form,
   CSS ↔ emitter parity, tokens-only CSS, workspace-scope mount, gate choice,
   daemon-constant parity) and `tests/rooms_product_doc_truth.rs`.
+- The room wire contract is pinned in-tree, not vendored (supersedes the
+  snapshots of legacy ocean-surface#225/#233): `src/rooms/wire_fixtures.rs`,
+  plus `daemon_attachment_fixtures_decode_through_the_production_folds` in
+  `rooms_workspace/attachments.rs`, decodes every file in
+  `platform/ocean-os/crates/ocean-daemon/tests/fixtures/room-wire/` with the
+  production decoders — `OwnerIdentity`, `RoomMutateResponse` (create, join),
+  `RoomGetResponse` (room, transcript, `has_more`/`next_seq`, `access`),
+  `RoomErrorResponse`, `RoomTranscriptPageResponse` (both halves of the cursor
+  pair), `RoomsListResponse` (both pages: `read_states`, `next_cursor`,
+  `muted`), `ReadCursorPatchEnvelope` through `parse_patch_read_cursor_response`,
+  `RoomAgentSettingsEnvelope`, `parse_agent_bindings`, `RoomInvite`,
+  `RedeemInviteResponse`, `RoomAccessProjection` for all five states,
+  `fold_list_response`/`fold_upload_response`, and `decode_room_tail_frame` for
+  the four SSE event names with one `room_agent_run` per `RoomAgentRunState` —
+  and asserts the fields the panel reads round-trip; every fixture file must be
+  claimed by one of those readers. The daemon writes the files from its real
+  router (`OCEAN_UPDATE_WIRE_FIXTURES=1 cargo test -p ocean-daemon
+  room_wire_fixtures` in `platform/ocean-os`), so a daemon serializer change
+  goes red there first and here second. Never hand-edit a fixture; a decoder
+  change here must still decode the committed files
+  (`cargo test -p ocean-surface-ui fixtures`).
 - In `styles/rooms-workspace.css` the "Layout & depth (canonical)" section is
   the final say on geometry, density, and depth; change values there rather
   than adding another override layer. Colors only from `tokens.css`.

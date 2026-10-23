@@ -1,0 +1,26 @@
+{
+  "closed": false,
+  "has_more": true,
+  "next_seq": 1,
+  "ok": true,
+  "transcript": [
+    {
+      "author_id": "john",
+      "author_kind": "human",
+      "body": "John joined",
+      "created_at": "2026-10-23T12:00:00.123456Z",
+      "federated": null,
+      "kind": "participant_joined",
+      "seq": 0
+    },
+    {
+      "author_id": "researcher",
+      "author_kind": "agent",
+      "body": "Researcher joined",
+      "created_at": "2026-10-23T12:00:00.123456Z",
+      "federated": null,
+      "kind": "participant_joined",
+      "seq": 1
+    }
+  ]
+}
