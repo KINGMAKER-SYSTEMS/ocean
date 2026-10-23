@@ -3237,19 +3237,50 @@ mod tests {
                 ("DELETE", "/v1/auth/providers/claude/login/abc123"),
                 ("POST", "/v1/auth/providers/codex/logout"),
             ] {
+                let mutating = method != "GET";
+                let forged = || {
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .header(header::COOKIE, "ocean_session=test-session")
+                        .header("x-ocean-operator", "browser-forged")
+                };
+                // Without the login, the auth-off cross-site gate refuses a
+                // mutation that names a foreign browser source before any
+                // lane logic runs; it must never reach the daemon.
+                if !login && mutating {
+                    let response = app
+                        .clone()
+                        .oneshot(
+                            forged()
+                                .header(header::ORIGIN, "https://evil.example")
+                                .header(header::REFERER, "https://evil.example/page")
+                                .body(Body::empty())
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        response.status(),
+                        StatusCode::FORBIDDEN,
+                        "login={login} {method} {uri}"
+                    );
+                    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                    let seen: Value = serde_json::from_slice(&body).unwrap();
+                    assert_eq!(seen["error"], "cross_site_mutation_refused");
+                }
+                // Behind the login every shape forwards whatever the browser
+                // named; without it, a headerless mutation (no browser source)
+                // is admitted and the lane still attaches nothing.
+                let mut request = forged();
+                if login || !mutating {
+                    request = request
+                        .header(header::ORIGIN, "https://evil.example")
+                        .header(header::REFERER, "https://evil.example/page");
+                }
                 let response = app
                     .clone()
-                    .oneshot(
-                        Request::builder()
-                            .method(method)
-                            .uri(uri)
-                            .header(header::COOKIE, "ocean_session=test-session")
-                            .header("x-ocean-operator", "browser-forged")
-                            .header(header::ORIGIN, "https://evil.example")
-                            .header(header::REFERER, "https://evil.example/page")
-                            .body(Body::empty())
-                            .unwrap(),
-                    )
+                    .oneshot(request.body(Body::empty()).unwrap())
                     .await
                     .unwrap();
                 assert_eq!(
