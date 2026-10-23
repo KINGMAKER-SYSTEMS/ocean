@@ -590,6 +590,26 @@ pub(super) fn RoomListRail(
                                     }
                                 />
                             </div>
+                            // After the last group, outside the listbox: the
+                            // daemon pages the list (OCEAN-250), so while it
+                            // reports more rooms the rail ends with one plain
+                            // control that appends the next page. A separate
+                            // tab stop, never an option, so the listbox keeps
+                            // its single roving stop.
+                            {move || rooms.can_load_more_rooms().then(|| view! {
+                                <button
+                                    class="rooms-workspace__left-more"
+                                    type="button"
+                                    disabled=move || rooms.rooms_loading_more.get()
+                                    on:click=move |_| rooms.fetch_rooms_more()
+                                >
+                                    {move || if rooms.rooms_loading_more.get() {
+                                        "Loading…"
+                                    } else {
+                                        "Load more rooms"
+                                    }}
+                                </button>
+                            })}
                         }.into_any()
                     }
                 }}
@@ -1240,5 +1260,56 @@ mod tests {
     #[test]
     fn option_dom_id_is_prefix_stable() {
         assert_eq!(room_option_dom_id("r1"), "rooms-opt-r1");
+    }
+
+    /// "Load more rooms" sits after the last group and OUTSIDE the listbox:
+    /// a plain button (not an option, no tabindex) gated on the daemon's
+    /// `has_more`, so the listbox keeps exactly one roving tab stop and the
+    /// grouped keyboard order (`rail_room_keys`) is untouched. It is the only
+    /// caller of `fetch_rooms_more`, and it is disabled while a page is in
+    /// flight so a double click cannot page twice.
+    #[test]
+    fn load_more_rooms_follows_the_groups_outside_the_listbox() {
+        let src: String = include_str!("room_list.rs")
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let listbox = src.find(r#"role="listbox""#).expect("listbox");
+        let groups = listbox
+            + src[listbox..]
+                .find("rail_group_view(label,rooms,show_left_rail)")
+                .expect("groups");
+        let more = src
+            .find(r#"class="rooms-workspace__left-more""#)
+            .expect("load more control");
+        assert!(groups < more, "the control follows the grouped options");
+        // The listbox closes (its `<For>` ends, then its `</div>`) before the control.
+        let listbox_close = groups + src[groups..].find("/></div>").expect("listbox close");
+        assert!(listbox_close < more, "the control is outside the listbox");
+        let control = &src[more..more + src[more..].find("</button>").unwrap()];
+        assert!(control.contains(r#"type="button""#));
+        assert!(!control.contains("role=") && !control.contains("tabindex"));
+        assert!(control.contains("disabled=move||rooms.rooms_loading_more.get()"));
+        assert!(control.contains("on:click=move|_|rooms.fetch_rooms_more()"));
+        assert!(control.contains(r#""Loadmorerooms""#));
+        // The production half of this file (before its test module) pages
+        // from exactly this one control.
+        let production = &src[..src.find("#[cfg(test)]").expect("test module")];
+        assert_eq!(production.matches("fetch_rooms_more()").count(), 1);
+        // Gated on the daemon's report, never on a local guess at page size.
+        let gate = &src[more - 120..more];
+        assert!(gate.contains("rooms.can_load_more_rooms().then("));
+        assert!(!production.contains(".len()>=100"));
+
+        let css: String = include_str!("../../../../styles/rooms-workspace.css")
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let rule = &css[css
+            .find(".rooms-workspace__left-more{")
+            .expect("control rule")..];
+        let rule = &rule[..rule.find('}').unwrap()];
+        assert!(rule.contains("color:var(--fg-3)") && rule.contains("background:transparent"));
+        assert!(!rule.contains('#') && !rule.contains("rgb("), "tokens only");
     }
 }

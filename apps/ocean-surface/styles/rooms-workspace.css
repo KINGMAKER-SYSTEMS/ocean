@@ -343,6 +343,39 @@
   overflow-wrap: anywhere;
 }
 
+/* "Load more rooms" (room_list.rs): one plain row after the last group,
+   outside the listbox so the options keep their single roving tab stop.
+   Same type and padding as a room row, quieter colour; tokens only. */
+.rooms-workspace__left-more {
+  appearance: none;
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin: 6px 0 0;
+  padding: 7px 12px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--fg-3);
+  font-family: var(--font);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__left-more:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__left-more:disabled {
+  background: transparent;
+  color: var(--fg-4);
+  cursor: default;
+}
+
 /* ── Center rail — room header ────────────────────────────────────── */
 
 .rooms-workspace__center {
@@ -2062,8 +2095,11 @@
   font-size: 12px;
 }
 
-.rooms-workspace__mention-kind {
-  margin-left: auto;
+/* Kind badge: one word, tokens only. Shared by the mention suggestion row
+   (every kind) and the transcript author line (`__msg-kind`, agents only;
+   rooms_workspace/format.rs `author_kind_badge`). */
+.rooms-workspace__mention-kind,
+.rooms-workspace__msg-kind {
   color: var(--fg-4);
   font-size: 10px;
   text-transform: uppercase;
@@ -2071,6 +2107,21 @@
   border: 1px solid var(--border-subtle);
   padding: 1px 6px;
   border-radius: 999px;
+}
+
+.rooms-workspace__mention-kind {
+  margin-left: auto;
+}
+
+.rooms-workspace__msg-kind {
+  flex: 0 0 auto;
+  line-height: 1.3;
+}
+
+/* Grouped rows hide the name (sr-only) and park the time in the avatar
+   gutter; the badge follows the name and stays on the group's first row. */
+.rooms-workspace__msg--grouped .rooms-workspace__msg-kind {
+  display: none;
 }
 
 .rooms-workspace__mention-desc {

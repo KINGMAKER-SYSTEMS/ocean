@@ -42,7 +42,7 @@ use composer::{
     message_send_admitted, normalized_message_body, outbox_matches_failed_message,
     should_clear_composer, ChannelComposer,
 };
-use format::{avatar_identity_class, canonical_wire_clock_time, today_day_key};
+use format::{author_kind_badge, avatar_identity_class, canonical_wire_clock_time, today_day_key};
 use members::MembersPanel;
 use mentions::{mention_roster, MentionState};
 use read_cursor::{
@@ -999,6 +999,9 @@ pub fn RoomsWorkspace(
                                                             <span class="rooms-workspace__msg-name">
                                                                 { let id = m.author_id.clone(); move || author_name(rooms, &id) }
                                                             </span>
+                                                            {author_kind_badge(m.author_kind, is_system).map(|label| view! {
+                                                                <span class="rooms-workspace__msg-kind">{label}</span>
+                                                            })}
                                                             <time
                                                                 class="rooms-workspace__msg-time"
                                                                 datetime=full_ts.clone()

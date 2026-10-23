@@ -74,6 +74,17 @@ pub(super) fn participant_kind_label(kind: RoomParticipantKind) -> &'static str 
     }
 }
 
+/// The author-kind badge a transcript row carries beside the name: agents
+/// only (the same word the mention suggestion badge uses), so machine authors
+/// read at a glance without every human row growing a label. Compact system
+/// rows (joins, leaves, audits) never carry one.
+pub(super) fn author_kind_badge(
+    kind: RoomParticipantKind,
+    is_system: bool,
+) -> Option<&'static str> {
+    (!is_system && kind == RoomParticipantKind::Agent).then(|| participant_kind_label(kind))
+}
+
 /// One-line identity summary for an agent member, from the federated roster
 /// descriptor when available: model alias and description. `None` for humans
 /// and for agents without a published descriptor — never fabricated.
@@ -253,5 +264,29 @@ mod tests {
             .map(|n| avatar_identity_class(&format!("agent-{n}")))
             .collect();
         assert!(hues.len() >= 3, "degenerate distribution: {hues:?}");
+    }
+
+    /// Only agent authors of conversation rows carry the badge, with the
+    /// same word the mention suggestion shows; humans and every other kind
+    /// stay unlabelled, and compact system rows never carry one.
+    #[test]
+    fn author_kind_badge_marks_agent_message_rows_only() {
+        assert_eq!(
+            author_kind_badge(RoomParticipantKind::Agent, false),
+            Some(participant_kind_label(RoomParticipantKind::Agent))
+        );
+        assert_eq!(
+            author_kind_badge(RoomParticipantKind::Agent, false),
+            Some("agent")
+        );
+        assert_eq!(author_kind_badge(RoomParticipantKind::Agent, true), None);
+        for kind in [
+            RoomParticipantKind::Human,
+            RoomParticipantKind::Bot,
+            RoomParticipantKind::Tool,
+            RoomParticipantKind::System,
+        ] {
+            assert_eq!(author_kind_badge(kind, false), None, "{kind:?}");
+        }
     }
 }
