@@ -356,6 +356,12 @@ struct RoomsListResponse {
     rooms: Vec<Room>,
     #[serde(default)]
     read_states: Vec<RoomReadStateWire>,
+    /// OCEAN-250 page pair: the daemon lists rooms one bounded page at a time.
+    /// Both default so an older daemon decodes as a single complete page.
+    #[serde(default)]
+    next_cursor: Option<String>,
+    #[serde(default)]
+    has_more: bool,
     #[serde(default)]
     error: Option<String>,
 }
@@ -597,6 +603,11 @@ pub struct Rooms {
     /// Monotonic ticket ensuring only the latest overlapping list request may
     /// publish list/loading/error state.
     list_request_ticket: RwSignal<u64>,
+    /// Room-list paging fold (OCEAN-250): the pending "Load more rooms" cursor
+    /// and the depth a refetch must cover. See [`RoomListPaging`].
+    list_paging: RwSignal<RoomListPaging>,
+    /// Whether a "Load more rooms" page is in flight (one at a time).
+    pub rooms_loading_more: RwSignal<bool>,
     /// The currently selected room key, if any.
     pub open_key: RwSignal<Option<String>>,
     /// The open room's full record (roster + metadata).
@@ -698,6 +709,8 @@ enum RoomsFetchMode {
 struct RoomsListSuccess {
     rooms: Vec<Room>,
     read_summaries: HashMap<String, RoomReadSummary>,
+    has_more: bool,
+    next_cursor: Option<String>,
 }
 
 impl Rooms {
@@ -721,6 +734,8 @@ impl Rooms {
             rooms_loading: RwSignal::new(false),
             rooms_error: RwSignal::new(None),
             list_request_ticket: RwSignal::new(0),
+            list_paging: RwSignal::new(RoomListPaging::default()),
+            rooms_loading_more: RwSignal::new(false),
             open_key: RwSignal::new(None),
             open_room: RwSignal::new(None),
             transcript: RwSignal::new(Vec::new()),
@@ -963,7 +978,9 @@ impl Rooms {
 
     /// Fetch the room list (`GET /v1/rooms/persistent`). Overlapping requests
     /// are latest-wins: an older completion cannot publish any list lifecycle
-    /// state after a newer request has started.
+    /// state after a newer request has started. The request covers the depth
+    /// the rail has been extended to by "Load more rooms"
+    /// (`RoomListPaging::list_query`), so a refetch never shrinks the rail.
     pub fn fetch_rooms(&self) {
         self.fetch_rooms_with_mode(RoomsFetchMode::Interactive);
     }
@@ -984,25 +1001,11 @@ impl Rooms {
             self.rooms_loading.set(true);
             self.rooms_error.set(None);
         }
+        let query = self
+            .list_paging
+            .with_untracked(|paging| paging.list_query());
         spawn_local(async move {
-            let get_url = format!("{base}/v1/rooms/persistent");
-            let result = match Request::get(&get_url).send().await {
-                Ok(resp) => match resp.json::<RoomsListResponse>().await {
-                    Ok(r) if r.ok => match read_summaries_from_wire(&r.read_states) {
-                        Ok(read_summaries) => Ok(RoomsListSuccess {
-                            rooms: r.rooms,
-                            read_summaries,
-                        }),
-                        Err(error) => Err(format!("rooms decode error: {error}")),
-                    },
-                    Ok(r) => Err(format!(
-                        "rooms list failed: {}",
-                        r.error.unwrap_or_else(|| "unknown error".into())
-                    )),
-                    Err(err) => Err(format!("rooms decode error: {err}")),
-                },
-                Err(err) => Err(format!("rooms fetch error: {err}")),
-            };
+            let result = fetch_rooms_page(&rooms_list_url(&base, query.as_deref())).await;
             let is_current =
                 list_request_is_current(ticket, me.list_request_ticket.get_untracked());
             finish_rooms_fetch(&me.rooms_loaded, &me.rooms_loading, mode, is_current);
@@ -1024,6 +1027,8 @@ impl Rooms {
                             &success.read_summaries,
                         );
                     });
+                    me.list_paging
+                        .update(|paging| paging.first_page(success.has_more, success.next_cursor));
                     me.rooms_error.set(None);
                 }
                 Err(error) => {
@@ -1032,6 +1037,65 @@ impl Rooms {
                         me.rooms_error.set(Some(error));
                     }
                 }
+            }
+        });
+    }
+
+    /// Whether the daemon reported rooms past what the rail holds, so the
+    /// rail ends with "Load more rooms". Reactive on the paging fold.
+    pub fn can_load_more_rooms(&self) -> bool {
+        self.list_paging.with(|paging| paging.has_more())
+    }
+
+    /// Append the daemon's next room-list page ("Load more rooms"): one page
+    /// per call, only while the daemon reports more, never concurrently. The
+    /// page is dropped when a refetch began in between (list ticket moved) or
+    /// the pending cursor changed underneath it (`RoomListPaging::absorb`),
+    /// so stale rows never land on a list they were not paged from.
+    pub fn fetch_rooms_more(&self) {
+        if self.rooms_loading_more.get_untracked() {
+            return;
+        }
+        let Some((cursor, query)) = self
+            .list_paging
+            .with_untracked(|paging| paging.more_request())
+        else {
+            return;
+        };
+        let base = self.base();
+        let me = *self;
+        let ticket = self.list_request_ticket.get_untracked();
+        self.rooms_loading_more.set(true);
+        spawn_local(async move {
+            let result = fetch_rooms_page(&rooms_list_url(&base, Some(&query))).await;
+            me.rooms_loading_more.set(false);
+            if !list_request_is_current(ticket, me.list_request_ticket.get_untracked()) {
+                return;
+            }
+            match result {
+                Ok(page) => {
+                    let held = me.list.get_untracked();
+                    let merged = me
+                        .list_paging
+                        .try_update(|paging| {
+                            paging.absorb(
+                                &held,
+                                &cursor,
+                                page.rooms,
+                                page.has_more,
+                                page.next_cursor,
+                            )
+                        })
+                        .flatten();
+                    if let Some(merged) = merged {
+                        me.read_summaries.update(|current| {
+                            *current =
+                                merge_room_read_summaries(current, &merged, &page.read_summaries);
+                        });
+                        me.list.set(merged);
+                    }
+                }
+                Err(error) => me.status.set(error),
             }
         });
     }
@@ -3345,6 +3409,138 @@ async fn fetch_open_catch_up_page(
         Ok(resp) => Err(format!("transcript page failed: HTTP {}", resp.status())),
         Err(err) => Err(format!("transcript page fetch error: {err}")),
     }
+}
+
+/// One `GET /v1/rooms/persistent` page, decoded to the rail's shape. Shared
+/// by the first-page (re)fetch and "Load more rooms".
+async fn fetch_rooms_page(url: &str) -> Result<RoomsListSuccess, String> {
+    match Request::get(url).send().await {
+        Ok(resp) => match resp.json::<RoomsListResponse>().await {
+            Ok(r) if r.ok => match read_summaries_from_wire(&r.read_states) {
+                Ok(read_summaries) => Ok(RoomsListSuccess {
+                    rooms: r.rooms,
+                    read_summaries,
+                    has_more: r.has_more,
+                    next_cursor: r.next_cursor,
+                }),
+                Err(error) => Err(format!("rooms decode error: {error}")),
+            },
+            Ok(r) => Err(format!(
+                "rooms list failed: {}",
+                r.error.unwrap_or_else(|| "unknown error".into())
+            )),
+            Err(err) => Err(format!("rooms decode error: {err}")),
+        },
+        Err(err) => Err(format!("rooms fetch error: {err}")),
+    }
+}
+
+/// The room-list route with an optional query (`limit=` / `cursor=`, already
+/// encoded). The daemon-default first page sends no query at all.
+fn rooms_list_url(base: &str, query: Option<&str>) -> String {
+    match query {
+        Some(query) => format!("{base}/v1/rooms/persistent?{query}"),
+        None => format!("{base}/v1/rooms/persistent"),
+    }
+}
+
+/// Pure fold for the rail's room-list paging. The daemon lists rooms one
+/// bounded page at a time (OCEAN-250: `GET /v1/rooms/persistent?limit=&cursor=`,
+/// default 100, clamped to 1000, `next_cursor` = the page's last room key,
+/// `has_more`). The rail renders the daemon-default first page and ends with
+/// "Load more rooms" while the daemon reports more; every refetch (create,
+/// close, the silent refresh) then asks for the depth the rail has been
+/// extended to, so a refresh never shrinks an expanded rail back to one page.
+/// Forward only: there is no backward paging anywhere in Rooms.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct RoomListPaging {
+    /// Cursor the next "Load more rooms" replays; `None` once the daemon
+    /// reported no more rows (or an older daemon omitted the pair).
+    next_cursor: Option<String>,
+    /// `Some(limit)` once the rail holds more than the daemon's first page:
+    /// the `limit` a refetch sends so it covers every room the rail shows.
+    depth: Option<usize>,
+}
+
+impl RoomListPaging {
+    /// Mirror of the daemon's `ocean_store::MAX_LIST_LIMIT`; a larger limit
+    /// is clamped there, so asking for more is pointless.
+    pub(crate) const MAX_LIST_LIMIT: usize = 1000;
+
+    /// Whether the daemon reported rooms past the ones the rail holds.
+    pub(crate) fn has_more(&self) -> bool {
+        self.next_cursor.is_some()
+    }
+
+    /// Query for the (re)fetch of the rail's first page: none until the rail
+    /// has been extended, then `limit=<depth>`.
+    pub(crate) fn list_query(&self) -> Option<String> {
+        self.depth.map(|depth| format!("limit={depth}"))
+    }
+
+    /// The pending cursor and the query for the next page, while the daemon
+    /// reports more rooms.
+    pub(crate) fn more_request(&self) -> Option<(String, String)> {
+        self.next_cursor.as_deref().map(|cursor| {
+            (
+                cursor.to_string(),
+                format!(
+                    "cursor={}",
+                    crate::daemon::percent_encode_query_component(cursor)
+                ),
+            )
+        })
+    }
+
+    /// Fold a (re)fetched first page: the daemon's `has_more` / `next_cursor`
+    /// replace the pending cursor; the depth asked for is kept.
+    pub(crate) fn first_page(&mut self, has_more: bool, next_cursor: Option<String>) {
+        self.next_cursor = pending_cursor(has_more, next_cursor);
+    }
+
+    /// Fold an appended page fetched with `used_cursor` onto the rooms the
+    /// rail `held`. Returns the merged list (daemon order, duplicates by id
+    /// dropped), or `None` when the page is stale: the pending cursor is no
+    /// longer `used_cursor`, so a refetch landed in between and these rows
+    /// belong to another list. An empty page or a non-advancing cursor ends
+    /// paging so the control cannot loop on a daemon that never advances.
+    pub(crate) fn absorb(
+        &mut self,
+        held: &[Room],
+        used_cursor: &str,
+        page: Vec<Room>,
+        has_more: bool,
+        next_cursor: Option<String>,
+    ) -> Option<Vec<Room>> {
+        if self.next_cursor.as_deref() != Some(used_cursor) {
+            return None;
+        }
+        let appended = !page.is_empty();
+        let mut merged = held.to_vec();
+        for room in page {
+            if !merged.iter().any(|existing| existing.id == room.id) {
+                merged.push(room);
+            }
+        }
+        self.depth = Some(
+            self.depth
+                .unwrap_or(0)
+                .max(merged.len())
+                .clamp(1, Self::MAX_LIST_LIMIT),
+        );
+        self.next_cursor = pending_cursor(has_more, next_cursor)
+            .filter(|cursor| appended && cursor != used_cursor);
+        Some(merged)
+    }
+}
+
+/// The cursor to replay next, or `None` when the daemon reported the last page
+/// (or omitted a usable cursor despite `has_more`).
+fn pending_cursor(has_more: bool, next_cursor: Option<String>) -> Option<String> {
+    if !has_more {
+        return None;
+    }
+    next_cursor.filter(|cursor| !cursor.is_empty())
 }
 
 fn list_request_is_current(expected_ticket: u64, current_ticket: u64) -> bool {
@@ -5878,6 +6074,183 @@ mod tests {
         );
         assert!(rooms_loaded.get_untracked());
         assert!(!rooms_loading.get_untracked());
+    }
+
+    fn rail_rooms(ids: &[&str]) -> Vec<Room> {
+        ids.iter()
+            .map(|id| Room {
+                id: (*id).into(),
+                name: (*id).into(),
+                ..local_room()
+            })
+            .collect()
+    }
+
+    fn rail_ids(rooms: &[Room]) -> Vec<&str> {
+        rooms.iter().map(|room| room.id.as_str()).collect()
+    }
+
+    /// The daemon-default first page sends no query; the daemon's `has_more`
+    /// / `next_cursor` pair decides whether the rail offers "Load more rooms".
+    /// An older daemon omits both, so the list decodes as one complete page.
+    #[test]
+    fn room_list_first_page_sends_no_query_and_offers_more_only_when_the_daemon_says_so() {
+        let mut paging = RoomListPaging::default();
+        assert_eq!(paging.list_query(), None);
+        assert_eq!(
+            rooms_list_url("http://d", None),
+            "http://d/v1/rooms/persistent"
+        );
+        assert!(!paging.has_more());
+        assert_eq!(paging.more_request(), None);
+
+        paging.first_page(true, Some("room-100".into()));
+        assert!(paging.has_more());
+        let (cursor, query) = paging.more_request().expect("pending page");
+        assert_eq!(cursor, "room-100");
+        assert_eq!(query, "cursor=room-100");
+        assert_eq!(
+            rooms_list_url("http://d", Some(&query)),
+            "http://d/v1/rooms/persistent?cursor=room-100"
+        );
+
+        // `has_more` without a usable cursor, or a complete page, ends paging.
+        paging.first_page(true, Some(String::new()));
+        assert!(!paging.has_more());
+        paging.first_page(true, None);
+        assert!(!paging.has_more());
+        paging.first_page(false, Some("room-100".into()));
+        assert!(!paging.has_more());
+
+        let legacy: RoomsListResponse =
+            serde_json::from_str(r#"{"ok":true,"rooms":[{"id":"a","name":"A"}],"read_states":[]}"#)
+                .unwrap();
+        assert!(!legacy.has_more);
+        assert_eq!(legacy.next_cursor, None);
+        let paged: RoomsListResponse = serde_json::from_str(
+            r#"{"ok":true,"rooms":[],"read_states":[],"next_cursor":"a","has_more":true}"#,
+        )
+        .unwrap();
+        assert!(paged.has_more);
+        assert_eq!(paged.next_cursor.as_deref(), Some("a"));
+    }
+
+    /// "Load more rooms" appends the next page in daemon order, drops rows
+    /// the rail already holds, and raises the refetch depth to the rooms held
+    /// so a refresh (create, close, the silent interval) covers the whole
+    /// extended rail instead of shrinking it back to the first page.
+    #[test]
+    fn room_list_load_more_appends_dedups_and_raises_the_refetch_depth() {
+        let mut paging = RoomListPaging::default();
+        paging.first_page(true, Some("b".into()));
+        let held = rail_rooms(&["a", "b"]);
+
+        let merged = paging
+            .absorb(
+                &held,
+                "b",
+                rail_rooms(&["b", "c", "d"]),
+                true,
+                Some("d".into()),
+            )
+            .expect("fresh page lands");
+        assert_eq!(rail_ids(&merged), vec!["a", "b", "c", "d"]);
+        assert!(paging.has_more());
+        assert_eq!(paging.more_request().unwrap().0, "d");
+        assert_eq!(paging.list_query().as_deref(), Some("limit=4"));
+
+        // The last page ends paging; the depth it reached stays for refetches,
+        // which replace only the pending cursor.
+        let merged = paging
+            .absorb(&merged, "d", rail_rooms(&["e"]), false, None)
+            .expect("last page lands");
+        assert_eq!(rail_ids(&merged), vec!["a", "b", "c", "d", "e"]);
+        assert!(!paging.has_more());
+        assert_eq!(paging.list_query().as_deref(), Some("limit=5"));
+        paging.first_page(true, Some("e".into()));
+        assert_eq!(paging.list_query().as_deref(), Some("limit=5"));
+        assert!(paging.has_more());
+
+        // A refetch that shrank the list never lowers the depth asked for.
+        let merged = paging
+            .absorb(&rail_rooms(&["a"]), "e", rail_rooms(&["f"]), false, None)
+            .unwrap();
+        assert_eq!(rail_ids(&merged), vec!["a", "f"]);
+        assert_eq!(paging.list_query().as_deref(), Some("limit=5"));
+    }
+
+    /// A page whose cursor is no longer the pending one is stale (a refetch
+    /// landed in between) and is dropped whole; an empty page or a cursor
+    /// that does not advance ends paging; the depth never exceeds the
+    /// daemon's clamp; cursors are query-encoded.
+    #[test]
+    fn room_list_load_more_drops_stale_pages_and_stops_on_exhausted_or_stuck_pages() {
+        let mut paging = RoomListPaging::default();
+        paging.first_page(true, Some("b".into()));
+        assert_eq!(
+            paging.absorb(&rail_rooms(&["a"]), "zz", rail_rooms(&["c"]), true, None),
+            None
+        );
+        assert!(
+            paging.has_more(),
+            "a dropped page leaves the pending cursor alone"
+        );
+
+        // Empty page: nothing appended, paging ends even if the daemon claims more.
+        let merged = paging
+            .absorb(
+                &rail_rooms(&["a", "b"]),
+                "b",
+                Vec::new(),
+                true,
+                Some("c".into()),
+            )
+            .unwrap();
+        assert_eq!(rail_ids(&merged), vec!["a", "b"]);
+        assert!(!paging.has_more());
+        assert_eq!(paging.list_query().as_deref(), Some("limit=2"));
+
+        // Non-advancing cursor: the rows land once, then paging ends.
+        let mut stuck = RoomListPaging::default();
+        stuck.first_page(true, Some("b".into()));
+        let merged = stuck
+            .absorb(
+                &rail_rooms(&["a", "b"]),
+                "b",
+                rail_rooms(&["c"]),
+                true,
+                Some("b".into()),
+            )
+            .unwrap();
+        assert_eq!(rail_ids(&merged), vec!["a", "b", "c"]);
+        assert!(!stuck.has_more());
+
+        // Depth is clamped to the daemon's maximum list limit.
+        let mut deep = RoomListPaging::default();
+        deep.first_page(true, Some("x".into()));
+        let many: Vec<String> = (0..RoomListPaging::MAX_LIST_LIMIT + 5)
+            .map(|i| format!("r{i}"))
+            .collect();
+        let many: Vec<&str> = many.iter().map(String::as_str).collect();
+        let merged = deep
+            .absorb(
+                &rail_rooms(&many),
+                "x",
+                rail_rooms(&["y"]),
+                true,
+                Some("y".into()),
+            )
+            .unwrap();
+        assert_eq!(merged.len(), RoomListPaging::MAX_LIST_LIMIT + 6);
+        assert_eq!(
+            deep.list_query().as_deref(),
+            Some(format!("limit={}", RoomListPaging::MAX_LIST_LIMIT).as_str())
+        );
+
+        // Room keys are URL-safe by the daemon's key rule; anything else is encoded.
+        let mut odd = RoomListPaging::default();
+        odd.first_page(true, Some("a b/c".into()));
+        assert_eq!(odd.more_request().unwrap().1, "cursor=a%20b%2Fc");
     }
 
     #[test]

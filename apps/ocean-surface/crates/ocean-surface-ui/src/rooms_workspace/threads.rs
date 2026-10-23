@@ -6,7 +6,7 @@ use leptos::prelude::*;
 
 use super::access::access_allows_thread_writes;
 use super::author_name;
-use super::format::{avatar_identity_class, canonical_wire_clock_time};
+use super::format::{author_kind_badge, avatar_identity_class, canonical_wire_clock_time};
 use super::mentions::MentionState;
 use crate::room_messages;
 use crate::rooms::{RoomAccessState, RoomMessage, RoomMessageKind, Rooms};
@@ -124,6 +124,9 @@ pub(super) fn ThreadPanel(
                     <div class="rooms-workspace__msg-body">
                         <div class="rooms-workspace__msg-author">
                             <span class="rooms-workspace__msg-name">{ let id = root.author_id.clone(); move || author_name(rooms, &id) }</span>
+                            {author_kind_badge(root.author_kind, root_is_system).map(|label| view! {
+                                <span class="rooms-workspace__msg-kind">{label}</span>
+                            })}
                             <time
                                 class="rooms-workspace__msg-time"
                                 datetime=full_ts.clone()
@@ -166,6 +169,9 @@ pub(super) fn ThreadPanel(
                                 <div class="rooms-workspace__msg-body">
                                     <div class="rooms-workspace__msg-author">
                                         <span class="rooms-workspace__msg-name">{ let id = reply.author_id.clone(); move || author_name(rooms, &id) }</span>
+                                        {author_kind_badge(reply.author_kind, is_system).map(|label| view! {
+                                            <span class="rooms-workspace__msg-kind">{label}</span>
+                                        })}
                                         <time
                                             class="rooms-workspace__msg-time"
                                             datetime=full_ts.clone()

@@ -305,13 +305,17 @@ The rooms rail lists the rooms the daemon serves:
 
 ```
 GET /v1/rooms/persistent
--> { ok, rooms, read_states, next_cursor }
+-> { ok, rooms, read_states, next_cursor, has_more }
 ```
 
 The daemon pages this route (`limit`, default 100, and `cursor` = the previous
-page's `next_cursor`); the surface sends no query and renders the first page
-only. `read_states` carries each room's latest and read sequence, which the
-rail turns into unread dots.
+page's `next_cursor`). The surface sends no query for the first page; while
+the response says `has_more`, the rail ends with a "Load more rooms" button
+(`.rooms-workspace__left-more`, after the last group and outside the listbox)
+that sends `?cursor=` for the next page and appends it. Refetches of the list
+send `?limit=` for the depth the rail has been extended to, so a refresh never
+shrinks it back to one page. `read_states` carries each room's latest and read
+sequence, which the rail turns into unread dots.
 
 Each room row (`rail_room_option` in `room_list.rs`) shows the `#` name and an
 unread dot (`.rooms-workspace__room--unread`; muted rooms never show one).
@@ -330,7 +334,10 @@ pushing the create field and status line outside the viewport.
 Messages render as a scrolling transcript (`rooms_workspace/mod.rs`) with the
 density rules in `crates/ocean-surface-ui/src/room_messages.rs`:
 - Author display name (`rooms::author_display_name`) and an initials avatar
-  with a deterministic hue per author id.
+  with a deterministic hue per author id. Rows whose author is an agent carry
+  an "agent" badge beside the name (`.rooms-workspace__msg-kind`, the mention
+  suggestion's kind label reused); humans are unlabelled, and grouped and
+  system rows do not repeat it.
 - Timestamp as the wire clock, `HH:MM` taken from the daemon's RFC 3339 UTC
   value (`canonical_wire_clock_time`); the full value sits in the `<time>`
   element's `datetime` and `title`. A value that is not canonical RFC 3339
@@ -516,7 +523,7 @@ operator key; the page only asks the shell for them.
 | Method | Path | Purpose |
 |--------|------|---------|
 | `GET` | `/v1/me` | Daemon owner identity (`rooms.rs`) |
-| `GET` | `/v1/rooms/persistent` | List rooms, first page (`rooms.rs`) |
+| `GET` | `/v1/rooms/persistent` | List rooms, one page; `?cursor=` appends the next, `?limit=` covers the extended rail on refetch (`rooms.rs`) |
 | `POST` | `/v1/rooms/persistent` | Create a room (`rooms.rs`) |
 | `GET` | `/v1/rooms/persistent/{key}` | Open: room + first transcript page + access projection; roster re-read (`rooms.rs`) |
 | `GET` | `/v1/rooms/persistent/{key}/events?after_seq=` | SSE: `room_message`, `room_access`, `room_read_cursor`, `room_agent_run` (`rooms.rs`) |
