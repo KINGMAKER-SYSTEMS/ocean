@@ -28,6 +28,15 @@
 //!   `participant_id`, read natively; the page names only room and package.
 //!   A bootstrap creates no binding: it lands in the same frozen preview, so
 //!   authorization still needs the native dialog.
+//! * The one policy the page chooses is the binding's activation
+//!   ([`Activation`]: `explicit_only`, `mention`, `task_and_thread`, the
+//!   daemon's closed set with its `explicit_only` default pre-selected, per
+//!   `OCEAN_ROOMS_DESIGN_DIRECTION.md` §5.1 step 3). The page names one by
+//!   its wire name at authorize time; the shell maps it onto the enum before
+//!   the dialog, which shows the choice, and refuses anything else unsent.
+//!   A decision that already reached the daemon replays unchanged: asking to
+//!   change its activation invalidates it instead of forging a second body
+//!   under the same decision id.
 //!
 //! The pure broker below owns every check; the `#[tauri::command]` glue at the
 //! bottom only adds the native dialog and the main-window gate (Tauri plugin
@@ -54,9 +63,63 @@ const MAX_DIALOG_LABEL_CHARS: usize = 128;
 /// Longest capability line shown in the authorize dialog.
 const MAX_DIALOG_CAPS_CHARS: usize = 1024;
 
-const ACTIVATION_DEFAULT: &str = "explicit_only";
 const CONTEXT_DEFAULT: &str = "invocation_only";
 const MEMORY_DEFAULT: &str = "none";
+
+/// The binding activation policies a consent may carry: the daemon's closed
+/// set (`room_agent_authority::parse_activation`). The page picks one by wire
+/// name; the shell maps it onto this enum and never forwards page text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Activation {
+    ExplicitOnly,
+    Mention,
+    TaskAndThread,
+}
+
+impl Activation {
+    /// The daemon's `default_activation_policy()`: pre-selected for a new
+    /// authorization, and what a binding without the field is read as.
+    pub(crate) const DEFAULT: Self = Self::ExplicitOnly;
+
+    /// Exact wire names only: no case folding, trimming or aliases.
+    pub(crate) fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "explicit_only" => Some(Self::ExplicitOnly),
+            "mention" => Some(Self::Mention),
+            "task_and_thread" => Some(Self::TaskAndThread),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::ExplicitOnly => "explicit_only",
+            Self::Mention => "mention",
+            Self::TaskAndThread => "task_and_thread",
+        }
+    }
+
+    /// The row label the Rooms design gives each policy (§5.1).
+    fn dialog_label(self) -> &'static str {
+        match self {
+            Self::ExplicitOnly => "only when invoked",
+            Self::Mention => "when @mentioned",
+            Self::TaskAndThread => "mentions, tasks and thread replies",
+        }
+    }
+}
+
+/// The page's optional activation argument: absent keeps the frozen policy;
+/// anything but an exact wire name is `invalid_request` before any dialog.
+fn parse_activation_arg(raw: Option<&str>) -> Result<Option<Activation>, String> {
+    match raw {
+        None => Ok(None),
+        Some(raw) => Activation::parse(raw)
+            .map(Some)
+            .ok_or_else(|| "invalid_request".to_string()),
+    }
+}
 
 // ── wire projections returned to the page ───────────────────────────────
 
@@ -74,6 +137,10 @@ pub(crate) struct ConsentPreview {
     pub(crate) requested_capabilities: Vec<String>,
     pub(crate) mode: ConsentMode,
     pub(crate) binding_status: Option<String>,
+    /// The activation the decision will carry unless the page chooses
+    /// another: the daemon default for a new authorization, the binding's
+    /// current policy for a reauthorization.
+    pub(crate) activation_policy: Activation,
     pub(crate) expires_in_ms: u64,
 }
 
@@ -136,16 +203,18 @@ pub(crate) struct Frozen {
     mode: ConsentMode,
     binding_status: Option<String>,
     decision_id: String,
-    activation_policy: String,
+    activation_policy: Activation,
     context_policy: String,
     memory_scope: String,
 }
 
 impl Frozen {
     /// Text for the native confirmation dialog. Every line comes from the
-    /// natively frozen preview, never page input: which agent (package, member
-    /// id, owner), where, what it asks for and the exact digest. The display
-    /// name is a label only and is sanitized; ids are already dialog-safe.
+    /// natively frozen state, never page text: which agent (package, member
+    /// id, owner), where, the activation the binding will carry (the page's
+    /// choice, already mapped onto [`Activation`]), what it asks for and the
+    /// exact digest. The display name is a label only and is sanitized; ids
+    /// are already dialog-safe.
     pub(crate) fn dialog_text(&self) -> (String, String, &'static str) {
         let action = match self.mode {
             ConsentMode::Authorize => "Authorize",
@@ -158,11 +227,13 @@ impl Frozen {
             title
         };
         let message = format!(
-            "Room: {}\nPackage: {}\nAgent id: {}\nOwner: {}\nCapabilities: {}\nDigest: {}",
+            "Room: {}\nPackage: {}\nAgent id: {}\nOwner: {}\nActivation: {} ({})\nCapabilities: {}\nDigest: {}",
             self.room,
             self.package_id,
             self.agent_member_id,
             self.owner_member_id,
+            self.activation_policy.dialog_label(),
+            self.activation_policy.as_str(),
             capability_line(&self.requested),
             self.digest,
         );
@@ -173,7 +244,10 @@ impl Frozen {
         let common = |map: &mut Map<String, Value>| {
             map.insert("decision_id".into(), json!(self.decision_id));
             map.insert("expected_definition_digest".into(), json!(self.digest));
-            map.insert("activation_policy".into(), json!(self.activation_policy));
+            map.insert(
+                "activation_policy".into(),
+                json!(self.activation_policy.as_str()),
+            );
             map.insert("context_policy".into(), json!(self.context_policy));
             map.insert("memory_scope".into(), json!(self.memory_scope));
             // Phase 1 grants nothing beyond the operator intersection.
@@ -212,6 +286,7 @@ impl Frozen {
             requested_capabilities: self.requested.clone(),
             mode: self.mode,
             binding_status: self.binding_status.clone(),
+            activation_policy: self.activation_policy,
             expires_in_ms: remaining.as_millis() as u64,
         }
     }
@@ -231,6 +306,9 @@ struct Entry {
     decision: Decision,
     created: Instant,
     phase: Phase,
+    /// Set at the dispatch claim and never cleared: after it, the decision id
+    /// is bound to the body that was sent, so a retry may only replay it.
+    dispatched: bool,
 }
 
 /// One lock owns the cancellation epoch and every pending native decision.
@@ -524,6 +602,13 @@ fn freeze_preview(
             return Err(BAD);
         }
     }
+    // A binding's activation must be one the shell can show and resend; a
+    // policy this shell does not know is not silently narrowed to the default.
+    let activation_policy = match binding.and_then(|b| b.get("activation_policy")) {
+        None | Some(Value::Null) => Activation::DEFAULT,
+        Some(Value::String(raw)) => Activation::parse(raw).ok_or(BAD)?,
+        Some(_) => return Err(BAD),
+    };
     Ok(Frozen {
         room: room.to_string(),
         package_id: package_id.to_string(),
@@ -543,7 +628,7 @@ fn freeze_preview(
             .and_then(Value::as_str)
             .map(str::to_string),
         decision_id,
-        activation_policy: policy(binding, "activation_policy", ACTIVATION_DEFAULT),
+        activation_policy,
         context_policy: policy(binding, "context_policy", CONTEXT_DEFAULT),
         memory_scope: policy(binding, "memory_scope", MEMORY_DEFAULT),
     })
@@ -722,25 +807,44 @@ impl ConsentBroker {
             decision: Decision::Consent(Box::new(frozen)),
             created: Instant::now(),
             phase: Phase::Ready,
+            dispatched: false,
         });
         Ok(preview)
     }
 
-    /// Claim a ready consent for native confirmation.
-    pub(crate) fn begin_confirm(&self, consent_id: &str) -> Result<Frozen, String> {
+    /// Claim a ready consent for native confirmation. With `activation`, the
+    /// frozen decision adopts that policy first, so the dialog and the body
+    /// name the same choice; without it the frozen policy stands. A decision
+    /// already dispatched once (lost acknowledgement) may only be replayed:
+    /// a different activation invalidates and drops it, and nothing is sent.
+    pub(crate) fn begin_confirm(
+        &self,
+        consent_id: &str,
+        activation: Option<Activation>,
+    ) -> Result<Frozen, String> {
         let mut pending = self.pending.lock();
         let entries = &mut pending.entries;
         self.prune(entries);
-        let entry = entries
-            .iter_mut()
-            .find(|e| e.id == consent_id)
+        let index = entries
+            .iter()
+            .position(|e| e.id == consent_id)
             .ok_or("consent_expired")?;
+        let entry = &mut entries[index];
         if entry.phase != Phase::Ready {
             return Err("consent_in_progress".into());
         }
-        let Decision::Consent(frozen) = &entry.decision else {
+        let Decision::Consent(frozen) = &mut entry.decision else {
             return Err("consent_invalidated".into());
         };
+        if let Some(activation) = activation {
+            if activation != frozen.activation_policy {
+                if entry.dispatched {
+                    entries.remove(index);
+                    return Err("consent_invalidated".into());
+                }
+                frozen.activation_policy = activation;
+            }
+        }
         entry.phase = Phase::Confirming;
         Ok((**frozen).clone())
     }
@@ -806,6 +910,7 @@ impl ConsentBroker {
             return Err("consent_expired");
         }
         entries[index].phase = Phase::Sending;
+        entries[index].dispatched = true;
         Ok(entries[index].decision.intent())
     }
 
@@ -972,6 +1077,7 @@ impl ConsentBroker {
             },
             created: Instant::now(),
             phase: Phase::Confirming,
+            dispatched: false,
         });
         Ok(id)
     }
@@ -1045,16 +1151,21 @@ pub(crate) async fn room_consent_preview(
     blocking(move || broker.preview_at(room.trim(), package_id.trim(), &epoch)).await?
 }
 
+/// `activation_policy` is the page's choice from the consent sheet by exact
+/// wire name (`explicit_only` | `mention` | `task_and_thread`); absent keeps
+/// the frozen policy. Anything else is `invalid_request` before any dialog.
 #[tauri::command]
 pub(crate) async fn room_consent_authorize(
     app: tauri::AppHandle,
     window: tauri::WebviewWindow,
     state: tauri::State<'_, ConsentState>,
     consent_id: String,
+    activation_policy: Option<String>,
 ) -> Result<ConsentOutcome, String> {
     main_window(&window)?;
+    let activation = parse_activation_arg(activation_policy.as_deref())?;
     let broker = state.0.clone();
-    let frozen = broker.begin_confirm(&consent_id)?;
+    let frozen = broker.begin_confirm(&consent_id, activation)?;
     let (title, message, action) = frozen.dialog_text();
     let confirmed = native_confirm(&app, title, message, action, false).await;
     let Some(_) = broker.finish_confirm(&consent_id, confirmed)? else {
@@ -1320,9 +1431,9 @@ mod tests {
         ]);
         let broker = broker(port, &key);
         let preview = broker.preview("room", "scout").unwrap();
-        let frozen = broker.begin_confirm(&preview.consent_id).unwrap();
+        let frozen = broker.begin_confirm(&preview.consent_id, None).unwrap();
         assert_eq!(
-            broker.begin_confirm(&preview.consent_id).unwrap_err(),
+            broker.begin_confirm(&preview.consent_id, None).unwrap_err(),
             "consent_in_progress"
         );
         let frozen2 = broker
@@ -1345,12 +1456,151 @@ mod tests {
         assert_eq!(body["owner_member_id"], "member-owner");
         assert_eq!(body["agent_package_id"], "scout");
         assert_eq!(body["room_capability_grants"], json!([]));
+        // No page choice: the daemon's `explicit_only` default is what is sent.
+        assert_eq!(body["activation_policy"], "explicit_only");
+        assert_eq!(body["context_policy"], "invocation_only");
+        assert_eq!(body["memory_scope"], "none");
         assert!(uuid::Uuid::parse_str(body["decision_id"].as_str().unwrap()).is_ok());
         // Consumed: a second authorize of the same consent cannot be sent.
         assert_eq!(
-            broker.begin_confirm(&preview.consent_id).unwrap_err(),
+            broker.begin_confirm(&preview.consent_id, None).unwrap_err(),
             "consent_expired"
         );
+    }
+
+    #[test]
+    fn preview_offers_the_daemon_default_activation_and_the_page_choice_is_what_is_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_file(dir.path(), 0o600);
+        let applied = json!({"ok": true, "created": true, "binding": {"agent_member_id": "agent-scout-1", "status": "active", "generation": "1", "activation_policy": "mention"}});
+        let (port, daemon) = fake_daemon(vec![
+            Some(http("200 OK", &preview_body(true, None))),
+            Some(http("201 Created", &applied.to_string())),
+        ]);
+        let broker = broker(port, &key);
+        let preview = broker.preview("room", "scout").unwrap();
+        // A new authorization is offered with the daemon default pre-selected.
+        assert_eq!(preview.activation_policy, Activation::ExplicitOnly);
+        assert_eq!(
+            serde_json::to_value(&preview).unwrap()["activation_policy"],
+            "explicit_only"
+        );
+        // The page's choice is adopted before the dialog, which names it ...
+        let frozen = broker
+            .begin_confirm(&preview.consent_id, Some(Activation::Mention))
+            .unwrap();
+        assert_eq!(frozen.activation_policy, Activation::Mention);
+        let (_, message, _) = frozen.dialog_text();
+        assert!(
+            message.contains("\nActivation: when @mentioned (mention)\n"),
+            "{message}"
+        );
+        // ... and the confirmed decision carries exactly that policy.
+        let confirmed = broker
+            .finish_confirm(&preview.consent_id, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(confirmed, frozen);
+        let outcome = broker.send_decision(&preview.consent_id);
+        let seen = daemon.join().unwrap();
+        assert_eq!(outcome.state, OutcomeState::Applied);
+        let body = json_body(&seen[1]);
+        assert_eq!(body["activation_policy"], "mention");
+        assert_eq!(body["expected_definition_digest"], DIGEST);
+        assert_eq!(body["context_policy"], "invocation_only");
+        assert_eq!(body["memory_scope"], "none");
+    }
+
+    #[test]
+    fn activation_is_a_closed_set_parsed_natively_and_refused_before_any_dialog() {
+        // Exact wire names only; the page cannot smuggle text into the body.
+        for (raw, parsed) in [
+            ("explicit_only", Activation::ExplicitOnly),
+            ("mention", Activation::Mention),
+            ("task_and_thread", Activation::TaskAndThread),
+        ] {
+            assert_eq!(Activation::parse(raw), Some(parsed));
+            assert_eq!(parsed.as_str(), raw);
+            assert_eq!(parse_activation_arg(Some(raw)).unwrap(), Some(parsed));
+        }
+        assert_eq!(Activation::DEFAULT, Activation::ExplicitOnly);
+        assert_eq!(parse_activation_arg(None).unwrap(), None);
+        for raw in [
+            "",
+            " mention",
+            "Mention",
+            "MENTION",
+            "mention\n",
+            "always",
+            "on_mention",
+            "task_and_thread; drop",
+        ] {
+            assert_eq!(Activation::parse(raw), None, "{raw:?}");
+            assert_eq!(
+                parse_activation_arg(Some(raw)).unwrap_err(),
+                "invalid_request",
+                "{raw:?}"
+            );
+        }
+
+        // A refused argument never reaches the broker: the ready consent is
+        // untouched (no Confirming claim), and the daemon sees only the preview.
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_file(dir.path(), 0o600);
+        let (port, daemon) = fake_daemon(vec![Some(http("200 OK", &preview_body(true, None)))]);
+        let broker = broker(port, &key);
+        let preview = broker.preview("room", "scout").unwrap();
+        assert!(parse_activation_arg(Some("always")).is_err());
+        let frozen = broker.begin_confirm(&preview.consent_id, None).unwrap();
+        assert_eq!(frozen.activation_policy, Activation::ExplicitOnly);
+        assert_eq!(daemon.join().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn reauthorize_preview_carries_the_binding_s_activation_and_refuses_an_unknown_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_file(dir.path(), 0o600);
+        let binding = |activation: Value| json!({"agent_member_id": "agent-scout-1", "status": "stale", "activation_policy": activation, "context_policy": "invocation_only", "memory_scope": "none"});
+        let (port, daemon) = fake_daemon(vec![Some(http(
+            "200 OK",
+            &preview_body(true, Some(binding(json!("task_and_thread")))),
+        ))]);
+        let broker = broker(port, &key);
+        let preview = broker.preview("room", "scout").unwrap();
+        daemon.join().unwrap();
+        assert_eq!(preview.mode, ConsentMode::Reauthorize);
+        assert_eq!(preview.activation_policy, Activation::TaskAndThread);
+        // Without a page choice the binding's own policy is what is re-pinned.
+        let frozen = broker.begin_confirm(&preview.consent_id, None).unwrap();
+        assert_eq!(frozen.activation_policy, Activation::TaskAndThread);
+        let Intent::Reauthorize { body, .. } = frozen.intent() else {
+            panic!("reauthorize intent");
+        };
+        assert_eq!(body["activation_policy"], "task_and_thread");
+
+        // A binding whose activation this shell cannot name is not silently
+        // narrowed to the default: nothing is frozen.
+        for activation in [json!("always"), json!(1), json!(""), json!(["mention"])] {
+            let (port, daemon) = fake_daemon(vec![Some(http(
+                "200 OK",
+                &preview_body(true, Some(binding(activation.clone()))),
+            ))]);
+            let broker = super::tests::broker(port, &key);
+            assert_eq!(
+                broker.preview("room", "scout").unwrap_err(),
+                "invalid_preview",
+                "{activation}"
+            );
+            daemon.join().unwrap();
+            assert!(broker.pending.lock().entries.is_empty());
+        }
+        // An absent field reads as the daemon default, as before.
+        let mut without = serde_json::from_str::<Value>(&preview_body(true, None)).unwrap();
+        without["binding"] = json!({"agent_member_id": "agent-scout-1", "status": "active"});
+        let frozen =
+            freeze_preview("room", "scout", without.as_object().unwrap(), fresh_id()).unwrap();
+        assert_eq!(frozen.activation_policy, Activation::ExplicitOnly);
+        assert_eq!(frozen.mode, ConsentMode::Reauthorize);
     }
 
     #[test]
@@ -1364,10 +1614,10 @@ mod tests {
         ]);
         let broker = broker(port, &key);
         let a = broker.preview("room", "scout").unwrap();
-        broker.begin_confirm(&a.consent_id).unwrap();
+        broker.begin_confirm(&a.consent_id, None).unwrap();
         assert_eq!(broker.finish_confirm(&a.consent_id, false).unwrap(), None);
         let b = broker.preview("room", "scout").unwrap();
-        broker.begin_confirm(&b.consent_id).unwrap();
+        broker.begin_confirm(&b.consent_id, None).unwrap();
         broker.cancel(None); // navigation while the dialog is open
         assert_eq!(
             broker.finish_confirm(&b.consent_id, true).unwrap_err(),
@@ -1376,7 +1626,7 @@ mod tests {
         let c = broker.preview("room", "scout").unwrap();
         broker.cancel(Some(&c.consent_id));
         assert_eq!(
-            broker.begin_confirm(&c.consent_id).unwrap_err(),
+            broker.begin_confirm(&c.consent_id, None).unwrap_err(),
             "consent_expired"
         );
         // Only the three unprivileged previews ever reached the daemon.
@@ -1400,7 +1650,7 @@ mod tests {
         ]);
         let broker = broker(port, &key);
         let preview = broker.preview("room", "scout").unwrap();
-        broker.begin_confirm(&preview.consent_id).unwrap();
+        broker.begin_confirm(&preview.consent_id, None).unwrap();
         let _frozen = broker
             .finish_confirm(&preview.consent_id, true)
             .unwrap()
@@ -1432,7 +1682,7 @@ mod tests {
         let broker = broker(port, &key);
         let preview = broker.preview("room", "scout").unwrap();
         assert_eq!(preview.mode, ConsentMode::Reauthorize);
-        broker.begin_confirm(&preview.consent_id).unwrap();
+        broker.begin_confirm(&preview.consent_id, None).unwrap();
         let frozen = broker
             .finish_confirm(&preview.consent_id, true)
             .unwrap()
@@ -1448,9 +1698,86 @@ mod tests {
         assert_eq!(body["expected_definition_digest"], DIGEST);
         assert_eq!(body["activation_policy"], "mention");
         assert!(body.get("agent_package_id").is_none());
-        // An explicit retry re-confirms and replays the identical decision id.
-        let retry = broker.begin_confirm(&preview.consent_id).unwrap();
+        // An explicit retry re-confirms and replays the identical decision id
+        // with the identical body: naming the same activation is a replay ...
+        let retry = broker
+            .begin_confirm(&preview.consent_id, Some(Activation::Mention))
+            .unwrap();
         assert_eq!(retry.decision_id, frozen.decision_id);
+        assert_eq!(retry, frozen);
+        assert_eq!(
+            broker.finish_confirm(&preview.consent_id, false).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn a_dispatched_decision_never_replays_under_a_changed_activation() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_file(dir.path(), 0o600);
+        let (port, daemon) = fake_daemon(vec![
+            Some(http("200 OK", &preview_body(true, None))),
+            None, // the authorize is written; its acknowledgement is lost
+        ]);
+        let broker = broker(port, &key);
+        let preview = broker.preview("room", "scout").unwrap();
+        broker
+            .begin_confirm(&preview.consent_id, Some(Activation::Mention))
+            .unwrap();
+        broker
+            .finish_confirm(&preview.consent_id, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            broker.send_decision(&preview.consent_id).state,
+            OutcomeState::Unknown
+        );
+        assert_eq!(
+            json_body(&daemon.join().unwrap()[1])["activation_policy"],
+            "mention"
+        );
+        // The decision id is bound to the `mention` body that may have landed:
+        // a different choice cannot be forged under it. The consent is dropped
+        // and the page starts over from a fresh preview.
+        assert_eq!(
+            broker
+                .begin_confirm(&preview.consent_id, Some(Activation::ExplicitOnly))
+                .unwrap_err(),
+            "consent_invalidated"
+        );
+        assert!(broker.pending.lock().entries.is_empty());
+        assert_eq!(
+            broker.begin_confirm(&preview.consent_id, None).unwrap_err(),
+            "consent_expired"
+        );
+
+        // Before dispatch, the choice is free: a declined dialog keeps the
+        // consent, and the next confirmation may name another activation.
+        let (port, daemon) = fake_daemon(vec![Some(http("200 OK", &preview_body(true, None)))]);
+        let broker = super::tests::broker(port, &key);
+        let preview = broker.preview("room", "scout").unwrap();
+        daemon.join().unwrap();
+        let first = broker
+            .begin_confirm(&preview.consent_id, Some(Activation::TaskAndThread))
+            .unwrap();
+        assert_eq!(first.activation_policy, Activation::TaskAndThread);
+        // A declined confirmation discards the consent (existing rule) ...
+        assert_eq!(
+            broker.finish_confirm(&preview.consent_id, false).unwrap(),
+            None
+        );
+        // ... so test the pre-dispatch change on a seeded Ready consent instead.
+        let id = seed_consent(&broker);
+        let a = broker
+            .begin_confirm(&id, Some(Activation::Mention))
+            .unwrap();
+        assert_eq!(a.activation_policy, Activation::Mention);
+        broker.pending.lock().entries[0].phase = Phase::Ready; // dialog abandoned natively
+        let b = broker
+            .begin_confirm(&id, Some(Activation::ExplicitOnly))
+            .unwrap();
+        assert_eq!(b.activation_policy, Activation::ExplicitOnly);
+        assert_eq!(a.decision_id, b.decision_id);
     }
 
     #[test]
@@ -1486,7 +1813,7 @@ mod tests {
         drop(pending);
         broker.ttl = Duration::ZERO;
         assert_eq!(
-            broker.begin_confirm(&ids[1]).unwrap_err(),
+            broker.begin_confirm(&ids[1], None).unwrap_err(),
             "consent_expired"
         );
     }
@@ -1548,7 +1875,7 @@ mod tests {
         ]);
         let mut broker = broker(port, &key);
         let a = broker.preview("room", "scout").unwrap();
-        broker.begin_confirm(&a.consent_id).unwrap();
+        broker.begin_confirm(&a.consent_id, None).unwrap();
         // The operator confirms only after the frozen preview expired.
         broker.ttl = Duration::ZERO;
         assert_eq!(
@@ -1563,7 +1890,7 @@ mod tests {
         // A consent stuck in Confirming past the TTL is pruned too.
         broker.ttl = CONSENT_TTL;
         let b = broker.preview("room", "scout").unwrap();
-        broker.begin_confirm(&b.consent_id).unwrap();
+        broker.begin_confirm(&b.consent_id, None).unwrap();
         broker.ttl = Duration::ZERO;
         broker.prune(&mut broker.pending.lock().entries);
         assert!(
@@ -1625,14 +1952,14 @@ mod tests {
         let broker = broker(port, &key);
         let preview = broker.preview("team.room", "scout").unwrap();
         daemon.join().unwrap();
-        let frozen = broker.begin_confirm(&preview.consent_id).unwrap();
+        let frozen = broker.begin_confirm(&preview.consent_id, None).unwrap();
         let (title, message, action) = frozen.dialog_text();
         assert_eq!(action, "Authorize");
         assert_eq!(title, "ScoutOwner: someone-else");
         assert_eq!(
             message,
             format!(
-                "Room: team.room\nPackage: scout\nAgent id: agent-scout-1\nOwner: member-owner\nCapabilities: read, write\nDigest: {DIGEST}"
+                "Room: team.room\nPackage: scout\nAgent id: agent-scout-1\nOwner: member-owner\nActivation: only when invoked (explicit_only)\nCapabilities: read, write\nDigest: {DIGEST}"
             )
         );
 
@@ -1690,7 +2017,7 @@ mod tests {
         ]);
         let broker = broker(port, &key);
         let preview = broker.preview("room", "scout").unwrap();
-        broker.begin_confirm(&preview.consent_id).unwrap();
+        broker.begin_confirm(&preview.consent_id, None).unwrap();
         let frozen = broker
             .finish_confirm(&preview.consent_id, true)
             .unwrap()
@@ -1701,7 +2028,7 @@ mod tests {
         assert_eq!(outcome.code.as_deref(), Some("invalid_reply"));
         // The slot is not stuck in Sending: an explicit retry can re-confirm
         // the same decision.
-        let retry = broker.begin_confirm(&preview.consent_id).unwrap();
+        let retry = broker.begin_confirm(&preview.consent_id, None).unwrap();
         assert_eq!(retry.decision_id, frozen.decision_id);
     }
 
@@ -1775,6 +2102,7 @@ mod tests {
             decision: Decision::Consent(Box::new(frozen)),
             created: Instant::now(),
             phase: Phase::Ready,
+            dispatched: false,
         });
         id
     }
@@ -1786,7 +2114,7 @@ mod tests {
             id
         } else {
             let id = seed_consent(broker);
-            broker.begin_confirm(&id).unwrap();
+            broker.begin_confirm(&id, None).unwrap();
             broker.finish_confirm(&id, true).unwrap().unwrap();
             id
         }
@@ -1970,7 +2298,7 @@ mod tests {
         let (port, listener) = silent_daemon();
         let mut broker = broker(port, &key);
         let id = seed_consent(&broker);
-        broker.begin_confirm(&id).unwrap();
+        broker.begin_confirm(&id, None).unwrap();
         let ids: Vec<_> = (1..MAX_PENDING)
             .map(|i| broker.begin_revoke("room", &format!("agent-{i}")).unwrap())
             .collect();
@@ -2069,7 +2397,7 @@ mod tests {
         assert_eq!(preview.mode, ConsentMode::Authorize);
         assert_eq!(preview.definition_digest, DIGEST);
         assert!(!serde_json::to_string(&preview).unwrap().contains(KEY));
-        assert!(broker.begin_confirm(&preview.consent_id).is_ok());
+        assert!(broker.begin_confirm(&preview.consent_id, None).is_ok());
     }
 
     #[test]

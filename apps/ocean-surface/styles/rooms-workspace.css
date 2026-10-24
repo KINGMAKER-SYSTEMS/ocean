@@ -1406,6 +1406,57 @@
   box-shadow: var(--focus-ring);
 }
 
+/* Activation radios: the one policy the page chooses (design §5.1 step 3,
+   daemon default pre-selected). Disabled while the decision is in flight or
+   once it reached the daemon, since the shell replays it only unchanged. */
+.rooms-workspace__consent-activation {
+  display: grid;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.rooms-workspace__consent-activation:disabled {
+  opacity: 0.6;
+}
+
+.rooms-workspace__consent-activation-legend {
+  padding: 0;
+  color: var(--fg-3);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.rooms-workspace__consent-activation-option {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: baseline;
+  min-width: 0;
+  cursor: pointer;
+}
+
+.rooms-workspace__consent-activation-option > input {
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.rooms-workspace__consent-activation-option > input:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.rooms-workspace__consent-activation-label {
+  color: var(--fg);
+  font-size: 12px;
+}
+
+.rooms-workspace__consent-activation-note {
+  grid-column: 2;
+  color: var(--fg-3);
+  font-size: 11px;
+}
+
 .rooms-workspace__member-binding {
   flex: 0 0 auto;
   color: var(--fg-4);
@@ -1830,6 +1881,19 @@
 
 .rooms-workspace__consent-cap {
   padding: 1px 6px;
+}
+
+.rooms-workspace__consent-activation {
+  gap: 6px;
+}
+
+.rooms-workspace__consent-activation-legend {
+  margin-bottom: 2px;
+}
+
+.rooms-workspace__consent-activation-option {
+  column-gap: 8px;
+  row-gap: 1px;
 }
 
 .rooms-workspace__consent-primary {

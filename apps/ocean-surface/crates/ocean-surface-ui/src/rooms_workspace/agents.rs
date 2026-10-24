@@ -9,7 +9,12 @@
 use leptos::prelude::*;
 
 use super::format::avatar_identity_class;
-use crate::rooms::{AgentSummary, InvocationState, RoomAgentBinding, RoomAgentRun, Rooms};
+use crate::rooms::{
+    AgentSummary, ConsentActivation, InvocationState, RoomAgentBinding, RoomAgentRun, Rooms,
+};
+
+/// One radio group per sheet; the sheet mounts once (`mod.rs`).
+const CONSENT_ACTIVATION_GROUP: &str = "rooms-workspace-consent-activation";
 
 /// `sha256:` plus the first 12 hex digits; the full digest stays in the title.
 fn short_digest(digest: &str) -> String {
@@ -137,14 +142,18 @@ pub(super) fn AddAgentPicker(rooms: Rooms) -> impl IntoView {
     }
 }
 
-/// Frozen native consent: name, digest, requested capabilities, one primary
-/// action and a dismiss. Absent unless the native shell froze a preview.
+/// Frozen native consent: name, digest, requested capabilities, the
+/// activation radios (daemon default pre-selected; the one policy the page
+/// chooses), one primary action and a dismiss. Absent unless the native
+/// shell froze a preview.
 #[component]
 pub(super) fn ConsentSheet(rooms: Rooms) -> impl IntoView {
     move || {
         let draft = rooms.consent.get()?;
         let preview = draft.preview.clone();
         let busy = draft.busy;
+        let chosen = draft.activation;
+        let editable = draft.activation_editable();
         let initials = preview
             .display_name
             .chars()
@@ -189,6 +198,22 @@ pub(super) fn ConsentSheet(rooms: Rooms) -> impl IntoView {
                         }).collect_view()}
                     </div>
                 })}
+                <fieldset class="rooms-workspace__consent-activation" disabled=!editable>
+                    <legend class="rooms-workspace__consent-activation-legend">"Activation"</legend>
+                    {ConsentActivation::ALL.into_iter().map(|activation| view! {
+                        <label class="rooms-workspace__consent-activation-option">
+                            <input
+                                type="radio"
+                                name=CONSENT_ACTIVATION_GROUP
+                                value=activation.wire()
+                                checked=activation == chosen
+                                on:change=move |_| rooms.set_consent_activation(activation)
+                            />
+                            <span class="rooms-workspace__consent-activation-label">{activation.label()}</span>
+                            <span class="rooms-workspace__consent-activation-note">{activation.consequence()}</span>
+                        </label>
+                    }).collect_view()}
+                </fieldset>
                 <button
                     class="rooms-workspace__consent-primary"
                     type="button"

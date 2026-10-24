@@ -217,7 +217,8 @@ and the host (`rooms::agent_add_route`):
   bootstrap, `POST /v1/rooms/persistent/{key}/agents/bootstrap`
   `{ owner_member_id, agent_package_id }`, records this daemon's owner and
   returns a frozen consent preview; the consent sheet then authorizes the
-  binding through `POST /v1/rooms/persistent/{key}/agents`.
+  binding through `POST /v1/rooms/persistent/{key}/agents`, carrying the
+  activation policy chosen in the sheet (below).
 - `local` room, browser or extension: the plain participant route,
 
   ```
@@ -241,6 +242,20 @@ must permit the trigger kind. Bindings are minted only through the native
 consent ceremony in `crates/ocean-tauri/src/room_consent.rs` (preview,
 authorize, reauthorize, revoke, each under the operator key), so browser and
 extension hosts render binding status but cannot authorize.
+
+The consent sheet offers the one policy the operator chooses, the binding's
+activation, as three radios in the design's words ("only when invoked" /
+"when @mentioned" / "mentions, tasks and thread replies", wire names
+`explicit_only`, `mention`, `task_and_thread`) with the daemon default
+`explicit_only` pre-selected for a new authorization and the binding's current
+policy pre-selected for a reauthorization. The page names the choice by wire
+name; the shell maps it onto its own closed set before the native dialog, the
+dialog shows it ("Activation: when @mentioned (mention)"), and the authorize
+or reauthorize body carries it. A decision whose acknowledgement was lost is
+replayed only unchanged: the radios lock, and asking the shell for a different
+policy on that decision drops it instead of forging a second body under the
+same `decision_id`. Context policy and memory scope stay at the daemon
+defaults; the sheet has no control for them.
 
 ### Agent Wake Policy
 
@@ -279,11 +294,12 @@ and `on_thread_reply` on, the other three flags off, no `on_schedule` — the
 "+ New room" policy fixed in `OCEAN_ROOMS_DESIGN_DIRECTION.md` (Sidebar) and
 the Gate 1 create flow. So in a room created here a bound agent wakes when a
 human @-mentions it or replies in a thread it rooted, provided its binding's
-activation policy admits that trigger (`mention` or `task_and_thread`; a
-binding minted with the consent default `explicit_only` still runs only
-through the explicit invoke below). This surface never calls the PATCH route
-and has no policy control; a later control would write through it. The
-`RoomTriggerPolicy` mirror in `rooms.rs` carries all five flags.
+activation policy admits that trigger (`mention` or `task_and_thread`, chosen
+in the consent sheet; an agent authorized with the pre-selected `explicit_only`
+still runs only through the explicit invoke below). This surface never calls
+the PATCH route and has no room-level policy control; a later control would
+write through it. The `RoomTriggerPolicy` mirror in `rooms.rs` carries all five
+flags.
 
 ### Agent Turns in Rooms
 
@@ -535,22 +551,29 @@ An agent identity already registered with the daemon (visible in
    the members/agents registration in a federated room.
 4. The daemon validates the identity and appends the join row; the roster and
    mention autocomplete update from the tail. On Tauri the consent sheet then
-   authorizes the binding; elsewhere the agent is on the roster but unbound,
-   and its row says so.
+   authorizes the binding, with the activation radios open on `explicit_only`
+   (pick "when @mentioned" for an agent that should answer `@id`); elsewhere
+   the agent is on the roster but unbound, and its row says so.
 
 ### Configuring Agent Wake Behavior
 
-There is no wake-policy control in this surface. Every room created here
-carries the canonical default (`on_mention` and `on_thread_reply`, see "Agent
-Wake Policy"), so a bound agent whose binding admits mentions wakes on `@id`
-without any setup; the daemon's `PATCH /v1/rooms/persistent/{key}` is where a
-later control would write, and this surface does not call it.
+There is no room-level wake-policy control in this surface. Every room created
+here carries the canonical default (`on_mention` and `on_thread_reply`, see
+"Agent Wake Policy"), so a bound agent whose binding admits mentions wakes on
+`@id` without any setup; the daemon's `PATCH /v1/rooms/persistent/{key}` is
+where a later control would write, and this surface does not call it. The
+per-agent half of that decision, the binding's activation policy, is chosen in
+the consent sheet when the agent is authorized or reauthorized (see "Binding
+an Agent to a Room"); "Review" on a bound agent's row reopens that sheet with
+the current policy pre-selected.
 
 ### Agent's First Turn in a Room
 
-1. Human writes a message in a room whose agent is bound (authorized), and
-   either @-mentions it (every room created here carries `on_mention`) or
-   picks it in the message's invoke menu.
+1. Human writes a message in a room whose agent is bound (authorized) with an
+   activation that admits the trigger, and either @-mentions it (every room
+   created here carries `on_mention`; the binding needs `mention` or
+   `task_and_thread`) or picks it in the message's invoke menu (any
+   activation).
 2. The daemon admits the agent against its binding, resolves the turn folder
    from the room's `workspace_root` (an unbound room records
    `workspace_unavailable` instead) and runs the turn itself.

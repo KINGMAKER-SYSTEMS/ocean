@@ -1780,11 +1780,8 @@ impl Rooms {
             }
             match result {
                 Ok(preview) if current && me.consent_ticket.get_untracked() == ticket => {
-                    me.consent.set(Some(RoomConsentDraft {
-                        preview,
-                        room_generation: generation_id,
-                        busy: false,
-                    }));
+                    me.consent
+                        .set(Some(RoomConsentDraft::new(preview, generation_id)));
                 }
                 Ok(preview) => crate::host::room_consent_cancel(Some(&preview.consent_id)),
                 Err(code) if current => me.status.set(bootstrap_error_text(&code)),
@@ -1926,11 +1923,9 @@ impl Rooms {
             let current = me.room_is_current(generation_id, &key)
                 && me.consent_ticket.get_untracked() == ticket;
             match result {
-                Ok(preview) if current => me.consent.set(Some(RoomConsentDraft {
-                    preview,
-                    room_generation: generation_id,
-                    busy: false,
-                })),
+                Ok(preview) if current => me
+                    .consent
+                    .set(Some(RoomConsentDraft::new(preview, generation_id))),
                 Ok(preview) => crate::host::room_consent_cancel(Some(&preview.consent_id)),
                 Err(code) if current => me.status.set(consent_error_text(&code)),
                 Err(_) => {}
@@ -1938,9 +1933,23 @@ impl Rooms {
         });
     }
 
+    /// The sheet's activation choice for the frozen consent. Ignored while
+    /// the decision is in flight or once it has reached the daemon
+    /// ([`RoomConsentDraft::choose_activation`]); nothing is sent until
+    /// [`Self::authorize_consent`].
+    pub fn set_consent_activation(&self, activation: ConsentActivation) {
+        self.consent.update(|c| {
+            if let Some(c) = c {
+                c.choose_activation(activation);
+            }
+        });
+    }
+
     /// Run native confirmation + digest-guarded authorization for the frozen
-    /// consent. A committed or unknown outcome always refreshes authoritative
-    /// bindings for the room it was decided in.
+    /// consent, carrying the sheet's activation choice. A committed or unknown
+    /// outcome always refreshes authoritative bindings for the room it was
+    /// decided in; after an unknown outcome the choice is locked, because the
+    /// shell replays that decision only unchanged.
     pub fn authorize_consent(&self) {
         let Some(draft) = self.consent.get_untracked() else {
             return;
@@ -1962,7 +1971,11 @@ impl Rooms {
             }
         });
         spawn_local(async move {
-            let Some(result) = crate::host::room_consent_authorize(&draft.preview.consent_id).await
+            let Some(result) = crate::host::room_consent_authorize(
+                &draft.preview.consent_id,
+                draft.activation.wire(),
+            )
+            .await
             else {
                 return;
             };
@@ -1977,6 +1990,7 @@ impl Rooms {
                     me.consent.update(|c| {
                         if let Some(c) = c {
                             c.busy = false;
+                            c.lock_activation();
                         }
                     });
                 } else {
@@ -3997,12 +4011,116 @@ pub(crate) fn invocable_bindings(bindings: &[RoomAgentBinding]) -> Vec<RoomAgent
         .collect()
 }
 
+/// The binding activation policies the consent sheet offers: the daemon's
+/// closed set (`room_agent_authority::parse_activation`), mirrored by the
+/// shell's `room_consent::Activation`. Per `OCEAN_ROOMS_DESIGN_DIRECTION.md`
+/// §5.1 step 3 the radios open on the daemon default, `explicit_only`, with
+/// nothing else pre-ticked; the labels are the design's activation labels.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ConsentActivation {
+    /// Runs only through the explicit invoke menu.
+    #[default]
+    ExplicitOnly,
+    /// Also wakes on an `@`-mention in a room whose wake policy has
+    /// `on_mention`.
+    Mention,
+    /// Also wakes on mentions and on replies in threads it rooted
+    /// (`on_thread_reply`).
+    TaskAndThread,
+}
+
+impl ConsentActivation {
+    /// Every offered policy, in the design's order; the sheet renders exactly
+    /// these, first one pre-selected.
+    pub const ALL: [Self; 3] = [Self::ExplicitOnly, Self::Mention, Self::TaskAndThread];
+
+    /// Exact wire names only, as the shell and daemon parse them.
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "explicit_only" => Some(Self::ExplicitOnly),
+            "mention" => Some(Self::Mention),
+            "task_and_thread" => Some(Self::TaskAndThread),
+            _ => None,
+        }
+    }
+
+    pub fn wire(self) -> &'static str {
+        match self {
+            Self::ExplicitOnly => "explicit_only",
+            Self::Mention => "mention",
+            Self::TaskAndThread => "task_and_thread",
+        }
+    }
+
+    /// The design's activation label (§5.1 agent row).
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ExplicitOnly => "only when invoked",
+            Self::Mention => "when @mentioned",
+            Self::TaskAndThread => "mentions, tasks and thread replies",
+        }
+    }
+
+    /// The one line of consequence under each radio (§5.1 step 3).
+    pub fn consequence(self) -> &'static str {
+        match self {
+            Self::ExplicitOnly => "Runs only when a member picks it from a message's invoke menu.",
+            Self::Mention => "Also wakes when a member @-mentions it in this room.",
+            Self::TaskAndThread => "Also wakes on @-mentions and on replies in threads it started.",
+        }
+    }
+}
+
 /// A frozen native consent preview held for explicit authorization.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RoomConsentDraft {
     pub preview: crate::host::RoomConsentPreview,
     room_generation: u64,
     pub busy: bool,
+    /// The activation the next authorize sends. Opens on what the shell froze
+    /// (`preview.activation_policy`: the daemon default for a new binding,
+    /// the current policy for a reauthorization).
+    pub activation: ConsentActivation,
+    /// Set once a decision reached the daemon with an unknown outcome: the
+    /// shell replays that decision id only with the same body, so the sheet
+    /// stops offering a different choice for it.
+    pub activation_locked: bool,
+}
+
+impl RoomConsentDraft {
+    fn new(preview: crate::host::RoomConsentPreview, room_generation: u64) -> Self {
+        let activation = preview
+            .activation_policy
+            .as_deref()
+            .and_then(ConsentActivation::parse)
+            .unwrap_or_default();
+        Self {
+            preview,
+            room_generation,
+            busy: false,
+            activation,
+            activation_locked: false,
+        }
+    }
+
+    /// Adopt the sheet's choice. Refused (returns `false`) while the decision
+    /// is in flight or after it reached the daemon once.
+    pub fn choose_activation(&mut self, activation: ConsentActivation) -> bool {
+        if self.busy || self.activation_locked {
+            return false;
+        }
+        self.activation = activation;
+        true
+    }
+
+    /// Whether the sheet's radios take input right now.
+    pub fn activation_editable(&self) -> bool {
+        !self.busy && !self.activation_locked
+    }
+
+    fn lock_activation(&mut self) {
+        self.activation_locked = true;
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7528,6 +7646,98 @@ mod tests {
             broken.status.as_deref(),
             Some("The operator credential is unavailable.")
         );
+    }
+
+    #[test]
+    fn consent_activation_is_the_daemon_s_three_names_and_opens_on_explicit_only() {
+        // The design's step 3: "activation explicit_only / mention /
+        // task_and_thread", daemon default selected. The order is the order
+        // the sheet renders; the wire names are exactly the daemon's.
+        assert_eq!(
+            ConsentActivation::ALL.map(ConsentActivation::wire),
+            ["explicit_only", "mention", "task_and_thread"]
+        );
+        assert_eq!(
+            ConsentActivation::default(),
+            ConsentActivation::ExplicitOnly
+        );
+        for activation in ConsentActivation::ALL {
+            assert_eq!(
+                ConsentActivation::parse(activation.wire()),
+                Some(activation)
+            );
+            assert!(!activation.label().is_empty());
+            assert!(activation.consequence().ends_with('.'));
+        }
+        assert_eq!(ConsentActivation::ExplicitOnly.label(), "only when invoked");
+        assert_eq!(ConsentActivation::Mention.label(), "when @mentioned");
+        assert_eq!(
+            ConsentActivation::TaskAndThread.label(),
+            "mentions, tasks and thread replies"
+        );
+        for raw in ["", "Mention", " mention", "on_mention", "always"] {
+            assert_eq!(ConsentActivation::parse(raw), None, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn consent_draft_preselects_the_frozen_activation_and_locks_after_an_unknown_outcome() {
+        let preview = |activation: Option<&str>| crate::host::RoomConsentPreview {
+            consent_id: "c1".into(),
+            room: "room".into(),
+            package_id: "scout".into(),
+            agent_member_id: "agent-scout-1".into(),
+            owner_member_id: "member-owner".into(),
+            display_name: "Scout".into(),
+            definition_digest: "sha256:00".into(),
+            definition_revision: None,
+            requested_capabilities: vec![],
+            mode: "authorize".into(),
+            binding_status: None,
+            activation_policy: activation.map(str::to_string),
+            expires_in_ms: 120_000,
+        };
+        // A new authorization opens on the daemon default the shell froze.
+        let mut draft = RoomConsentDraft::new(preview(Some("explicit_only")), 7);
+        assert_eq!(draft.activation, ConsentActivation::ExplicitOnly);
+        assert!(!draft.activation_locked && draft.activation_editable());
+        // A reauthorization opens on the binding's current policy.
+        assert_eq!(
+            RoomConsentDraft::new(preview(Some("task_and_thread")), 7).activation,
+            ConsentActivation::TaskAndThread
+        );
+        // An absent or unknown frozen value never pre-ticks a wider policy.
+        assert_eq!(
+            RoomConsentDraft::new(preview(None), 7).activation,
+            ConsentActivation::ExplicitOnly
+        );
+        assert_eq!(
+            RoomConsentDraft::new(preview(Some("always")), 7).activation,
+            ConsentActivation::ExplicitOnly
+        );
+
+        // The choice is free until the decision is in flight ...
+        assert!(draft.choose_activation(ConsentActivation::Mention));
+        assert_eq!(draft.activation, ConsentActivation::Mention);
+        draft.busy = true;
+        assert!(!draft.choose_activation(ConsentActivation::TaskAndThread));
+        assert_eq!(draft.activation, ConsentActivation::Mention);
+        assert!(!draft.activation_editable());
+        draft.busy = false;
+        assert!(draft.activation_editable());
+        // ... and locked once it reached the daemon with a lost
+        // acknowledgement: the shell replays that decision only unchanged.
+        draft.lock_activation();
+        assert!(!draft.choose_activation(ConsentActivation::ExplicitOnly));
+        assert_eq!(draft.activation, ConsentActivation::Mention);
+        assert!(!draft.activation_editable());
+        // Only an unknown outcome keeps the draft (and so needs the lock).
+        let unknown = consent_step(&Ok(crate::host::RoomConsentOutcome {
+            state: "unknown".into(),
+            status: None,
+            code: None,
+        }));
+        assert!(unknown.keep_draft);
     }
 }
 
