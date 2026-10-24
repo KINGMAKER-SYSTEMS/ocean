@@ -1,9 +1,11 @@
 //! Left rail: room listbox (roving tabindex), status line, and a shared
-//! create/join entry menu. Creation has an optional workspace selector.
+//! create/join entry menu. Creation carries an optional default folder
+//! through the shared daemon-catalogue picker (`working_directory.rs`).
 
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
+use super::working_directory::WorkingDirectoryPicker;
 use crate::daemon::ProjectInfo;
 use crate::rooms::{CreateResolution, Room, Rooms};
 
@@ -13,30 +15,10 @@ enum RoomEntry {
     Join,
 }
 
-// ── Room-create workspace selector (pure, unit-testable) ───────────────────
+// ── Workspace-root display helpers (pure, unit-testable) ───────────────────
 
-/// Select value of the native "Choose folder…" entry. Never an absolute path,
-/// so it cannot collide with a workspace option.
-pub(super) const CHOOSE_FOLDER_VALUE: &str = "choose-folder";
-
-/// One selectable workspace root for a new room.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct WorkspaceOption {
-    pub root: String,
-    pub label: String,
-}
-
-/// What a workspace `<select>` value means.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum WorkspaceSelection {
-    /// Unbound room: no `workspace_root` is sent.
-    None,
-    Root(String),
-    ChooseFolder,
-}
-
-/// True for an absolute POSIX path or a drive/UNC-rooted Windows path. The
-/// daemon refuses anything else, so relative roots are never offered.
+/// True for an absolute POSIX path or a drive/UNC-rooted Windows path. Used
+/// only to tidy the rail's group labels; never to judge what is sent.
 pub(super) fn is_absolute_root(path: &str) -> bool {
     let bytes = path.as_bytes();
     path.starts_with('/')
@@ -68,56 +50,13 @@ pub(super) fn root_basename(root: &str) -> &str {
         .unwrap_or(root)
 }
 
-/// Workspace choices for a new room: each daemon project's absolute
-/// `workspace_root` (first wins on duplicates), then a natively picked folder
-/// not already listed. Labels are the project name (or folder name for a
-/// picked root); colliding labels fall back to the full root.
-pub(super) fn workspace_options(
-    projects: &[ProjectInfo],
-    picked: Option<&str>,
-) -> Vec<WorkspaceOption> {
-    let mut options: Vec<WorkspaceOption> = Vec::new();
-    let candidates = projects
-        .iter()
-        .map(|project| (project.workspace_root.as_str(), Some(project.name.trim())))
-        .chain(picked.map(|root| (root, None)));
-    for (raw, name) in candidates {
-        let Some(root) = normalized_root(raw) else {
-            continue;
-        };
-        if options.iter().any(|option| option.root == root) {
-            continue;
-        }
-        let label = match name {
-            Some(name) if !name.is_empty() => name.to_string(),
-            _ => root_basename(&root).to_string(),
-        };
-        options.push(WorkspaceOption { root, label });
-    }
-    let labels: Vec<String> = options.iter().map(|o| o.label.clone()).collect();
-    for option in &mut options {
-        if labels
-            .iter()
-            .filter(|label| **label == option.label)
-            .count()
-            > 1
-        {
-            option.label = option.root.clone();
-        }
-    }
-    options
-}
-
-/// Decode a workspace `<select>` value. The empty value is "No workspace";
-/// anything not absolute is treated as no workspace rather than sent.
-pub(super) fn workspace_selection(value: &str) -> WorkspaceSelection {
-    if value == CHOOSE_FOLDER_VALUE {
-        return WorkspaceSelection::ChooseFolder;
-    }
-    match normalized_root(value) {
-        Some(root) => WorkspaceSelection::Root(root),
-        None => WorkspaceSelection::None,
-    }
+/// The `workspace_root` a create sends: the picker's draft trimmed of
+/// surrounding whitespace, or none for an unbound room. The path is a folder
+/// on the DAEMON's host, sent as chosen; the daemon canonicalizes and accepts
+/// or refuses it (`400 invalid_workspace_root`, shown with the draft kept).
+pub(super) fn create_workspace_root(draft: &str) -> Option<String> {
+    let root = draft.trim();
+    (!root.is_empty()).then(|| root.to_string())
 }
 
 // ── Room-list ARIA listbox helpers (pure, unit-testable) ───────────────────
@@ -253,13 +192,13 @@ fn rail_group_rooms(rooms: &[Room], label: &Option<String>) -> Vec<Room> {
 }
 
 /// Left rail: room listbox, status line, and create/join entry controls.
-/// The create draft, its workspace choice, and its op-id admission state live
-/// here; nothing else in the workspace reads them.
+/// The create draft, its default-folder draft, and its op-id admission state
+/// live here; nothing else in the workspace reads them.
 #[component]
 pub(super) fn RoomListRail(
     rooms: Rooms,
-    /// The daemon's project catalogue; its workspace roots are the selectable
-    /// workspaces for a new room.
+    /// The daemon's project catalogue; its project and worktree roots are the
+    /// picker's rows for a new room's default folder.
     projects: Signal<Vec<ProjectInfo>>,
     /// Compact-drawer visibility, shared with the mobile nav toggle,
     /// backdrop, and Escape handling in `RoomsWorkspace`.
@@ -277,15 +216,11 @@ pub(super) fn RoomListRail(
     // Team-platform P6: the mentions inbox replaces the list while open.
     let inbox_open = RwSignal::new(false);
     let create_input_ref: NodeRef<leptos::html::Input> = NodeRef::new();
-    // Workspace for the next create: `None` (unbound) unless chosen here.
+    // Default folder for the next create: empty (unbound) unless chosen here.
     // Never seeded from a session cwd, the focused chat's project, or /tmp.
-    let workspace_choice = RwSignal::new(None::<String>);
-    let picked_folder = RwSignal::new(None::<String>);
-    let picker_pending = RwSignal::new(false);
-    let workspace_select_ref: NodeRef<leptos::html::Select> = NodeRef::new();
-    let can_pick_folder = crate::host::running_in_tauri();
-    let workspace_choices =
-        Memo::new(move |_| workspace_options(&projects.get(), picked_folder.get().as_deref()));
+    let create_workspace = RwSignal::new(String::new());
+    // Bumped when the create draft is cleared so the picker leaves manual mode.
+    let create_workspace_reset = RwSignal::new(0u32);
 
     Effect::new(move |_| {
         let mode = entry.get();
@@ -317,7 +252,7 @@ pub(super) fn RoomListRail(
     let pending_create = RwSignal::new(false);
     let create_op_id: RwSignal<u64> = RwSignal::new(0);
     let cancel_entry = move || {
-        if pending_create.get_untracked() || picker_pending.get_untracked() {
+        if pending_create.get_untracked() {
             return;
         }
         invitation.set(String::new());
@@ -358,18 +293,16 @@ pub(super) fn RoomListRail(
         // Prevent concurrent dispatch: if a create is already in flight,
         // ignore the keypress. The Effect clears pending_create when the
         // outcome resolves; until then, any second Enter is a no-op.
-        if pending_create.get_untracked() || picker_pending.get_untracked() {
+        if pending_create.get_untracked() {
             return;
         }
         let name = new_room_name.get_untracked();
         if name.trim().is_empty() {
             return;
         }
-        // Send only a root still offered; a choice whose project vanished
-        // from the catalogue never rides along unseen.
-        let workspace_root = workspace_choice.get_untracked().filter(|root| {
-            workspace_choices.with_untracked(|options| options.iter().any(|o| &o.root == root))
-        });
+        // The picker's draft is visible in full (a catalogue row by its path,
+        // or the typed path in its field), so what is sent is what is shown.
+        let workspace_root = create_workspace_root(&create_workspace.get_untracked());
         // The create body attaches the canonical wake policy itself
         // (`RoomTriggerPolicy::create_default`); the rail chooses only the
         // name and the folder.
@@ -405,8 +338,10 @@ pub(super) fn RoomListRail(
         match Rooms::resolve_create_op(current_op, my_op, outcome.as_ref()) {
             CreateResolution::Success => {
                 new_room_name.set(String::new());
-                workspace_choice.set(None);
-                picked_folder.set(None);
+                // Same rule for the folder: it was part of this draft, and
+                // the next room chooses its own.
+                create_workspace.set(String::new());
+                create_workspace_reset.update(|n| *n = n.wrapping_add(1));
                 pending_create.set(false);
                 cancel_entry();
             }
@@ -416,37 +351,6 @@ pub(super) fn RoomListRail(
             CreateResolution::Pending => { /* still in flight */ }
         }
     });
-
-    let choose_folder = move || {
-        if picker_pending.get_untracked() {
-            return;
-        }
-        picker_pending.set(true);
-        leptos::task::spawn_local(async move {
-            let picked = crate::host::pick_folder().await;
-            // A disposed rail drops the late result.
-            if picker_pending.try_set(false).is_some() {
-                return;
-            }
-            if let Some(root) = picked.as_deref().and_then(normalized_root) {
-                picked_folder.set(Some(root.clone()));
-                workspace_choice.set(Some(root));
-            }
-        });
-    };
-
-    let on_workspace_change =
-        move |ev: leptos::ev::Event| match workspace_selection(&event_target_value(&ev)) {
-            WorkspaceSelection::None => workspace_choice.set(None),
-            WorkspaceSelection::Root(root) => workspace_choice.set(Some(root)),
-            WorkspaceSelection::ChooseFolder => {
-                // Keep showing the current choice until a folder is picked.
-                if let Some(select) = workspace_select_ref.get_untracked() {
-                    select.set_value(&workspace_choice.get_untracked().unwrap_or_default());
-                }
-                choose_folder();
-            }
-        };
 
     view! {
         <div
@@ -676,43 +580,25 @@ pub(super) fn RoomListRail(
                     disabled=move || pending_create.get()
                 />
                 <Show when=move || !new_room_name.get().trim().is_empty()>
-                <select
-                    class="rooms-workspace__left-input rooms-workspace__left-workspace"
-                    aria-label="Project"
-                    node_ref=workspace_select_ref
-                    prop:value=move || workspace_choice.get().unwrap_or_default()
-                    on:change=on_workspace_change
-                    disabled=move || pending_create.get() || picker_pending.get()
-                >
-                    <option value="" prop:selected=move || workspace_choice.get().is_none()>
-                        "Project (optional)"
-                    </option>
-                    <For
-                        each=move || workspace_choices.get()
-                        key=|option: &WorkspaceOption| (option.root.clone(), option.label.clone())
-                        children=move |option: WorkspaceOption| {
-                            let root = option.root.clone();
-                            view! {
-                                <option
-                                    value=option.root.clone()
-                                    title=option.root.clone()
-                                    prop:selected=move || {
-                                        workspace_choice.get().as_deref() == Some(root.as_str())
-                                    }
-                                >
-                                    {option.label}
-                                </option>
-                            }
-                        }
-                    />
-                    {can_pick_folder.then(|| view! {
-                        <option value=CHOOSE_FOLDER_VALUE>"Choose folder…"</option>
-                    })}
-                </select>
+                // The folder is on the DAEMON's host: rows are the daemon's
+                // project catalogue (`daemon.projects`, never a browser
+                // filesystem API) plus an explicit path field, and only the
+                // daemon validates what is chosen or typed.
+                <WorkingDirectoryPicker
+                    projects=projects
+                    value=create_workspace
+                    disabled=Signal::derive(move || pending_create.get())
+                    reset=create_workspace_reset
+                    id_base="rooms-create-workspace"
+                    label="Workspace folder on the daemon host"
+                    help="Choose a project or worktree registered on the daemon's machine, or enter an absolute path there. Leave it unbound to bind a folder later from Room details."
+                    allow_empty=true
+                    on_enter=Callback::new(move |()| create_room())
+                />
                 <button
                     class="rooms-workspace__create-submit"
                     type="button"
-                    disabled=move || pending_create.get() || picker_pending.get()
+                    disabled=move || pending_create.get()
                     on:click=move |_| create_room()
                 >
                     {move || if pending_create.get() { "Creating…" } else { "Create" }}
@@ -750,7 +636,7 @@ pub(super) fn RoomListRail(
                 </Show>
                 <Show when=move || entry.get().is_some()>
                     <button class="rooms-workspace__entry-cancel" type="button"
-                        disabled=move || pending_create.get() || picker_pending.get()
+                        disabled=move || pending_create.get()
                         on:click=move |_| cancel_entry()
                     >"Cancel"</button>
                 </Show>
@@ -1007,90 +893,21 @@ mod tests {
         assert_eq!(room_list_tab_stop(&[], Some("a")), None);
     }
 
-    fn project(id: &str, name: &str, root: &str) -> ProjectInfo {
-        serde_json::from_value(serde_json::json!({
-            "id": id,
-            "name": name,
-            "workspace_root": root,
-        }))
-        .unwrap()
-    }
-
-    fn roots(options: &[WorkspaceOption]) -> Vec<&str> {
-        options.iter().map(|o| o.root.as_str()).collect()
-    }
-
+    /// What a create sends is the picker's draft, trimmed, or nothing: no
+    /// browser-side judgement of the path (the daemon answers
+    /// `invalid_workspace_root` for one it cannot bind).
     #[test]
-    fn workspace_options_come_from_absolute_project_roots_deduped() {
-        let projects = vec![
-            project("a", "Ocean", "/Users/me/dev/ocean"),
-            project("b", "Ocean copy", "/Users/me/dev/ocean/"),
-            project("c", "Relative", "dev/rel"),
-            project("d", "Empty", ""),
-            project("e", "Site", "  /srv/site  "),
-            project("f", "Win", "C:\\work\\app"),
-        ];
-        let options = workspace_options(&projects, None);
+    fn create_workspace_root_is_the_trimmed_draft_or_absent() {
+        assert_eq!(create_workspace_root(""), None);
+        assert_eq!(create_workspace_root("   \n"), None);
         assert_eq!(
-            roots(&options),
-            vec!["/Users/me/dev/ocean", "/srv/site", "C:\\work\\app"]
-        );
-        assert_eq!(options[0].label, "Ocean");
-        assert_eq!(options[1].label, "Site");
-    }
-
-    #[test]
-    fn workspace_options_without_projects_is_empty() {
-        assert!(workspace_options(&[], None).is_empty());
-    }
-
-    #[test]
-    fn workspace_options_append_unlisted_picked_folder() {
-        let projects = vec![project("a", "Ocean", "/Users/me/dev/ocean")];
-        let options = workspace_options(&projects, Some("/Users/me/notes"));
-        assert_eq!(
-            roots(&options),
-            vec!["/Users/me/dev/ocean", "/Users/me/notes"]
-        );
-        assert_eq!(options[1].label, "notes");
-        // A picked folder already listed as a project is not repeated.
-        let options = workspace_options(&projects, Some("/Users/me/dev/ocean/"));
-        assert_eq!(roots(&options), vec!["/Users/me/dev/ocean"]);
-        // A relative pick is never offered.
-        let options = workspace_options(&projects, Some("notes"));
-        assert_eq!(roots(&options), vec!["/Users/me/dev/ocean"]);
-    }
-
-    #[test]
-    fn workspace_options_disambiguate_colliding_labels_with_root() {
-        let projects = vec![
-            project("a", "app", "/a/app"),
-            project("b", "app", "/b/app"),
-            project("c", "", "/c/tool"),
-        ];
-        let labels: Vec<String> = workspace_options(&projects, None)
-            .into_iter()
-            .map(|o| o.label)
-            .collect();
-        assert_eq!(labels, vec!["/a/app", "/b/app", "tool"]);
-    }
-
-    #[test]
-    fn workspace_selection_defaults_to_none() {
-        assert_eq!(workspace_selection(""), WorkspaceSelection::None);
-        assert_eq!(
-            workspace_selection("relative/dir"),
-            WorkspaceSelection::None
+            create_workspace_root("  /Users/me/dev/ocean  "),
+            Some("/Users/me/dev/ocean".into())
         );
         assert_eq!(
-            workspace_selection("/tmp/"),
-            WorkspaceSelection::Root("/tmp".into())
+            create_workspace_root("relative/dir"),
+            Some("relative/dir".into())
         );
-        assert_eq!(
-            workspace_selection(CHOOSE_FOLDER_VALUE),
-            WorkspaceSelection::ChooseFolder
-        );
-        assert!(!is_absolute_root(CHOOSE_FOLDER_VALUE));
     }
 
     #[test]
@@ -1102,14 +919,6 @@ mod tests {
         assert!(!is_absolute_root("C:work"));
         assert!(!is_absolute_root("~/dev"));
         assert!(!is_absolute_root(""));
-        assert_eq!(
-            workspace_selection("/"),
-            WorkspaceSelection::Root("/".into())
-        );
-        assert_eq!(
-            workspace_selection("C:\\"),
-            WorkspaceSelection::Root("C:\\".into())
-        );
     }
 
     #[test]

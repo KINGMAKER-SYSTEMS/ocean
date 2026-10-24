@@ -1,17 +1,23 @@
-//! Slack-style persistent 3-column Rooms workspace.
+//! Slack-style persistent Rooms workspace: focus-first.
 //!
-//! Left rail (room list + create), center rail (header + transcript + composer),
-//! right rail (members / details). Renders against the existing CSS classes in
-//! `styles/rooms-workspace.css` and the existing [`crate::rooms::Rooms`] signals
-//! and API surface. Mounted as the default web+Tauri collaboration surface in
-//! [`crate::app`]; the legacy RoomStage/RoomsPanel components in rooms.rs are
-//! deleted.
+//! Left rail (room list + create), center rail (header + transcript + docked
+//! composer), and the room details drawer (design
+//! `OCEAN_ROOMS_DESIGN_DIRECTION.md` §5): there is no permanent right rail.
+//! Members, Files, Search and the thread panel open on explicit intent in one
+//! slide-over (`.rooms-workspace__right`) at every width; only the thread
+//! panel docks inline at or above 1280px (§7). Renders against the existing
+//! CSS classes in `styles/rooms-workspace.css` and the existing
+//! [`crate::rooms::Rooms`] signals and API surface. Mounted as the default
+//! web+Tauri collaboration surface in [`crate::app`]; the legacy
+//! RoomStage/RoomsPanel components in rooms.rs are deleted.
 //!
 //! Submodules own the pure helpers (each with its unit tests) and the
-//! extracted rail components; this module owns `RoomsWorkspace`, the shared
-//! signals and Effects that must outlive rail re-renders, and the transcript.
-//! Room context files (`attachments.rs`) are the right rail's Files mode plus
+//! extracted components; this module owns `RoomsWorkspace`, the shared
+//! signals and Effects that must outlive re-renders, and the transcript.
+//! Room context files (`attachments.rs`) are the drawer's Files mode plus
 //! the composer's attach control, against the daemon's attachment routes.
+//! The drawer's default-folder row (`workspace_binding.rs`) and the create
+//! form share one daemon-catalogue directory picker (`working_directory.rs`).
 
 mod access;
 mod agents;
@@ -26,6 +32,8 @@ mod room_list;
 #[cfg(test)]
 mod test_support;
 mod threads;
+mod working_directory;
+mod workspace_binding;
 
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
@@ -55,6 +63,7 @@ use threads::{
     is_thread_open, partition_thread_messages, reply_count_for, should_show_thread_button,
     show_transcript_empty, sync_thread_selection, thread_root_for, ThreadPanel,
 };
+use workspace_binding::DefaultFolderSection;
 
 // ── Production helpers (testable directly, called from Effects) ─
 
@@ -106,6 +115,23 @@ fn right_rail_escape(open: bool, default_prevented: bool) -> bool {
     open && !default_prevented
 }
 
+/// People and agents the header's members pill counts for the open room: the
+/// daemon roster in a Local room, the access projection's members elsewhere
+/// (the same two sources the Members section lists). `None` while nothing has
+/// loaded, so the pill shows no number rather than a false zero.
+fn members_pill_count(
+    room: Option<&crate::rooms::Room>,
+    access: Option<&crate::rooms::RoomAccessProjection>,
+) -> Option<usize> {
+    match access {
+        Some(access) if access.state == crate::rooms::RoomAccessState::Local => {
+            room.map(|room| room.participants.len())
+        }
+        Some(access) => Some(access.members.len()),
+        None => None,
+    }
+}
+
 /// Display name for an author/member id in the open room (tracked, so a late
 /// roster load or an owner rename re-renders names in place).
 fn author_name(rooms: Rooms, id: &str) -> String {
@@ -128,19 +154,23 @@ fn speaker_id(rooms: Rooms) -> String {
 
 // ── Component ─────────────────────────────────────────────────────────
 
-/// Full-screen 3-column Slack-style rooms workspace.
+/// Full-screen focus-first rooms workspace.
 ///
-/// Takes a [`Rooms`] handle (Clone, Copy) and drives the three rails:
+/// Takes a [`Rooms`] handle (Clone, Copy) and drives:
 ///
-/// - **Left:** room list with active highlight, new-room create input.
-/// - **Center:** selected room header, message timeline, composer form,
-///   status bar.
-/// - **Right:** participant / member roster with kind, role, and presence
-///   badges.
+/// - **Left:** room list with active highlight, new-room create entry.
+/// - **Center:** selected room header, message timeline, docked composer,
+///   status line.
+/// - **Details drawer:** members (with the default-folder row), files,
+///   search and the thread panel, each off-canvas until explicitly opened so
+///   the conversation keeps the working area. Opened by the header members
+///   pill, the overflow's Members/Files items, the search icon and the
+///   thread toggles; closed by its control, the scrim or Escape.
 ///
 /// At 650px and below, a compact top nav reveals the hidden left rail so the
-/// reader is never stranded with no room navigation. Tauri can reach this at
-/// its matching minimum window width.
+/// reader is never stranded with no room navigation, and the drawer is a
+/// full-screen sheet. Tauri can reach this at its matching minimum window
+/// width.
 #[component]
 pub fn RoomsWorkspace(
     rooms: Rooms,
@@ -814,6 +844,43 @@ pub fn RoomsWorkspace(
                                                 "Join room"
                                             </button>
                                         })}
+                                        // Members pill (design §7): the one
+                                        // always-present door to the room
+                                        // details drawer at every width.
+                                        <button
+                                            class="rooms-workspace__members-chip"
+                                            class:is-on=move || members_open.get()
+                                            type="button"
+                                            aria-label="Room details"
+                                            title="Room details"
+                                            aria-controls="rooms-workspace-details"
+                                            aria-expanded=move || members_open.get().to_string()
+                                            on:click=move |ev| {
+                                                if members_open.get_untracked() {
+                                                    close_right();
+                                                } else {
+                                                    remember_right_focus(ev.current_target());
+                                                    search_open.set(false);
+                                                    files_open.set(false);
+                                                    selected_thread_root_seq.set(None);
+                                                    show_left_rail.set(false);
+                                                    members_open.set(true);
+                                                }
+                                            }
+                                        >
+                                            <crate::icons::Groups />
+                                            {move || {
+                                                members_pill_count(
+                                                    rooms.open_room.get().as_ref(),
+                                                    rooms.access.get().as_ref(),
+                                                )
+                                                .map(|count| view! {
+                                                    <span class="rooms-workspace__members-chip-count">
+                                                        {count.to_string()}
+                                                    </span>
+                                                })
+                                            }}
+                                        </button>
                                         <button
                                             class="rooms-workspace__center-search"
                                             class:is-on=move || search_open.get()
@@ -1159,10 +1226,18 @@ pub fn RoomsWorkspace(
                 }}
             </div>
 
-            // ═══ RIGHT RAIL — members / details ═════════════════════════
+            // ═══ ROOM DETAILS DRAWER — members / files / search / thread ═══
+            // One slide-over at every width (design §5); closed by default.
+            // The thread panel alone docks inline at or above 1280px (§7),
+            // which the `--thread` modifier lets the stylesheet express.
             <div
+                id="rooms-workspace-details"
                 class="rooms-workspace__right"
                 class:rooms-workspace__right--open=right_open
+                class:rooms-workspace__right--thread=move || selected_thread_root_seq.get().is_some()
+                role="complementary"
+                aria-label="Room details"
+                aria-hidden=move || (!right_open()).to_string()
             >
                 <div class="rooms-workspace__right-head">
                     <h3 class="rooms-workspace__right-title">
@@ -1173,7 +1248,7 @@ pub fn RoomsWorkspace(
                         } else if files_open.get() {
                             "Files"
                         } else {
-                            "Members"
+                            "Room details"
                         }}
                     </h3>
                     <Show when=right_open>
@@ -1188,7 +1263,7 @@ pub fn RoomsWorkspace(
                             } else if files_open.get() {
                                 "Close files"
                             } else {
-                                "Close members"
+                                "Close room details"
                             }
                             on:click=move |_| close_right()
                         >
@@ -1238,12 +1313,30 @@ pub fn RoomsWorkspace(
                                 />
                             }.into_any()
                         } else {
-                            view! { <MembersPanel rooms=rooms /> }.into_any()
+                            // Room details: the roster, then the room's
+                            // default folder (design §5.2) with its Bind /
+                            // Unbind through the daemon PATCH. Sections, not
+                            // tabs, until `inspect` lands (S6/S7).
+                            view! {
+                                <div class="rooms-workspace__right-section-title">"Members"</div>
+                                <MembersPanel rooms=rooms />
+                                <DefaultFolderSection rooms=rooms projects=projects />
+                            }.into_any()
                         }
                     }}
                 </div>
 
             </div>
+            // Scrim behind the open drawer: a tap outside closes it the way
+            // Escape does. Follows the drawer in the DOM so the stylesheet can
+            // hide it while the thread panel is docked inline.
+            {move || right_open().then(|| view! {
+                <div
+                    class="rooms-workspace__right-scrim"
+                    aria-hidden="true"
+                    on:click=move |_| close_right()
+                ></div>
+            })}
         </div>
     }
 }
@@ -1380,22 +1473,40 @@ mod tests {
         css.chars().filter(|char| !char.is_whitespace()).collect()
     }
 
+    /// Design §5: no permanent right rail. The details drawer is one fixed
+    /// slide-over at every width (closed by default, `--open` slides it in),
+    /// a full-screen sheet at or below 650px, and the thread panel alone
+    /// docks inline at or above 1280px (§7). The old 901-1080 rail gap and
+    /// the docked-members breakpoints are gone.
     #[test]
-    fn shared_right_rail_overlay_css_matches_visibility_breakpoints() {
+    fn details_drawer_css_is_a_slide_over_at_every_width() {
         let css = include_str!("../../../../styles/rooms-workspace.css");
-        let overlays = css_media_blocks(css, "@media (max-width: 1080px)");
-        assert!(overlays.iter().any(|body| {
-            let body = css_without_whitespace(body);
-            body.contains(".rooms-workspace__right{display:none;}")
-                && body.contains(".rooms-workspace__right--open{display:flex;position:absolute;")
-        }));
+        let normalized = css_without_whitespace(&strip_css_comments(css));
+        // The canonical (Layout & depth) rule is the one that fixes the
+        // drawer; the base and compact rules share its selector.
+        let drawer = normalized
+            .match_indices(".rooms-workspace__right{")
+            .map(|(at, _)| &normalized[at..at + normalized[at..].find('}').unwrap()])
+            .find(|body| body.contains("position:fixed;"))
+            .expect("canonical drawer rule");
+        assert!(drawer.contains("transform:translateX(100%);"), "{drawer}");
+        assert!(drawer.contains("visibility:hidden;"), "{drawer}");
+        assert!(drawer.contains("width:min(380px,100vw);"), "{drawer}");
+        assert!(drawer.contains("box-shadow:var(--shadow-lg);"), "{drawer}");
+        assert!(drawer.contains("border-left:none;"), "{drawer}");
+        assert!(normalized.contains(".rooms-workspace__right--open{transform:none;visibility:visible;"));
+        assert!(normalized.contains(".rooms-workspace__right-scrim{position:fixed;inset:0;"));
         let compact = css_media_blocks(css, "@media (max-width: 650px)");
         assert!(compact.iter().any(|body| {
+            css_without_whitespace(body).contains(".rooms-workspace__right{width:100vw;}")
+        }));
+        let wide = css_media_blocks(css, "@media (min-width: 1280px)");
+        assert!(wide.iter().any(|body| {
             css_without_whitespace(body).contains(
-                ".rooms-workspace__right--open{position:fixed;inset:0;width:100vw;z-index:410;}",
+                ".rooms-workspace__right--open.rooms-workspace__right--thread{position:static;",
             )
         }));
-        assert!(!css.contains("rooms-workspace__right--thread"));
+        assert!(!css.contains("(max-width: 1080px)"));
         assert!(!css.contains("(min-width: 901px)"));
     }
 
