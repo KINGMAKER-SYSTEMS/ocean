@@ -141,8 +141,10 @@ Native surface direction:
   and XDG state, Ocean/Codex/Claude auth, room/title databases, agent/plugin/
   assistant/skill roots and prompt capture. SQLite `:memory:`, in-memory `file:`
   URIs (including parsed `mode=memory`) and absolute `file:` URIs retain their
-  original bytes; relative disk `file:` URIs fail before spawn and require an
-  explicit absolute URI. Verify with `cargo test --lib daemon_child`.
+  original bytes, with absoluteness judged on SQLite's percent-decoded path
+  (`file:%2Ftmp%2Frooms.db` names the absolute /tmp/rooms.db); relative disk
+  `file:` URIs fail before spawn and require an explicit absolute URI. Verify
+  with `cargo test --lib daemon_child`.
   Home/profile also owns native daemon logs. Verify native launch with
   `cargo test --lib daemon_` from `crates/ocean-tauri`.
   A native-process `OCEAN_DAEMON_LOG` may select an absolute log file for
