@@ -326,7 +326,6 @@ token to browser code, bundle it, or cache it in client storage.
   POST answer has not arrived yet. Messages with staged images, voice
   prompts, and sends with no acknowledged turn take the queue instead. Stop,
   New Session and a session switch clear pending steers with the queue.
->>>>>>> origin/main
 - The main composer never refuses a send because a turn is running. A prompt
   that cannot steer (see above), sent while earlier prompts are queued, or
   while the head of the queue is waiting out a busy daemon goes into
@@ -558,6 +557,9 @@ ships today and are updated slice by slice.
 - Every successful `GET /v1/rooms/persistent/{key}` carries a required
   `RoomAccessProjection`, including explicit `Local` for G1 rooms. Surface
   `None` means loading or no open room; it is never a local-room discriminator.
+- A selected room without a loaded record renders its existing loading or failure
+  status in the center pane with a polite status announcement. An unselected
+  canvas stays empty; rendering adds no requests or automatic retries.
 - Room transcripts hydrate once, then tail only the room-scoped SSE endpoint
   `GET /v1/rooms/persistent/{key}/events` with sequence resume. Subscribe to
   both `room_message` and `room_access` immediately: messages alone advance the
