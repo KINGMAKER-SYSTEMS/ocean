@@ -169,6 +169,27 @@ pub(super) fn rail_group_display_label(label: Option<&str>) -> String {
     }
 }
 
+/// Compact folder name when it identifies one loaded workspace. Collisions
+/// retain the full root, including a folder named like the unbound bucket.
+/// Recompute from the live roster so pagination and refresh cannot leave two
+/// already-mounted groups with an ambiguous label.
+fn rail_group_compact_label(label: Option<&str>, rooms: &[Room]) -> String {
+    let full = rail_group_display_label(label);
+    let Some(root) = label else { return full };
+    let basename = root_basename(&full);
+    let collides = basename == "Other rooms"
+        || rooms.iter().any(|room| {
+            room.workspace_root.as_deref().is_some_and(|other| {
+                other != root && root_basename(&rail_group_display_label(Some(other))) == basename
+            })
+        });
+    if collides {
+        full
+    } else {
+        basename.to_string()
+    }
+}
+
 /// Header DOM id derived from the root's bytes, not list position, so keyed
 /// groups that reorder never collide.
 pub(super) fn rail_group_header_dom_id(label: Option<&str>) -> String {
@@ -656,12 +677,18 @@ fn rail_group_view(
 ) -> impl IntoView {
     let header_id = rail_group_header_dom_id(label.as_deref());
     let labelled_by = header_id.clone();
-    let display = rail_group_display_label(label.as_deref());
+    let full = rail_group_display_label(label.as_deref());
+    let display_label = label.clone();
+    let display = move || {
+        rooms
+            .list
+            .with(|list| rail_group_compact_label(display_label.as_deref(), list))
+    };
     let count_label = label.clone();
     view! {
         <div class="rooms-workspace__group" role="group" aria-labelledby=labelled_by>
             <div class="rooms-workspace__group-head" id=header_id>
-                <span class="rooms-workspace__group-label">{display}</span>
+                <span class="rooms-workspace__group-label" title=full>{display}</span>
                 <span class="rooms-workspace__group-count">
                     {move || rooms.list.with(|l| rail_group_rooms(l, &count_label).len())}
                 </span>
@@ -989,6 +1016,41 @@ mod tests {
         assert_eq!(rail_group_display_label(Some("/w/")), "/w");
         assert_eq!(rail_group_display_label(Some("/")), "/");
         assert_eq!(rail_group_display_label(None), "Other rooms");
+    }
+
+    #[test]
+    fn compact_group_labels_preserve_case_roots_and_windows_folders() {
+        for (root, expected) in [
+            ("/Users/Me/Project", "Project"),
+            ("/work/日本語/", "日本語"),
+            (r"C:\Users\Me\Ocean", "Ocean"),
+            ("/", "/"),
+            ("/work/Other rooms", "/work/Other rooms"),
+        ] {
+            assert_eq!(rail_group_compact_label(Some(root), &[]), expected);
+        }
+        assert_eq!(rail_group_compact_label(None, &[]), "Other rooms");
+    }
+
+    #[test]
+    fn compact_group_labels_expand_and_shrink_with_live_collisions() {
+        let mut rooms = vec![
+            rail_room("a", Some("/clients/acme/web")),
+            rail_room("b", Some("/clients/acme/web")),
+        ];
+        assert_eq!(
+            rail_group_compact_label(Some("/clients/acme/web"), &rooms),
+            "web"
+        );
+        rooms.push(rail_room("c", Some("/archive/acme/web")));
+        for root in ["/clients/acme/web", "/archive/acme/web"] {
+            assert_eq!(rail_group_compact_label(Some(root), &rooms), root);
+        }
+        rooms.pop();
+        assert_eq!(
+            rail_group_compact_label(Some("/clients/acme/web"), &rooms),
+            "web"
+        );
     }
 
     #[test]

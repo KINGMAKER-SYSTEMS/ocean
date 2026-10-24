@@ -791,8 +791,11 @@ ships today and are updated slice by slice.
 - The Rooms rail groups rooms by `Room.workspace_root` (`group_rail_rooms` in
   `room_list.rs`; derived, never stored): first-seen root order, daemon order
   within a group, unbound rooms last under "Other rooms". Each group is a static
-  `role="group"` labelled by a non-interactive header showing the full,
-  case-preserved root (wrapping, never a basename or ellipsis) and a live count.
+  `role="group"` labelled by a non-interactive header showing a case-preserved folder
+  name and a live count.
+  Full roots remain in the label title; shared folder names (and the reserved
+  "Other rooms" name) render full roots without ellipsis. Labels re-read the
+  live roster so paging/refresh updates ambiguity without remounting groups.
   Headers are not buttons and groups never collapse, so the listbox keeps one
   roving tab stop and Arrow/Home/End over the flattened grouped order
   (`rail_room_keys`). Header ids derive from the root, not list position. A
