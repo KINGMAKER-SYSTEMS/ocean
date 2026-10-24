@@ -815,8 +815,17 @@ pub fn RoomsWorkspace(
                     let open = rooms.open_room.get();
                     match open {
                         None => {
-                            // No room open: the empty canvas carries no copy.
-                            view! { <div class="rooms-workspace__join"></div> }.into_any()
+                            // Keep an idle canvas quiet, but never hide the
+                            // selected room's loading or failure status.
+                            view! {
+                                <div class="rooms-workspace__join">
+                                    <Show when=move || rooms.open_key.get().is_some()>
+                                        <p class="rooms-workspace__join-desc" role="status">
+                                            {move || rooms.status.get()}
+                                        </p>
+                                    </Show>
+                                </div>
+                            }.into_any()
                         }
                         Some(ref room) => {
                             let joined = rooms.joined_open();

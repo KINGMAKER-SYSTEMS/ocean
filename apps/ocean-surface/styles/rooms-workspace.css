@@ -227,8 +227,8 @@
 /* Workspace-root group (group_rail_rooms in rooms_workspace/room_list.rs):
    structure, not a card. The header labels the options (role="group" +
    aria-labelledby) and is never a disclosure: no hover, focus ring or caret.
-   Full roots wrap rather than truncate or case-fold so distinct roots stay
-   distinguishable without hover. */
+   Unique roots use folder names; colliding names expand to full roots and
+   wrap rather than truncate or case-fold. Full roots remain in titles. */
 .rooms-workspace__group {
   display: flex;
   flex-direction: column;
