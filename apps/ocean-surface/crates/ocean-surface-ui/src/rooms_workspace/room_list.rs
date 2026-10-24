@@ -15,6 +15,15 @@ enum RoomEntry {
     Join,
 }
 
+// A deferred focus belongs to the entry/navigation intent that scheduled it.
+fn entry_focus_is_current(
+    requested: Option<RoomEntry>,
+    current: Option<RoomEntry>,
+    drawer_open: bool,
+) -> bool {
+    requested == current && (drawer_open || requested.is_some())
+}
+
 // ── Workspace-root display helpers (pure, unit-testable) ───────────────────
 
 /// True for an absolute POSIX path or a drive/UNC-rooted Windows path. Used
@@ -227,6 +236,9 @@ pub(super) fn RoomListRail(
     /// Leaves the Rooms workspace entirely; see `RoomsWorkspace::on_close`.
     on_close: Option<Callback<()>>,
 ) -> impl IntoView {
+    // Keep the keyed list mounted across nonempty background refreshes.
+    let list_empty = Memo::new(move |_| rooms.list.with(Vec::is_empty));
+    let list_error = Memo::new(move |_| rooms.rooms_error.get());
     let new_room_name = RwSignal::new(String::new());
     let entry = RwSignal::new(None::<RoomEntry>);
     let invitation = RwSignal::new(String::new());
@@ -246,20 +258,41 @@ pub(super) fn RoomListRail(
     Effect::new(move |_| {
         let mode = entry.get();
         if show_left_rail.get() || mode.is_some() {
-            request_animation_frame(move || match mode {
-                Some(RoomEntry::Create) => {
-                    if let Some(input) = create_input_ref.get() {
-                        let _ = input.focus();
-                    }
+            request_animation_frame(move || {
+                let (Some(current_entry), Some(drawer_open)) = (
+                    entry.try_get_untracked(),
+                    show_left_rail.try_get_untracked(),
+                ) else {
+                    return;
+                };
+                if !entry_focus_is_current(mode, current_entry, drawer_open) {
+                    return;
                 }
-                Some(RoomEntry::Join) => {
-                    if let Some(input) = invite_input_ref.get() {
-                        let _ = input.focus();
+                match mode {
+                    Some(RoomEntry::Create) => {
+                        if let Some(input) = create_input_ref.get() {
+                            let _ = input.focus();
+                        }
                     }
-                }
-                None => {
-                    if let Some(summary) = entry_summary_ref.get() {
-                        let _ = summary.focus();
+                    Some(RoomEntry::Join) => {
+                        if let Some(input) = invite_input_ref.get() {
+                            let _ = input.focus();
+                        }
+                    }
+                    None => {
+                        let option = web_sys::window()
+                            .and_then(|window| window.document())
+                            .and_then(|doc| {
+                                doc.query_selector(
+                                    "#rooms-workspace-room-list [role=\"listbox\"] [tabindex=\"0\"]",
+                                ).ok().flatten()
+                            })
+                            .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok());
+                        if let Some(option) = option {
+                            let _ = option.focus();
+                        } else if let Some(summary) = entry_summary_ref.get() {
+                            let _ = summary.focus();
+                        }
                     }
                 }
             });
@@ -431,8 +464,8 @@ pub(super) fn RoomListRail(
                     }
                 >
                 {move || {
-                    let list = rooms.list.get();
-                    let error = rooms.rooms_error.get();
+                    let empty = list_empty.get();
+                    let error = list_error.get();
                     if let Some(error) = error {
                         view! {
                             <div
@@ -442,7 +475,7 @@ pub(super) fn RoomListRail(
                                 {format!("Unable to load rooms: {error}")}
                             </div>
                         }.into_any()
-                    } else if list.is_empty()
+                    } else if empty
                         && (rooms.rooms_loading.get() || !rooms.rooms_loaded.get())
                     {
                         view! {
@@ -450,7 +483,7 @@ pub(super) fn RoomListRail(
                                 "Loading…"
                             </div>
                         }.into_any()
-                    } else if list.is_empty() {
+                    } else if empty {
                         view! {
                             <div class="rooms-workspace__left-empty">
                                 "No rooms yet."
@@ -695,7 +728,7 @@ fn rail_group_view(
             </div>
             <For
                 each=move || rooms.list.with(|l| rail_group_rooms(l, &label))
-                key=|r: &Room| (r.id.clone(), r.participants.len(), r.updated_at.clone(), r.muted)
+                key=|r: &Room| r.id.clone()
                 children=move |room: Room| rail_room_option(room, rooms, show_left_rail)
             />
         </div>
@@ -720,11 +753,17 @@ fn rail_room_option(room: Room, rooms: Rooms, show_left_rail: RwSignal<bool>) ->
             .as_deref()
             == Some(&*key_tab)
     };
-    let muted = room.muted;
+    let key_live = key2.clone();
+    let live_room = Memo::new(move |_| {
+        rooms
+            .list
+            .with(|list| list.iter().find(|row| row.id == key_live).cloned())
+    });
+    let muted = move || live_room.with(|row| row.as_ref().is_some_and(|row| row.muted));
     // Muted rooms stay quiet in the list; their mentions still reach the inbox.
     // Memo, not a closure: both the bold modifier and the dot read it.
     let unread = Memo::new(move |_| {
-        !muted
+        !muted()
             && rooms
                 .read_summaries
                 .with(|summaries| crate::rooms::room_has_durable_unread(summaries.get(&key_unread)))
@@ -746,7 +785,7 @@ fn rail_room_option(room: Room, rooms: Rooms, show_left_rail: RwSignal<bool>) ->
             }
         >
             <span class="rooms-workspace__room-hash">"#"</span>
-            <span class="rooms-workspace__room-name">{room.name.clone()}</span>
+            <span class="rooms-workspace__room-name">{move || live_room.with(|row| row.as_ref().map(|row| row.name.clone()).unwrap_or_default())}</span>
             <Show when=move || unread.get()>
                 <span
                     class="rooms-workspace__room-unread"
@@ -894,6 +933,27 @@ mod tests {
         let k = keys(&["a", "b"]);
         assert_eq!(room_list_next_focus(&k, None, "ArrowDown"), Some(0));
         assert_eq!(room_list_next_focus(&k, None, "ArrowUp"), Some(1));
+    }
+
+    #[test]
+    fn deferred_entry_focus_rejects_closed_navigation_and_replaced_forms() {
+        assert!(entry_focus_is_current(None, None, true));
+        assert!(!entry_focus_is_current(None, None, false));
+        for mode in [RoomEntry::Create, RoomEntry::Join] {
+            assert!(entry_focus_is_current(Some(mode), Some(mode), false));
+            assert!(!entry_focus_is_current(Some(mode), None, true));
+            assert!(!entry_focus_is_current(None, Some(mode), true));
+        }
+        assert!(!entry_focus_is_current(
+            Some(RoomEntry::Create),
+            Some(RoomEntry::Join),
+            true,
+        ));
+        assert!(!entry_focus_is_current(
+            Some(RoomEntry::Join),
+            Some(RoomEntry::Create),
+            true,
+        ));
     }
 
     #[test]
