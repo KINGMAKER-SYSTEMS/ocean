@@ -5464,7 +5464,7 @@ impl Daemon {
             Err(error) => {
                 log::warn!("session projection commit skipped: {error}");
                 if admit_session_snapshot(
-                    &id,
+                    id,
                     generation,
                     self.session_id.get_untracked().as_deref(),
                     self.sse_generation.get_untracked(),

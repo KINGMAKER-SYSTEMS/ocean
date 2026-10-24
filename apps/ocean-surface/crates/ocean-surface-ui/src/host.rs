@@ -937,6 +937,11 @@ pub struct RoomConsentPreview {
     pub mode: String,
     #[serde(default)]
     pub binding_status: Option<String>,
+    /// The activation the shell froze: the daemon default (`explicit_only`)
+    /// for a new authorization, the binding's current policy for a
+    /// reauthorization. The sheet pre-selects it (`rooms::ConsentActivation`).
+    #[serde(default)]
+    pub activation_policy: Option<String>,
     #[serde(default)]
     pub expires_in_ms: u64,
 }
@@ -999,14 +1004,21 @@ pub async fn room_consent_preview(
 }
 
 /// Run the native confirmation for a frozen consent and, only if confirmed,
-/// send the digest-guarded authorize/reauthorize. `None` off-Tauri.
+/// send the digest-guarded authorize/reauthorize. `activation_policy` is the
+/// sheet's choice by exact wire name (`rooms::ConsentActivation::wire`); the
+/// shell maps it onto its own closed set, shows it in the dialog and refuses
+/// anything else unsent. `None` off-Tauri.
 pub async fn room_consent_authorize(
     consent_id: &str,
+    activation_policy: &str,
 ) -> Option<Result<RoomConsentOutcome, String>> {
     if !room_consent_supported() {
         return None;
     }
-    let args = consent_args(&[("consentId", consent_id)]);
+    let args = consent_args(&[
+        ("consentId", consent_id),
+        ("activationPolicy", activation_policy),
+    ]);
     Some(match tauri_invoke("room_consent_authorize", &args).await {
         Ok(val) => consent_decode(&val),
         Err(err) => Err(consent_error(err)),

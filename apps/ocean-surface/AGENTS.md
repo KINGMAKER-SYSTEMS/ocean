@@ -716,9 +716,11 @@ ships today and are updated slice by slice.
   flow; ocean-core never convenes on an absent policy, so the `None` the rail
   used to pass made every Surface room invoke-only against the documented
   "mention an agent to wake it" expectation. A mention still has to pass the
-  agent binding's activation policy (`mention` / `task_and_thread`; the
-  consent default is `explicit_only`). No policy UI here: a later control
-  writes through the daemon's `PATCH /v1/rooms/persistent/{key}`. Guarded by
+  agent binding's activation policy (`mention` / `task_and_thread`), which
+  the consent sheet now offers with the daemon default `explicit_only`
+  pre-selected (see the consent consumer section below). No room-level
+  policy UI here: a later control writes through the daemon's
+  `PATCH /v1/rooms/persistent/{key}`. Guarded by
   `create_body_always_carries_the_canonical_wake_policy` (`rooms.rs`) and
   `product_doc_create_body_carries_the_wake_policy_rooms_rs_sends`
   (`tests/rooms_product_doc_truth.rs`).
@@ -969,9 +971,42 @@ ships today and are updated slice by slice.
 - Authorize/reauthorize require a native dialog (`tauri-plugin-dialog`, Rust
   side; the webview gains no dialog permission) and always send the frozen
   non-null `expected_definition_digest`. The authorize dialog shows only
-  frozen preview values: room, package id, agent member id, owner, requested
-  capabilities and digest. Decline, expiry or cancellation received natively
+  natively frozen values: room, package id, agent member id, owner, the
+  activation the binding will carry, requested capabilities and digest.
+  Decline, expiry or cancellation received natively
   before the dispatch claim sends zero authorization/revoke requests.
+- Activation choice (ocean#167 follow-up; ruling from
+  `docs/OCEAN_ROOMS_DESIGN_DIRECTION.md` §5.1 step 3, "three radio groups
+  with the daemon defaults selected and nothing else pre-ticked: activation
+  explicit_only / mention / task_and_thread"): the consent sheet renders the
+  activation radios from `rooms::ConsentActivation::ALL` with the design's
+  labels ("only when invoked" / "when @mentioned" / "mentions, tasks and
+  thread replies") and one consequence line each; `RoomConsentDraft` opens on
+  the shell's frozen `activation_policy` (the daemon default `explicit_only`
+  for a new binding, the binding's current policy for a reauthorization,
+  `unwrap_or_default` otherwise) and `authorize_consent` passes
+  `draft.activation.wire()` to `host::room_consent_authorize(consent_id,
+  activation_policy)`. The shell command takes `activation_policy:
+  Option<String>`, maps it onto `room_consent::Activation` (exact wire names;
+  anything else is `invalid_request` before any dialog, and no page text ever
+  reaches the body), `begin_confirm(consent_id, Some(activation))` adopts it
+  under the native lock so the dialog and the body name the same choice, and
+  `Frozen::intent` serializes `Activation::as_str()`. A binding whose
+  activation the shell cannot name is `invalid_preview`, never narrowed to the
+  default. `Entry::dispatched` is set at the dispatch claim: a decision that
+  reached the daemon once (unknown outcome) replays only unchanged — the page
+  locks the radios (`RoomConsentDraft::activation_locked`), and a different
+  activation on that consent is `consent_invalidated` and drops it. Context
+  policy and memory scope keep the daemon defaults; no control. Guarded by
+  `preview_offers_the_daemon_default_activation_and_the_page_choice_is_what_is_sent`,
+  `activation_is_a_closed_set_parsed_natively_and_refused_before_any_dialog`,
+  `reauthorize_preview_carries_the_binding_s_activation_and_refuses_an_unknown_one`
+  and `a_dispatched_decision_never_replays_under_a_changed_activation`
+  (`room_consent.rs`), the `consent_activation_*` / `consent_draft_*` tests
+  (`rooms.rs`) and `tests/rooms_consent_activation.rs` (page, shell and
+  daemon name the same three policies and default; the sheet, bridge, command
+  and body wiring; the deciding design text and `docs/OCEAN_ROOMS_PRODUCT.md`
+  sentences).
   `room_consent_cancel(None)` clears all tracked decisions and advances the
   epoch, including while a revoke dialog or preview/bootstrap read is pending.
   This boundary is native receipt, not a page navigation click or IPC enqueue:
@@ -1084,8 +1119,9 @@ ships today and are updated slice by slice.
   explicit click may try again). It never calls `Daemon::cancel_request`, a
   session-level cancel, or touches focused direct-chat state (tested).
 - UI (`rooms_workspace/agents.rs`): one consent sheet (name, short digest,
-  requested capabilities, one primary action, dismiss) above the right-rail
-  list; bound agent rows get a single overflow holding Review/Revoke; the
+  requested capabilities, the activation radios, one primary action, dismiss)
+  above the right-rail list (styles `.rooms-workspace__consent-activation*`,
+  tokens only); bound agent rows get a single overflow holding Review/Revoke; the
   message action rail gets one invoke trigger after the thread button listing
   active agents with their invocation state. Menus reuse the header's
   `.room-overflow__*` styles; their in-row geometry lives in the "Layout &
