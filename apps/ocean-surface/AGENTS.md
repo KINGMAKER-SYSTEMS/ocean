@@ -807,6 +807,14 @@ ships today and are updated slice by slice.
   (`rail_room_keys`). Header ids derive from the root, not list position. A
   shared root is a folder binding, not a daemon Project identity; do not call
   these project groups.
+- Opening the compact room drawer focuses the existing listbox tab stop (the
+  selected room, otherwise the first room), falling back to Add room only when
+  no room option is available. Create/Join entries retain their input focus.
+  Deferred focus checks live component signals before use. Navigation focus is
+  ignored after drawer dismissal, and form focus cannot target a cancelled or
+  replaced entry. Nonempty refreshes retain the listbox and room-id-keyed
+  options; names and mute state read the live rows so updates preserve focus
+  without leaving stale labels or unread styling.
 - Room-list paging (OCEAN-250): `GET /v1/rooms/persistent` serves one bounded
   page (`limit` default 100, max 1000; `next_cursor` / `has_more`). The rail
   renders the daemon-default first page with no query and, while the daemon
