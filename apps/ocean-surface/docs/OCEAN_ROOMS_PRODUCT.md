@@ -54,12 +54,16 @@ That is `CreateRoomBody` in `rooms.rs`. `trigger_policy` is never omitted: it
 is always `RoomTriggerPolicy::create_default()`, the object above (see "Agent
 Wake Policy"); `workspace_root` is omitted when unset. The `key` is derived
 from the name (`slugify`: lower-kebab); the daemon keys rooms by it and refuses
-a duplicate. `workspace_root` is optional — when set, agent turns in this room
-resolve their project and `cwd` from it. It is resolved on the machine running
-the daemon (an absolute existing directory, else 400 `invalid_workspace_root`).
-The daemon can rebind or unbind it later through
-`PATCH /v1/rooms/persistent/{key}` (`workspace_root`; `null` unbinds), which
-this surface does not call.
+a duplicate. `workspace_root` is optional — the room's default folder, the
+third rung of the daemon's turn-folder rule (agent folder, then room folder
+grant, then this). It is chosen in the create form's directory picker
+(`rooms_workspace/working_directory.rs`: the daemon's project and worktree
+catalogue, the desktop shell's native chooser, or a typed absolute path) and is
+resolved on the machine running the daemon (an absolute existing directory,
+else 400 `invalid_workspace_root`, shown as "create failed: workspace folder
+not found on this Ocean" with the draft kept). The browser never validates the
+path. It can be rebound or unbound later from the room details drawer (see
+"Default folder").
 
 Creating does not join: the roster starts empty, the surface opens the new
 room, and the header's Join action is the next step.
@@ -281,9 +285,11 @@ the Gate 1 create flow. So in a room created here a bound agent wakes when a
 human @-mentions it or replies in a thread it rooted, provided its binding's
 activation policy admits that trigger (`mention` or `task_and_thread`; a
 binding minted with the consent default `explicit_only` still runs only
-through the explicit invoke below). This surface never calls the PATCH route
-and has no policy control; a later control would write through it. The
-`RoomTriggerPolicy` mirror in `rooms.rs` carries all five flags.
+through the explicit invoke below). This surface has no policy control and
+never sends `trigger_policy` on the PATCH route; its only PATCH body carries
+`workspace_root` (see "Default folder"), and a later policy control would
+write through the same route. The `RoomTriggerPolicy` mirror in `rooms.rs`
+carries all five flags.
 
 ### Agent Turns in Rooms
 
@@ -348,6 +354,49 @@ The rail is the left column of `rooms_workspace/`. Its list is
 `min-height: 0` with `overflow-y: auto` — long room lists scroll instead of
 pushing the create field and status line outside the viewport.
 
+### Room details drawer
+
+There is no permanent right rail (`OCEAN_ROOMS_DESIGN_DIRECTION.md` §5). The
+room's secondary context — members, the default folder, files, search and the
+thread panel — lives in one slide-over drawer (`.rooms-workspace__right`,
+380px, full-screen at or below 650px) that is closed by default and opens on
+explicit intent: the header's members pill (`.rooms-workspace__members-chip`,
+the Groups glyph and the roster count), the Room options overflow's Members
+and Files items, the header search icon, and a message's thread toggle. The
+scrim (`.rooms-workspace__right-scrim`), the drawer's close control and Escape
+close it and return focus to the control that opened it. Only the thread
+panel docks inline beside the conversation, at or above 1280px; the other
+modes slide over the conversation at every width so it keeps the working
+area.
+
+### Default folder
+
+The drawer's Members mode ends with the room's default folder
+(`rooms_workspace/workspace_binding.rs`): `Room.workspace_root` in mono, or
+"none", with the daemon's cwd rule in one sentence, and a ghost Edit that
+reveals the same directory picker the create form uses with Bind and Unbind.
+Those two controls are the only callers of the room PATCH on this surface
+(`Rooms::set_open_room_workspace`):
+
+```
+PATCH /v1/rooms/persistent/{key}
+{ "workspace_root": "/path/to/project" }     # bind or rebind
+{ "workspace_root": null }                   # unbind — an explicit null, never an absent field
+-> 200 { "ok": true, "room": { ... } }
+```
+
+`RoomWorkspacePatchBody` in `rooms.rs` carries only that field; the daemon
+reads it absent-vs-`null` (absent is unchanged) and rejects unknown fields.
+The path is a folder on the daemon's host and the daemon is its only judge:
+400 `invalid_workspace_root` reads "workspace folder not found on this Ocean"
+beside the control with the draft kept, and a 404 means the room is closed.
+On success the returned room replaces the open room and its rail row, so the
+header's folder name and the rail's workspace-root grouping follow the daemon.
+The web proxy forwards the PATCH generically behind its session gate with no
+operator key; Tauri sends it to the daemon directly. The controls take the
+local-store write gate (the binding lives in this daemon's room record and is
+never enqueued for a peer) and are absent, not disabled, otherwise.
+
 ### Transcript Rendering
 
 Messages render as a scrolling transcript (`rooms_workspace/mod.rs`) with the
@@ -401,9 +450,9 @@ It supports:
 ### Room files
 
 A room's context files live on the daemon (`room_attachments.rs`; the bytes
-sit beside `rooms.db`). The right rail's Files mode — Room options → Files,
-`rooms_workspace/attachments.rs` — lists them at a reading measure with its
-own `+ file` control, and the composer's paperclip attaches one from the
+sit beside `rooms.db`). The room details drawer's Files mode — Room options →
+Files, `rooms_workspace/attachments.rs` — lists them at a reading measure with
+its own `+ file` control, and the composer's paperclip attaches one from the
 conversation. Three routes, all through the proxy on the web and direct on
 Tauri:
 
@@ -454,9 +503,9 @@ upload lands in this daemon's store and is never enqueued for a peer.
 
 A room becomes federated when an invite is minted on it or redeemed into it
 (see "Inviting Another Human"); from then on its access state is
-`connecting`, `live`, `recovering` or `revoked`, the members rail shows the
-access projection's member list instead of the local roster, and posts go
-through the outbox above. The access projection returned by an outbox retry
+`connecting`, `live`, `recovering` or `revoked`, the drawer's Members section
+shows the access projection's member list instead of the local roster, and
+posts go through the outbox above. The access projection returned by an outbox retry
 applies immediately behind the room-generation guard.
 
 ---
@@ -524,9 +573,9 @@ not configured; the code never enters status text.
 ### Porting an Existing Agent
 
 An agent identity already registered with the daemon (visible in
-`GET /v1/agents`) is added from the room's Members rail:
+`GET /v1/agents`) is added from the room details drawer's Members section:
 
-1. Human opens Members from the room overflow.
+1. Human opens Members from the room overflow (or the header's members pill).
 2. Human picks the agent in the `+ agent` picker (daemon identities only;
    unresolved entries stay disabled).
 3. The surface takes the route for the room's access state and host (see
@@ -544,7 +593,8 @@ There is no wake-policy control in this surface. Every room created here
 carries the canonical default (`on_mention` and `on_thread_reply`, see "Agent
 Wake Policy"), so a bound agent whose binding admits mentions wakes on `@id`
 without any setup; the daemon's `PATCH /v1/rooms/persistent/{key}` is where a
-later control would write, and this surface does not call it.
+later control would write `trigger_policy`. This surface sends that route only
+with `workspace_root` (see "Default folder").
 
 ### Agent's First Turn in a Room
 
@@ -552,8 +602,9 @@ later control would write, and this surface does not call it.
    either @-mentions it (every room created here carries `on_mention`) or
    picks it in the message's invoke menu.
 2. The daemon admits the agent against its binding, resolves the turn folder
-   from the room's `workspace_root` (an unbound room records
-   `workspace_unavailable` instead) and runs the turn itself.
+   (agent folder, then room folder grant, then the room's `workspace_root`; a
+   turn it cannot place records `workspace_unavailable` instead) and runs the
+   turn itself.
 3. A `room_agent_run` frame projects the run as a work card while it runs; a
    tool that needs approval surfaces Approve/Deny on the card.
 4. The reply appears as a room message with the agent's participant id, on the
@@ -581,9 +632,9 @@ carries no `session_id`, so a client can never attribute its post to a session.
   into it.
 - **Not a file-sharing surface.** Room messages carry text. A room does hold
   context files — the doc, the spec, the screenshot — through the daemon's
-  attachment routes (see "Room files"): listed in the right rail's Files mode
-  and downloaded by link. This surface never renders their bytes inline and
-  has no remove control.
+  attachment routes (see "Room files"): listed in the details drawer's Files
+  mode and downloaded by link. This surface never renders their bytes inline
+  and has no remove control.
 - **Not a project management tool.** No kanban, no issue tracker, no sprints.
   Rooms carry conversation and agent turns. Workflows that need structured
   tracking belong in the Longhouse or the agent session surface.
@@ -602,6 +653,7 @@ operator key; the page only asks the shell for them.
 | `GET` | `/v1/rooms/persistent` | List rooms, one page; `?cursor=` appends the next, `?limit=` covers the extended rail on refetch (`rooms.rs`) |
 | `POST` | `/v1/rooms/persistent` | Create a room (`rooms.rs`) |
 | `GET` | `/v1/rooms/persistent/{key}` | Open: room + first transcript page + access projection; roster re-read (`rooms.rs`) |
+| `PATCH` | `/v1/rooms/persistent/{key}` | Bind, rebind or unbind the room's default folder: `{ workspace_root }`, string or explicit `null` (`rooms.rs`, from the drawer's Default folder row) |
 | `GET` | `/v1/rooms/persistent/{key}/events?after_seq=` | SSE: `room_message`, `room_access`, `room_read_cursor`, `room_agent_run` (`rooms.rs`) |
 | `POST` | `/v1/rooms/persistent/{key}/messages` | Send a message (`rooms.rs`) |
 | `POST` | `/v1/rooms/persistent/{key}/outbox/retry` | Retry a failed federated send (`rooms.rs`) |
@@ -622,7 +674,7 @@ operator key; the page only asks the shell for them.
 | `PUT` | `/v1/rooms/persistent/{key}/prefs` | Per-room mute (`room_attention.rs`) |
 | `GET` | `/v1/rooms/persistent/{key}/attachments` | List the room's context files (`rooms_workspace/attachments.rs`) |
 | `POST` | `/v1/rooms/persistent/{key}/attachments?filename=&content_type=&uploader_id=` | Upload one file as raw bytes, metadata in the query (`rooms_workspace/attachments.rs`) |
-| `GET` | `/v1/rooms/persistent/{key}/attachments/{attachment_id}` | Download the bytes, linked from the Files rail (`rooms_workspace/attachments.rs`) |
+| `GET` | `/v1/rooms/persistent/{key}/attachments/{attachment_id}` | Download the bytes, linked from the drawer's Files mode (`rooms_workspace/attachments.rs`) |
 | `GET` | `/v1/rooms/persistent/{key}/agents/preview/{package_id}` | Consent preview (Tauri shell) |
 | `POST` | `/v1/rooms/persistent/{key}/agents/bootstrap` | First local agent bootstrap (Tauri shell) |
 | `POST` | `/v1/rooms/persistent/{key}/agents` | Authorize a binding (Tauri shell) |

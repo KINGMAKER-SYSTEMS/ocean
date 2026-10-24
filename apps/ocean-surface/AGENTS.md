@@ -660,9 +660,12 @@ ships today and are updated slice by slice.
     check by design; doing this safely needs a native-messaging host or an
     extension proxy login, so these actions keep the daemon's authority error
     there.
-- The room header has exactly one primary action (Join when not joined) and
-  one overflow (`room_overflow.rs`): Members, Share, Agents, Mute/Unmute, Leave,
-  Close room…. Agents opens the
+- The room header has exactly one primary action (Join when not joined), the
+  members pill (`.rooms-workspace__members-chip`, design §7: the Groups glyph
+  plus `members_pill_count` — the Local roster or the access projection's
+  members — toggling the room details drawer at every width), the P6 search
+  icon, and one overflow (`room_overflow.rs`): Members, Files, Share, Agents,
+  Mute/Unmute, Leave, Close room…. Agents opens the
   per-room agent settings panel (instructions overlay + model) over
   `GET/PUT .../agents/{agent_id}/settings`; these settings are local to this
   Ocean. New secondary room actions go into this overflow, not the header.
@@ -698,14 +701,31 @@ ships today and are updated slice by slice.
   (`prevent_default`, so the workspace and window handlers stand down) or the
   scrim, and returns focus to the overflow trigger. For any non-`Local` access
   state the copy says the close is local and other nodes keep their copy.
-- Room create (`RoomListRail`) carries an optional workspace (PR F): a
-  native `<select>` under the name input defaults to "No workspace" and lists
-  the daemon project catalogue's absolute `ProjectInfo.workspace_root`s
-  (passed down from `RoomsWorkspace` as a signal, deduped, first wins), plus
-  "Choose folder…" via `host::pick_folder` on Tauri only. The choice is
-  explicit and resets after a successful create; it is never seeded from a
-  session cwd, the focused chat's project, or `/tmp`, and a root no longer
-  offered is not sent. `CreateRoomBody.workspace_root` is omitted when unset.
+- Room create (`RoomListRail`) carries an optional default folder (PR F,
+  re-implemented through the shared picker ported from
+  Risingtides-dev/ocean-surface#240): `WorkingDirectoryPicker`
+  (`rooms_workspace/working_directory.rs`, mounted exactly twice — the create
+  form with `allow_empty=true` and the drawer's Default folder row with
+  `allow_empty=false`) is a native `<select>` whose rows are the daemon
+  project catalogue's `ProjectInfo.workspace_root`s AND their `worktrees`
+  (passed down from `RoomsWorkspace` as the one `daemon.projects` signal,
+  never fetched again, deduped by path, first wins, offered verbatim), plus
+  "Choose folder…" via `host::pick_folder` on Tauri only, plus "Other
+  absolute path…", which reveals a mono text field. `directory_choice` is a
+  pure decision rendered through per-option `prop:selected`: an empty value
+  is the explicit "Unbound" row on create and the text field on bind, a
+  catalogue path is its row, anything else (a stored binding the catalogue
+  no longer lists, a picked folder, a typed path) is manual and stays
+  visible and editable; typing keeps manual mode so a value that comes to
+  equal a row never unmounts the field mid-keystroke, and a `reset` epoch
+  bumped on successful create and on bind-draft reseed drops manual mode
+  with its draft. Nothing in the picker judges a path (no absoluteness,
+  existence or canonical-form check; `tests/directory_selection.rs` bans the
+  tokens): the daemon's `400 invalid_workspace_root` is the only verdict.
+  The choice is explicit and resets after a successful create; it is never
+  seeded from a session cwd, the focused chat's project, or `/tmp`. What is
+  sent is what is shown (`create_workspace_root`: the draft trimmed, or
+  absent). `CreateRoomBody.workspace_root` is omitted when unset.
   `CreateRoomBody.trigger_policy` is never omitted: `CreateRoomBody::new`
   attaches `RoomTriggerPolicy::create_default()` (`on_mention` and
   `on_thread_reply` on; `on_component_event`, `on_build_failure`,
@@ -722,14 +742,46 @@ ships today and are updated slice by slice.
   `create_body_always_carries_the_canonical_wake_policy` (`rooms.rs`) and
   `product_doc_create_body_carries_the_wake_policy_rooms_rs_sends`
   (`tests/rooms_product_doc_truth.rs`).
-  The daemon binds it once (absolute existing directory, canonicalized;
+  The daemon binds it (absolute existing directory, canonicalized;
   otherwise 400 `invalid_workspace_root`, shown as "create failed: workspace
-  folder not found on this Ocean" with the draft kept); the daemon's
-  `PATCH /v1/rooms/persistent/{key}` can rebind or unbind it later, but this
-  surface does not call it. `Room.workspace_root` decodes as absent for unbound rooms and
-  older daemons; when set, the header shows its folder name read-only
-  (`title` = full root). A room turn's folder is agent folder, then room
-  folder, then `workspace_root`, else `workspace_unavailable`.
+  folder not found on this Ocean" with the draft kept). `Room.workspace_root`
+  decodes as absent for unbound rooms and older daemons; when set, the header
+  shows its folder name read-only (`title` = full root). A room turn's folder
+  is agent folder, then room folder grant, then `workspace_root`, else
+  `workspace_unavailable`.
+- Default folder (design §5.2; `rooms_workspace/workspace_binding.rs`): the
+  drawer's Members mode ends with `Room.workspace_root` in mono (or "none"),
+  the cwd rule in one sentence ("used only when an agent has no shared
+  folder"), and a ghost Edit — rendered only when `local_store_write_gate`
+  holds (the binding is this daemon's room record, never enqueued for a
+  peer), absent otherwise — that reveals the shared picker with Bind and
+  Unbind. Those two are the ONLY callers of `PATCH /v1/rooms/persistent/{key}`
+  on this surface: `Rooms::set_open_room_workspace(Some(root))` sends
+  `RoomWorkspacePatchBody { workspace_root: Some(root) }` (trimmed, otherwise
+  verbatim) and `set_open_room_workspace(None)` sends an EXPLICIT
+  `"workspace_root": null` (the daemon reads the field absent-vs-null; an
+  omitted field would mean "unchanged", so the body type has no
+  `skip_serializing_if`). No `trigger_policy` or name ever rides along; the
+  daemon rejects unknown fields. One PATCH in flight at a time
+  (`Rooms::workspace_patch_in_flight`); the reply lands only in the room
+  admission that sent it (`room_is_current`): a `2xx {ok, room}` replaces
+  `open_room` AND the rail row's `workspace_root`/`updated_at` (so the header
+  folder and the workspace-root grouping follow the daemon), everything else
+  is one sentence in `Rooms::workspace_patch_error` beside the control with
+  the draft kept (`classify_workspace_patch` / `workspace_patch_status`:
+  `invalid_workspace_root` → "workspace folder not found on this Ocean", 404
+  → "This room is closed.", else the daemon's code). Bind is disabled for a
+  blank draft, an unchanged root, or a PATCH in flight; Unbind only while
+  bound. The draft reseeds from the stored root when the room id OR its root
+  changes (`reseed_needed`), never on a roster frame, and reseeding closes
+  edit mode. Design ruling followed over the legacy PR: no room-wide
+  "agents cannot run" warning — the per-agent cannot-run line belongs to
+  `inspect.agents[].execution` (S6/S7); the refusal still surfaces at the
+  action through `invocation_error_text` (`workspace_unavailable`). The web
+  proxy forwards this PATCH generically (`RoomsPersistentShape::Json`, no
+  operator key); Tauri reaches the daemon directly. Guarded by the
+  `workspace_patch_*` tests in `rooms.rs`, `workspace_binding.rs`'s unit
+  tests, `tests/room_details_drawer.rs` and `tests/directory_selection.rs`.
 - The Rooms rail groups rooms by `Room.workspace_root` (`group_rail_rooms` in
   `room_list.rs`; derived, never stored): first-seen root order, daemon order
   within a group, unbound rooms last under "Other rooms". Each group is a static
@@ -767,24 +819,44 @@ ships today and are updated slice by slice.
   grouped rows hide it with the name. `tests/rooms_agent_badge.rs` pins the
   three emit sites, the shared rule and the agent-only gate.
 - Rooms UI lives in `src/rooms_workspace/` (team-platform P5): `mod.rs`
-  owns `RoomsWorkspace`, its shared signals, and the transcript; child
-  components are `RoomListRail` (`room_list.rs`), `ChannelComposer`
-  (`composer.rs`), `ThreadPanel` (`threads.rs`), `MembersPanel`
-  (`members.rs`), the notice banners (`banners.rs`), and the agent consent
-  and invoke components (`agents.rs`); pure helpers live
+  owns `RoomsWorkspace`, its shared signals, the transcript and the details
+  drawer; child components are `RoomListRail` (`room_list.rs`),
+  `ChannelComposer` (`composer.rs`), `ThreadPanel` (`threads.rs`),
+  `MembersPanel` (`members.rs`), `DefaultFolderSection`
+  (`workspace_binding.rs`), the shared `WorkingDirectoryPicker`
+  (`working_directory.rs`), the notice banners (`banners.rs`), and the agent
+  consent and invoke components (`agents.rs`); pure helpers live
   in `read_cursor.rs`, `mentions.rs` (one `MentionState` drives both
   composers), `format.rs`, and `access.rs`, each with its own tests. Drafts,
   send latches, and mention state stay owned by `RoomsWorkspace` because the
-  center and right rails re-render on room state.
-- The existing Room options overflow always offers Members, including an empty
-  agent roster. It reveals the same MembersPanel and ConsentSheet; native consent
-  and browser/extension authority gates remain in those components. Members, Search, and Thread stay closed until requested at every width. Through
-  1080px they use one dismissible right-rail overlay; at 650px and below it is
-  full width, while above 1080px the requested rail docks beside the conversation.
-  Explicit picks select one rail mode. Close and unhandled Escape dismiss the
-  requested rail and restore its trigger focus (Room options for Members); nested
-  Escape handlers take precedence. Room admission/origin changes retire open
-  rail modes without moving focus or altering consent authority.
+  center rail and the drawer re-render on room state.
+- Room details drawer (design §5, executed by the port of
+  Risingtides-dev/ocean-surface#240): there is no permanent right rail.
+  `.rooms-workspace__right` is one fixed slide-over at every width — 380px,
+  closed by default (`transform: translateX(100%)` + `visibility: hidden`;
+  `--open` slides it in over 280ms with the reduced-motion kill AFTER the
+  state selectors), `--bg-raised` on `--shadow-lg` with no border, behind a
+  `--scrim` backdrop (`.rooms-workspace__right-scrim`, rendered only while
+  open, a click closes like Escape), a full-screen sheet at or below 650px;
+  z-index 420/415, above the compact left drawer (400) and the mobile nav
+  (410), below the close confirmation (440). The drawer hosts the former
+  rail modes as content: Members (the roster, then the Default folder row,
+  titled "Room details"), Files, Search, and Thread. Only the thread panel
+  docks inline, at or above 1280px (§7), through the
+  `rooms-workspace__right--thread` modifier (the scrim stands down there);
+  Members/Files/Search never dock, and the 901-1080 docked-rail breakpoints
+  are gone. The Room options overflow still offers Members (including an
+  empty agent roster; it reveals the same MembersPanel and ConsentSheet, and
+  native consent and browser/extension authority gates remain in those
+  components) and Files; the header members pill toggles Members. Explicit
+  picks select one drawer mode. Close, the scrim and unhandled Escape dismiss
+  the drawer and restore its trigger focus (the pill, or Room options for
+  Members); nested Escape handlers take precedence. Room admission/origin
+  changes retire open drawer modes without moving focus or altering consent
+  authority. Guarded by `details_drawer_css_is_a_slide_over_at_every_width`
+  (`mod.rs`) and `tests/room_details_drawer.rs`. Not built here (later
+  slices): the four plain-text tabs over `inspect`, `details_open`
+  persistence, the pin-inline opt-in at 1440px, and the attention chip.
 - Unread attention and the new-message jump exclude the same routine audit rows
   as the timeline. Local room-list summaries come from the daemon's conversation
   frontier; the open-room summary uses the same filter. Visible failures, access
@@ -836,7 +908,7 @@ ships today and are updated slice by slice.
   trust-boundary decision. Empty states carry no copy.
 - Room files (ported from Risingtides-dev/ocean-surface `attachments.rs`,
   legacy main `1b88f862`; now `src/rooms_workspace/attachments.rs`): the
-  right rail's Files mode (Room options → Files; same reveal, Escape and
+  details drawer's Files mode (Room options → Files; same reveal, Escape and
   return-focus rules as Members) lists the open room's context files from
   `GET /v1/rooms/persistent/{key}/attachments` and links each at
   `GET .../attachments/{id}` with `<a download>` — the daemon serves a type

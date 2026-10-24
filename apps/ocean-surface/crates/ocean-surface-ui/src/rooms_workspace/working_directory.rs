@@ -385,7 +385,11 @@ mod tests {
     fn a_path_listed_twice_is_offered_once_in_first_seen_order() {
         let projects = vec![
             project("Ocean", "/dev/ocean", &[("/dev/ocean", Some("main"))]),
-            project("Again", "/dev/ocean", &[("/dev/wt", None), ("/dev/wt", None)]),
+            project(
+                "Again",
+                "/dev/ocean",
+                &[("/dev/wt", None), ("/dev/wt", None)],
+            ),
         ];
         let paths: Vec<_> = working_directory_options(&projects)
             .into_iter()

@@ -1494,7 +1494,9 @@ mod tests {
         assert!(drawer.contains("width:min(380px,100vw);"), "{drawer}");
         assert!(drawer.contains("box-shadow:var(--shadow-lg);"), "{drawer}");
         assert!(drawer.contains("border-left:none;"), "{drawer}");
-        assert!(normalized.contains(".rooms-workspace__right--open{transform:none;visibility:visible;"));
+        assert!(
+            normalized.contains(".rooms-workspace__right--open{transform:none;visibility:visible;")
+        );
         assert!(normalized.contains(".rooms-workspace__right-scrim{position:fixed;inset:0;"));
         let compact = css_media_blocks(css, "@media (max-width: 650px)");
         assert!(compact.iter().any(|body| {

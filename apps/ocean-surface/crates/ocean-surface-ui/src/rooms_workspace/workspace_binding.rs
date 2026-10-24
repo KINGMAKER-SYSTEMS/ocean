@@ -95,11 +95,7 @@ pub(super) fn DefaultFolderSection(
     let can_edit = move || local_store_write_gate(rooms.access.get().as_ref());
     let bind = move || {
         let root = draft.get_untracked();
-        if !bind_enabled(
-            &root,
-            current_root.get_untracked().as_deref(),
-            in_flight(),
-        ) {
+        if !bind_enabled(&root, current_root.get_untracked().as_deref(), in_flight()) {
             return;
         }
         rooms.set_open_room_workspace(Some(root));
@@ -194,7 +190,7 @@ pub(super) fn DefaultFolderSection(
                             <button
                                 class="rooms-workspace__workspace-unbind"
                                 type="button"
-                                disabled=move || in_flight()
+                                disabled=in_flight
                                 on:click=move |_| unbind()
                             >
                                 "Unbind"

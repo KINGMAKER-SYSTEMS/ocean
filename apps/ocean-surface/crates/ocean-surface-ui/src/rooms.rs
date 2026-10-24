@@ -1759,9 +1759,9 @@ impl Rooms {
                         WorkspacePatchOutcome::Refused(format!("workspace update error: {err}"))
                     }
                 },
-                Err(err) => WorkspacePatchOutcome::Refused(format!(
-                    "workspace update encode error: {err}"
-                )),
+                Err(err) => {
+                    WorkspacePatchOutcome::Refused(format!("workspace update encode error: {err}"))
+                }
             };
             if !me.room_is_current(generation_id, &key) {
                 return;
