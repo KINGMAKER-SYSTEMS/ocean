@@ -712,6 +712,10 @@ pub fn RoomsWorkspace(
     view! {
         <div
             class="rooms-workspace"
+            class:rooms-workspace--selecting=move || rooms.open_key.get().is_none()
+                && rooms.pending_invite.get().is_none()
+            class:rooms-workspace--viewing=move || rooms.open_room.get().is_some()
+                && rooms.pending_invite.get().is_none()
             role="region"
             aria-label="Rooms workspace"
             on:keydown=move |ev| {
@@ -742,9 +746,9 @@ pub fn RoomsWorkspace(
         >
 
             // ═══ COMPACT NAV — narrow-screen room selector ════════════
-            // Always present but CSS hides it above the shared 650px
-            // breakpoint; renders a compact bar with room toggle + active
-            // room name so the reader is never stranded.
+            // Fallback navigation while loading or confirming an invite.
+            // A loaded conversation uses its own header and Back action;
+            // an unselected compact workspace shows the full room list.
             <div class="rooms-workspace__mobile-nav">
                 <button
                     class="rooms-workspace__mobile-nav-toggle"
@@ -831,6 +835,22 @@ pub fn RoomsWorkspace(
                             view! {
                                 // Header
                                 <div class="rooms-workspace__center-head">
+                                    <button
+                                        class="rooms-workspace__center-back"
+                                        type="button"
+                                        title="Back to room list"
+                                        aria-label="Back to room list"
+                                        on:click=move |_| {
+                                            rooms.close_room();
+                                            crate::room_close::focus_room_list();
+                                        }
+                                    >
+                                        <svg viewBox="0 0 16 16" width="14" height="14"
+                                            fill="none" stroke="currentColor" stroke-width="1.6"
+                                            stroke-linecap="round">
+                                            <path d="M10 3L5 8l5 5"/>
+                                        </svg>
+                                    </button>
                                     <span class="rooms-workspace__center-hash">"#"</span>
                                     <h1 class="rooms-workspace__center-title">
                                         {room_name.clone()}
@@ -938,19 +958,6 @@ pub fn RoomsWorkspace(
                                                 files_open.set(true);
                                             })
                                         />
-                                        <button
-                                            class="rooms-workspace__center-back"
-                                            type="button"
-                                            title="Back to room list"
-                                            aria-label="Close current room"
-                                            on:click=move |_| rooms.close_room()
-                                        >
-                                            <svg viewBox="0 0 16 16" width="14" height="14"
-                                                fill="none" stroke="currentColor" stroke-width="1.6"
-                                                stroke-linecap="round">
-                                                <path d="M10 3L5 8l5 5"/>
-                                            </svg>
-                                        </button>
                                     </div>
                                 </div>
 

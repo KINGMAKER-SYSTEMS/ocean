@@ -853,6 +853,17 @@ ships today and are updated slice by slice.
   composers), `format.rs`, and `access.rs`, each with its own tests. Drafts,
   send latches, and mention state stay owned by `RoomsWorkspace` because the
   center rail and the drawer re-render on room state.
+- At 650px and below, Rooms with no selected room and no pending invitation
+  shows the existing room list full-width in normal flow. It hides the empty
+  center, redundant mobile nav and drawer backdrop. A loaded conversation uses
+  one header with Back at the leading edge, returning to the full list and
+  restoring lost keyboard focus to its existing tab stop; its
+  duplicate mobile title bar and decorative hash are hidden. The folder label
+  stays in Room details on compact screens so the room name has priority. Loading and pending
+  invitations retain list-toggle navigation. Pending invitations retain their
+  confirmation in the center. No automatic room selection or read advance. The
+  center flex child keeps `min-height: 0` so mobile transcripts scroll within
+  the viewport and cannot push the composer below the screen.
 - Room details drawer (design §5, executed by the port of
   Risingtides-dev/ocean-surface#240): there is no permanent right rail.
   `.rooms-workspace__right` is one fixed slide-over at every width — 380px,
