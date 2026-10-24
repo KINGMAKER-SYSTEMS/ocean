@@ -1,0 +1,7 @@
+time: [22:54] [10-22-26]
+agent: [claude code] [claude-opus-5-5]
+worktree: [port/surface-219-rail-groups] [.claude/worktrees/agent-a55eabf5d63223a54]
+type: [feature-request] [port]
+area: [frontend]
+
+Ported Risingtides-dev/ocean-surface#219 (group the Rooms rail by workspace root) into the split `rooms_workspace/room_list.rs`. The rail now derives groups from `Room.workspace_root` (`group_rail_rooms`): first-seen root order, daemon order within a group, unbound rooms last under "Other rooms". Each group is a static `role="group"` labelled by a non-interactive header with the full case-preserved root (wrapping, never truncated) and a live count; header ids hex-encode the root so reordering never collides. The listbox keeps one roving tab stop and Arrow/Home/End over the flattened grouped order (`rail_room_keys`), and retained keyed groups re-read membership from the live list. The option button moved into `rail_room_option` and the group into `rail_group_view` to keep the view flat. The legacy "Load more rooms" ordering guard is not ported because room paging is not on main. Group CSS in `styles/rooms-workspace.css`; contract added to `apps/ocean-surface/AGENTS.md`. Validation: `cargo test -p ocean-surface-ui` 957 lib + 34 integration pass (7 new rail tests incl. a header/CSS source guard), wasm clippy `-D warnings` clean, `cargo fmt --check` clean; all-targets clippy shows only the 13 pre-existing rooms.rs hits. Not run live in a browser.

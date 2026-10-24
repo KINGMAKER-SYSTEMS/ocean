@@ -1,0 +1,7 @@
+time: [22:51] [10-22-26]
+agent: [claude code] [claude-opus-5-5]
+worktree: [port/surface-114-unread-divider] [.claude/worktrees/agent-acc4d29a89bf4cd65]
+type: [port] [feature-request]
+area: [frontend]
+
+Ported Risingtides-dev/ocean-surface#114 (per-room unread baseline + first-unread transcript divider) by re-implementing it into the split `rooms_workspace/` module rather than applying the diff. `Rooms` gains an App-scoped `unread_baseline` that `open_room` locks via `next_unread_baseline` from the room-list `read_summaries` before the open resets or advances the cursor, and `close_room` clears. `read_cursor.rs` gains `ReadSequenceSpace`, `read_sequence_space` and `first_unread_root_seq`: transcript `seq` for Local rooms, `global_sequence` for Live rooms (rows without federated metadata are history and skipped), no divider without a baseline or in Connecting/Recovering/Revoked. `mod.rs` renders `rooms-workspace__unread-divider` above the first visible root past the baseline, computed over the same audit-filtered roots as the timeline (a monorepo adaptation; the legacy selector used unfiltered roots), and the room row now emits the `rooms-workspace__room--unread` bold modifier, with `unread` made a Memo. The legacy count badge was already dropped upstream and the monorepo keeps its dot. Validation: `cargo test -p ocean-surface-ui` (996 tests, 12 new), wasm32 clippy `-D warnings` clean, `cargo fmt --check` clean, all-targets clippy still shows only the 13 pre-existing rooms.rs test-module hits.
