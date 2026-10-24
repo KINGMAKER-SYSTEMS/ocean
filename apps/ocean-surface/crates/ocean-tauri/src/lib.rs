@@ -1509,20 +1509,55 @@ fn preserve_database_uri(uri: &str) -> Result<(), ()> {
         .split(['?', '#'])
         .next()
         .ok_or(())?;
+    // SQLite percent-decodes the URI path before opening the database, so an
+    // encoded absolute URI like `file:%2Ftmp%2Frooms.db` names /tmp/rooms.db.
+    // Classify on the decoded path or such URIs look relative in raw bytes.
+    let decoded_path = sqlite_percent_decoded(raw_path);
     let modes: Vec<_> = parsed
         .query_pairs()
         .filter(|(key, _)| key == "mode")
         .map(|(_, value)| value)
         .collect();
-    if raw_path == ":memory:"
+    if decoded_path == ":memory:"
         || (modes.len() == 1 && modes[0] == "memory")
-        || raw_path.starts_with('/')
-        || Path::new(raw_path).is_absolute()
+        || decoded_path.starts_with('/')
+        || Path::new(&decoded_path).is_absolute()
     {
         Ok(())
     } else {
         Err(())
     }
+}
+
+/// SQLite's URI parser percent-decodes `%HH` escapes in the path before the
+/// filename is used; an invalid escape keeps its literal `%`. Mirror that
+/// decode so URI classification matches the file SQLite would open, while the
+/// child still receives the original bytes.
+fn sqlite_percent_decoded(path: &str) -> String {
+    fn hex(byte: u8) -> u8 {
+        match byte {
+            b'0'..=b'9' => byte - b'0',
+            b'a'..=b'f' => byte - b'a' + 10,
+            b'A'..=b'F' => byte - b'A' + 10,
+            _ => unreachable!("caller checks for a hex digit"),
+        }
+    }
+    let bytes = path.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && bytes.get(index + 1).is_some_and(u8::is_ascii_hexdigit)
+            && bytes.get(index + 2).is_some_and(u8::is_ascii_hexdigit)
+        {
+            decoded.push(hex(bytes[index + 1]) << 4 | hex(bytes[index + 2]));
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
 }
 
 /// Blocking TCP connect probe — `true` when something is accepting on
@@ -2178,6 +2213,12 @@ mod tests {
                 "file:named?mode=memory&cache=shared",
                 "file:named?cache=shared&mode=%6Demory",
                 absolute_uri.as_str(),
+                // SQLite percent-decodes the path before opening the database,
+                // so encoded absolute (and encoded in-memory) URIs are admitted
+                // and forwarded byte-identical, like their unencoded forms.
+                "file:%2Ftmp%2Frooms.db",
+                "file:%2Ftmp%2Frooms.db?mode=rwc&cache=private",
+                "file:%3Amemory%3A",
             ] {
                 let command = daemon_process_with_environment(
                     Path::new("ocean-daemon"),
@@ -2193,6 +2234,10 @@ mod tests {
                 "file:relative.db?mode=rwc",
                 "file:relative.db?comment=mode%3Dmemory",
                 "file:relative.db?mode=memory&mode=ro",
+                // Encoding a relative path's separators does not make it
+                // absolute after SQLite's percent-decode.
+                "file:relative%2Frooms.db",
+                "file:relative%2Frooms.db?mode=rwc",
             ] {
                 let error = daemon_process_with_environment(
                     Path::new("ocean-daemon"),
