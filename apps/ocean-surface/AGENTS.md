@@ -46,6 +46,11 @@ Capability Matrix). The load-bearing rules:
   browser commands (Cmd/Ctrl+P and Cmd/Ctrl+Shift+F remain native-only; their hints are absent on web/PWA) — never
   layout, panels, or navigation. Do not reintroduce a web-only deck or per-host
   panel markup.
+- Below 900px, an open workspace dismisses on its backdrop or unhandled Escape,
+  after higher reveals have had priority, and restores focus to the header
+  toggle. Docked workspaces stay open on Escape. Collapsed workspace content is
+  inert and hidden from accessibility traversal; the toggle exposes its current
+  expanded state and controls relationship. Existing pane state and tabs persist.
 - Shared-file discipline (`app.rs`): smallest hunks, committed promptly;
   NEVER reference an uncommitted module from a shared file — `mod x;` +
   usage lands only when `x` compiles with passing tests.
@@ -524,7 +529,8 @@ Web surface session UI:
   open (Council, Rooms, Sessions, Floor, phone dialer, LiveKit controls)
   closes the Island. Window Escape closes exactly one topmost surface in visual
   z-order: Council → Island → Rooms → Sessions → Floor → phone dialer →
-  LiveKit. The workspace pane is permanent furniture, not a reveal.
+  LiveKit, then the compact workspace overlay. The docked workspace pane is
+  permanent furniture, not a reveal.
 
 ## Rooms Contract
 
