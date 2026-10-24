@@ -1244,6 +1244,27 @@
   .rooms-workspace__mobile-nav {
     display: flex;
   }
+
+  /* With no conversation selected, the list is the screen, not a closed
+     drawer over an empty canvas. Invitation confirmation keeps the center. */
+  .rooms-workspace--selecting .rooms-workspace__left {
+    display: flex;
+    position: relative;
+    inset: auto;
+    z-index: auto;
+    flex: 1 1 auto;
+    width: 100%;
+    max-width: none;
+    min-height: 0;
+    border-right: none;
+    box-shadow: none;
+  }
+
+  .rooms-workspace--selecting .rooms-workspace__mobile-nav,
+  .rooms-workspace--selecting .rooms-workspace__left-backdrop,
+  .rooms-workspace--selecting .rooms-workspace__center {
+    display: none;
+  }
 }
 
 /* ── Member presence dot ──────────────────────────────────────────── */

@@ -712,6 +712,8 @@ pub fn RoomsWorkspace(
     view! {
         <div
             class="rooms-workspace"
+            class:rooms-workspace--selecting=move || rooms.open_key.get().is_none()
+                && rooms.pending_invite.get().is_none()
             role="region"
             aria-label="Rooms workspace"
             on:keydown=move |ev| {
