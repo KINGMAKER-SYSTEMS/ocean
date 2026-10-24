@@ -37,7 +37,7 @@ const ACCESS_STATES: [&str; 5] = ["local", "connecting", "live", "recovering", "
 const ACCESS_LINE_NON_STATES: [&str; 5] = ["access", "id", "outbox", "seq", "state"];
 
 /// The audit's specific ghosts, independent of formatting.
-const GHOSTS: [(&str, &str); 6] = [
+const GHOSTS: [(&str, &str); 7] = [
     ("`Remote`", "there is no remote access state"),
     ("`remote`", "there is no remote access state"),
     (
@@ -54,7 +54,11 @@ const GHOSTS: [(&str, &str); 6] = [
     ),
     (
         "sends neither",
-        "the create body always carries the canonical wake policy; only the PATCH route is unused",
+        "the create body always carries the canonical wake policy; the PATCH route carries workspace_root",
+    ),
+    (
+        "this surface does not call it",
+        "the drawer's Default folder row sends PATCH /v1/rooms/persistent/{key} with workspace_root",
     ),
 ];
 

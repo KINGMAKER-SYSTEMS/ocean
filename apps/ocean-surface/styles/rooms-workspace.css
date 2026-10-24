@@ -1619,6 +1619,7 @@
 
 .rooms-workspace__left-create > input,
 .rooms-workspace__left-create > select,
+.rooms-workspace__left-create > .working-directory,
 .rooms-workspace__entry-menu,
 .rooms-workspace__entry-error { grid-column: 1 / -1; }
 
@@ -1820,18 +1821,254 @@
   font-style: normal;
 }
 
+/* Room details drawer (design §5): there is no permanent right rail. One
+   slide-over at every width — 380px, closed by default, `--bg-raised` on
+   `--shadow-lg` with no border, a `--scrim` backdrop, a 280ms slide — that
+   hosts Members (with the default-folder row), Files, Search and the thread.
+   Only the thread panel docks inline, at or above 1280px (§7). Above the
+   compact left-rail drawer (400) and the mobile nav (410); below the close
+   confirmation (440). */
 .rooms-workspace__right {
-  display: none;
-  flex-basis: 300px;
-  box-shadow: none;
+  display: flex;
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(380px, 100vw);
+  flex-basis: auto;
+  z-index: 420;
+  border-left: none;
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-lg);
+  transform: translateX(100%);
+  visibility: hidden;
+  transition: transform 280ms var(--ease), visibility 0s linear 280ms;
 }
 
 .rooms-workspace__right--open {
-  display: flex;
+  transform: none;
+  visibility: visible;
+  transition: transform 280ms var(--ease), visibility 0s;
+}
+
+.rooms-workspace__right-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 415;
+  background: var(--scrim);
+}
+
+/* Reduced motion: the kill sits AFTER the state selectors so it wins. */
+@media (prefers-reduced-motion: reduce) {
+  .rooms-workspace__right,
+  .rooms-workspace__right--open {
+    transition: none;
+  }
+}
+
+/* The thread panel is a reading column, not a console: at or above 1280px
+   it docks beside the conversation and the scrim stands down. */
+@media (min-width: 1280px) {
+  .rooms-workspace__right--open.rooms-workspace__right--thread {
+    position: static;
+    flex: 0 0 360px;
+    width: 360px;
+    z-index: auto;
+    border-left: 1px solid var(--border-subtle);
+    box-shadow: none;
+    transition: none;
+  }
+
+  .rooms-workspace__right--thread + .rooms-workspace__right-scrim {
+    display: none;
+  }
+}
+
+/* Members pill (design §7): the header's always-present door to the drawer.
+   Groups glyph plus the people-and-agents count in mono; ghost until open. */
+.rooms-workspace__members-chip {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 auto;
+  height: var(--ctl-h-sm);
+  padding: 0 8px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-3);
+  font-family: var(--font);
+  font-size: 15px;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__members-chip:hover,
+.rooms-workspace__members-chip.is-on {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__members-chip.is-on {
+  color: var(--accent);
+}
+
+.rooms-workspace__members-chip:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.rooms-workspace__members-chip-count {
+  min-width: 1ch;
+  color: var(--fg-3);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1;
 }
 
 .rooms-workspace__right-list {
   padding: 10px 8px;
+}
+
+/* Section labels inside the drawer (Members, Default folder). */
+.rooms-workspace__right-section-title {
+  padding: 6px 8px 4px;
+  color: var(--fg-3);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.rooms-workspace__right-section-title + .rooms-workspace__right-section-title,
+.rooms-workspace__member-list + .rooms-workspace__right-section-title,
+.rooms-workspace__addagent + .rooms-workspace__right-section-title,
+.rooms-workspace__right-empty + .rooms-workspace__right-section-title {
+  margin-top: 14px;
+}
+
+/* Default folder row (design §5.2): the bound root in mono or "none", one
+   sentence, a ghost Edit that reveals the shared picker with Bind / Unbind. */
+.rooms-workspace__workspace {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 2px 8px 6px;
+}
+
+.rooms-workspace__workspace-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+}
+
+.rooms-workspace__workspace-root {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--fg-2);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.rooms-workspace__workspace-root--none {
+  color: var(--fg-3);
+  font-family: var(--font);
+}
+
+.rooms-workspace__workspace-edit {
+  appearance: none;
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-3);
+  font-family: var(--font);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__workspace-edit:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__workspace-help {
+  color: var(--fg-3);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.rooms-workspace__workspace-controls {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.rooms-workspace__workspace-error {
+  color: var(--err);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.rooms-workspace__workspace-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.rooms-workspace__workspace-bind,
+.rooms-workspace__workspace-unbind {
+  appearance: none;
+  flex: 0 0 auto;
+  height: var(--ctl-h-sm);
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__workspace-unbind {
+  color: var(--err);
+}
+
+.rooms-workspace__workspace-bind:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.rooms-workspace__workspace-unbind:hover:not(:disabled) {
+  background: var(--err-soft);
+  border-color: var(--border-strong);
+}
+
+.rooms-workspace__workspace-bind:disabled,
+.rooms-workspace__workspace-unbind:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.rooms-workspace__workspace-edit:focus-visible,
+.rooms-workspace__workspace-bind:focus-visible,
+.rooms-workspace__workspace-unbind:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
 }
 
 .rooms-workspace__member {
@@ -1923,34 +2160,10 @@
   height: 13px;
 }
 
-/* Reveal the shared Members/Search/Thread rail on explicit intent. */
-@media (max-width: 1080px) {
-  .rooms-workspace {
-    position: relative;
-  }
-
-  .rooms-workspace__right {
-    display: none;
-  }
-
-  .rooms-workspace__right--open {
-    display: flex;
-    position: absolute;
-    top: 0;
-    right: 0;
-    bottom: 0;
-    width: min(360px, 46vw);
-    z-index: 220;
-    box-shadow: var(--shadow-md);
-  }
-}
-
+/* At 650px and below the drawer is a full-screen sheet (design §5). */
 @media (max-width: 650px) {
-  .rooms-workspace__right--open {
-    position: fixed;
-    inset: 0;
+  .rooms-workspace__right {
     width: 100vw;
-    z-index: 410;
   }
   .rooms-workspace__left--visible {
     inset: auto;
@@ -2402,5 +2615,88 @@
     content: '';
     position: absolute;
     inset: -6px;
+  }
+}
+
+/* ── Shared working-directory picker (rooms_workspace/working_directory.rs) ──
+   One control for the create form and the drawer's default-folder row: a
+   select over the daemon's project and worktree catalogue, the desktop
+   shell's "Choose folder…", and an explicit absolute-path field. Tokens only.
+   The path is a folder on the daemon's host; nothing here judges it. */
+
+.working-directory {
+  display: flex;
+  flex: 1 1 100%;
+  min-width: 0;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.working-directory__label,
+.working-directory__manual {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.working-directory__label-text,
+.working-directory__manual-label {
+  color: var(--fg-3);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.working-directory__select,
+.working-directory__input {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  height: var(--ctl-h);
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background-color: var(--bg-raised);
+  color: var(--fg);
+  font: inherit;
+  font-size: 12px;
+}
+
+.working-directory__input {
+  font-family: var(--mono);
+}
+
+.working-directory__input::placeholder {
+  color: var(--fg-4);
+}
+
+.working-directory__select:focus-visible,
+.working-directory__input:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+
+.working-directory__select:disabled,
+.working-directory__input:disabled {
+  opacity: 0.5;
+}
+
+.working-directory__help {
+  color: var(--fg-3);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+/* iOS zooms the page when a focused control computes below 16px. This floor
+   sits AFTER the picker's base rules on purpose: the equal-specificity
+   `font-size: 12px` above would otherwise win the cascade and a floor in an
+   earlier coarse-pointer block would never apply to these two. */
+@media (pointer: coarse) {
+  .working-directory__select,
+  .working-directory__input {
+    font-size: 16px;
   }
 }

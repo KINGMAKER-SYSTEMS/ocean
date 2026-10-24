@@ -372,8 +372,10 @@ pub struct Room {
     /// This Ocean's per-room mute pref (team-platform P6; owner-local).
     #[serde(default)]
     pub muted: bool,
-    /// Canonical workspace directory bound at create. Fixed for the room's
-    /// lifetime; absent for unbound rooms and older daemons.
+    /// Canonical workspace directory — the room's default folder, bound at
+    /// create or later through `PATCH /v1/rooms/persistent/{key}`
+    /// ([`Rooms::set_open_room_workspace`]). Absent for unbound rooms and
+    /// older daemons.
     #[serde(default)]
     pub workspace_root: Option<String>,
 }
@@ -480,13 +482,13 @@ struct RoomErrorResponse {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct RoomMutateResponse {
+pub(crate) struct RoomMutateResponse {
     #[serde(default)]
-    ok: bool,
+    pub(crate) ok: bool,
     #[serde(default)]
-    room: Option<Room>,
+    pub(crate) room: Option<Room>,
     #[serde(default)]
-    error: Option<String>,
+    pub(crate) error: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -531,6 +533,91 @@ pub(crate) fn create_failure_status(error: &str) -> String {
             "create failed: workspace folder not found on this Ocean".to_string()
         }
         other => format!("create failed: {other}"),
+    }
+}
+
+/// `PATCH /v1/rooms/persistent/{key}` body for the room's default folder
+/// (OCEAN-260; design §5.2 "Default folder"). The daemon reads this field on
+/// an absent-vs-`null` contract: absent leaves the binding alone, `null`
+/// unbinds, a string binds after the daemon canonicalizes it. The field is
+/// therefore NEVER skipped here — `None` must serialize as an explicit
+/// `"workspace_root": null`, or an unbind would arrive as "unchanged".
+///
+/// Only this field travels: the surface has no name or trigger-policy control,
+/// and the daemon rejects unknown fields, so a one-field body is the whole
+/// contract this surface has with the route.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct RoomWorkspacePatchBody {
+    pub(crate) workspace_root: Option<String>,
+}
+
+impl RoomWorkspacePatchBody {
+    /// Bind to `root`. The path is a folder on the DAEMON's host, sent as the
+    /// operator wrote it (trimmed of surrounding whitespace only): the browser
+    /// cannot see that filesystem, so nothing here judges absoluteness,
+    /// existence or canonical form — the daemon's `400 invalid_workspace_root`
+    /// is the one verdict. A blank string is the unbind body, matching the
+    /// daemon's own reading of a blank value.
+    pub(crate) fn bind(root: &str) -> Self {
+        let root = root.trim();
+        Self {
+            workspace_root: (!root.is_empty()).then(|| root.to_string()),
+        }
+    }
+
+    /// Unbind: an explicit JSON `null`.
+    pub(crate) fn unbind() -> Self {
+        Self {
+            workspace_root: None,
+        }
+    }
+}
+
+/// What a workspace PATCH reply means for the open room.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WorkspacePatchOutcome {
+    /// The daemon stored the binding and answered the updated room; the open
+    /// room and its rail row take this record.
+    Updated(Room),
+    /// The daemon refused or could not be reached; the draft is kept and the
+    /// text is shown beside the control that sent it.
+    Refused(String),
+}
+
+/// Fold one PATCH reply. `status` is the HTTP status, `body` the decoded
+/// envelope (or the decode error). The room is taken only from a `2xx`
+/// `{ok: true, room}`; every other shape keeps the draft.
+pub(crate) fn classify_workspace_patch(
+    status: u16,
+    body: Result<RoomMutateResponse, String>,
+) -> WorkspacePatchOutcome {
+    match body {
+        Ok(envelope) if (200..300).contains(&status) && envelope.ok => match envelope.room {
+            Some(room) => WorkspacePatchOutcome::Updated(room),
+            None => WorkspacePatchOutcome::Refused(
+                "workspace update failed: the daemon answered without the room".to_string(),
+            ),
+        },
+        Ok(envelope) => WorkspacePatchOutcome::Refused(workspace_patch_status(
+            status,
+            envelope.error.as_deref(),
+        )),
+        Err(decode) => WorkspacePatchOutcome::Refused(format!(
+            "workspace update failed: HTTP {status} ({decode})"
+        )),
+    }
+}
+
+/// Sentence for a refused workspace PATCH. The daemon's typed codes the
+/// operator can act on get plain language; anything else is passed through.
+pub(crate) fn workspace_patch_status(status: u16, error: Option<&str>) -> String {
+    match (status, error) {
+        (_, Some("invalid_workspace_root")) => {
+            "workspace folder not found on this Ocean".to_string()
+        }
+        (404, _) => "This room is closed.".to_string(),
+        (_, Some(code)) if !code.is_empty() => format!("workspace update failed: {code}"),
+        (status, _) => format!("workspace update failed: HTTP {status}"),
     }
 }
 
@@ -742,6 +829,12 @@ pub struct Rooms {
     /// Exact cancellations of this page's own room runs, keyed by daemon
     /// request id. Memory-only and reset with the room.
     run_cancels: RwSignal<RunCancels>,
+    /// Whether a default-folder `PATCH` ([`Rooms::set_open_room_workspace`])
+    /// is in flight for the open room. One at a time; reset with the room.
+    pub workspace_patch_in_flight: RwSignal<bool>,
+    /// The last default-folder PATCH refusal, shown beside the control that
+    /// sent it. Cleared by the next attempt and by a room change.
+    pub workspace_patch_error: RwSignal<Option<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -816,6 +909,8 @@ impl Rooms {
             consent_ticket: RwSignal::new(0),
             invocations: RwSignal::new(Vec::new()),
             run_cancels: RwSignal::new(RunCancels::default()),
+            workspace_patch_in_flight: RwSignal::new(false),
+            workspace_patch_error: RwSignal::new(None),
         }
     }
 
@@ -1003,6 +1098,8 @@ impl Rooms {
         self.agent_bindings.set(Vec::new());
         self.invocations.set(Vec::new());
         self.run_cancels.set(RunCancels::default());
+        self.workspace_patch_in_flight.set(false);
+        self.workspace_patch_error.set(None);
         self.consent_ticket.update(|t| *t = t.wrapping_add(1));
         if self.consent.get_untracked().is_some() {
             crate::host::room_consent_cancel(None);
@@ -1238,8 +1335,8 @@ impl Rooms {
     /// attempts — the closure in `rooms_workspace/` does this.
     ///
     /// `workspace_root` is only an explicit creator choice; the daemon binds it
-    /// once (absolute existing directory, else 400 `invalid_workspace_root`)
-    /// and offers no route to change it later.
+    /// (absolute existing directory, else 400 `invalid_workspace_root`), and
+    /// [`Rooms::set_open_room_workspace`] rebinds or unbinds it later.
     pub fn create_room(&self, name: String, workspace_root: Option<String>) -> u64 {
         let name = name.trim().to_string();
         if name.is_empty() {
@@ -1614,6 +1711,80 @@ impl Rooms {
             }
         });
     }
+    /// Bind or unbind the open room's default folder through
+    /// `PATCH /v1/rooms/persistent/{key}` (design §5.2 "Default folder";
+    /// OCEAN-260 on the daemon). `Some(root)` binds, `None` unbinds; the body
+    /// is [`RoomWorkspacePatchBody`], so an unbind arrives as an explicit
+    /// `null` and never as "unchanged".
+    ///
+    /// The path is a folder on the DAEMON's host and the daemon is the only
+    /// authority on it: this method sends what the operator chose and renders
+    /// the daemon's answer (`400 invalid_workspace_root` reads "workspace
+    /// folder not found on this Ocean"). One request at a time; a reply lands
+    /// only in the room admission that sent it (`room_is_current`), where the
+    /// returned record replaces the open room and its rail row so the header
+    /// folder and the workspace-root grouping follow the daemon's truth.
+    pub fn set_open_room_workspace(&self, workspace_root: Option<String>) {
+        if self.workspace_patch_in_flight.get_untracked() {
+            return;
+        }
+        let Some(key) = self.open_key.get_untracked() else {
+            return;
+        };
+        let body = match workspace_root {
+            Some(root) => RoomWorkspacePatchBody::bind(&root),
+            None => RoomWorkspacePatchBody::unbind(),
+        };
+        let base = self.base();
+        let me = *self;
+        let generation_id = self.generation.get_untracked();
+        self.workspace_patch_error.set(None);
+        self.workspace_patch_in_flight.set(true);
+        spawn_local(async move {
+            let url = format!("{base}/v1/rooms/persistent/{}", encode(&key));
+            let outcome = match Request::patch(&url)
+                .header("content-type", "application/json")
+                .json(&body)
+            {
+                Ok(req) => match req.send().await {
+                    Ok(resp) => {
+                        let status = resp.status();
+                        let decoded = resp
+                            .json::<RoomMutateResponse>()
+                            .await
+                            .map_err(|err| err.to_string());
+                        classify_workspace_patch(status, decoded)
+                    }
+                    Err(err) => {
+                        WorkspacePatchOutcome::Refused(format!("workspace update error: {err}"))
+                    }
+                },
+                Err(err) => {
+                    WorkspacePatchOutcome::Refused(format!("workspace update encode error: {err}"))
+                }
+            };
+            if !me.room_is_current(generation_id, &key) {
+                return;
+            }
+            me.workspace_patch_in_flight.set(false);
+            match outcome {
+                WorkspacePatchOutcome::Updated(room) => {
+                    me.list.update(|list| {
+                        if let Some(row) = list.iter_mut().find(|row| row.id == room.id) {
+                            row.workspace_root = room.workspace_root.clone();
+                            row.updated_at = room.updated_at.clone();
+                        }
+                    });
+                    me.open_room.set(Some(room));
+                    me.workspace_patch_error.set(None);
+                }
+                WorkspacePatchOutcome::Refused(text) => {
+                    me.workspace_patch_error.set(Some(text));
+                }
+            }
+        });
+    }
+
     /// Close the open room and stop its live loops.
     pub fn close_room(&self) {
         self.generation.update(|g| *g = g.wrapping_add(1));
@@ -5047,6 +5218,125 @@ mod tests {
         assert_eq!(create_failure_status("timeout"), "create failed: timeout");
         // The rail shows only `create `-prefixed status lines.
         assert!(create_failure_status("invalid_workspace_root").starts_with("create "));
+    }
+
+    /// The daemon's PATCH reads `workspace_root` absent-vs-`null`: absent is
+    /// "unchanged", `null` unbinds. So the bind body carries the path and the
+    /// unbind body carries an EXPLICIT null — never an omitted field — and
+    /// nothing else travels (the daemon rejects unknown fields).
+    #[test]
+    fn workspace_patch_body_binds_with_a_string_and_unbinds_with_an_explicit_null() {
+        assert_eq!(
+            serde_json::to_value(RoomWorkspacePatchBody::bind("/Users/me/dev/ocean")).unwrap(),
+            serde_json::json!({ "workspace_root": "/Users/me/dev/ocean" })
+        );
+        // Surrounding whitespace is the only thing trimmed; the path itself
+        // is the daemon's to judge (relative, missing, not a directory).
+        assert_eq!(
+            serde_json::to_value(RoomWorkspacePatchBody::bind("  relative/dir \n")).unwrap(),
+            serde_json::json!({ "workspace_root": "relative/dir" })
+        );
+        let unbind = serde_json::to_value(RoomWorkspacePatchBody::unbind()).unwrap();
+        assert_eq!(unbind, serde_json::json!({ "workspace_root": null }));
+        assert!(
+            unbind.as_object().unwrap().contains_key("workspace_root"),
+            "an unbind must send the key with null; an absent key means unchanged"
+        );
+        // A blank bind is the unbind body (the daemon treats blank as unbind too).
+        assert_eq!(
+            RoomWorkspacePatchBody::bind("   "),
+            RoomWorkspacePatchBody::unbind()
+        );
+    }
+
+    #[test]
+    fn workspace_patch_fold_takes_the_room_only_from_an_ok_2xx_envelope() {
+        let room: Room = serde_json::from_value(serde_json::json!({
+            "id": "ops",
+            "name": "Ops",
+            "workspace_root": "/srv/ocean",
+        }))
+        .unwrap();
+        let ok = RoomMutateResponse {
+            ok: true,
+            room: Some(room.clone()),
+            error: None,
+        };
+        assert_eq!(
+            classify_workspace_patch(200, Ok(ok.clone())),
+            WorkspacePatchOutcome::Updated(room.clone())
+        );
+        // An unbind answers the room with `workspace_root: null`.
+        let unbound: Room = serde_json::from_value(serde_json::json!({
+            "id": "ops",
+            "name": "Ops",
+            "workspace_root": null,
+        }))
+        .unwrap();
+        assert_eq!(
+            classify_workspace_patch(
+                200,
+                Ok(RoomMutateResponse {
+                    ok: true,
+                    room: Some(unbound.clone()),
+                    error: None,
+                })
+            ),
+            WorkspacePatchOutcome::Updated(unbound)
+        );
+        // `ok: true` without a room is not a success the page can apply.
+        assert!(matches!(
+            classify_workspace_patch(
+                200,
+                Ok(RoomMutateResponse {
+                    ok: true,
+                    room: None,
+                    error: None,
+                })
+            ),
+            WorkspacePatchOutcome::Refused(_)
+        ));
+        // A non-2xx status never applies a room, even if one is echoed.
+        assert!(matches!(
+            classify_workspace_patch(500, Ok(ok)),
+            WorkspacePatchOutcome::Refused(_)
+        ));
+    }
+
+    #[test]
+    fn workspace_patch_refusals_read_as_sentences_and_keep_the_daemons_code_otherwise() {
+        let refused = |status: u16, error: Option<&str>| {
+            classify_workspace_patch(
+                status,
+                Ok(RoomMutateResponse {
+                    ok: false,
+                    room: None,
+                    error: error.map(str::to_string),
+                }),
+            )
+        };
+        assert_eq!(
+            refused(400, Some("invalid_workspace_root")),
+            WorkspacePatchOutcome::Refused("workspace folder not found on this Ocean".into())
+        );
+        assert_eq!(
+            refused(404, Some("room_not_open")),
+            WorkspacePatchOutcome::Refused("This room is closed.".into())
+        );
+        assert_eq!(
+            refused(400, Some("invalid_request")),
+            WorkspacePatchOutcome::Refused("workspace update failed: invalid_request".into())
+        );
+        assert_eq!(
+            refused(502, None),
+            WorkspacePatchOutcome::Refused("workspace update failed: HTTP 502".into())
+        );
+        assert_eq!(
+            classify_workspace_patch(503, Err("EOF while parsing".into())),
+            WorkspacePatchOutcome::Refused(
+                "workspace update failed: HTTP 503 (EOF while parsing)".into()
+            )
+        );
     }
 
     #[test]
