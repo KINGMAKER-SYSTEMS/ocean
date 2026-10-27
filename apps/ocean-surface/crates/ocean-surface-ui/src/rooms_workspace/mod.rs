@@ -191,6 +191,7 @@ pub fn RoomsWorkspace(
     // Refresh owner identity and room list when bootstrap resolves the origin.
     Effect::new(move |_| {
         let _origin = rooms.url.get();
+        rooms.sync_room_origin();
         rooms.fetch_me();
         rooms.fetch_rooms();
     });
@@ -509,10 +510,13 @@ pub fn RoomsWorkspace(
     });
 
     Owner::on_cleanup(move || {
-        if let Some(handle) = refresh_handle.get_untracked() {
+        if let Some(Some(handle)) = refresh_handle.try_get_untracked() {
             handle.clear();
         }
-        refresh_handle.set(None);
+        refresh_handle.try_set(None);
+        // Rooms is parent-owned: hiding this workspace does not dispose its
+        // signals. Retire callbacks and native decisions on every exit path.
+        rooms.close_room();
     });
 
     Effect::new(move |_| {
