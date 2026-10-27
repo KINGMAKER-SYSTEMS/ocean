@@ -1159,9 +1159,10 @@ ships today and are updated slice by slice.
 - Surface: `host.rs` wrappers are absent off-Tauri, so browser/extension hosts
   render bindings but never emulate consent. `rooms.rs` owns the bindings
   client (`GET .../agents`), the consent draft (room generation + ticket
-  guarded; committed or unknown outcomes refresh authoritative bindings even
-  when navigation raced; post-send command errors `consent_task_failed` and
-  `invalid_reply` are treated as `unknown`) and explicit invocation.
+  guarded; committed or unknown outcomes refresh authoritative bindings only
+  in their originating room admission; post-send command errors
+  `consent_task_failed` and `invalid_reply` are treated as `unknown`) and
+  explicit invocation.
   `rooms::invoke_caller(access, open_room, identity_id)` names the invoker
   from daemon projections only: in Local rooms (PR H) the `/v1/me` owner
   `participant_id` (`Rooms.identity_id`, since #68) when non-empty and a
@@ -1222,6 +1223,26 @@ ships today and are updated slice by slice.
   "Ocean could not cancel this run." and is never retried automatically (an
   explicit click may try again). It never calls `Daemon::cancel_request`, a
   session-level cancel, or touches focused direct-chat state (tested).
+- Room consent UI retirement: `host::room_consent_cancel` returns an awaited
+  native receipt/error (the native command signature is unchanged). Room/origin
+  changes, workspace unmount and dismissal retire page tickets immediately and
+  cancel all native decisions even without a visible draft. Every outstanding
+  cancellation receipt must succeed before a new preview, bootstrap, authorize
+  or revoke can dispatch; an error keeps this page fail-closed and uses existing
+  status presentation. Nothing retries a mutation automatically. Fresh or
+  superseding revokes cancel older native intents; only a page-owned Unknown
+  revoke for the same origin/admission/ticket/agent can explicitly retry without
+  cancel-all, preserving the native decision id and native reconfirmation.
+  Pending duplicate clicks are latched; retirement and definitive outcomes clear
+  retry ownership. Post-send command errors use the existing Unknown mapping.
+  Callback writes
+  require live signals plus the originating room admission, origin and request
+  ticket; already-sent committed/unknown results reconcile authoritative state
+  only in that admission. Unmount also stops the room tail by advancing its
+  generation. The native epoch/tracked-revoke repair (PR103) is integrated in
+  canonical main; this UI gate relies on that native cancellation boundary and
+  cannot retract an already-dispatched send. Maintainer approval and native
+  IPC/dialog/served acceptance remain release gates (issues #54 and #90).
 - UI (`rooms_workspace/agents.rs`): one consent sheet (name, short digest,
   requested capabilities, the activation radios, one primary action, dismiss)
   above the right-rail list (styles `.rooms-workspace__consent-activation*`,

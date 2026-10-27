@@ -962,7 +962,14 @@ pub struct RoomConsentOutcome {
 /// extension hosts have no operator credential custody, so consent controls
 /// stay absent there rather than emulated.
 pub fn room_consent_supported() -> bool {
-    running_in_tauri()
+    #[cfg(target_arch = "wasm32")]
+    {
+        running_in_tauri()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        false
+    }
 }
 
 fn consent_args(pairs: &[(&str, &str)]) -> Object {
@@ -1025,17 +1032,20 @@ pub async fn room_consent_authorize(
     })
 }
 
-/// Drop one frozen consent, or all of them (`None`) on navigation.
-pub fn room_consent_cancel(consent_id: Option<&str>) {
+/// Drop one frozen consent, or all of them (`None`) on navigation. The
+/// receipt confirms native invalidation, not reversal of an already-sent
+/// request. `None` off-Tauri; callers must not discard native errors.
+pub async fn room_consent_cancel(consent_id: Option<&str>) -> Option<Result<(), String>> {
     if !room_consent_supported() {
-        return;
+        return None;
     }
     let args = Object::new();
     let value = consent_id.map_or(JsValue::NULL, JsValue::from_str);
     let _ = Reflect::set(&args, &JsValue::from_str("consentId"), &value);
-    wasm_bindgen_futures::spawn_local(async move {
-        let _ = tauri_invoke("room_consent_cancel", &args).await;
-    });
+    Some(match tauri_invoke("room_consent_cancel", &args).await {
+        Ok(value) => consent_decode::<()>(&value),
+        Err(error) => Err(consent_error(error)),
+    })
 }
 
 /// Bootstrap `package_id` into the Local `room` as this daemon's owner's
