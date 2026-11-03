@@ -2,6 +2,7 @@
 //! and the room-file attach control.
 
 use leptos::prelude::*;
+use std::collections::HashMap;
 
 use super::access::access_allows_writes;
 use super::attachments::{upload_control_enabled, RoomAttachmentsState};
@@ -13,6 +14,81 @@ use crate::rooms::{OutboxItemState, Rooms};
 /// typing that happened while the send was in flight is never discarded.
 pub(super) fn should_clear_composer(current: &str, original_draft: &str) -> bool {
     !original_draft.is_empty() && current == original_draft
+}
+
+/// Stable identity for one room's unsent composer text. The daemon origin is
+/// part of the key because different servers may use the same room key.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(super) struct RoomDraftIdentity {
+    origin: String,
+    room_key: String,
+}
+
+pub(super) type RoomDrafts = HashMap<RoomDraftIdentity, String>;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct PendingRoomSend {
+    pub original_draft: String,
+    pub wire: String,
+    pub sent_at_seq: u64,
+}
+
+pub(super) type PendingRoomSends = HashMap<RoomDraftIdentity, PendingRoomSend>;
+
+pub(super) fn room_draft_identity(
+    origin: String,
+    room_key: Option<String>,
+) -> Option<RoomDraftIdentity> {
+    room_key.map(|room_key| RoomDraftIdentity { origin, room_key })
+}
+
+/// Save the visible draft under its old room before loading the new room's
+/// draft. A missing room only hides the text; it never discards it.
+pub(super) fn transition_room_draft(
+    drafts: &mut RoomDrafts,
+    current: &mut Option<RoomDraftIdentity>,
+    visible: &mut String,
+    next: Option<RoomDraftIdentity>,
+) {
+    if *current == next {
+        return;
+    }
+    if let Some(previous) = current.as_ref() {
+        drafts.insert(previous.clone(), visible.clone());
+    }
+    *visible = next
+        .as_ref()
+        .and_then(|identity| drafts.get(identity).cloned())
+        .unwrap_or_default();
+    *current = next;
+}
+
+/// Clear a sent draft only in the room that admitted it. The visible value is
+/// used when that room is open; otherwise its saved value is checked. This
+/// prevents an older completion from clearing another room's composer.
+pub(super) fn clear_confirmed_room_draft(
+    drafts: &mut RoomDrafts,
+    active: Option<&RoomDraftIdentity>,
+    visible: &mut String,
+    sent_room: &RoomDraftIdentity,
+    original_draft: &str,
+) -> bool {
+    let current = if active == Some(sent_room) {
+        visible.as_str()
+    } else {
+        drafts
+            .get(sent_room)
+            .map(String::as_str)
+            .unwrap_or_default()
+    };
+    if !should_clear_composer(current, original_draft) {
+        return false;
+    }
+    drafts.insert(sent_room.clone(), String::new());
+    if active == Some(sent_room) {
+        visible.clear();
+    }
+    true
 }
 
 pub(super) fn normalized_message_body(draft: &str) -> String {
@@ -248,5 +324,111 @@ mod tests {
         assert!(!message_send_admitted(true, false, true, "hello"));
         assert!(!message_send_admitted(false, true, true, "hello"));
         assert!(message_send_admitted(false, false, true, " hello "));
+    }
+
+    #[test]
+    fn room_drafts_restore_only_for_their_origin_and_key() {
+        let room_a = room_draft_identity("https://one.example".into(), Some("a".into()));
+        let room_b = room_draft_identity("https://one.example".into(), Some("b".into()));
+        let other_server = room_draft_identity("https://two.example".into(), Some("a".into()));
+        let mut drafts = RoomDrafts::new();
+        let mut current = room_a.clone();
+        let mut visible = "draft A".to_string();
+
+        transition_room_draft(&mut drafts, &mut current, &mut visible, room_b.clone());
+        assert_eq!(visible, "");
+        visible = "draft B".into();
+        transition_room_draft(&mut drafts, &mut current, &mut visible, room_a.clone());
+        assert_eq!(visible, "draft A");
+        transition_room_draft(&mut drafts, &mut current, &mut visible, room_b);
+        assert_eq!(visible, "draft B");
+        transition_room_draft(&mut drafts, &mut current, &mut visible, other_server);
+        assert_eq!(visible, "");
+    }
+
+    #[test]
+    fn room_draft_survives_identity_loss_and_loading() {
+        let room = room_draft_identity("https://one.example".into(), Some("a".into()));
+        let mut drafts = RoomDrafts::new();
+        let mut current = room.clone();
+        let mut visible = "keep me".to_string();
+
+        transition_room_draft(&mut drafts, &mut current, &mut visible, None);
+        assert_eq!(visible, "");
+        transition_room_draft(&mut drafts, &mut current, &mut visible, room);
+        assert_eq!(visible, "keep me");
+    }
+
+    #[test]
+    fn pending_send_completion_clears_only_its_room_draft() {
+        let room_a = room_draft_identity("https://one.example".into(), Some("a".into())).unwrap();
+        let room_b = room_draft_identity("https://one.example".into(), Some("b".into())).unwrap();
+        let mut drafts = RoomDrafts::from([
+            (room_a.clone(), "same text".into()),
+            (room_b.clone(), "same text".into()),
+        ]);
+        let mut pending_sends = PendingRoomSends::from([(
+            room_a.clone(),
+            PendingRoomSend {
+                original_draft: "same text".into(),
+                wire: "same text".into(),
+                sent_at_seq: 0,
+            },
+        )]);
+        let mut visible = "same text".into();
+        let mut current = Some(room_b.clone());
+
+        assert!(pending_sends.contains_key(&room_a));
+        assert!(!pending_sends.contains_key(&room_b));
+
+        assert!(clear_confirmed_room_draft(
+            &mut drafts,
+            Some(&room_b),
+            &mut visible,
+            &room_a,
+            "same text",
+        ));
+        assert_eq!(visible, "same text");
+        assert_eq!(drafts.get(&room_b).map(String::as_str), Some("same text"));
+        assert_eq!(drafts.get(&room_a).map(String::as_str), Some(""));
+        transition_room_draft(
+            &mut drafts,
+            &mut current,
+            &mut visible,
+            Some(room_a.clone()),
+        );
+        assert_eq!(visible, "");
+        pending_sends.remove(&room_a);
+        assert!(!pending_sends.contains_key(&room_a));
+        assert!(!clear_confirmed_room_draft(
+            &mut drafts,
+            current.as_ref(),
+            &mut visible,
+            &room_a,
+            "same text",
+        ));
+    }
+
+    #[test]
+    fn successful_send_clears_an_unchanged_same_room_draft_once() {
+        let room = room_draft_identity("https://one.example".into(), Some("a".into())).unwrap();
+        let mut drafts = RoomDrafts::from([(room.clone(), "sent text".into())]);
+        let mut visible = "sent text".into();
+
+        assert!(clear_confirmed_room_draft(
+            &mut drafts,
+            Some(&room),
+            &mut visible,
+            &room,
+            "sent text",
+        ));
+        assert_eq!(visible, "");
+        assert!(!clear_confirmed_room_draft(
+            &mut drafts,
+            Some(&room),
+            &mut visible,
+            &room,
+            "sent text",
+        ));
     }
 }
