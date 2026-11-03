@@ -35,6 +35,13 @@ pub(super) struct PendingRoomSend {
 
 pub(super) type PendingRoomSends = HashMap<RoomDraftIdentity, PendingRoomSend>;
 
+pub(super) fn retire_pending_room_send(
+    pending: &mut PendingRoomSends,
+    room: &RoomDraftIdentity,
+) -> bool {
+    pending.remove(room).is_some()
+}
+
 pub(super) fn room_draft_identity(
     origin: String,
     room_key: Option<String>,
@@ -430,5 +437,61 @@ mod tests {
             &room,
             "sent text",
         ));
+    }
+
+    #[test]
+    fn pending_http_failure_after_navigation_restores_retryable_draft() {
+        let room_a = room_draft_identity("https://one.example".into(), Some("a".into())).unwrap();
+        let room_b = room_draft_identity("https://one.example".into(), Some("b".into())).unwrap();
+        let mut drafts = RoomDrafts::from([
+            (room_a.clone(), "possibly sent".into()),
+            (room_b.clone(), "draft B".into()),
+        ]);
+        let mut pending = PendingRoomSends::from([(
+            room_a.clone(),
+            PendingRoomSend {
+                original_draft: "possibly sent".into(),
+                wire: "possibly sent".into(),
+                sent_at_seq: 0,
+            },
+        )]);
+        let mut active = Some(room_a.clone());
+        let mut visible = "possibly sent".into();
+        let sent_generation = 7;
+
+        // A's request is fenced when navigation advances its generation. Its
+        // failure may arrive while B is open, so keep the draft but retire the
+        // latch that could otherwise leave A disabled on return.
+        assert!(retire_pending_room_send(&mut pending, &room_a));
+        assert!(!crate::rooms::room_request_is_current(
+            sent_generation,
+            sent_generation + 1,
+            "a",
+            Some("b"),
+        ));
+        let late_http_failure = crate::rooms::room_request_is_current(
+            sent_generation,
+            sent_generation + 1,
+            "a",
+            Some("b"),
+        )
+        .then_some("message failed: HTTP 500");
+        assert_eq!(late_http_failure, None);
+        transition_room_draft(&mut drafts, &mut active, &mut visible, Some(room_b.clone()));
+        assert_eq!(visible, "draft B");
+        assert!(!pending.contains_key(&room_a));
+
+        // The late A failure is discarded by Rooms' generation guard. A new
+        // generation for the same identity restores text with no stale latch.
+        transition_room_draft(&mut drafts, &mut active, &mut visible, Some(room_a.clone()));
+        assert!(!crate::rooms::room_request_is_current(
+            sent_generation,
+            sent_generation + 2,
+            "a",
+            Some("a"),
+        ));
+        assert_eq!(visible, "possibly sent");
+        assert!(!pending.contains_key(&room_a));
+        assert!(message_send_admitted(false, false, true, &visible));
     }
 }

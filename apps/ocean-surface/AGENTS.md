@@ -598,7 +598,10 @@ ships today and are updated slice by slice.
   so stale transcript, access, and tail state cannot leak across room identity.
 - Top-level composer drafts are keyed by daemon origin and room key. Switching
   rooms, losing the selected identity, or waiting for a room to load preserves
-  each draft; a confirmed send clears only that room's unchanged draft.
+  each draft; a confirmed send clears only that room's unchanged draft. Room
+  navigation retires its pending confirmation because the generation fence
+  drops stale POST results; the draft remains available when the outcome is
+  unknown.
   Verify with `cargo test -p ocean-surface-ui rooms_workspace::composer::tests`.
 - Read PATCH dedupe uses confirmed cursors and the current request ticket. A
   clamped acknowledgement remains retryable; a completion clears only its own

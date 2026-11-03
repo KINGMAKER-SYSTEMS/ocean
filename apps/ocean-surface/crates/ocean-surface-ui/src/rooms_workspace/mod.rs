@@ -48,9 +48,9 @@ use attachments::{AttachmentInput, FilesPanel, RoomAttachmentsState};
 use banners::{AccessStateBanner, InviteResult, OutboxPanel, PendingInviteBanner};
 use composer::{
     clear_confirmed_room_draft, message_send_admitted, normalized_message_body,
-    outbox_matches_failed_message, room_draft_identity, should_clear_composer,
-    transition_room_draft, ChannelComposer, PendingRoomSend, PendingRoomSends, RoomDraftIdentity,
-    RoomDrafts,
+    outbox_matches_failed_message, retire_pending_room_send, room_draft_identity,
+    should_clear_composer, transition_room_draft, ChannelComposer, PendingRoomSend,
+    PendingRoomSends, RoomDraftIdentity, RoomDrafts,
 };
 use format::{author_kind_badge, avatar_identity_class, canonical_wire_clock_time, today_day_key};
 use members::MembersPanel;
@@ -565,17 +565,23 @@ pub fn RoomsWorkspace(
     // allowed only if the operator has not edited the original draft.
     let send_in_flight = RwSignal::new(false);
 
-    // The visible latch follows the active room. Pending confirmations stay
-    // keyed to their originating room so navigation cannot borrow or clear a
-    // different room's draft.
+    // The visible latch follows the active room. A navigation advances the
+    // Rooms generation and fences the old POST result, so retire that room's
+    // pending latch while its draft remains available if its outcome is unknown.
     Effect::new(
-        move |previous: Option<(Option<RoomDraftIdentity>, Option<u64>)>| {
+        move |previous: Option<(Option<RoomDraftIdentity>, u64, Option<u64>)>| {
             let current = (
                 room_draft_identity(rooms.url.get(), rooms.open_key.get()),
+                rooms.generation_snapshot(),
                 selected_thread_root_seq.get(),
             );
-            if let Some((previous_room, previous_root)) = previous {
-                if previous_room != current.0 {
+            if let Some((previous_room, previous_generation, previous_root)) = previous {
+                if previous_room != current.0 || previous_generation != current.1 {
+                    if let Some(previous_room) = previous_room.as_ref() {
+                        pending_room_sends.update(|pending| {
+                            retire_pending_room_send(pending, previous_room);
+                        });
+                    }
                     send_in_flight.set(current.0.as_ref().is_some_and(|identity| {
                         pending_room_sends.with_untracked(|pending| pending.contains_key(identity))
                     }));
@@ -583,7 +589,7 @@ pub fn RoomsWorkspace(
                     thread_last_sent_draft.set(String::new());
                     thread_last_sent_wire.set(String::new());
                     thread_last_sent_seq.set(0);
-                } else if previous_root != current.1 {
+                } else if previous_root != current.2 {
                     thread_send_in_flight.set(false);
                     thread_last_sent_draft.set(String::new());
                     thread_last_sent_wire.set(String::new());
