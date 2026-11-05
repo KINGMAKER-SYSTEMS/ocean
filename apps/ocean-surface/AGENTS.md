@@ -46,6 +46,11 @@ Capability Matrix). The load-bearing rules:
   browser commands (Cmd/Ctrl+P and Cmd/Ctrl+Shift+F remain native-only; their hints are absent on web/PWA) — never
   layout, panels, or navigation. Do not reintroduce a web-only deck or per-host
   panel markup.
+- Below 900px, an open workspace dismisses on its backdrop or unhandled Escape,
+  after higher reveals have had priority, and restores focus to the header
+  toggle. Docked workspaces stay open on Escape. Collapsed workspace content is
+  inert and hidden from accessibility traversal; the toggle exposes its current
+  expanded state and controls relationship. Existing pane state and tabs persist.
 - Shared-file discipline (`app.rs`): smallest hunks, committed promptly;
   NEVER reference an uncommitted module from a shared file — `mod x;` +
   usage lands only when `x` compiles with passing tests.
@@ -141,8 +146,10 @@ Native surface direction:
   and XDG state, Ocean/Codex/Claude auth, room/title databases, agent/plugin/
   assistant/skill roots and prompt capture. SQLite `:memory:`, in-memory `file:`
   URIs (including parsed `mode=memory`) and absolute `file:` URIs retain their
-  original bytes; relative disk `file:` URIs fail before spawn and require an
-  explicit absolute URI. Verify with `cargo test --lib daemon_child`.
+  original bytes, with absoluteness judged on SQLite's percent-decoded path
+  (`file:%2Ftmp%2Frooms.db` names the absolute /tmp/rooms.db); relative disk
+  `file:` URIs fail before spawn and require an explicit absolute URI. Verify
+  with `cargo test --lib daemon_child`.
   Home/profile also owns native daemon logs. Verify native launch with
   `cargo test --lib daemon_` from `crates/ocean-tauri`.
   A native-process `OCEAN_DAEMON_LOG` may select an absolute log file for
@@ -326,7 +333,6 @@ token to browser code, bundle it, or cache it in client storage.
   POST answer has not arrived yet. Messages with staged images, voice
   prompts, and sends with no acknowledged turn take the queue instead. Stop,
   New Session and a session switch clear pending steers with the queue.
->>>>>>> origin/main
 - The main composer never refuses a send because a turn is running. A prompt
   that cannot steer (see above), sent while earlier prompts are queued, or
   while the head of the queue is waiting out a busy daemon goes into
@@ -524,7 +530,8 @@ Web surface session UI:
   open (Council, Rooms, Sessions, Floor, phone dialer, LiveKit controls)
   closes the Island. Window Escape closes exactly one topmost surface in visual
   z-order: Council → Island → Rooms → Sessions → Floor → phone dialer →
-  LiveKit. The workspace pane is permanent furniture, not a reveal.
+  LiveKit, then the compact workspace overlay. The docked workspace pane is
+  permanent furniture, not a reveal.
 
 ## Rooms Contract
 
@@ -558,6 +565,9 @@ ships today and are updated slice by slice.
 - Every successful `GET /v1/rooms/persistent/{key}` carries a required
   `RoomAccessProjection`, including explicit `Local` for G1 rooms. Surface
   `None` means loading or no open room; it is never a local-room discriminator.
+- A selected room without a loaded record renders its existing loading or failure
+  status in the center pane with a polite status announcement. An unselected
+  canvas stays empty; rendering adds no requests or automatic retries.
 - Room transcripts hydrate once, then tail only the room-scoped SSE endpoint
   `GET /v1/rooms/persistent/{key}/events` with sequence resume. Subscribe to
   both `room_message` and `room_access` immediately: messages alone advance the
@@ -586,6 +596,13 @@ ships today and are updated slice by slice.
 - Decoded room-tail frames mutate state only after one shared generation+room
   admission check. Opening and closing a room share one synchronous reset path
   so stale transcript, access, and tail state cannot leak across room identity.
+- Top-level composer drafts are keyed by daemon origin and room key. Switching
+  rooms, losing the selected identity, or waiting for a room to load preserves
+  each draft; a confirmed send clears only that room's unchanged draft. Room
+  navigation retires its pending confirmation because the generation fence
+  drops stale POST results; the draft remains available when the outcome is
+  unknown.
+  Verify with `cargo test -p ocean-surface-ui rooms_workspace::composer::tests`.
 - Read PATCH dedupe uses confirmed cursors and the current request ticket. A
   clamped acknowledgement remains retryable; a completion clears only its own
   in-flight request.
@@ -787,13 +804,24 @@ ships today and are updated slice by slice.
 - The Rooms rail groups rooms by `Room.workspace_root` (`group_rail_rooms` in
   `room_list.rs`; derived, never stored): first-seen root order, daemon order
   within a group, unbound rooms last under "Other rooms". Each group is a static
-  `role="group"` labelled by a non-interactive header showing the full,
-  case-preserved root (wrapping, never a basename or ellipsis) and a live count.
+  `role="group"` labelled by a non-interactive header showing a case-preserved folder
+  name and a live count.
+  Full roots remain in the label title; shared folder names (and the reserved
+  "Other rooms" name) render full roots without ellipsis. Labels re-read the
+  live roster so paging/refresh updates ambiguity without remounting groups.
   Headers are not buttons and groups never collapse, so the listbox keeps one
   roving tab stop and Arrow/Home/End over the flattened grouped order
   (`rail_room_keys`). Header ids derive from the root, not list position. A
   shared root is a folder binding, not a daemon Project identity; do not call
   these project groups.
+- Opening the compact room drawer focuses the existing listbox tab stop (the
+  selected room, otherwise the first room), falling back to Add room only when
+  no room option is available. Create/Join entries retain their input focus.
+  Deferred focus checks live component signals before use. Navigation focus is
+  ignored after drawer dismissal, and form focus cannot target a cancelled or
+  replaced entry. Nonempty refreshes retain the listbox and room-id-keyed
+  options; names and mute state read the live rows so updates preserve focus
+  without leaving stale labels or unread styling.
 - Room-list paging (OCEAN-250): `GET /v1/rooms/persistent` serves one bounded
   page (`limit` default 100, max 1000; `next_cursor` / `has_more`). The rail
   renders the daemon-default first page with no query and, while the daemon
@@ -832,6 +860,17 @@ ships today and are updated slice by slice.
   composers), `format.rs`, and `access.rs`, each with its own tests. Drafts,
   send latches, and mention state stay owned by `RoomsWorkspace` because the
   center rail and the drawer re-render on room state.
+- At 650px and below, Rooms with no selected room and no pending invitation
+  shows the existing room list full-width in normal flow. It hides the empty
+  center, redundant mobile nav and drawer backdrop. A loaded conversation uses
+  one header with Back at the leading edge, returning to the full list and
+  restoring lost keyboard focus to its existing tab stop; its
+  duplicate mobile title bar and decorative hash are hidden. The folder label
+  stays in Room details on compact screens so the room name has priority. Loading and pending
+  invitations retain list-toggle navigation. Pending invitations retain their
+  confirmation in the center. No automatic room selection or read advance. The
+  center flex child keeps `min-height: 0` so mobile transcripts scroll within
+  the viewport and cannot push the composer below the screen.
 - Room details drawer (design §5, executed by the port of
   Risingtides-dev/ocean-surface#240): there is no permanent right rail.
   `.rooms-workspace__right` is one fixed slide-over at every width — 380px,

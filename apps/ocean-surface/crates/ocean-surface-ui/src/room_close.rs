@@ -475,7 +475,7 @@ impl RoomCloseState {
 /// next thing a keyboard reader would reach for. Deferred one frame because
 /// the reset that empties the center rail renders on the next tick, and best
 /// effort: no list, no move.
-fn focus_room_list() {
+pub(crate) fn focus_room_list() {
     request_animation_frame(move || {
         let Some(document) = web_sys::window().and_then(|window| window.document()) else {
             return;

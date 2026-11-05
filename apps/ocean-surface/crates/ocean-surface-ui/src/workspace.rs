@@ -929,6 +929,9 @@ pub fn WorkspacePane(
     view! {
         <aside
             class="workspace"
+            id="ocean-workspace"
+            inert=move || (!open.get()).then_some("")
+            aria-hidden=move || (!open.get()).to_string()
             class:is-collapsed=move || !open.get()
             class:files-active=move || files_active.get()
             role="complementary"

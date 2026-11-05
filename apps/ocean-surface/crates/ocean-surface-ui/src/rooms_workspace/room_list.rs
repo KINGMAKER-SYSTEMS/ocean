@@ -15,6 +15,15 @@ enum RoomEntry {
     Join,
 }
 
+// A deferred focus belongs to the entry/navigation intent that scheduled it.
+fn entry_focus_is_current(
+    requested: Option<RoomEntry>,
+    current: Option<RoomEntry>,
+    drawer_open: bool,
+) -> bool {
+    requested == current && (drawer_open || requested.is_some())
+}
+
 // ── Workspace-root display helpers (pure, unit-testable) ───────────────────
 
 /// True for an absolute POSIX path or a drive/UNC-rooted Windows path. Used
@@ -169,6 +178,27 @@ pub(super) fn rail_group_display_label(label: Option<&str>) -> String {
     }
 }
 
+/// Compact folder name when it identifies one loaded workspace. Collisions
+/// retain the full root, including a folder named like the unbound bucket.
+/// Recompute from the live roster so pagination and refresh cannot leave two
+/// already-mounted groups with an ambiguous label.
+fn rail_group_compact_label(label: Option<&str>, rooms: &[Room]) -> String {
+    let full = rail_group_display_label(label);
+    let Some(root) = label else { return full };
+    let basename = root_basename(&full);
+    let collides = basename == "Other rooms"
+        || rooms.iter().any(|room| {
+            room.workspace_root.as_deref().is_some_and(|other| {
+                other != root && root_basename(&rail_group_display_label(Some(other))) == basename
+            })
+        });
+    if collides {
+        full
+    } else {
+        basename.to_string()
+    }
+}
+
 /// Header DOM id derived from the root's bytes, not list position, so keyed
 /// groups that reorder never collide.
 pub(super) fn rail_group_header_dom_id(label: Option<&str>) -> String {
@@ -206,6 +236,9 @@ pub(super) fn RoomListRail(
     /// Leaves the Rooms workspace entirely; see `RoomsWorkspace::on_close`.
     on_close: Option<Callback<()>>,
 ) -> impl IntoView {
+    // Keep the keyed list mounted across nonempty background refreshes.
+    let list_empty = Memo::new(move |_| rooms.list.with(Vec::is_empty));
+    let list_error = Memo::new(move |_| rooms.rooms_error.get());
     let new_room_name = RwSignal::new(String::new());
     let entry = RwSignal::new(None::<RoomEntry>);
     let invitation = RwSignal::new(String::new());
@@ -225,20 +258,41 @@ pub(super) fn RoomListRail(
     Effect::new(move |_| {
         let mode = entry.get();
         if show_left_rail.get() || mode.is_some() {
-            request_animation_frame(move || match mode {
-                Some(RoomEntry::Create) => {
-                    if let Some(input) = create_input_ref.get() {
-                        let _ = input.focus();
-                    }
+            request_animation_frame(move || {
+                let (Some(current_entry), Some(drawer_open)) = (
+                    entry.try_get_untracked(),
+                    show_left_rail.try_get_untracked(),
+                ) else {
+                    return;
+                };
+                if !entry_focus_is_current(mode, current_entry, drawer_open) {
+                    return;
                 }
-                Some(RoomEntry::Join) => {
-                    if let Some(input) = invite_input_ref.get() {
-                        let _ = input.focus();
+                match mode {
+                    Some(RoomEntry::Create) => {
+                        if let Some(input) = create_input_ref.get() {
+                            let _ = input.focus();
+                        }
                     }
-                }
-                None => {
-                    if let Some(summary) = entry_summary_ref.get() {
-                        let _ = summary.focus();
+                    Some(RoomEntry::Join) => {
+                        if let Some(input) = invite_input_ref.get() {
+                            let _ = input.focus();
+                        }
+                    }
+                    None => {
+                        let option = web_sys::window()
+                            .and_then(|window| window.document())
+                            .and_then(|doc| {
+                                doc.query_selector(
+                                    "#rooms-workspace-room-list [role=\"listbox\"] [tabindex=\"0\"]",
+                                ).ok().flatten()
+                            })
+                            .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok());
+                        if let Some(option) = option {
+                            let _ = option.focus();
+                        } else if let Some(summary) = entry_summary_ref.get() {
+                            let _ = summary.focus();
+                        }
                     }
                 }
             });
@@ -410,8 +464,8 @@ pub(super) fn RoomListRail(
                     }
                 >
                 {move || {
-                    let list = rooms.list.get();
-                    let error = rooms.rooms_error.get();
+                    let empty = list_empty.get();
+                    let error = list_error.get();
                     if let Some(error) = error {
                         view! {
                             <div
@@ -421,7 +475,7 @@ pub(super) fn RoomListRail(
                                 {format!("Unable to load rooms: {error}")}
                             </div>
                         }.into_any()
-                    } else if list.is_empty()
+                    } else if empty
                         && (rooms.rooms_loading.get() || !rooms.rooms_loaded.get())
                     {
                         view! {
@@ -429,7 +483,7 @@ pub(super) fn RoomListRail(
                                 "Loading…"
                             </div>
                         }.into_any()
-                    } else if list.is_empty() {
+                    } else if empty {
                         view! {
                             <div class="rooms-workspace__left-empty">
                                 "No rooms yet."
@@ -656,19 +710,25 @@ fn rail_group_view(
 ) -> impl IntoView {
     let header_id = rail_group_header_dom_id(label.as_deref());
     let labelled_by = header_id.clone();
-    let display = rail_group_display_label(label.as_deref());
+    let full = rail_group_display_label(label.as_deref());
+    let display_label = label.clone();
+    let display = move || {
+        rooms
+            .list
+            .with(|list| rail_group_compact_label(display_label.as_deref(), list))
+    };
     let count_label = label.clone();
     view! {
         <div class="rooms-workspace__group" role="group" aria-labelledby=labelled_by>
             <div class="rooms-workspace__group-head" id=header_id>
-                <span class="rooms-workspace__group-label">{display}</span>
+                <span class="rooms-workspace__group-label" title=full>{display}</span>
                 <span class="rooms-workspace__group-count">
                     {move || rooms.list.with(|l| rail_group_rooms(l, &count_label).len())}
                 </span>
             </div>
             <For
                 each=move || rooms.list.with(|l| rail_group_rooms(l, &label))
-                key=|r: &Room| (r.id.clone(), r.participants.len(), r.updated_at.clone(), r.muted)
+                key=|r: &Room| r.id.clone()
                 children=move |room: Room| rail_room_option(room, rooms, show_left_rail)
             />
         </div>
@@ -693,11 +753,17 @@ fn rail_room_option(room: Room, rooms: Rooms, show_left_rail: RwSignal<bool>) ->
             .as_deref()
             == Some(&*key_tab)
     };
-    let muted = room.muted;
+    let key_live = key2.clone();
+    let live_room = Memo::new(move |_| {
+        rooms
+            .list
+            .with(|list| list.iter().find(|row| row.id == key_live).cloned())
+    });
+    let muted = move || live_room.with(|row| row.as_ref().is_some_and(|row| row.muted));
     // Muted rooms stay quiet in the list; their mentions still reach the inbox.
     // Memo, not a closure: both the bold modifier and the dot read it.
     let unread = Memo::new(move |_| {
-        !muted
+        !muted()
             && rooms
                 .read_summaries
                 .with(|summaries| crate::rooms::room_has_durable_unread(summaries.get(&key_unread)))
@@ -719,7 +785,7 @@ fn rail_room_option(room: Room, rooms: Rooms, show_left_rail: RwSignal<bool>) ->
             }
         >
             <span class="rooms-workspace__room-hash">"#"</span>
-            <span class="rooms-workspace__room-name">{room.name.clone()}</span>
+            <span class="rooms-workspace__room-name">{move || live_room.with(|row| row.as_ref().map(|row| row.name.clone()).unwrap_or_default())}</span>
             <Show when=move || unread.get()>
                 <span
                     class="rooms-workspace__room-unread"
@@ -870,6 +936,27 @@ mod tests {
     }
 
     #[test]
+    fn deferred_entry_focus_rejects_closed_navigation_and_replaced_forms() {
+        assert!(entry_focus_is_current(None, None, true));
+        assert!(!entry_focus_is_current(None, None, false));
+        for mode in [RoomEntry::Create, RoomEntry::Join] {
+            assert!(entry_focus_is_current(Some(mode), Some(mode), false));
+            assert!(!entry_focus_is_current(Some(mode), None, true));
+            assert!(!entry_focus_is_current(None, Some(mode), true));
+        }
+        assert!(!entry_focus_is_current(
+            Some(RoomEntry::Create),
+            Some(RoomEntry::Join),
+            true,
+        ));
+        assert!(!entry_focus_is_current(
+            Some(RoomEntry::Join),
+            Some(RoomEntry::Create),
+            true,
+        ));
+    }
+
+    #[test]
     fn next_focus_ignores_non_nav_keys_and_empty_list() {
         let k = keys(&["a"]);
         assert_eq!(room_list_next_focus(&k, Some("a"), "Enter"), None);
@@ -989,6 +1076,41 @@ mod tests {
         assert_eq!(rail_group_display_label(Some("/w/")), "/w");
         assert_eq!(rail_group_display_label(Some("/")), "/");
         assert_eq!(rail_group_display_label(None), "Other rooms");
+    }
+
+    #[test]
+    fn compact_group_labels_preserve_case_roots_and_windows_folders() {
+        for (root, expected) in [
+            ("/Users/Me/Project", "Project"),
+            ("/work/日本語/", "日本語"),
+            (r"C:\Users\Me\Ocean", "Ocean"),
+            ("/", "/"),
+            ("/work/Other rooms", "/work/Other rooms"),
+        ] {
+            assert_eq!(rail_group_compact_label(Some(root), &[]), expected);
+        }
+        assert_eq!(rail_group_compact_label(None, &[]), "Other rooms");
+    }
+
+    #[test]
+    fn compact_group_labels_expand_and_shrink_with_live_collisions() {
+        let mut rooms = vec![
+            rail_room("a", Some("/clients/acme/web")),
+            rail_room("b", Some("/clients/acme/web")),
+        ];
+        assert_eq!(
+            rail_group_compact_label(Some("/clients/acme/web"), &rooms),
+            "web"
+        );
+        rooms.push(rail_room("c", Some("/archive/acme/web")));
+        for root in ["/clients/acme/web", "/archive/acme/web"] {
+            assert_eq!(rail_group_compact_label(Some(root), &rooms), root);
+        }
+        rooms.pop();
+        assert_eq!(
+            rail_group_compact_label(Some("/clients/acme/web"), &rooms),
+            "web"
+        );
     }
 
     #[test]

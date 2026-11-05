@@ -1509,6 +1509,12 @@ fn workspace_default_open(stored: Option<&str>, viewport_w: f64) -> bool {
     }
 }
 
+/// Only the compact overlay participates in dismissal; the docked workspace
+/// remains persistent furniture. Unknown viewport dimensions fail closed.
+fn workspace_overlay_can_dismiss(open: bool, viewport_w: f64) -> bool {
+    open && viewport_w.is_finite() && viewport_w > 0.0 && viewport_w < 900.0
+}
+
 #[component]
 pub fn App() -> impl IntoView {
     let daemon = Daemon::new(daemon_url_from_env());
@@ -1776,6 +1782,13 @@ pub fn App() -> impl IntoView {
             .and_then(|w| w.as_f64())
             .unwrap_or(0.0),
     ));
+    let workspace_toggle_ref = NodeRef::<leptos::html::Button>::new();
+    let dismiss_workspace = Callback::new(move |()| {
+        workspace_open.set(false);
+        if let Some(toggle) = workspace_toggle_ref.get() {
+            let _ = toggle.focus();
+        }
+    });
     // One-shot focus intent from the toggle-* commands: the pane
     // watches this and opens/focuses the matching tab, then resets to None.
     let workspace_focus: RwSignal<Option<WorkspaceFocus>> = RwSignal::new(None);
@@ -2289,7 +2302,16 @@ pub fn App() -> impl IntoView {
             Some(RevealSurface::Floor) => show_floor.set(false),
             Some(RevealSurface::PhoneDialer) => show_phone_dialer.set(false),
             Some(RevealSurface::LiveKit) => show_livekit_controls.set(false),
-            None => {}
+            None => {
+                let width = window().inner_width().ok().and_then(|w| w.as_f64());
+                if workspace_overlay_can_dismiss(
+                    workspace_open.get_untracked(),
+                    width.unwrap_or(f64::NAN),
+                ) {
+                    e.prevent_default();
+                    dismiss_workspace.run(());
+                }
+            }
         }
     });
     on_cleanup(move || _overlay_escape.remove());
@@ -2769,7 +2791,10 @@ pub fn App() -> impl IntoView {
                         <button
                             class="ocean-workspace-toggle"
                             type="button"
+                            node_ref=workspace_toggle_ref
                             aria-label="toggle workspace"
+                            aria-controls="ocean-workspace"
+                            aria-expanded=move || workspace_open.get().to_string()
                             title=move || if workspace_open.get() { "Hide workspace" } else { "Show workspace" }
                             on:click=move |_| workspace_open.update(|v| *v = !*v)
                         >
@@ -3203,6 +3228,13 @@ pub fn App() -> impl IntoView {
             // wide viewports and overlays below 900px. `focus_intent` carries
             // one-shot tab-focus intents from the toggle-* commands.
             <Show when=move || !show_rooms.get()>
+                <Show when=move || workspace_open.get()>
+                    <div
+                        class="workspace-backdrop"
+                        aria-hidden="true"
+                        on:click=move |_| dismiss_workspace.run(())
+                    ></div>
+                </Show>
                 <crate::workspace::WorkspacePane
                     daemon=daemon_for_workspace.get_value()
                     open=workspace_open
@@ -4344,6 +4376,16 @@ mod tests {
         assert_eq!(parse_deep_link("ocean://session/a/b"), None);
         // Empty input.
         assert_eq!(parse_deep_link(""), None);
+    }
+
+    #[test]
+    fn workspace_overlay_dismissal_respects_open_state_and_docking_boundary() {
+        assert!(super::workspace_overlay_can_dismiss(true, 390.0));
+        assert!(super::workspace_overlay_can_dismiss(true, 899.0));
+        assert!(!super::workspace_overlay_can_dismiss(false, 390.0));
+        for width in [900.0, 1280.0, 0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(!super::workspace_overlay_can_dismiss(true, width));
+        }
     }
 
     #[test]
