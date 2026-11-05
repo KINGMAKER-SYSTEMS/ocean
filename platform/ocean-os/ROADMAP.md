@@ -9,10 +9,15 @@ approved design or permission to alter public contracts.
 
 ## Near-term integration gaps
 
-- [ ] Decide the Tauri effective harness classification. `ocean-agent` now maps
+- [ ] Decide the Tauri effective harness classification. `ocean-agent` maps
       `client_type = "surface-tauri"` to the `TAURI` prompt identity and native-
-      shell component guidance, while the daemon harness seam intentionally
-      retains CLI-compatible hashline/artifact gates pending cross-repo policy.
+      shell component guidance. Proposed answer, pending the operator's yes on
+      KINGMAKER-SYSTEMS/ocean#179 (the port of Risingtides-dev/ocean-os#525):
+      the daemon harness seam maps `surface-tauri` to the Web profile it already
+      gives `surface-web` and `surface-extension`, since all three host the one
+      shared Leptos/WASM Surface; until that PR merges, Tauri turns run the CLI
+      fallback (hashline-tagged reads and `hashline_edit` on). Merging it is the
+      decision; remove this item then.
 - [ ] Keep cross-repository session, voice, component, and room contracts under
       executable drift checks rather than prose-only synchronization.
 - [ ] Reach the production-grade finish line in
