@@ -9,10 +9,6 @@ approved design or permission to alter public contracts.
 
 ## Near-term integration gaps
 
-- [ ] Decide the Tauri effective harness classification. `ocean-agent` now maps
-      `client_type = "surface-tauri"` to the `TAURI` prompt identity and native-
-      shell component guidance, while the daemon harness seam intentionally
-      retains CLI-compatible hashline/artifact gates pending cross-repo policy.
 - [ ] Keep cross-repository session, voice, component, and room contracts under
       executable drift checks rather than prose-only synchronization.
 - [ ] Reach the production-grade finish line in

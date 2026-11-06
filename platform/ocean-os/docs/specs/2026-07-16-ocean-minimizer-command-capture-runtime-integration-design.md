@@ -212,7 +212,7 @@ Policy after implementation:
 
 The compatibility-fallback row is an explicit policy decision, not an accidental enum consequence: those turns already receive the CLI artifact capability and M2 gives them the same recoverable model-context reduction. Tests must name `room`, `heartbeat`, missing, unknown, and unmapped tags individually. The runtime additionally requires artifact capability and a bound session store, so minimization can never produce an unrecoverable rewrite. `PromptControl::without_tools()` remains the stronger fail-closed boundary.
 
-This does not classify `surface-tauri` as a new profile; that tag retains the daemon's current CLI compatibility fallback, including the new M2 gate, until cross-repository policy changes.
+`surface-tauri` still adds no new profile; the cross-repository policy change has landed (PR #179, `e6dc81c6`, mapping that tag to the Web harness profile in `crates/ocean-daemon/src/harness_profile.rs`), so its M2 gate follows the Web row above rather than the CLI compatibility-fallback row.
 
 ## 4. Explicit exclusions
 

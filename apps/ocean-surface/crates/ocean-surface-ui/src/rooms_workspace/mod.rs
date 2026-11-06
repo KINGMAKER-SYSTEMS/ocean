@@ -47,8 +47,10 @@ use agents::{ConsentSheet, InvokeMenu};
 use attachments::{AttachmentInput, FilesPanel, RoomAttachmentsState};
 use banners::{AccessStateBanner, InviteResult, OutboxPanel, PendingInviteBanner};
 use composer::{
-    message_send_admitted, normalized_message_body, outbox_matches_failed_message,
-    should_clear_composer, ChannelComposer,
+    clear_confirmed_room_draft, message_send_admitted, normalized_message_body,
+    outbox_matches_failed_message, retire_pending_room_send, room_draft_identity,
+    should_clear_composer, transition_room_draft, ChannelComposer, PendingRoomSend,
+    PendingRoomSends, RoomDraftIdentity, RoomDrafts,
 };
 use format::{author_kind_badge, avatar_identity_class, canonical_wire_clock_time, today_day_key};
 use members::MembersPanel;
@@ -198,6 +200,31 @@ pub fn RoomsWorkspace(
 
     // ── Center-rail: composer signal + focus/scroll refs ────────────────
     let composer = RwSignal::new(String::new());
+    let room_drafts = RwSignal::new(RoomDrafts::new());
+    let pending_room_sends = RwSignal::new(PendingRoomSends::new());
+    let active_draft_room = RwSignal::new(room_draft_identity(
+        rooms.url.get_untracked(),
+        rooms.open_key.get_untracked(),
+    ));
+    Effect::new(move |_| {
+        let next = room_draft_identity(rooms.url.get(), rooms.open_key.get());
+        let mut current = active_draft_room.get_untracked();
+        let mut visible = composer.get_untracked();
+        let mut drafts = room_drafts.get_untracked();
+        transition_room_draft(&mut drafts, &mut current, &mut visible, next);
+        room_drafts.set(drafts);
+        composer.set(visible);
+        active_draft_room.set(current);
+    });
+    Effect::new(move |_| {
+        let Some(identity) = active_draft_room.get() else {
+            return;
+        };
+        let visible = composer.get();
+        room_drafts.update(|drafts| {
+            drafts.insert(identity, visible);
+        });
+    });
     let thread_composer = RwSignal::new(String::new());
     let selected_thread_root_seq = RwSignal::new(None::<u64>);
     // Team-platform P6: the right rail shows search when no thread is open.
@@ -540,44 +567,59 @@ pub fn RoomsWorkspace(
     // ── Composer: one admitted send at a time. Keep both the exact draft and
     // the normalized wire body: daemon messages are trimmed, while clearing is
     // allowed only if the operator has not edited the original draft.
-    let last_sent_draft = RwSignal::new(String::new());
-    let last_sent_wire = RwSignal::new(String::new());
-    let last_sent_seq = RwSignal::new(0u64);
     let send_in_flight = RwSignal::new(false);
 
-    // A completion from a prior room/thread is intentionally discarded by the
-    // Rooms generation guard. Reset the matching local latch on context changes
-    // so the newly selected conversation can never inherit a disabled composer.
-    Effect::new(move |previous: Option<(Option<String>, Option<u64>)>| {
-        let current = (rooms.open_key.get(), selected_thread_root_seq.get());
-        if let Some((previous_room, previous_root)) = previous {
-            if previous_room != current.0 {
-                send_in_flight.set(false);
-                last_sent_draft.set(String::new());
-                last_sent_wire.set(String::new());
-                last_sent_seq.set(0);
-                thread_send_in_flight.set(false);
-                thread_last_sent_draft.set(String::new());
-                thread_last_sent_wire.set(String::new());
-                thread_last_sent_seq.set(0);
-            } else if previous_root != current.1 {
-                thread_send_in_flight.set(false);
-                thread_last_sent_draft.set(String::new());
-                thread_last_sent_wire.set(String::new());
-                thread_last_sent_seq.set(0);
+    // The visible latch follows the active room. A navigation advances the
+    // Rooms generation and fences the old POST result, so retire that room's
+    // pending latch while its draft remains available if its outcome is unknown.
+    Effect::new(
+        move |previous: Option<(Option<RoomDraftIdentity>, u64, Option<u64>)>| {
+            let current = (
+                room_draft_identity(rooms.url.get(), rooms.open_key.get()),
+                rooms.generation_snapshot(),
+                selected_thread_root_seq.get(),
+            );
+            if let Some((previous_room, previous_generation, previous_root)) = previous {
+                if previous_room != current.0 || previous_generation != current.1 {
+                    if let Some(previous_room) = previous_room.as_ref() {
+                        pending_room_sends.update(|pending| {
+                            retire_pending_room_send(pending, previous_room);
+                        });
+                    }
+                    send_in_flight.set(current.0.as_ref().is_some_and(|identity| {
+                        pending_room_sends.with_untracked(|pending| pending.contains_key(identity))
+                    }));
+                    thread_send_in_flight.set(false);
+                    thread_last_sent_draft.set(String::new());
+                    thread_last_sent_wire.set(String::new());
+                    thread_last_sent_seq.set(0);
+                } else if previous_root != current.2 {
+                    thread_send_in_flight.set(false);
+                    thread_last_sent_draft.set(String::new());
+                    thread_last_sent_wire.set(String::new());
+                    thread_last_sent_seq.set(0);
+                }
             }
-        }
-        current
-    });
+            current
+        },
+    );
 
     let do_send = move || {
         let draft = composer.get_untracked();
+        let Some(sent_room) =
+            room_draft_identity(rooms.url.get_untracked(), rooms.open_key.get_untracked())
+        else {
+            return;
+        };
         if !message_send_admitted(
             send_in_flight.get_untracked(),
             thread_send_in_flight.get_untracked(),
             access_allows_writes(rooms.access.get_untracked().as_ref()),
             &draft,
         ) {
+            return;
+        }
+        if pending_room_sends.with_untracked(|pending| pending.contains_key(&sent_room)) {
             return;
         }
         let wire = normalized_message_body(&draft);
@@ -589,9 +631,20 @@ pub fn RoomsWorkspace(
             .max()
             .unwrap_or(0);
         rooms.status.set(String::new());
-        last_sent_draft.set(draft);
-        last_sent_wire.set(wire.clone());
-        last_sent_seq.set(max_seq);
+        let current_draft = draft.clone();
+        pending_room_sends.update(|pending| {
+            pending.insert(
+                sent_room.clone(),
+                PendingRoomSend {
+                    original_draft: current_draft.clone(),
+                    wire: wire.clone(),
+                    sent_at_seq: max_seq,
+                },
+            );
+        });
+        room_drafts.update(|drafts| {
+            drafts.insert(sent_room, current_draft);
+        });
         send_in_flight.set(true);
         rooms.post_message(wire, None);
     };
@@ -626,27 +679,40 @@ pub fn RoomsWorkspace(
     };
 
     Effect::new(move |_: Option<()>| {
+        let Some(sent_room) = active_draft_room.get() else {
+            return;
+        };
+        let Some(pending) = pending_room_sends.with(|pending| pending.get(&sent_room).cloned())
+        else {
+            return;
+        };
         if !send_in_flight.get() {
             return;
         }
-        let wire = last_sent_wire.get();
-        let sent_at_seq = last_sent_seq.get();
         let me = speaker_id(rooms);
         let me = me.as_str();
         let confirmed = rooms.transcript.get().iter().any(|m| {
-            m.seq > sent_at_seq
-                && m.body == wire
+            m.seq > pending.sent_at_seq
+                && m.body == pending.wire
                 && m.author_id == me
                 && m.thread_parent_seq.is_none()
         });
         if confirmed {
-            let original = last_sent_draft.get_untracked();
-            if should_clear_composer(&composer.get_untracked(), &original) {
-                composer.set(String::new());
+            let mut drafts = room_drafts.get_untracked();
+            let mut visible = composer.get_untracked();
+            if clear_confirmed_room_draft(
+                &mut drafts,
+                Some(&sent_room),
+                &mut visible,
+                &sent_room,
+                &pending.original_draft,
+            ) {
+                room_drafts.set(drafts);
+                composer.set(visible);
             }
-            last_sent_draft.set(String::new());
-            last_sent_wire.set(String::new());
-            last_sent_seq.set(0);
+            pending_room_sends.update(|pending| {
+                pending.remove(&sent_room);
+            });
             send_in_flight.set(false);
             return;
         }
@@ -655,13 +721,13 @@ pub fn RoomsWorkspace(
             access
                 .outbox
                 .iter()
-                .any(|item| outbox_matches_failed_message(item, me, &wire, None))
+                .any(|item| outbox_matches_failed_message(item, me, &pending.wire, None))
         });
         let request_failed = rooms.status.get().starts_with("message ");
         if failed_outbox || request_failed {
-            last_sent_draft.set(String::new());
-            last_sent_wire.set(String::new());
-            last_sent_seq.set(0);
+            pending_room_sends.update(|pending| {
+                pending.remove(&sent_room);
+            });
             send_in_flight.set(false);
         }
     });
