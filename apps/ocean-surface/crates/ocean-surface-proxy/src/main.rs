@@ -2348,7 +2348,13 @@ async fn proxy_events(State(state): State<Arc<AppState>>, req: Request) -> impl 
     let Some(url) = upstream_url(&state.daemon_url, "/v1/agent/events", req.uri().query()) else {
         return upstream_path_rewritten();
     };
-    match state.http.get(url).send().await {
+    let mut upstream = state.http.get(url);
+    if let Some(last_event_id) = req.headers().get("last-event-id") {
+        if let Ok(last_event_id) = last_event_id.to_str() {
+            upstream = upstream.header("Last-Event-ID", last_event_id);
+        }
+    }
+    match upstream.send().await {
         Ok(resp) => sse_stream_response(resp),
         Err(err) => (StatusCode::BAD_GATEWAY, daemon_unreachable_body(&err)).into_response(),
     }
@@ -2666,6 +2672,57 @@ mod tests {
                 )
             }))
             .layer(middleware::from_fn(wasm_headers))
+    }
+
+    #[tokio::test]
+    async fn agent_events_resume_forwards_last_event_id_to_daemon() {
+        use axum::response::{IntoResponse, Response};
+        use serde_json::{json, Value};
+
+        async fn echo(uri: Uri, headers: HeaderMap) -> Response {
+            let body = format!(
+                "id: 9\ndata: {}\n\n",
+                json!({
+                    "query": uri.query(),
+                    "last_event_id": headers.get("last-event-id").and_then(|v| v.to_str().ok()),
+                    "cookie": headers.contains_key(header::COOKIE),
+                })
+            );
+            ([(header::CONTENT_TYPE, "text/event-stream")], body).into_response()
+        }
+        let upstream = Router::new().route("/v1/agent/events", get(echo));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let mut state = auth_test_state();
+        Arc::get_mut(&mut state)
+            .expect("sole state owner")
+            .daemon_url = format!("http://{addr}");
+        let dist = tempfile::tempdir().expect("dist tempdir");
+        let app = build_app(state, dist.path());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/agent/events?session_id=session-1&replay=1")
+                    .header(header::COOKIE, "ocean_session=test-session")
+                    .header("last-event-id", "1842")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let text = String::from_utf8_lossy(&body);
+        let data = text
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .expect("one data frame");
+        let seen: Value = serde_json::from_str(data).unwrap();
+        assert_eq!(seen["query"], "session_id=session-1&replay=1");
+        assert_eq!(seen["last_event_id"], "1842");
+        assert_eq!(seen["cookie"], false);
+        assert!(text.contains("id: 9"));
     }
 
     /// ocean-os ROADMAP (Observatory): end-to-end event resume through the

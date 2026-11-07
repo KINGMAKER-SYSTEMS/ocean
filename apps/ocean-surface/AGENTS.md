@@ -374,6 +374,8 @@ Rules:
   `session_id`.
 - Different sessions on different surfaces must not blend, switch each other,
   or race to become the active transcript.
+- Browser proxy reconnects to a session-scoped agent event stream must forward
+  `Last-Event-ID` so the daemon can replay missed frames or report a reset gap.
 - `client_type` only describes the surface medium (`surface-web`,
   `surface-extension`, `surface-tauri`; legacy: `surface-gpui`). It is not a
   session id or workspace id.
