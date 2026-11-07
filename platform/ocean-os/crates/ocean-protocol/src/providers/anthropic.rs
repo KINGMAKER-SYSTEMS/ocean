@@ -304,6 +304,19 @@ struct ErrorBody {
     message: String,
 }
 
+// Anthropic can report availability failures inside an HTTP-200 SSE stream.
+// Preserve their status class for clean-round retries and pre-output failover.
+// Caller/content and unknown errors remain terminal message events.
+fn transient_sse_status(kind: &str) -> Option<u16> {
+    match kind {
+        "rate_limit_error" => Some(429),
+        "api_error" => Some(500),
+        "timeout_error" => Some(504),
+        "overloaded_error" => Some(529),
+        _ => None,
+    }
+}
+
 pub struct AnthropicProvider {
     client: reqwest::Client,
 }
@@ -1039,7 +1052,12 @@ impl Provider for AnthropicProvider {
                     }
                     SseEvent::MessageStop => {}
                     SseEvent::Error { error } => {
+                        let status = transient_sse_status(&error.kind);
                         let err_msg = format!("{}: {}", error.kind, error.message);
+                        if let Some(status) = status {
+                            yield Err(Error::ProviderError { status, body: err_msg });
+                            return;
+                        }
                         usage.total_tokens = total_tokens(&usage);
                         let am = AssistantMessage {
                             content: vec![],
@@ -1118,6 +1136,60 @@ mod tests {
     fn anthropic_model() -> Model {
         Model::anthropic_claude_sonnet_4_6()
     }
+
+    #[tokio::test]
+    async fn transient_sse_errors_keep_their_availability_class() {
+        use std::io::{Read, Write};
+
+        for (kind, expected_status) in [
+            ("rate_limit_error", Some(429)),
+            ("api_error", Some(500)),
+            ("timeout_error", Some(504)),
+            ("overloaded_error", Some(529)),
+            ("invalid_request_error", None),
+        ] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let data = json!({"type": "error", "error": {"type": kind, "message": "fixture"}});
+            let server = std::thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                let mut request = [0; 8192];
+                assert!(socket.read(&mut request).unwrap() > 0);
+                let body = format!("event: error\ndata: {data}\n\n");
+                write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+            });
+            let options = StreamOptions {
+                api_key: Some("test-key".into()),
+                base_url: Some(format!("http://{address}")),
+                ..Default::default()
+            };
+            let events: Vec<_> = AnthropicProvider::new()
+                .stream(&anthropic_model(), &Context::default(), &options)
+                .await
+                .unwrap()
+                .collect()
+                .await;
+            server.join().unwrap();
+            assert!(matches!(
+                events.first(),
+                Some(Ok(AssistantMessageEvent::Start))
+            ));
+            match (events.into_iter().nth(1).unwrap(), expected_status) {
+                (Err(Error::ProviderError { status, body }), Some(expected)) => {
+                    assert_eq!(status, expected, "{kind}");
+                    assert!(body.contains(kind), "{kind}: {body}");
+                }
+                (Ok(AssistantMessageEvent::Error { error, .. }), None) => {
+                    assert_eq!(
+                        error.error_message.as_deref(),
+                        Some("invalid_request_error: fixture")
+                    );
+                }
+                (actual, expected) => panic!("{kind}: expected {expected:?}, got {actual:?}"),
+            }
+        }
+    }
+
     #[test]
     fn current_claude_models_use_adaptive_effort_without_budget() {
         let summarized = json!({"type":"adaptive","display":"summarized"});
