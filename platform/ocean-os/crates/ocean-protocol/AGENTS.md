@@ -143,6 +143,11 @@ This crate owns the multi-provider LLM wire protocol layer for Anthropic, OpenAI
   is a fixed `RetryReason` vocabulary classified from the error type — never
   provider body text, which is attacker-influenced, unbounded, and fans out to
   every connected client.
+- Anthropic HTTP-200 SSE error frames with `rate_limit_error`, `api_error`,
+  `timeout_error`, or `overloaded_error` carry their 429/500/504/529 availability
+  class as a typed stream error. Caller/content and unknown SSE errors remain
+  terminal message events. Runtime retries and provider failover use the typed
+  class only before model output; emitted output still forbids replay.
 - `OCEAN_PROMPT_CAPTURE_DIR` is an opt-in local diagnostics path: capture the
   complete serialized JSON body only (never request headers or endpoint URLs),
   warn-and-continue on capture failures, and retain owner-only permissions
