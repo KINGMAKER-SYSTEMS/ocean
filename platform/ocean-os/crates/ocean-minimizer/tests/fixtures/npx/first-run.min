@@ -1,4 +1,7 @@
 cowsay@1.6.0
+
+npm warn deprecated foo@1.0.0: use bar instead
+npm notice New major version of npm available!
  _______
 < Hello >
  -------

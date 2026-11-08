@@ -268,6 +268,17 @@ fn npx_without_a_first_install_preamble_is_not_line_capped() {
 }
 
 #[test]
+fn npx_preserves_ambiguous_npm_prefixed_output_after_install_prompt() {
+    let capture = "Need to install the following packages:\ntool@1.0.0\nnpm notice install preamble\n\nOk to proceed? (y)\nnpm warn command-output: diagnostic emitted by the invoked package\nactual command output\n";
+    let expected = "tool@1.0.0\nnpm warn command-output: diagnostic emitted by the invoked package\nactual command output\n";
+    let output = minimize(&Invocation::new(Program::Npx, ["tool"]), capture, 0);
+
+    assert_eq!(output.disposition, Disposition::Minimized);
+    assert_eq!(output.text, expected);
+    assert_eq!(output.original_text.as_deref(), Some(capture));
+}
+
+#[test]
 fn nul_and_oversized_captures_fail_open_with_exact_accounting() {
     let nul = " M a\0?? b\0";
     let nul_output = minimize(&Invocation::new(Program::Git, ["status"]), nul, 0);

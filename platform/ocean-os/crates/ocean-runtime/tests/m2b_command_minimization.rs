@@ -143,14 +143,14 @@ fn gh_checks(all_pass: bool) -> String {
 }
 
 fn npx_first_run() -> String {
-    let mut out = String::from(
-        "Need to install the following packages:\ncowsay@1.6.0\nOk to proceed? (y)\n\n",
-    );
+    let mut out = String::from("Need to install the following packages:\ncowsay@1.6.0\n");
     for i in 0..12 {
         out.push_str(&format!(
             "npm warn deprecated pkg{i}@1.0.0: this package is no longer maintained\n"
         ));
     }
+    out.push_str("Ok to proceed? (y)\n");
+    out.push_str("npm warn command-output: diagnostic emitted by the invoked package\n");
     out.push_str(" _______\n< Hello >\n -------\n");
     out
 }
@@ -386,6 +386,18 @@ async fn positive_programs(h: &Harness) {
             .unwrap_or_else(|| panic!("{program} {args:?} {code} must project"))
             .to_string();
         let m1_out = Invocation::new(m1, args.clone()).minimize(&output, code);
+        if program == "npx" {
+            assert!(
+                !m1_out.text.contains("deprecated pkg"),
+                "recognized installer chatter before confirmation is filtered"
+            );
+            assert!(
+                m1_out
+                    .text
+                    .contains("npm warn command-output: diagnostic emitted by the invoked package"),
+                "ambiguous package output after confirmation is preserved"
+            );
+        }
         let a = m1_out.accounting;
         let expected = format!(
             "{}\n[exit {code}]\n[output minimized: {}→{} lines, {}→{} bytes · full output: read artifact://{id}]",

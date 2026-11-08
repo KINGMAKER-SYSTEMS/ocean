@@ -16,6 +16,10 @@ human command output from already-tokenized invocations.
 
 - Preserve unknown, machine-readable, NUL-delimited, oversized, and ambiguous
   captures byte-for-byte.
+- For npx first-install output, discard the recognized install header and
+  confirmation prompt plus npm chatter before confirmation. Preserve everything
+  after the prompt because npm diagnostics and invoked-package output share the
+  same stream.
 - Keep the public API already-tokenized and deterministic.
 - `original_text` exists only for changed output; accounting is exact.
 - Keep the crate dependency-free and compatible with Rust 1.88.
