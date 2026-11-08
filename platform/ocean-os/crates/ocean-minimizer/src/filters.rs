@@ -706,22 +706,23 @@ pub(crate) fn npx(invocation: &Invocation, input: &str) -> FilterResult {
     };
 
     let mut out = String::new();
-    let mut tool_started = false;
     for (index, line) in lines.iter().enumerate() {
         if index == header || index == prompt {
             continue;
         }
-        // npm's first-run warning/notice chatter sits immediately after the
-        // prompt. Once tool output starts, preserve every later line verbatim.
-        if index > prompt && !tool_started {
-            if line.trim_start().starts_with("npm warn")
+        // Before confirmation, this is still npx's install preamble. That
+        // region can safely drop npm chatter; after confirmation stdout is
+        // shared with the invoked package and must be preserved verbatim.
+        if index < prompt
+            && (line.trim_start().starts_with("npm warn")
                 || line.trim_start().starts_with("npm notice")
-                || line.trim().is_empty()
-            {
-                continue;
-            }
-            tool_started = true;
+                || line.trim().is_empty())
+        {
+            continue;
         }
+        // After the prompt, npx and the invoked package share stdout. npm-
+        // prefixed warnings and notices may be package diagnostics, so preserve
+        // that region verbatim instead of guessing where command output starts.
         push_line(&mut out, line);
     }
     FilterResult::Text(out)
