@@ -296,11 +296,15 @@ async fn resolve_login_path(
     cwd: Option<&std::path::Path>,
     timeout: Duration,
 ) -> Result<Option<(PathBuf, String)>, ()> {
-    let deadline = tokio::time::Instant::now() + timeout;
-    let Some(builtin_probe) = resolve_login_path_probe(program, cwd, false, deadline).await? else {
+    let started = tokio::time::Instant::now();
+    let Some(builtin_probe) =
+        resolve_login_path_probe(program, cwd, false, started, timeout).await?
+    else {
         return Ok(None);
     };
-    let Some(command_probe) = resolve_login_path_probe(program, cwd, true, deadline).await? else {
+    let Some(command_probe) =
+        resolve_login_path_probe(program, cwd, true, started, timeout).await?
+    else {
         return Ok(None);
     };
     Ok((builtin_probe == command_probe).then_some(builtin_probe))
@@ -310,7 +314,8 @@ async fn resolve_login_path_probe(
     program: &str,
     cwd: Option<&std::path::Path>,
     command_dispatch: bool,
-    deadline: tokio::time::Instant,
+    started: tokio::time::Instant,
+    timeout: Duration,
 ) -> Result<Option<(PathBuf, String)>, ()> {
     let dispatch = if command_dispatch {
         "command builtin"
@@ -343,7 +348,10 @@ async fn resolve_login_path_probe(
         let status = child.wait().await;
         (stdout, truncated, status)
     };
-    let (stdout, truncated, status) = match tokio::time::timeout_at(deadline, probe).await {
+    let Some(remaining) = timeout.checked_sub(started.elapsed()) else {
+        return Err(());
+    };
+    let (stdout, truncated, status) = match tokio::time::timeout(remaining, probe).await {
         Ok((stdout, truncated, Ok(status))) => {
             process_group.disarm();
             (stdout, truncated, status)

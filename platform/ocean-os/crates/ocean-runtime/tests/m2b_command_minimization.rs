@@ -239,6 +239,17 @@ fn gated_command_output_minimization_end_to_end() {
                 .execute("login-path-shebang", json!({"argv": ["pytest"]})).await.unwrap();
             assert_eq!(text(&shebang_result.content), "login-path-helper\n\n[exit 0]");
 
+            // An API caller may supply the full JSON u64 range. Sharing the
+            // probe budget must not overflow while constructing a deadline.
+            let huge_timeout_result = BashTool::for_cwd(harness.cwd.clone()).with_argv_mode()
+                .execute(
+                    "login-path-huge-timeout",
+                    json!({"argv": ["pytest"], "timeout_ms": u64::MAX}),
+                )
+                .await
+                .unwrap();
+            assert_eq!(text(&huge_timeout_result.content), "login-path-helper\n\n[exit 0]");
+
             let relative = harness.cwd.join("relative-bin");
             std::fs::create_dir_all(&relative).unwrap();
             let runner = relative.join("pytest");
