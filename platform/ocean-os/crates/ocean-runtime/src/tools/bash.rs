@@ -253,7 +253,7 @@ impl AgentTool for BashTool {
                     )
                     .await
                     .map_err(|()| format!("command timed out after {timeout_ms}ms"))?;
-                    let Some(program) = program else {
+                    let Some((program, path)) = program else {
                         return Err(format!("'argv' executable '{}' was not found in the login-shell PATH (use 'command' otherwise)", tokens[0]));
                     };
                     let elapsed_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
@@ -263,6 +263,10 @@ impl AgentTool for BashTool {
                     }
                     let mut command = Command::new(program);
                     command.args(&tokens[1..]);
+                    // The executable was selected from the login shell's
+                    // post-profile PATH. Preserve that environment for
+                    // shebangs such as `#!/usr/bin/env node` as well.
+                    command.env("PATH", path);
                     (command, remaining_ms)
                 }
             }
@@ -291,7 +295,7 @@ async fn resolve_login_path(
     program: &str,
     cwd: Option<&std::path::Path>,
     timeout: Duration,
-) -> Result<Option<PathBuf>, ()> {
+) -> Result<Option<(PathBuf, String)>, ()> {
     let deadline = tokio::time::Instant::now() + timeout;
     let Some(builtin_probe) = resolve_login_path_probe(program, cwd, false, deadline).await? else {
         return Ok(None);
@@ -307,7 +311,7 @@ async fn resolve_login_path_probe(
     cwd: Option<&std::path::Path>,
     command_dispatch: bool,
     deadline: tokio::time::Instant,
-) -> Result<Option<PathBuf>, ()> {
+) -> Result<Option<(PathBuf, String)>, ()> {
     let dispatch = if command_dispatch {
         "command builtin"
     } else {
@@ -315,7 +319,7 @@ async fn resolve_login_path_probe(
     };
     let mut command = Command::new("bash");
     command.arg("-lc").arg(format!(
-        "resolved=$({dispatch} type -P -- {program}) || exit 1; case \"$resolved\" in /*) absolute=\"$resolved\" ;; *) cwd=$({dispatch} pwd -P) || exit 1; absolute=\"$cwd/$resolved\" ;; esac; {dispatch} printf '\\000%s\\000' \"$absolute\""
+        "login_cwd=$({dispatch} pwd -P) || exit 1; resolved=$({dispatch} type -P -- {program}) || exit 1; case \"$resolved\" in /*) absolute=\"$resolved\" ;; *) absolute=\"$login_cwd/$resolved\" ;; esac; {dispatch} printf '\\000%s\\000%s\\000%s\\000' \"$absolute\" \"$PATH\" \"$login_cwd\""
     ));
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
@@ -350,16 +354,76 @@ async fn resolve_login_path_probe(
     if truncated || !status.success() {
         return Ok(None);
     }
-    let end = stdout.iter().rposition(|byte| *byte == 0);
-    let Some(end) = end else { return Ok(None) };
-    let start = stdout[..end].iter().rposition(|byte| *byte == 0);
-    let Some(start) = start else { return Ok(None) };
-    let resolved = std::str::from_utf8(&stdout[start + 1..end]).ok();
+    let cwd_end = stdout.iter().rposition(|byte| *byte == 0);
+    let Some(cwd_end) = cwd_end else {
+        return Ok(None);
+    };
+    let cwd_start = stdout[..cwd_end].iter().rposition(|byte| *byte == 0);
+    let Some(cwd_start) = cwd_start else {
+        return Ok(None);
+    };
+    let path_end = cwd_start;
+    let path_start = stdout[..path_end].iter().rposition(|byte| *byte == 0);
+    let Some(path_start) = path_start else {
+        return Ok(None);
+    };
+    let executable_end = path_start;
+    let executable_start = stdout[..executable_end].iter().rposition(|byte| *byte == 0);
+    let Some(executable_start) = executable_start else {
+        return Ok(None);
+    };
+    let resolved = std::str::from_utf8(&stdout[executable_start + 1..executable_end]).ok();
     let Some(resolved) = resolved else {
         return Ok(None);
     };
-    let path = PathBuf::from(resolved);
-    Ok(path.is_absolute().then_some(path))
+    let raw_path = std::str::from_utf8(&stdout[path_start + 1..path_end]).ok();
+    let Some(raw_path) = raw_path else {
+        return Ok(None);
+    };
+    let login_cwd = std::str::from_utf8(&stdout[cwd_start + 1..cwd_end]).ok();
+    let Some(login_cwd) = login_cwd else {
+        return Ok(None);
+    };
+    let login_cwd = PathBuf::from(login_cwd);
+    if !login_cwd.is_absolute() {
+        return Ok(None);
+    }
+    let needs_login_cwd = raw_path.is_empty()
+        || raw_path
+            .split(':')
+            .any(|entry| !PathBuf::from(entry).is_absolute());
+    if needs_login_cwd && login_cwd.to_string_lossy().contains(':') {
+        // A colon cannot be represented inside a PATH component, so passing
+        // an absolute rewrite would change which helper the login PATH names.
+        return Ok(None);
+    }
+    // The direct child runs in the turn cwd, which may differ from the login
+    // profile's cwd. Make PATH entries retain the directory they denoted in
+    // that profile, including empty entries (the shell's current directory).
+    let search_path = if raw_path.is_empty() {
+        // Bash treats an empty PATH as the current directory for command
+        // lookup; preserve that meaning after the direct child returns to the
+        // turn cwd.
+        login_cwd.to_string_lossy().into_owned()
+    } else {
+        raw_path
+            .split(':')
+            .map(|entry| {
+                let entry = PathBuf::from(if entry.is_empty() { "." } else { entry });
+                if entry.is_absolute() {
+                    entry
+                } else {
+                    login_cwd.join(entry)
+                }
+            })
+            .map(|entry| entry.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(":")
+    };
+    let executable = PathBuf::from(resolved);
+    Ok(executable
+        .is_absolute()
+        .then_some((executable, search_path)))
 }
 
 impl BashTool {

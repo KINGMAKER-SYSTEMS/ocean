@@ -49,7 +49,7 @@ impl Harness {
         std::fs::create_dir_all(&home).unwrap();
         for program in PROGRAMS {
             let script = format!(
-                "#!/bin/sh\ncat '{dir}/{program}.out'\nexit \"$(cat '{dir}/{program}.code')\"\n",
+                "#!/bin/sh\n/bin/cat '{dir}/{program}.out'\nexit \"$(/bin/cat '{dir}/{program}.code')\"\n",
                 dir = bin.display()
             );
             let path = bin.join(program);
@@ -74,7 +74,7 @@ impl Harness {
         std::fs::write(
             &path,
             format!(
-                "#!/bin/sh\ncat '{dir}/{program}.out'\nexit \"$(cat '{dir}/{program}.code')\"\n",
+                "#!/bin/sh\n/bin/cat '{dir}/{program}.out'\nexit \"$(/bin/cat '{dir}/{program}.code')\"\n",
                 dir = self.bin.display()
             ),
         )
@@ -224,6 +224,21 @@ fn gated_command_output_minimization_end_to_end() {
                 .execute("missing-login-path", json!({"argv": ["pytest"]})).await.unwrap_err();
             assert!(missing.contains("not found in the login-shell PATH"));
 
+            // Direct spawn must retain the verified login PATH for an
+            // executable's `/usr/bin/env` shebang helper.
+            let login_bin = harness.cwd.join("login-bin");
+            std::fs::create_dir_all(&login_bin).unwrap();
+            let helper = login_bin.join("m2b-login-helper");
+            std::fs::write(&helper, "#!/bin/sh\nprintf 'login-path-helper\\n'\n").unwrap();
+            std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let login_pytest = login_bin.join("pytest");
+            std::fs::write(&login_pytest, "#!/usr/bin/env m2b-login-helper\n").unwrap();
+            std::fs::set_permissions(&login_pytest, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::write(&profile, format!("export PATH='{}'\n", login_bin.display())).unwrap();
+            let shebang_result = BashTool::for_cwd(harness.cwd.clone()).with_argv_mode()
+                .execute("login-path-shebang", json!({"argv": ["pytest"]})).await.unwrap();
+            assert_eq!(text(&shebang_result.content), "login-path-helper\n\n[exit 0]");
+
             let relative = harness.cwd.join("relative-bin");
             std::fs::create_dir_all(&relative).unwrap();
             let runner = relative.join("pytest");
@@ -237,12 +252,38 @@ fn gated_command_output_minimization_end_to_end() {
             let profile_cwd = harness.cwd.join("profile-cwd");
             std::fs::create_dir_all(profile_cwd.join("relative-bin")).unwrap();
             let profile_runner = profile_cwd.join("relative-bin/pytest");
-            std::fs::write(&profile_runner, "#!/bin/sh\nprintf 'profile-cwd-relative\\n'\n").unwrap();
+            std::fs::write(&profile_runner, "#!/usr/bin/env profile-cwd-helper\n").unwrap();
             std::fs::set_permissions(&profile_runner, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let profile_helper = profile_cwd.join("relative-bin/profile-cwd-helper");
+            std::fs::write(&profile_helper, "#!/bin/sh\nprintf 'profile-cwd-relative\\n'\n").unwrap();
+            std::fs::set_permissions(&profile_helper, std::fs::Permissions::from_mode(0o755)).unwrap();
             std::fs::write(&profile, format!("cd '{}'\nexport PATH='relative-bin'\n", profile_cwd.display())).unwrap();
             let profile_result = BashTool::for_cwd(harness.cwd.clone()).with_argv_mode()
                 .execute("profile-cwd-relative-path", json!({"argv": ["pytest"]})).await.unwrap();
             assert_eq!(text(&profile_result.content), "profile-cwd-relative\n\n[exit 0]");
+
+            let empty_path_cwd = harness.cwd.join("profile-cwd-empty-path");
+            std::fs::create_dir_all(&empty_path_cwd).unwrap();
+            let empty_path_runner = empty_path_cwd.join("pytest");
+            std::fs::write(&empty_path_runner, "#!/usr/bin/env empty-path-helper\n").unwrap();
+            let empty_path_helper = empty_path_cwd.join("empty-path-helper");
+            std::fs::write(&empty_path_helper, "#!/bin/sh\nprintf 'empty-path-cwd\\n'\n").unwrap();
+            std::fs::set_permissions(&empty_path_runner, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(&empty_path_helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::write(&profile, format!("cd '{}'\nexport PATH=''\n", empty_path_cwd.display())).unwrap();
+            let empty_path_result = BashTool::for_cwd(harness.cwd.clone()).with_argv_mode()
+                .execute("profile-cwd-empty-path", json!({"argv": ["pytest"]})).await.unwrap();
+            assert_eq!(text(&empty_path_result.content), "empty-path-cwd\n\n[exit 0]");
+
+            let colon_cwd = harness.cwd.join("profile:cwd");
+            std::fs::create_dir_all(&colon_cwd).unwrap();
+            let colon_runner = colon_cwd.join("pytest");
+            std::fs::write(&colon_runner, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(&colon_runner, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::write(&profile, format!("cd '{}'\nexport PATH=''\n", colon_cwd.display())).unwrap();
+            let colon_path_result = BashTool::for_cwd(harness.cwd.clone()).with_argv_mode()
+                .execute("profile-cwd-colon-path", json!({"argv": ["pytest"]})).await.unwrap_err();
+            assert!(colon_path_result.contains("not found in the login-shell PATH"));
 
             for shadow in ["builtin() { return 1; }\n", "command() { return 1; }\n"] {
                 std::fs::write(&profile, format!("{shadow}export PATH='{}'\n", harness.bin.display())).unwrap();
@@ -404,7 +445,7 @@ async fn argv_validation_and_direct_execution(h: &Harness) {
 
     // Direct execution: no expansion, globbing, or shell metacharacters.
     let pytest = h.bin.join("pytest");
-    std::fs::write(&pytest, "#!/bin/sh\nif [ \"$1\" = sleep ]; then sleep 5; exit; fi\nif [ \"$1\" = envelope ]; then printf o; printf e >&2; exit 3; fi\nprintf '%s|' \"$@\"\nprintf '\\n'\n").unwrap();
+    std::fs::write(&pytest, "#!/bin/sh\nif [ \"$1\" = sleep ]; then /bin/sleep 5; exit; fi\nif [ \"$1\" = envelope ]; then printf o; printf e >&2; exit 3; fi\nprintf '%s|' \"$@\"\nprintf '\\n'\n").unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
