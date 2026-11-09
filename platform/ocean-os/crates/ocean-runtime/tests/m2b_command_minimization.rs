@@ -193,6 +193,31 @@ fn gated_command_output_minimization_end_to_end() {
             use std::os::unix::fs::PermissionsExt;
             std::os::unix::fs::symlink("/bin/bash", harness.bin.join("bash")).unwrap();
             let profile = harness.home.join(".bash_profile");
+
+            let marker = harness.cwd.join("timed-out-profile-marker");
+            std::fs::write(
+                &profile,
+                format!(
+                    "export PATH='{}'\n/bin/sleep 2; /usr/bin/touch '{}'\n",
+                    harness.bin.display(),
+                    marker.display()
+                ),
+            )
+            .unwrap();
+            let started = std::time::Instant::now();
+            let timeout_error = BashTool::for_cwd(harness.cwd.clone())
+                .with_argv_mode()
+                .execute(
+                    "profile-timeout",
+                    json!({"argv": ["pytest"], "timeout_ms": 200}),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(timeout_error, "command timed out after 200ms");
+            assert!(started.elapsed() < std::time::Duration::from_secs(2));
+            tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
+            assert!(!marker.exists(), "timed-out login profile left a child running");
+
             std::fs::write(&profile, format!("export PATH='{}'\n", harness.cwd.join("empty").display())).unwrap();
             std::fs::create_dir_all(harness.cwd.join("empty")).unwrap();
             let missing = BashTool::for_cwd(harness.cwd.clone()).with_argv_mode()
@@ -231,6 +256,34 @@ fn gated_command_output_minimization_end_to_end() {
             let forged = BashTool::for_cwd(harness.cwd.clone()).with_argv_mode()
                 .execute("forged-frame", json!({"argv": ["pytest"]})).await.unwrap_err();
             assert!(forged.contains("not found in the login-shell PATH"));
+
+            let start_marker = harness.cwd.join("cancelled-profile-started");
+            let cancel_marker = harness.cwd.join("cancelled-profile-marker");
+            std::fs::write(
+                &profile,
+                format!(
+                    "export PATH='{}'\n/usr/bin/touch '{}'; (/bin/sleep 1; /usr/bin/touch '{}') & wait\n",
+                    harness.bin.display(),
+                    start_marker.display(),
+                    cancel_marker.display()
+                ),
+            )
+            .unwrap();
+            let tool = BashTool::for_cwd(harness.cwd.clone()).with_argv_mode();
+            let task = tokio::spawn(async move {
+                tool.execute("profile-cancel", json!({"argv": ["pytest"]})).await
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while !start_marker.exists() {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("login profile should start before cancellation");
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+            tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+            assert!(!cancel_marker.exists(), "cancelled login profile left a child running");
             std::fs::remove_file(profile).unwrap();
         });
     #[cfg(unix)]

@@ -239,19 +239,31 @@ impl AgentTool for BashTool {
             .get("timeout_ms")
             .and_then(|v| v.as_u64())
             .unwrap_or(120_000);
-        let command = if self.argv_mode {
+        let (command, execution_timeout_ms) = if self.argv_mode {
             match parse_argv_mode_args(&args)? {
-                Invocation::Command(cmd) => shell_command(cmd),
+                Invocation::Command(cmd) => (shell_command(cmd), timeout_ms),
                 Invocation::Argv(tokens) => {
                     // Direct execution: no shell, alias, function, expansion,
                     // redirection, pipeline, or re-tokenization.
-                    let program = resolve_login_path(tokens[0], self.cwd.as_deref()).await;
+                    let started = tokio::time::Instant::now();
+                    let program = resolve_login_path(
+                        tokens[0],
+                        self.cwd.as_deref(),
+                        Duration::from_millis(timeout_ms),
+                    )
+                    .await
+                    .map_err(|()| format!("command timed out after {timeout_ms}ms"))?;
                     let Some(program) = program else {
                         return Err(format!("'argv' executable '{}' was not found in the login-shell PATH (use 'command' otherwise)", tokens[0]));
                     };
+                    let elapsed_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                    let remaining_ms = timeout_ms.saturating_sub(elapsed_ms);
+                    if remaining_ms == 0 {
+                        return Err(format!("command timed out after {timeout_ms}ms"));
+                    }
                     let mut command = Command::new(program);
                     command.args(&tokens[1..]);
-                    command
+                    (command, remaining_ms)
                 }
             }
         } else {
@@ -259,9 +271,10 @@ impl AgentTool for BashTool {
                 .get("command")
                 .and_then(|v| v.as_str())
                 .ok_or("missing 'command'")?;
-            shell_command(cmd)
+            (shell_command(cmd), timeout_ms)
         };
-        self.run_captured(command, timeout_ms).await
+        self.run_captured(command, execution_timeout_ms, timeout_ms)
+            .await
     }
 }
 
@@ -274,17 +287,27 @@ fn shell_command(cmd: &str) -> Command {
 /// Resolve an allowlisted bare name through the login-shell PATH in the turn cwd.
 /// Independent complete probes must agree, preventing ordinary startup output
 /// or function/command shadowing from forging the final framed path.
-async fn resolve_login_path(program: &str, cwd: Option<&std::path::Path>) -> Option<PathBuf> {
-    let builtin_probe = resolve_login_path_probe(program, cwd, false).await?;
-    let command_probe = resolve_login_path_probe(program, cwd, true).await?;
-    (builtin_probe == command_probe).then_some(builtin_probe)
+async fn resolve_login_path(
+    program: &str,
+    cwd: Option<&std::path::Path>,
+    timeout: Duration,
+) -> Result<Option<PathBuf>, ()> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let Some(builtin_probe) = resolve_login_path_probe(program, cwd, false, deadline).await? else {
+        return Ok(None);
+    };
+    let Some(command_probe) = resolve_login_path_probe(program, cwd, true, deadline).await? else {
+        return Ok(None);
+    };
+    Ok((builtin_probe == command_probe).then_some(builtin_probe))
 }
 
 async fn resolve_login_path_probe(
     program: &str,
     cwd: Option<&std::path::Path>,
     command_dispatch: bool,
-) -> Option<PathBuf> {
+    deadline: tokio::time::Instant,
+) -> Result<Option<PathBuf>, ()> {
     let dispatch = if command_dispatch {
         "command builtin"
     } else {
@@ -297,21 +320,46 @@ async fn resolve_login_path_probe(
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
-    let output = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .await
-        .ok()?;
-    if !output.status.success() {
-        return None;
+    command.stdin(Stdio::null());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::null());
+    #[cfg(unix)]
+    command.process_group(0);
+    command.kill_on_drop(true);
+
+    let Ok(mut child) = command.spawn() else {
+        return Ok(None);
+    };
+    let mut process_group = ProcessGroupGuard::new(child.id());
+    let Some(stdout) = child.stdout.take() else {
+        return Ok(None);
+    };
+    let probe = async {
+        let (stdout, truncated) = read_capped(stdout).await;
+        let status = child.wait().await;
+        (stdout, truncated, status)
+    };
+    let (stdout, truncated, status) = match tokio::time::timeout_at(deadline, probe).await {
+        Ok((stdout, truncated, Ok(status))) => {
+            process_group.disarm();
+            (stdout, truncated, status)
+        }
+        Ok((_stdout, _truncated, Err(_))) => return Ok(None),
+        Err(_) => return Err(()),
+    };
+    if truncated || !status.success() {
+        return Ok(None);
     }
-    let end = output.stdout.iter().rposition(|byte| *byte == 0)?;
-    let start = output.stdout[..end].iter().rposition(|byte| *byte == 0)?;
-    let resolved = std::str::from_utf8(&output.stdout[start + 1..end]).ok()?;
+    let end = stdout.iter().rposition(|byte| *byte == 0);
+    let Some(end) = end else { return Ok(None) };
+    let start = stdout[..end].iter().rposition(|byte| *byte == 0);
+    let Some(start) = start else { return Ok(None) };
+    let resolved = std::str::from_utf8(&stdout[start + 1..end]).ok();
+    let Some(resolved) = resolved else {
+        return Ok(None);
+    };
     let path = PathBuf::from(resolved);
-    path.is_absolute().then_some(path)
+    Ok(path.is_absolute().then_some(path))
 }
 
 impl BashTool {
@@ -322,6 +370,7 @@ impl BashTool {
         &self,
         mut command: Command,
         timeout_ms: u64,
+        reported_timeout_ms: u64,
     ) -> Result<AgentToolResult, String> {
         if let Some(cwd) = &self.cwd {
             command.current_dir(cwd);
@@ -359,7 +408,7 @@ impl BashTool {
                 Ok(r) => r,
                 // On elapse the process-group guard kills descendants and
                 // kill_on_drop also targets the direct child.
-                Err(_) => return Err(format!("command timed out after {timeout_ms}ms")),
+                Err(_) => return Err(format!("command timed out after {reported_timeout_ms}ms")),
             };
         let status = match status {
             Ok(status) => {

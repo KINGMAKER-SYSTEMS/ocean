@@ -101,7 +101,7 @@ This crate owns the Ocean agent loop and permission-gated tool execution runtime
 - Prefer small, auditable tool-execution changes.
 - Include tests for permission-sensitive behavior.
 - Coordinate event shape changes with `ocean-daemon`, `ocean-core`, and `ocean-tui`.
-- When command-output minimization is enabled, `BashTool` accepts `argv` only for the six bare names `cargo`, `git`, `gh`, `npm`, `npx`, and `pytest`. Resolve those names through login-shell `PATH` starting at the turn cwd; fail closed on lookup errors. Startup output is not lookup evidence: two complete, independently dispatched NUL-framed probes must return the same absolute executable path before direct spawn. Relative PATH entries resolve against the shell's post-startup cwd.
+- When command-output minimization is enabled, `BashTool` accepts `argv` only for the six bare names `cargo`, `git`, `gh`, `npm`, `npx`, and `pytest`. Resolve those names through login-shell `PATH` starting at the turn cwd; fail closed on lookup errors. Startup output is not lookup evidence: two complete, independently dispatched NUL-framed probes must return the same absolute executable path before direct spawn. Relative PATH entries resolve against the shell's post-startup cwd. Both probes share the caller's `timeout_ms` budget, run in the tool's owned process group, and must be killed with their ordinary descendants on timeout or future cancellation.
 
 ## Verification
 
