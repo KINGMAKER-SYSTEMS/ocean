@@ -35,6 +35,7 @@ const PROGRAMS: [&str; 6] = ["cargo", "git", "gh", "npm", "npx", "pytest"];
 struct Harness {
     bin: PathBuf,
     cwd: PathBuf,
+    home: PathBuf,
 }
 
 impl Harness {
@@ -42,11 +43,13 @@ impl Harness {
         let root = std::env::temp_dir().join(format!("ocean-m2b-{}", std::process::id()));
         let bin = root.join("bin");
         let cwd = root.join("work");
+        let home = root.join("home");
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
         for program in PROGRAMS {
             let script = format!(
-                "#!/bin/sh\ncat '{dir}/{program}.out'\nexit \"$(cat '{dir}/{program}.code')\"\n",
+                "#!/bin/sh\n/bin/cat '{dir}/{program}.out'\nexit \"$(/bin/cat '{dir}/{program}.code')\"\n",
                 dir = bin.display()
             );
             let path = bin.join(program);
@@ -57,13 +60,30 @@ impl Harness {
                 std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
             }
         }
-        Self { bin, cwd }
+        Self { bin, cwd, home }
     }
 
     /// Script what `program` prints (stdout) and its exit code.
     fn script(&self, program: &str, output: &str, code: i32) {
         std::fs::write(self.bin.join(format!("{program}.out")), output).unwrap();
         std::fs::write(self.bin.join(format!("{program}.code")), code.to_string()).unwrap();
+    }
+
+    fn restore_runner(&self, program: &str) {
+        let path = self.bin.join(program);
+        std::fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\n/bin/cat '{dir}/{program}.out'\nexit \"$(/bin/cat '{dir}/{program}.code')\"\n",
+                dir = self.bin.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
     }
 
     fn ctx(&self, session: &str, gate: bool, artifacts: bool) -> SessionContext {
@@ -158,8 +178,173 @@ fn npx_first_run() -> String {
 #[test]
 fn gated_command_output_minimization_end_to_end() {
     let harness = Harness::new();
+    std::env::set_var("HOME", &harness.home);
     let path = std::env::var("PATH").unwrap_or_default();
     std::env::set_var("PATH", format!("{}:{path}", harness.bin.display()));
+
+    // Resolver regressions run before the multithreaded runtime. Login startup
+    // output is allowed, but lookup must fail closed and probes must agree.
+    #[cfg(unix)]
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            use std::os::unix::fs::PermissionsExt;
+            std::os::unix::fs::symlink("/bin/bash", harness.bin.join("bash")).unwrap();
+            let profile = harness.home.join(".bash_profile");
+
+            let marker = harness.cwd.join("timed-out-profile-marker");
+            std::fs::write(
+                &profile,
+                format!(
+                    "export PATH='{}'\n/bin/sleep 2; /usr/bin/touch '{}'\n",
+                    harness.bin.display(),
+                    marker.display()
+                ),
+            )
+            .unwrap();
+            let started = std::time::Instant::now();
+            let timeout_error = BashTool::for_cwd(harness.cwd.clone())
+                .with_argv_mode()
+                .execute(
+                    "profile-timeout",
+                    json!({"argv": ["pytest"], "timeout_ms": 200}),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(timeout_error, "command timed out after 200ms");
+            assert!(started.elapsed() < std::time::Duration::from_secs(2));
+            tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
+            assert!(!marker.exists(), "timed-out login profile left a child running");
+
+            std::fs::write(&profile, format!("export PATH='{}'\n", harness.cwd.join("empty").display())).unwrap();
+            std::fs::create_dir_all(harness.cwd.join("empty")).unwrap();
+            let missing = BashTool::for_cwd(harness.cwd.clone()).with_argv_mode()
+                .execute("missing-login-path", json!({"argv": ["pytest"]})).await.unwrap_err();
+            assert!(missing.contains("not found in the login-shell PATH"));
+
+            // Direct spawn must retain the verified login PATH for an
+            // executable's `/usr/bin/env` shebang helper.
+            let login_bin = harness.cwd.join("login-bin");
+            std::fs::create_dir_all(&login_bin).unwrap();
+            let helper = login_bin.join("m2b-login-helper");
+            std::fs::write(&helper, "#!/bin/sh\nprintf 'login-path-helper\\n'\n").unwrap();
+            std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let login_pytest = login_bin.join("pytest");
+            std::fs::write(&login_pytest, "#!/usr/bin/env m2b-login-helper\n").unwrap();
+            std::fs::set_permissions(&login_pytest, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::write(&profile, format!("export PATH='{}'\n", login_bin.display())).unwrap();
+            let shebang_result = BashTool::for_cwd(harness.cwd.clone()).with_argv_mode()
+                .execute("login-path-shebang", json!({"argv": ["pytest"]})).await.unwrap();
+            assert_eq!(text(&shebang_result.content), "login-path-helper\n\n[exit 0]");
+
+            // An API caller may supply the full JSON u64 range. Sharing the
+            // probe budget must not overflow while constructing a deadline.
+            let huge_timeout_result = BashTool::for_cwd(harness.cwd.clone()).with_argv_mode()
+                .execute(
+                    "login-path-huge-timeout",
+                    json!({"argv": ["pytest"], "timeout_ms": u64::MAX}),
+                )
+                .await
+                .unwrap();
+            assert_eq!(text(&huge_timeout_result.content), "login-path-helper\n\n[exit 0]");
+
+            let relative = harness.cwd.join("relative-bin");
+            std::fs::create_dir_all(&relative).unwrap();
+            let runner = relative.join("pytest");
+            std::fs::write(&runner, "#!/bin/sh\nprintf 'turn-cwd-relative\\n'\n").unwrap();
+            std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::write(&profile, "export PATH='relative-bin'\n").unwrap();
+            let relative_result = BashTool::for_cwd(harness.cwd.clone()).with_argv_mode()
+                .execute("relative-login-path", json!({"argv": ["pytest"]})).await.unwrap();
+            assert_eq!(text(&relative_result.content), "turn-cwd-relative\n\n[exit 0]");
+
+            let profile_cwd = harness.cwd.join("profile-cwd");
+            std::fs::create_dir_all(profile_cwd.join("relative-bin")).unwrap();
+            let profile_runner = profile_cwd.join("relative-bin/pytest");
+            std::fs::write(&profile_runner, "#!/usr/bin/env profile-cwd-helper\n").unwrap();
+            std::fs::set_permissions(&profile_runner, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let profile_helper = profile_cwd.join("relative-bin/profile-cwd-helper");
+            std::fs::write(&profile_helper, "#!/bin/sh\nprintf 'profile-cwd-relative\\n'\n").unwrap();
+            std::fs::set_permissions(&profile_helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::write(&profile, format!("cd '{}'\nexport PATH='relative-bin'\n", profile_cwd.display())).unwrap();
+            let profile_result = BashTool::for_cwd(harness.cwd.clone()).with_argv_mode()
+                .execute("profile-cwd-relative-path", json!({"argv": ["pytest"]})).await.unwrap();
+            assert_eq!(text(&profile_result.content), "profile-cwd-relative\n\n[exit 0]");
+
+            let empty_path_cwd = harness.cwd.join("profile-cwd-empty-path");
+            std::fs::create_dir_all(&empty_path_cwd).unwrap();
+            let empty_path_runner = empty_path_cwd.join("pytest");
+            std::fs::write(&empty_path_runner, "#!/usr/bin/env empty-path-helper\n").unwrap();
+            let empty_path_helper = empty_path_cwd.join("empty-path-helper");
+            std::fs::write(&empty_path_helper, "#!/bin/sh\nprintf 'empty-path-cwd\\n'\n").unwrap();
+            std::fs::set_permissions(&empty_path_runner, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(&empty_path_helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::write(&profile, format!("cd '{}'\nexport PATH=''\n", empty_path_cwd.display())).unwrap();
+            let empty_path_result = BashTool::for_cwd(harness.cwd.clone()).with_argv_mode()
+                .execute("profile-cwd-empty-path", json!({"argv": ["pytest"]})).await.unwrap();
+            assert_eq!(text(&empty_path_result.content), "empty-path-cwd\n\n[exit 0]");
+
+            let colon_cwd = harness.cwd.join("profile:cwd");
+            std::fs::create_dir_all(&colon_cwd).unwrap();
+            let colon_runner = colon_cwd.join("pytest");
+            std::fs::write(&colon_runner, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(&colon_runner, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::write(&profile, format!("cd '{}'\nexport PATH=''\n", colon_cwd.display())).unwrap();
+            let colon_path_result = BashTool::for_cwd(harness.cwd.clone()).with_argv_mode()
+                .execute("profile-cwd-colon-path", json!({"argv": ["pytest"]})).await.unwrap_err();
+            assert!(colon_path_result.contains("not found in the login-shell PATH"));
+
+            for shadow in ["builtin() { return 1; }\n", "command() { return 1; }\n"] {
+                std::fs::write(&profile, format!("{shadow}export PATH='{}'\n", harness.bin.display())).unwrap();
+                let result = BashTool::for_cwd(harness.cwd.clone()).with_argv_mode()
+                    .execute("shadowed-login-probe", json!({"argv": ["pytest"]})).await;
+                assert!(result.is_err(), "shadowed dispatcher must fail closed");
+            }
+
+            let spoof = format!("builtin() {{ case \\\"$1\\\" in printf) command builtin printf '\\000%s\\000' '/bin/echo' ;; *) command builtin \\\"$@\\\" ;; esac; }}\nexport PATH='{}'\nprintf 'startup output\\n'\n", harness.bin.display());
+            std::fs::write(&profile, spoof).unwrap();
+            let forged = BashTool::for_cwd(harness.cwd.clone()).with_argv_mode()
+                .execute("forged-frame", json!({"argv": ["pytest"]})).await.unwrap_err();
+            assert!(forged.contains("not found in the login-shell PATH"));
+
+            let start_marker = harness.cwd.join("cancelled-profile-started");
+            let cancel_marker = harness.cwd.join("cancelled-profile-marker");
+            std::fs::write(
+                &profile,
+                format!(
+                    "export PATH='{}'\n/usr/bin/touch '{}'; (/bin/sleep 1; /usr/bin/touch '{}') & wait\n",
+                    harness.bin.display(),
+                    start_marker.display(),
+                    cancel_marker.display()
+                ),
+            )
+            .unwrap();
+            let tool = BashTool::for_cwd(harness.cwd.clone()).with_argv_mode();
+            let task = tokio::spawn(async move {
+                tool.execute("profile-cancel", json!({"argv": ["pytest"]})).await
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while !start_marker.exists() {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("login profile should start before cancellation");
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+            tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+            assert!(!cancel_marker.exists(), "cancelled login profile left a child running");
+            std::fs::remove_file(profile).unwrap();
+        });
+    #[cfg(unix)]
+    std::fs::write(
+        harness.home.join(".bash_profile"),
+        format!("export PATH='{}'\n", harness.bin.display()),
+    )
+    .unwrap();
+    harness.restore_runner("pytest");
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -270,31 +455,40 @@ async fn argv_validation_and_direct_execution(h: &Harness) {
     assert!(!marker.exists(), "validation fails before spawn");
 
     // Direct execution: no expansion, globbing, or shell metacharacters.
+    let pytest = h.bin.join("pytest");
+    std::fs::write(&pytest, "#!/bin/sh\nif [ \"$1\" = sleep ]; then /bin/sleep 5; exit; fi\nif [ \"$1\" = envelope ]; then printf o; printf e >&2; exit 3; fi\nprintf '%s|' \"$@\"\nprintf '\\n'\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&pytest, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
     let out = bash
-        .execute("c", json!({"argv": ["printf", "%s|", "$HOME", "*", "a;b"]}))
+        .execute("c", json!({"argv": ["pytest", "$HOME", "*", "a;b"]}))
         .await
         .unwrap();
-    assert_eq!(text(&out.content), "$HOME|*|a;b|\n[exit 0]");
+    assert_eq!(text(&out.content), "$HOME|*|a;b|\n\n[exit 0]");
 
     // Same envelope, cwd, and exit contract as command mode.
-    let script = "printf o; printf e >&2; exit 3";
     let argv = bash
-        .execute("c", json!({"argv": ["sh", "-c", script]}))
+        .execute("c", json!({"argv": ["pytest", "envelope"]}))
         .await
         .unwrap();
-    let command = bash.execute("c", json!({"command": script})).await.unwrap();
+    let command = bash
+        .execute("c", json!({"command": "pytest envelope"}))
+        .await
+        .unwrap();
     assert_eq!(text(&argv.content), "o\n[stderr]\ne\n[exit 3]");
     assert_eq!(argv.content, command.content);
-    let pwd = bash.execute("c", json!({"argv": ["pwd"]})).await.unwrap();
-    assert!(text(&pwd.content).contains("m2b"), "turn cwd is shared");
+    // Turn cwd behavior is covered by the relative PATH resolver regression.
 
     // Timeout keeps the existing error and never projects.
     let error = bash
-        .execute_for_run("c", json!({"argv": ["sleep", "5"], "timeout_ms": 200}))
+        .execute_for_run("c", json!({"argv": ["pytest", "sleep"], "timeout_ms": 200}))
         .await
         .expect_err("times out");
     assert_eq!(error, "command timed out after 200ms");
     assert_eq!(store_len(&store), 0);
+    h.restore_runner("pytest");
 }
 
 async fn positive_programs(h: &Harness) {
@@ -421,17 +615,10 @@ async fn positive_programs(h: &Harness) {
 
 async fn passthrough_via_real_execution(h: &Harness) {
     let status = fixture("git/status-long.raw");
-    let git_path = h.bin.join("git").to_string_lossy().to_string();
     let cases: Vec<(Value, &str, String, i32)> = vec![
         (json!({"command": "git status"}), "git", status.clone(), 0),
         (
             json!({"command": "git status | cat"}),
-            "git",
-            status.clone(),
-            0,
-        ),
-        (
-            json!({"argv": [git_path, "status"]}),
             "git",
             status.clone(),
             0,
