@@ -29,7 +29,10 @@ pub struct BashTool {
 const ARGV_MODE_DESCRIPTION: &str =
     "Run a command. Provide exactly one of `command` (shell source run via \
 `bash -lc <cmd>`) or `argv` (a program and its arguments executed directly, \
-with no shell). Returns combined stdout/stderr and exit code.";
+with no shell; the program must be cargo, git, gh, npm, npx, or pytest). \
+Returns combined stdout/stderr and exit code.";
+
+const ARGV_MODE_ELIGIBLE: &str = "cargo, git, gh, npm, npx, pytest";
 
 /// The provider-portable plain-object schema offered in argv mode: optional
 /// `command`, optional string-array `argv`, optional `timeout_ms`, no
@@ -81,7 +84,12 @@ fn parse_argv_mode_args(args: &Value) -> Result<Invocation<'_>, String> {
             match tokens.first() {
                 None => Err("'argv' must not be empty".into()),
                 Some(&"") => Err("'argv' executable must not be empty".into()),
-                Some(_) => Ok(Invocation::Argv(tokens)),
+                Some(&program) => {
+                    if !matches!(program, "cargo" | "git" | "gh" | "npm" | "npx" | "pytest") {
+                        return Err(format!("'argv' executable must be one of: {ARGV_MODE_ELIGIBLE} (use 'command' otherwise)"));
+                    }
+                    Ok(Invocation::Argv(tokens))
+                }
             }
         }
     }
@@ -237,7 +245,11 @@ impl AgentTool for BashTool {
                 Invocation::Argv(tokens) => {
                     // Direct execution: no shell, alias, function, expansion,
                     // redirection, pipeline, or re-tokenization.
-                    let mut command = Command::new(tokens[0]);
+                    let program = resolve_login_path(tokens[0], self.cwd.as_deref()).await;
+                    let Some(program) = program else {
+                        return Err(format!("'argv' executable '{}' was not found in the login-shell PATH (use 'command' otherwise)", tokens[0]));
+                    };
+                    let mut command = Command::new(program);
                     command.args(&tokens[1..]);
                     command
                 }
@@ -257,6 +269,49 @@ fn shell_command(cmd: &str) -> Command {
     let mut command = Command::new("bash");
     command.arg("-lc").arg(cmd);
     command
+}
+
+/// Resolve an allowlisted bare name through the login-shell PATH in the turn cwd.
+/// Independent complete probes must agree, preventing ordinary startup output
+/// or function/command shadowing from forging the final framed path.
+async fn resolve_login_path(program: &str, cwd: Option<&std::path::Path>) -> Option<PathBuf> {
+    let builtin_probe = resolve_login_path_probe(program, cwd, false).await?;
+    let command_probe = resolve_login_path_probe(program, cwd, true).await?;
+    (builtin_probe == command_probe).then_some(builtin_probe)
+}
+
+async fn resolve_login_path_probe(
+    program: &str,
+    cwd: Option<&std::path::Path>,
+    command_dispatch: bool,
+) -> Option<PathBuf> {
+    let dispatch = if command_dispatch {
+        "command builtin"
+    } else {
+        "\\builtin"
+    };
+    let mut command = Command::new("bash");
+    command.arg("-lc").arg(format!(
+        "resolved=$({dispatch} type -P -- {program}) || exit 1; case \"$resolved\" in /*) absolute=\"$resolved\" ;; *) cwd=$({dispatch} pwd -P) || exit 1; absolute=\"$cwd/$resolved\" ;; esac; {dispatch} printf '\\000%s\\000' \"$absolute\""
+    ));
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    let output = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let end = output.stdout.iter().rposition(|byte| *byte == 0)?;
+    let start = output.stdout[..end].iter().rposition(|byte| *byte == 0)?;
+    let resolved = std::str::from_utf8(&output.stdout[start + 1..end]).ok()?;
+    let path = PathBuf::from(resolved);
+    path.is_absolute().then_some(path)
 }
 
 impl BashTool {
