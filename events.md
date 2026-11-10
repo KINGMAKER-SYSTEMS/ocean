@@ -2812,3 +2812,23 @@ area: [testing] [frontend]
 
 Ported Risingtides-dev/ocean-surface#235: the isolated macOS Rooms Stage0 Tauri/WebDriver acceptance scaffold. Adds the `rooms-acceptance` feature (optional `tauri-plugin-wdio-webdriver =1.3.0`), the debug-only `ocean-rooms-acceptance` bin with its own capability and config, `run_rooms_acceptance` in `ocean-tauri/src/lib.rs` behind a `compile_error!` that refuses release builds with the feature, `scripts/test-tauri-rooms.sh` (Stage0 runner; `--validate` is static only) and `test/tauri/rooms_stage0.py`. Eight files applied cleanly; the Tauri `Cargo.lock` was regenerated, purely additive (19 new packages, all from the optional plugin; no existing version changed). Validation: `cargo build --locked` (what Build Surface runs), `cargo check --features rooms-acceptance --bin ocean-rooms-acceptance`, the release gate refuses as intended, clippy `-D warnings` on both the default and acceptance builds, rustfmt, `scripts/test-tauri-rooms.sh --validate` PASS, `cargo test` 81/82 with the one failure the pre-existing timing-flaky `scoped_native_watch_release_keeps_alias_peer_and_legacy_watch_live` (passes alone 2/3; lib.rs only gains the cfg-gated runner here). The live Stage0 run needs a dedicated macOS login with Accessibility permission and an isolated daemon; it was not run. Also carries `test/tauri/README.md` from Risingtides-dev/ocean-surface#217 (the harness's own doc), with its CI paragraph rewritten as local commands: #217's separate `tauri-acceptance` workflow job is not ported because the root CI contract keeps CI to one scope job and two build jobs.
 _________________________________________________________________________________
+time: [19:04] [09-11-26]
+agent: [codex] [gpt-6-astra]
+worktree: [codex/kingmaker-ocean-oauth-state-20261109]
+type: [bug report]
+area: [backend] [testing]
+
+The current canonical Ocean OAuth callback already rejects wrong state,
+including provider errors, without consuming the login. A separate one-shot
+race remained: two concurrent valid callbacks both received a success page,
+while only one code resolved the flow. The new regression failed on main with
+HTTP 200/200. The handler now claims the sender before acknowledging a valid
+callback, and a duplicate receives 409 with a failure page. The browser reply
+still completes before the winning result is sent for token exchange. The
+focused ocean-oauth suite passes 57/57, workspace check, formatting and
+docs-check pass. Strict crate Clippy found the inherited nine-argument
+`exchange_chatgpt` signature; with only that lint allowed, Clippy passed.
+Independent read-only review found no actionable issue. This is local code
+evidence only; no provider call, token exchange, daemon install, or live login
+occurred.
+_________________________________________________________________________________ 19:04 codex/kingmaker-ocean-oauth-state-20261109

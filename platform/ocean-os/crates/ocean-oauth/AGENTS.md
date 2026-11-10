@@ -34,6 +34,10 @@ This crate owns browser OAuth 2.0 + PKCE login for provider subscriptions: bind 
   and `openai-realtime`; they retain the same atomic 0600 merge contract and
   must never overwrite unrelated agent OAuth or API-key blocks.
 - Tests never touch the real `~/.config/ocean-rs/auth.json` and never hit real provider endpoints.
+- A callback with valid state claims the one-shot resolver before receiving a
+  success page. A concurrent or later valid callback receives HTTP 409 instead
+  of a second success page; the winning browser response still completes before
+  token exchange starts.
 
 ## Work Guidance
 
