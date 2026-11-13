@@ -23,8 +23,8 @@ Ocean OS; they do not become alternate agent runtimes.
   fail open, and never block a turn or terminal event loop.
 - Never label these packages as Ocean daemon tool plugins; `crates/ocean-plugin`
   owns that separate subprocess ABI.
-- After a meaningful change, refresh this index and append a root `events.md`
-  entry with `worktree:`.
+- After a meaningful change, refresh this index and record the work in a new
+  monorepo-root `events/` entry with `worktree:`.
 
 ## Adapter Index
 

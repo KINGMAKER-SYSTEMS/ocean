@@ -27,8 +27,8 @@ pub(crate) enum CallbackResult {
         state: String,
         client_id: Option<String>,
     },
-    /// A terminal error detected at the callback (provider `error`, missing
-    /// code, or state mismatch).
+    /// A terminal error detected at the callback after valid state (provider
+    /// `error` or missing code).
     Err(String),
 }
 
@@ -233,6 +233,16 @@ async fn handle_callback(stream: &mut TcpStream, query: &str, shared: &ServerSha
         write_response(stream, 500, "text/html; charset=utf-8", &body).await;
         return;
     }
+    let Some(sender) = shared.tx.lock().take() else {
+        write_response(
+            stream,
+            409,
+            "text/html; charset=utf-8",
+            &error_html("login already completed"),
+        )
+        .await;
+        return;
+    };
 
     let result = if let Some(err) = error.as_deref() {
         let detail = error_description.unwrap_or_else(|| err.to_string());
@@ -255,10 +265,7 @@ async fn handle_callback(stream: &mut TcpStream, query: &str, shared: &ServerSha
     // Respond to the browser BEFORE resolving the flow / performing exchange.
     write_response(stream, status, "text/html; charset=utf-8", &body).await;
 
-    let sender = shared.tx.lock().take();
-    if let Some(sender) = sender {
-        let _ = sender.send(result);
-    }
+    let _ = sender.send(result);
 }
 
 async fn write_response(stream: &mut TcpStream, status: u16, content_type: &str, body: &str) {
@@ -284,6 +291,7 @@ fn reason_phrase(status: u16) -> &'static str {
         200 => "OK",
         302 => "Found",
         404 => "Not Found",
+        409 => "Conflict",
         500 => "Internal Server Error",
         503 => "Service Unavailable",
         _ => "OK",
@@ -456,6 +464,38 @@ mod tests {
                 assert_eq!(state, "GOOD");
             }
             other => panic!("expected valid callback after wrong-state request, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_valid_callbacks_only_acknowledge_the_winner() {
+        let mut server = CallbackServer::bind(&ephemeral_spec(), "S".to_string())
+            .await
+            .expect("bind");
+        let port = port_of(&server);
+        let (first, second) = tokio::join!(
+            get(port, "/callback?code=FIRST&state=S"),
+            get(port, "/callback?code=SECOND&state=S"),
+        );
+        let first_status = status_and_body(&first).0;
+        let second_status = status_and_body(&second).0;
+        assert!(
+            matches!((first_status, second_status), (200, 409) | (409, 200)),
+            "statuses: {first_status}, {second_status}"
+        );
+        let loser = if first_status == 409 { &first } else { &second };
+        assert!(status_and_body(loser).1.contains("Ocean — login failed."));
+        let winning_code = if first_status == 200 {
+            "FIRST"
+        } else {
+            "SECOND"
+        };
+        match server.next_result().await.expect("result") {
+            CallbackResult::Ok { code, state, .. } => {
+                assert_eq!(code, winning_code);
+                assert_eq!(state, "S");
+            }
+            other => panic!("expected winning callback, got {other:?}"),
         }
     }
 

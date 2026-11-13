@@ -85,7 +85,7 @@ This crate owns shared protocol types used across Ocean clients, daemon, runtime
 
 - Prefer explicit fields and stable enums over implicit client-specific conventions.
 - Update downstream crates when shared types change.
-- Document any migration or compatibility risk in the root `events.md` entry for the work.
+- Document any migration or compatibility risk in the new monorepo-root `events/` entry for the work.
 
 ## Verification
 

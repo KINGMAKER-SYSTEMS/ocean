@@ -48,7 +48,7 @@ This child contract governs current architecture, operations, cross-repository r
 
 ## Proposed A3b amendment boundary
 
-- This documentation-only proposal describes the public A3a registry writer and unresolved A3b decisions. Record explicit operator rulings in the canonical public proposal or a linked public decision record before implementation; private history is not public acceptance evidence. Allowed changes are `../AGENTS.md`, this file, `README.md`, `specs/2026-10-03-ocean-extension-a3b-contract-amendment.md`, and the canonical monorepo root `events.md`.
+- This documentation-only proposal describes the public A3a registry writer and unresolved A3b decisions. Record explicit operator rulings in the canonical public proposal or a linked public decision record before implementation; private history is not public acceptance evidence. Allowed changes are `../AGENTS.md`, this file, `README.md`, `specs/2026-10-03-ocean-extension-a3b-contract-amendment.md`, and a new canonical monorepo root `events/` entry.
 - Keep the accepted Stage A manifest byte-unchanged while proposing nullable unknown outcome facts/nonretry CLI classification and explicit postcommit live-trust reconciliation semantics. Preserve every known fact and the full A3b scope.
 - The proposal, its merge, and reviewer acceptance are not operator ratification. Obtain explicit decisions on both conflicts before A3b source; do not substitute startup-only work or add disable-before-trust as an inferred rule.
 - No source/Cargo/HTTP/CLI implementation, activation, installation, schedule/account/protection changes, Git acquisition, Crew/integration work, or migration-hold release belongs to this proposal.
@@ -58,7 +58,7 @@ This child contract governs current architecture, operations, cross-repository r
 
 - Prefer concise present-tense contracts over dated overlays and append-only handoffs.
 - Name source anchors and executable validation for behavioral claims.
-- Put open product work in `../ROADMAP.md`; daemon-refactor progress stays in `DAEMON_REFACTOR_MISSION.md`; chronology belongs in `../events.md`.
+- Put open product work in `../ROADMAP.md`; daemon-refactor progress stays in `DAEMON_REFACTOR_MISSION.md`; chronology belongs in new monorepo-root `events/` entries.
 - Avoid copied route, model, crate, or package inventories when a typed source or executable manifest exists.
 - Do not port Pi TypeScript line-by-line; document idiomatic Rust concepts and boundaries.
 - Mark a known mismatch honestly instead of documenting intended behavior as shipped.

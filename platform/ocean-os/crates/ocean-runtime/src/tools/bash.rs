@@ -29,7 +29,10 @@ pub struct BashTool {
 const ARGV_MODE_DESCRIPTION: &str =
     "Run a command. Provide exactly one of `command` (shell source run via \
 `bash -lc <cmd>`) or `argv` (a program and its arguments executed directly, \
-with no shell). Returns combined stdout/stderr and exit code.";
+with no shell; the program must be cargo, git, gh, npm, npx, or pytest). \
+Returns combined stdout/stderr and exit code.";
+
+const ARGV_MODE_ELIGIBLE: &str = "cargo, git, gh, npm, npx, pytest";
 
 /// The provider-portable plain-object schema offered in argv mode: optional
 /// `command`, optional string-array `argv`, optional `timeout_ms`, no
@@ -81,7 +84,12 @@ fn parse_argv_mode_args(args: &Value) -> Result<Invocation<'_>, String> {
             match tokens.first() {
                 None => Err("'argv' must not be empty".into()),
                 Some(&"") => Err("'argv' executable must not be empty".into()),
-                Some(_) => Ok(Invocation::Argv(tokens)),
+                Some(&program) => {
+                    if !matches!(program, "cargo" | "git" | "gh" | "npm" | "npx" | "pytest") {
+                        return Err(format!("'argv' executable must be one of: {ARGV_MODE_ELIGIBLE} (use 'command' otherwise)"));
+                    }
+                    Ok(Invocation::Argv(tokens))
+                }
             }
         }
     }
@@ -231,15 +239,35 @@ impl AgentTool for BashTool {
             .get("timeout_ms")
             .and_then(|v| v.as_u64())
             .unwrap_or(120_000);
-        let command = if self.argv_mode {
+        let (command, execution_timeout_ms) = if self.argv_mode {
             match parse_argv_mode_args(&args)? {
-                Invocation::Command(cmd) => shell_command(cmd),
+                Invocation::Command(cmd) => (shell_command(cmd), timeout_ms),
                 Invocation::Argv(tokens) => {
                     // Direct execution: no shell, alias, function, expansion,
                     // redirection, pipeline, or re-tokenization.
-                    let mut command = Command::new(tokens[0]);
+                    let started = tokio::time::Instant::now();
+                    let program = resolve_login_path(
+                        tokens[0],
+                        self.cwd.as_deref(),
+                        Duration::from_millis(timeout_ms),
+                    )
+                    .await
+                    .map_err(|()| format!("command timed out after {timeout_ms}ms"))?;
+                    let Some((program, path)) = program else {
+                        return Err(format!("'argv' executable '{}' was not found in the login-shell PATH (use 'command' otherwise)", tokens[0]));
+                    };
+                    let elapsed_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                    let remaining_ms = timeout_ms.saturating_sub(elapsed_ms);
+                    if remaining_ms == 0 {
+                        return Err(format!("command timed out after {timeout_ms}ms"));
+                    }
+                    let mut command = Command::new(program);
                     command.args(&tokens[1..]);
-                    command
+                    // The executable was selected from the login shell's
+                    // post-profile PATH. Preserve that environment for
+                    // shebangs such as `#!/usr/bin/env node` as well.
+                    command.env("PATH", path);
+                    (command, remaining_ms)
                 }
             }
         } else {
@@ -247,9 +275,10 @@ impl AgentTool for BashTool {
                 .get("command")
                 .and_then(|v| v.as_str())
                 .ok_or("missing 'command'")?;
-            shell_command(cmd)
+            (shell_command(cmd), timeout_ms)
         };
-        self.run_captured(command, timeout_ms).await
+        self.run_captured(command, execution_timeout_ms, timeout_ms)
+            .await
     }
 }
 
@@ -257,6 +286,152 @@ fn shell_command(cmd: &str) -> Command {
     let mut command = Command::new("bash");
     command.arg("-lc").arg(cmd);
     command
+}
+
+/// Resolve an allowlisted bare name through the login-shell PATH in the turn cwd.
+/// Independent complete probes must agree, preventing ordinary startup output
+/// or function/command shadowing from forging the final framed path.
+async fn resolve_login_path(
+    program: &str,
+    cwd: Option<&std::path::Path>,
+    timeout: Duration,
+) -> Result<Option<(PathBuf, String)>, ()> {
+    let started = tokio::time::Instant::now();
+    let Some(builtin_probe) =
+        resolve_login_path_probe(program, cwd, false, started, timeout).await?
+    else {
+        return Ok(None);
+    };
+    let Some(command_probe) =
+        resolve_login_path_probe(program, cwd, true, started, timeout).await?
+    else {
+        return Ok(None);
+    };
+    Ok((builtin_probe == command_probe).then_some(builtin_probe))
+}
+
+async fn resolve_login_path_probe(
+    program: &str,
+    cwd: Option<&std::path::Path>,
+    command_dispatch: bool,
+    started: tokio::time::Instant,
+    timeout: Duration,
+) -> Result<Option<(PathBuf, String)>, ()> {
+    let dispatch = if command_dispatch {
+        "command builtin"
+    } else {
+        "\\builtin"
+    };
+    let mut command = Command::new("bash");
+    command.arg("-lc").arg(format!(
+        "login_cwd=$({dispatch} pwd -P) || exit 1; resolved=$({dispatch} type -P -- {program}) || exit 1; case \"$resolved\" in /*) absolute=\"$resolved\" ;; *) absolute=\"$login_cwd/$resolved\" ;; esac; {dispatch} printf '\\000%s\\000%s\\000%s\\000' \"$absolute\" \"$PATH\" \"$login_cwd\""
+    ));
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    command.stdin(Stdio::null());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::null());
+    #[cfg(unix)]
+    command.process_group(0);
+    command.kill_on_drop(true);
+
+    let Ok(mut child) = command.spawn() else {
+        return Ok(None);
+    };
+    let mut process_group = ProcessGroupGuard::new(child.id());
+    let Some(stdout) = child.stdout.take() else {
+        return Ok(None);
+    };
+    let probe = async {
+        let (stdout, truncated) = read_capped(stdout).await;
+        let status = child.wait().await;
+        (stdout, truncated, status)
+    };
+    let Some(remaining) = timeout.checked_sub(started.elapsed()) else {
+        return Err(());
+    };
+    let (stdout, truncated, status) = match tokio::time::timeout(remaining, probe).await {
+        Ok((stdout, truncated, Ok(status))) => {
+            process_group.disarm();
+            (stdout, truncated, status)
+        }
+        Ok((_stdout, _truncated, Err(_))) => return Ok(None),
+        Err(_) => return Err(()),
+    };
+    if truncated || !status.success() {
+        return Ok(None);
+    }
+    let cwd_end = stdout.iter().rposition(|byte| *byte == 0);
+    let Some(cwd_end) = cwd_end else {
+        return Ok(None);
+    };
+    let cwd_start = stdout[..cwd_end].iter().rposition(|byte| *byte == 0);
+    let Some(cwd_start) = cwd_start else {
+        return Ok(None);
+    };
+    let path_end = cwd_start;
+    let path_start = stdout[..path_end].iter().rposition(|byte| *byte == 0);
+    let Some(path_start) = path_start else {
+        return Ok(None);
+    };
+    let executable_end = path_start;
+    let executable_start = stdout[..executable_end].iter().rposition(|byte| *byte == 0);
+    let Some(executable_start) = executable_start else {
+        return Ok(None);
+    };
+    let resolved = std::str::from_utf8(&stdout[executable_start + 1..executable_end]).ok();
+    let Some(resolved) = resolved else {
+        return Ok(None);
+    };
+    let raw_path = std::str::from_utf8(&stdout[path_start + 1..path_end]).ok();
+    let Some(raw_path) = raw_path else {
+        return Ok(None);
+    };
+    let login_cwd = std::str::from_utf8(&stdout[cwd_start + 1..cwd_end]).ok();
+    let Some(login_cwd) = login_cwd else {
+        return Ok(None);
+    };
+    let login_cwd = PathBuf::from(login_cwd);
+    if !login_cwd.is_absolute() {
+        return Ok(None);
+    }
+    let needs_login_cwd = raw_path.is_empty()
+        || raw_path
+            .split(':')
+            .any(|entry| !PathBuf::from(entry).is_absolute());
+    if needs_login_cwd && login_cwd.to_string_lossy().contains(':') {
+        // A colon cannot be represented inside a PATH component, so passing
+        // an absolute rewrite would change which helper the login PATH names.
+        return Ok(None);
+    }
+    // The direct child runs in the turn cwd, which may differ from the login
+    // profile's cwd. Make PATH entries retain the directory they denoted in
+    // that profile, including empty entries (the shell's current directory).
+    let search_path = if raw_path.is_empty() {
+        // Bash treats an empty PATH as the current directory for command
+        // lookup; preserve that meaning after the direct child returns to the
+        // turn cwd.
+        login_cwd.to_string_lossy().into_owned()
+    } else {
+        raw_path
+            .split(':')
+            .map(|entry| {
+                let entry = PathBuf::from(if entry.is_empty() { "." } else { entry });
+                if entry.is_absolute() {
+                    entry
+                } else {
+                    login_cwd.join(entry)
+                }
+            })
+            .map(|entry| entry.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(":")
+    };
+    let executable = PathBuf::from(resolved);
+    Ok(executable
+        .is_absolute()
+        .then_some((executable, search_path)))
 }
 
 impl BashTool {
@@ -267,6 +442,7 @@ impl BashTool {
         &self,
         mut command: Command,
         timeout_ms: u64,
+        reported_timeout_ms: u64,
     ) -> Result<AgentToolResult, String> {
         if let Some(cwd) = &self.cwd {
             command.current_dir(cwd);
@@ -304,7 +480,7 @@ impl BashTool {
                 Ok(r) => r,
                 // On elapse the process-group guard kills descendants and
                 // kill_on_drop also targets the direct child.
-                Err(_) => return Err(format!("command timed out after {timeout_ms}ms")),
+                Err(_) => return Err(format!("command timed out after {reported_timeout_ms}ms")),
             };
         let status = match status {
             Ok(status) => {
