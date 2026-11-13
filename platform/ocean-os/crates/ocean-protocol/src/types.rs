@@ -382,6 +382,38 @@ impl Model {
         }
     }
 
+    /// Anthropic Claude Fable 5.2 (2026-11). 1M input / 128K output, adaptive
+    /// thinking only (rejects `disabled` and `temperature`; verified live).
+    pub fn anthropic_claude_fable_5_2() -> Self {
+        Self {
+            id: "claude-fable-5-2".into(),
+            name: "Claude Fable 5.2".into(),
+            api: "anthropic-messages".into(),
+            provider: "anthropic".into(),
+            base_url: "https://api.anthropic.com".into(),
+            reasoning: true,
+            supports_images: true,
+            context_window: 1_000_000,
+            max_tokens: 128_000,
+        }
+    }
+
+    /// Anthropic Claude Haiku 5.5 (2026-10). 1M input / 128K output, adaptive
+    /// thinking that can be disabled (verified live 2026-11-13).
+    pub fn anthropic_claude_haiku_5_5() -> Self {
+        Self {
+            id: "claude-haiku-5-5".into(),
+            name: "Claude Haiku 5.5".into(),
+            api: "anthropic-messages".into(),
+            provider: "anthropic".into(),
+            base_url: "https://api.anthropic.com".into(),
+            reasoning: true,
+            supports_images: true,
+            context_window: 1_000_000,
+            max_tokens: 128_000,
+        }
+    }
+
     /// Anthropic Claude Fable 5.1 — demanding reasoning and long-horizon
     /// agentic work, with the current 1M input / 128K output limits.
     pub fn anthropic_claude_fable_5_1() -> Self {
@@ -468,6 +500,22 @@ impl Model {
             supports_images: true,
             context_window: 128_000,
             max_tokens: 16_384,
+        }
+    }
+
+    /// Any current Gemini id on the v1beta generativelanguage surface.
+    pub fn gemini(id: impl Into<String>, context_window: u32, max_tokens: u32) -> Self {
+        let id = id.into();
+        Self {
+            name: id.clone(),
+            id,
+            api: "google-generative-ai".into(),
+            provider: "google".into(),
+            base_url: "https://generativelanguage.googleapis.com".into(),
+            reasoning: false,
+            supports_images: true,
+            context_window,
+            max_tokens,
         }
     }
 

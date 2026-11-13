@@ -214,12 +214,16 @@ fn note_input_transformations(model: &str, transformations: &[Value]) {
 fn runs_prefix_binding_check(id: &str) -> bool {
     matches!(
         id,
-        "claude-fable-5-1"
+        "claude-fable-5-2"
+            | "fable-5-2"
+            | "claude-fable-5-1"
             | "fable-5-1"
             | "claude-opus-5-5"
             | "opus-5-5"
             | "claude-sonnet-5-5"
             | "sonnet-5-5"
+            | "claude-haiku-5-5"
+            | "haiku-5-5"
     )
 }
 
@@ -567,7 +571,11 @@ fn build_body(model: &Model, context: &Context, options: &StreamOptions) -> Valu
     // parameters with a 400, whatever the thinking mode.
     let adaptive = matches!(
         id,
-        "claude-fable-5-1"
+        "claude-fable-5-2"
+            | "fable-5-2"
+            | "claude-haiku-5-5"
+            | "haiku-5-5"
+            | "claude-fable-5-1"
             | "fable-5-1"
             | "claude-fable-5"
             | "fable-5"
@@ -594,7 +602,13 @@ fn build_body(model: &Model, context: &Context, options: &StreamOptions) -> Valu
     // thinking disabled it can write a tool call into its visible text instead
     // of a `tool_use` block: the turn succeeds, the tool never runs, and the
     // text pollutes later rounds. In a tool loop Off is low effort there.
-    let can_disable = off_by_default || matches!(id, "claude-sonnet-5" | "sonnet-5");
+    // Haiku 5.5 accepts `disabled` (verified live 2026-11-13); Fable 5.2
+    // rejects it like Fable 5.1.
+    let can_disable = off_by_default
+        || matches!(
+            id,
+            "claude-sonnet-5" | "sonnet-5" | "claude-haiku-5-5" | "haiku-5-5"
+        );
     if adaptive {
         body.as_object_mut().unwrap().remove("temperature");
     }

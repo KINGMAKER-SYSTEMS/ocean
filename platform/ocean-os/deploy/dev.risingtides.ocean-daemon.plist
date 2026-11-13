@@ -57,9 +57,13 @@
   <key>ThrottleInterval</key>
   <integer>10</integer>
 
-  <!-- Long-running background service; do not let it be aggressively throttled. -->
+  <!-- Every Ocean client blocks on this HTTP server, so it must not be
+       throttled. `Background` is the launchd class that IS throttled: on
+       2026-11-13, under a sustained load average of ~300, the daemon accepted
+       connections but answered none for hours and its launcher took minutes
+       to parse. `Interactive` runs with app-level limits (launchd.plist(5)). -->
   <key>ProcessType</key>
-  <string>Background</string>
+  <string>Interactive</string>
 
   <key>StandardOutPath</key>
   <string>/private/tmp/ocean-daemon.log</string>

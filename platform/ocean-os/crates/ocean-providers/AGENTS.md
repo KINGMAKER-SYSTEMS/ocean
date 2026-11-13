@@ -28,12 +28,17 @@ auth-file write custody. Provider wire encoding remains in `ocean-protocol`.
   fallback. Native Claude uses its captured environment and never borrows a
   different account after an explicit home/config selection.
 - Preserve forward model/catalog routes and feature credential isolation.
-- Public Codex routes include GPT-6.1 Sol, GPT-6 Sol, GPT-6 Luna and GPT-6
-  Astra. Claude Opus aliases track 5.5 (1M/128K); explicit 5/4.x ids remain
-  routable for pinned sessions. Explicit Anthropic/Claude Code Fable 5.1,
-  Opus 5.5 and Sonnet 5.5 routes retain the same 1M/128K limits as the catalog.
-  Fable aliases retain Fable 5.1; Sonnet aliases
-  track 5.5 (1M/128K), retaining exact older ids for pinned sessions.
+- Public Codex routes include GPT-6.1 Sol, GPT-6.1 Terra (both 500K on Codex),
+  GPT-6 Sol, GPT-6 Luna and GPT-6 Astra; GPT-5.5 left the menu 2026-11-13
+  (Codex 400s it) and stays routable. Claude Opus aliases track 5.5, Fable
+  aliases track 5.2 and Haiku aliases track 5.5 (all 1M/128K); explicit older
+  ids remain routable for pinned sessions. Explicit Anthropic/Claude Code
+  Fable 5.2/5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5 routes retain the same
+  1M/128K limits as the catalog. Sonnet aliases track 5.5.
+- Catalog refreshes record how each new id was verified. 2026-11-13: Claude,
+  Codex/OpenAI and GLM ids are live-verified with real turns; DeepSeek
+  `deepseek-flash`, MiniMax M3/M3.1 Flash, Kimi K3.1 Pro and the Gemini 4 /
+  3.8 Flash ids are docs-verified only (the local keys were revoked or absent).
 - Explicit OpenAI API-key GPT-6/5.6 routes retain API auth and published
   1,050,000/128,000 limits. `openai_uses_responses` is the shared exact-model
   selection predicate for runtime construction and history replay; bare ids
@@ -51,8 +56,8 @@ auth-file write custody. Provider wire encoding remains in `ocean-protocol`.
 - `model_effort_levels` lists a level only when choosing it changes the request
   the encoder builds. Levels the encoder folds into another are omitted, `off`
   appears only where thinking can be turned off, and a route whose encoder
-  sends no effort parameter (GLM, MiniMax, Kimi K2.x, GPT-4o, Gemini 2.0
-  Flash) has an empty list, which clients render as no effort control. Change
+  sends no effort parameter (MiniMax, Kimi K2.x/K3.1, GPT-4o, Gemini) has an
+  empty list, which clients render as no effort control. Change
   it with the encoder.
 - Readiness catalog responses include additive model-specific `effort_levels`;
   advertise max only where Ocean's encoder supports the provider vocabulary.

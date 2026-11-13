@@ -515,7 +515,7 @@ pub const DEFAULT_FALLBACK_ORDER: &[&str] = &[
     "claude-sonnet-5-5", // claude-code oauth
     "gpt-6-astra",       // openai-codex
     "deepseek-v4-pro",   // deepseek
-    "gemini-2.0-flash",  // google
+    "gemini-4-argon",    // google
     "kimi-k2.6",         // kimi
     "MiniMax-M2.7",      // minimax
 ];
@@ -746,15 +746,23 @@ pub fn known_models() -> Vec<KnownModel> {
         // `resolve_model_selection`, but the picker must stop offering models that
         // are about to stop existing.
         m("deepseek-v4-pro", "deepseek", "DeepSeek V4 Pro"),
+        // 2026-11 refresh: DeepSeek's docs now publish `deepseek-flash`
+        // (V4.1 Flash) as the flash id; `deepseek-v4-flash` stays accepted and
+        // on the menu because the operator key on this Mac was revoked when the
+        // refresh ran, so the new id is docs-verified, not live-verified.
+        m("deepseek-flash", "deepseek", "DeepSeek V4.1 Flash"),
         m("deepseek-v4-flash", "deepseek", "DeepSeek V4 Flash"),
         m("gpt-6.1-sol", "openai-codex", "GPT-6.1 Sol (Codex)"),
+        m("gpt-6.1-terra", "openai-codex", "GPT-6.1 Terra (Codex)"),
         m("gpt-6-sol", "openai-codex", "GPT-6 Sol (Codex)"),
         m("gpt-6-luna", "openai-codex", "GPT-6 Luna (Codex)"),
         m("gpt-6-astra", "openai-codex", "GPT-6 Astra (Codex)"),
         m("gpt-5.6-sol", "openai-codex", "GPT-5.6 Sol (Codex)"),
         m("gpt-5.6-terra", "openai-codex", "GPT-5.6 Terra (Codex)"),
         m("gpt-5.6-luna", "openai-codex", "GPT-5.6 Luna (Codex)"),
-        m("gpt-5.5", "openai-codex", "GPT-5.5 (Codex)"),
+        // `gpt-5.5` left the menu 2026-11-13: the Codex catalog no longer lists
+        // it and the backend answers 400 "not supported when using Codex with a
+        // ChatGPT account" (verified live). It stays routable as a legacy arm.
         // `gpt-5.4`, `gpt-5.4-mini` and `gpt-5.3-codex-spark` are retired from
         // the menu: the Codex backend answers 400 "not supported when using
         // Codex with a ChatGPT account" for all three (verified live
@@ -774,29 +782,51 @@ pub fn known_models() -> Vec<KnownModel> {
         // uses its Anthropic wire id in the menu, matching the other
         // current Claude models. Legacy Fable 5 ids stay resolver-only so
         // persisted sessions continue to replay.
+        // 2026-11-13 refresh (verified live against GET /v1/models and a real
+        // turn on subscription OAuth): Fable 5.2 and Haiku 5.5 joined; Haiku
+        // 4.5 left the menu and stays routable for pinned sessions.
+        m("claude-fable-5-2", "claude-code", "Claude Fable 5.2"),
         m("claude-fable-5-1", "claude-code", "Claude Fable 5.1"),
         m("claude-opus-5-5", "claude-code", "Claude Opus 5.5"),
         m("claude-sonnet-5-5", "claude-code", "Claude Sonnet 5.5"),
-        m("claude-haiku-4-5", "claude-code", "Claude Haiku 4.5"),
+        m("claude-haiku-5-5", "claude-code", "Claude Haiku 5.5"),
         // MiniMax ids use the API casing the resolver returns as current.model
         // (`MiniMax-M2`, not the lowercase alias), so `id == current.model`
         // holds for every entry — ACP/Zed match the selected mode id against the
         // advertised list, and a lowercase alias here would never match. The
         // resolver lowercases the lookup key, so these still route correctly.
+        // M3 / M3.1 Flash: ids from MiniMax's own docs (2026-11-13). The local
+        // MiniMax key was revoked when the refresh ran, so not live-verified.
+        m("MiniMax-M3", "minimax", "MiniMax M3"),
+        m("MiniMax-M3.1-Flash", "minimax", "MiniMax M3.1 Flash"),
         m("MiniMax-M2.7", "minimax", "MiniMax M2.7"),
         m("MiniMax-M2", "minimax", "MiniMax M2"),
         m("k3", "kimi-coding", "Kimi K3 (coding plan)"),
+        // K3.1 Pro (+ highspeed): Moonshot's current flagship per its docs
+        // (2026-11-13); the local Moonshot key was revoked, so docs-verified.
+        m("kimi-k3.1-pro", "kimi", "Kimi K3.1 Pro"),
+        m("kimi-k3.1-pro-highspeed", "kimi", "Kimi K3.1 Pro Highspeed"),
         m("kimi-k3", "kimi", "Kimi K3"),
         m("kimi-k2.6", "kimi", "Kimi K2.6"),
         m("kimi-k2", "kimi", "Kimi K2"),
         m("glm-5.3-flash", "glm", "GLM 5.3 Flash"),
         m("glm-5.3", "glm", "GLM 5.3"),
         m("glm-5.2", "glm", "GLM 5.2"),
+        m("glm-5.1", "glm", "GLM 5.1"),
+        m("glm-5-turbo", "glm", "GLM 5 Turbo"),
+        m("glm-5", "glm", "GLM 5"),
         m("glm-4.7", "glm", "GLM 4.7"),
         m("glm-4.6", "glm", "GLM 4.6"),
         m("glm-4.5", "glm", "GLM 4.5"),
+        m("glm-4.5-air", "glm", "GLM 4.5 Air"),
         m("glm-4.5-flash", "glm", "GLM 4.5 Flash"),
-        m("gemini-2.0-flash", "google", "Gemini 2.0 Flash"),
+        // Gemini 4 family + 3.8 Flash (Google AI docs / launch notes,
+        // 2026-11-13). No Gemini key exists on the refresh machine, so these
+        // are docs-verified. `gemini-2.0-flash` left the menu; still routable.
+        m("gemini-4-hydrogen", "google", "Gemini 4 Hydrogen"),
+        m("gemini-4-carbon", "google", "Gemini 4 Carbon"),
+        m("gemini-4-argon", "google", "Gemini 4 Argon"),
+        m("gemini-3.8-flash", "google", "Gemini 3.8 Flash"),
     ]
 }
 
@@ -827,11 +857,13 @@ pub struct ReadyModel {
 pub fn model_effort_levels(id: &str) -> &'static [&'static str] {
     if matches!(
         id,
-        "gpt-6-astra" | "gpt-6.1-sol" | "claude-fable-5-1" | "claude-opus-5-5"
+        "gpt-6-astra" | "gpt-6.1-sol" | "claude-fable-5-2" | "claude-fable-5-1" | "claude-opus-5-5"
     ) {
         &["low", "medium", "high", "xhigh", "max"]
-    } else if matches!(id, "gpt-6-sol" | "gpt-6-luna" | "claude-sonnet-5-5")
-        || id.starts_with("gpt-5.6")
+    } else if matches!(
+        id,
+        "gpt-6.1-terra" | "gpt-6-sol" | "gpt-6-luna" | "claude-sonnet-5-5" | "claude-haiku-5-5"
+    ) || id.starts_with("gpt-5.6")
     {
         &["off", "low", "medium", "high", "xhigh", "max"]
     } else if id.starts_with("deepseek-") {
@@ -856,10 +888,9 @@ pub fn model_effort_levels(id: &str) -> &'static [&'static str] {
         // `glm_reasoning_effort` in ocean-protocol's OpenAI encoder).
         &["off", "medium", "high"]
     } else if id.starts_with("MiniMax-")
-        || matches!(
-            id,
-            "kimi-k2.6" | "kimi-k2" | "gpt-4o" | "gpt-4o-mini" | "gemini-2.0-flash"
-        )
+        || id.starts_with("gemini-")
+        || id.starts_with("kimi-k3.1")
+        || matches!(id, "kimi-k2.6" | "kimi-k2" | "gpt-4o" | "gpt-4o-mini")
     {
         // No effort parameter is sent on these routes.
         &[]
@@ -977,6 +1008,7 @@ pub fn model_routes() -> Vec<ModelRoute> {
     // would make its bare-id contract ambiguous.
     for (model_id, label) in [
         ("gpt-6.1-sol", "GPT-6.1 Sol (ChatGPT)"),
+        ("gpt-6.1-terra", "GPT-6.1 Terra (ChatGPT)"),
         ("gpt-6-sol", "GPT-6 Sol (ChatGPT)"),
         ("gpt-6-luna", "GPT-6 Luna (ChatGPT)"),
         ("gpt-6-astra", "GPT-6 Astra (ChatGPT)"),
@@ -1104,6 +1136,13 @@ pub fn resolve_model_selection(env: &ProviderEnv) -> Result<ModelSelection, Prov
         // resolve FORWARD onto v4-flash, keeping pinned sessions alive across the
         // cutover — the same pattern the retired Claude 4-6/4-7 ids use. They are
         // dropped from `known_models()` so the picker stops advertising them.
+        "deepseek-flash" | "deepseek-v4.1-flash" | "deepseek-v4-1-flash" => Ok(model_selection(
+            ProviderId::DeepSeek,
+            "deepseek-flash",
+            DEEPSEEK_BASE_URL,
+            DEEPSEEK_CONTEXT_WINDOW,
+            DEEPSEEK_MAX_OUTPUT_TOKENS,
+        )),
         "deepseek-chat" | "deepseek-reasoner" | "deepseek-r1" | "deepseek-v4-flash" => {
             Ok(model_selection(
                 ProviderId::DeepSeek,
@@ -1136,7 +1175,15 @@ pub fn resolve_model_selection(env: &ProviderEnv) -> Result<ModelSelection, Prov
             128_000,
             16_384,
         )),
-        "gpt-6.1-sol" | "gpt-6-sol" | "gpt-6-luna" => Ok(model_selection(
+        // Codex catalog (live 2026-11-13) serves the 6.1 generation at 500k.
+        "gpt-6.1-sol" | "gpt-6.1-terra" | "gpt-6-1-sol" | "gpt-6-1-terra" => Ok(model_selection(
+            ProviderId::OpenAiCodex,
+            &model.replace("gpt-6-1-", "gpt-6.1-"),
+            CODEX_BASE_URL,
+            500_000,
+            128_000,
+        )),
+        "gpt-6-sol" | "gpt-6-luna" => Ok(model_selection(
             ProviderId::OpenAiCodex,
             &model,
             CODEX_BASE_URL,
@@ -1248,7 +1295,19 @@ pub fn resolve_model_selection(env: &ProviderEnv) -> Result<ModelSelection, Prov
             200_000,
             16_384,
         )),
-        "claude-haiku-4-5" | "claude-haiku" | "haiku" => Ok(model_selection(
+        "claude-haiku-5-5"
+        | "claude-code-haiku-5-5"
+        | "claude-haiku"
+        | "haiku"
+        | "claude-code-haiku"
+        | "cc-haiku" => Ok(model_selection(
+            ProviderId::ClaudeCode,
+            "claude-haiku-5-5",
+            ANTHROPIC_BASE_URL,
+            1_000_000,
+            128_000,
+        )),
+        "claude-haiku-4-5" => Ok(model_selection(
             ProviderId::ClaudeCode,
             "claude-haiku-4-5",
             ANTHROPIC_BASE_URL,
@@ -1283,11 +1342,19 @@ pub fn resolve_model_selection(env: &ProviderEnv) -> Result<ModelSelection, Prov
         // its Anthropic API id. The old menu/wire ids remain routable below:
         // session records persist `Model.id`, so removing either would brick
         // Fable 5 sessions on their next turn (the 2026-07-29 outage pattern).
-        "claude-fable-5-1"
-        | "claude-code-fable-5-1"
+        "claude-fable-5-2"
+        | "claude-code-fable-5-2"
+        | "claude-fable"
         | "claude-code-fable"
         | "cc-fable"
         | "fable" => Ok(model_selection(
+            ProviderId::ClaudeCode,
+            "claude-fable-5-2",
+            ANTHROPIC_BASE_URL,
+            1_000_000,
+            128_000,
+        )),
+        "claude-fable-5-1" | "claude-code-fable-5-1" => Ok(model_selection(
             ProviderId::ClaudeCode,
             "claude-fable-5-1",
             ANTHROPIC_BASE_URL,
@@ -1322,7 +1389,7 @@ pub fn resolve_model_selection(env: &ProviderEnv) -> Result<ModelSelection, Prov
             200_000,
             16_384,
         )),
-        "claude-code-haiku-4-5" | "claude-code-haiku" | "cc-haiku" => Ok(model_selection(
+        "claude-code-haiku-4-5" => Ok(model_selection(
             ProviderId::ClaudeCode,
             "claude-code-haiku-4-5",
             ANTHROPIC_BASE_URL,
@@ -1354,6 +1421,20 @@ pub fn resolve_model_selection(env: &ProviderEnv) -> Result<ModelSelection, Prov
             200_000,
             8_192,
         )),
+        "minimax-m3" => Ok(model_selection(
+            ProviderId::MiniMax,
+            "MiniMax-M3",
+            minimax_base_url(env),
+            1_000_000,
+            8_192,
+        )),
+        "minimax-m3.1-flash" | "minimax-m3-1-flash" => Ok(model_selection(
+            ProviderId::MiniMax,
+            "MiniMax-M3.1-Flash",
+            minimax_base_url(env),
+            200_000,
+            8_192,
+        )),
         "minimax-m2.7" | "minimax-m2-7" => Ok(model_selection(
             ProviderId::MiniMax,
             "MiniMax-M2.7",
@@ -1373,6 +1454,16 @@ pub fn resolve_model_selection(env: &ProviderEnv) -> Result<ModelSelection, Prov
             KIMI_CODING_BASE_URL,
             KIMI_K3_CONTEXT_WINDOW,
             131_072,
+        )),
+        "kimi-k3.1-pro"
+        | "kimi-k3-1-pro"
+        | "kimi-k3.1-pro-highspeed"
+        | "kimi-k3-1-pro-highspeed" => Ok(model_selection(
+            ProviderId::Kimi,
+            &model.replace("kimi-k3-1-", "kimi-k3.1-"),
+            MOONSHOT_BASE_URL,
+            KIMI_K3_CONTEXT_WINDOW,
+            KIMI_MAX_OUTPUT_TOKENS,
         )),
         "kimi-k3" => Ok(model_selection(
             ProviderId::Kimi,
@@ -1421,6 +1512,20 @@ pub fn resolve_model_selection(env: &ProviderEnv) -> Result<ModelSelection, Prov
             200_000,
             8_192,
         )),
+        // Live-verified on the coding plan 2026-11-13. `glm-5.3-flashx` is
+        // listed by the API but the plan answers 1311 "does not yet include
+        // access", so it stays off the menu.
+        "glm-5.1" | "glm-5-1" | "glm-5" | "glm-5-turbo" | "glm-4.5-air" | "glm-4-5-air" => {
+            Ok(model_selection(
+                ProviderId::Glm,
+                &model
+                    .replace("glm-5-1", "glm-5.1")
+                    .replace("glm-4-5-air", "glm-4.5-air"),
+                glm_base_url(env),
+                200_000,
+                8_192,
+            ))
+        }
         "glm-5.2" | "glm-5-2" => Ok(model_selection(
             ProviderId::Glm,
             "glm-5.2",
@@ -1459,7 +1564,23 @@ pub fn resolve_model_selection(env: &ProviderEnv) -> Result<ModelSelection, Prov
         // Google Gemini family. Routed through ocean-protocol's
         // `google-generative-ai` provider (not OpenAI-compatible). Model ids
         // are lowercase, so casing survives normalization as-is.
-        "gemini" | "gemini-2.0-flash" | "gemini-2-0-flash" => Ok(model_selection(
+        "gemini" | "gemini-4-argon" => Ok(model_selection(
+            ProviderId::Google,
+            "gemini-4-argon",
+            GOOGLE_BASE_URL,
+            1_000_000,
+            8_192,
+        )),
+        "gemini-4-hydrogen" | "gemini-4-carbon" | "gemini-3.8-flash" | "gemini-3-8-flash" => {
+            Ok(model_selection(
+                ProviderId::Google,
+                &model.replace("gemini-3-8-", "gemini-3.8-"),
+                GOOGLE_BASE_URL,
+                1_000_000,
+                8_192,
+            ))
+        }
+        "gemini-2.0-flash" | "gemini-2-0-flash" => Ok(model_selection(
             ProviderId::Google,
             "gemini-2.0-flash",
             GOOGLE_BASE_URL,
@@ -1523,10 +1644,26 @@ fn normalize_model_id(model: &str) -> String {
 /// `minimax-m2` -> `MiniMax-M2`, `minimax-m2.7` -> `MiniMax-M2.7`. Anything that
 /// doesn't match the `minimax-m…` shape passes through unchanged.
 fn minimax_api_casing(model: &str) -> String {
-    match model.to_ascii_lowercase().strip_prefix("minimax-m") {
-        Some(rest) => format!("MiniMax-M{}", rest.to_ascii_uppercase()),
-        None => model.to_string(),
+    // `minimax-m3.1-flash` -> `MiniMax-M3.1-Flash`: the version token is
+    // upper-cased, any suffix word is title-cased.
+    let lower = model.to_ascii_lowercase();
+    let Some(rest) = lower.strip_prefix("minimax-m") else {
+        return model.to_string();
+    };
+    let mut parts = rest.split('-');
+    let mut out = format!(
+        "MiniMax-M{}",
+        parts.next().unwrap_or("").to_ascii_uppercase()
+    );
+    for word in parts {
+        let mut chars = word.chars();
+        out.push('-');
+        if let Some(first) = chars.next() {
+            out.push(first.to_ascii_uppercase());
+            out.push_str(chars.as_str());
+        }
     }
+    out
 }
 
 /// Resolve the GLM base URL for the current environment: a non-empty
@@ -1565,6 +1702,7 @@ pub fn openai_uses_responses(model: &str) -> bool {
     matches!(
         model,
         "gpt-6.1-sol"
+            | "gpt-6.1-terra"
             | "gpt-6-sol"
             | "gpt-6-luna"
             | "gpt-6-astra"
@@ -1580,7 +1718,7 @@ fn explicit_claude_limits(model: &str) -> (u32, u32) {
         .strip_prefix("claude-code-")
         .unwrap_or(model.strip_prefix("claude-").unwrap_or(model))
     {
-        "fable-5-1" | "opus-5-5" | "sonnet-5-5" => (1_000_000, 128_000),
+        "fable-5-2" | "fable-5-1" | "opus-5-5" | "sonnet-5-5" | "haiku-5-5" => (1_000_000, 128_000),
         _ => (200_000, 16_384),
     }
 }
@@ -1650,11 +1788,15 @@ fn model_for_explicit_provider(
             ProviderId::MiniMax,
             minimax_api_casing(model),
             minimax_base_url(env),
-            200_000,
+            if model == "minimax-m3" {
+                1_000_000
+            } else {
+                200_000
+            },
             8_192,
         )),
         "kimi" | "moonshot" => {
-            let context_window = if model == "kimi-k3" {
+            let context_window = if model == "kimi-k3" || model.starts_with("kimi-k3.1") {
                 KIMI_K3_CONTEXT_WINDOW
             } else {
                 256_000
@@ -2085,7 +2227,10 @@ mod tests {
     fn gemini_alias_routes_to_google_provider() {
         let selection = resolve_model_selection(&env(&[("OCEAN_MODEL", "gemini")])).unwrap();
         assert_eq!(selection.provider, ProviderId::Google);
-        assert_eq!(selection.model, "gemini-2.0-flash");
+        assert_eq!(selection.model, "gemini-4-argon");
+        // The retired 2.0 id stays routable for pinned sessions.
+        let legacy = resolve_model_selection(&env(&[("OCEAN_MODEL", "gemini-2.0-flash")])).unwrap();
+        assert_eq!(legacy.model, "gemini-2.0-flash");
     }
 
     #[test]
@@ -2429,17 +2574,20 @@ mod tests {
     }
 
     #[test]
-    fn fable_aliases_track_5_1_and_legacy_ids_stay_routable() {
-        for alias in [
-            "claude-fable-5-1",
-            "claude-code-fable-5-1",
-            "claude-code-fable",
-            "cc-fable",
-            "fable",
+    fn fable_aliases_track_5_2_and_legacy_ids_stay_routable() {
+        for (alias, want) in [
+            ("claude-fable-5-2", "claude-fable-5-2"),
+            ("claude-code-fable-5-2", "claude-fable-5-2"),
+            ("claude-fable", "claude-fable-5-2"),
+            ("claude-code-fable", "claude-fable-5-2"),
+            ("cc-fable", "claude-fable-5-2"),
+            ("fable", "claude-fable-5-2"),
+            ("claude-fable-5-1", "claude-fable-5-1"),
+            ("claude-code-fable-5-1", "claude-fable-5-1"),
         ] {
             let s = resolve_model_selection(&env(&[("OCEAN_MODEL", alias)])).unwrap();
             assert_eq!(s.provider, ProviderId::ClaudeCode, "{alias}");
-            assert_eq!(s.model, "claude-fable-5-1", "{alias}");
+            assert_eq!(s.model, want, "{alias}");
             assert_eq!(s.context_window, 1_000_000, "{alias}");
             assert_eq!(s.max_output_tokens, 128_000, "{alias}");
         }
@@ -2756,42 +2904,55 @@ mod tests {
             // the retired Claude 4-6/4-7 ids are: DeepSeek retires them 2026-07-24,
             // so they stay ROUTABLE as forward aliases onto v4-flash (pinned
             // sessions survive the cutover) but must not be in the menu.
+            "deepseek-flash",
             "deepseek-v4-flash",
             "deepseek-v4-pro",
             "gpt-4o",
             "gpt-4o-mini",
             "gpt-6-astra",
             "gpt-6.1-sol",
+            "gpt-6.1-terra",
             "gpt-6-sol",
             "gpt-6-luna",
             "gpt-5.6-sol",
             "gpt-5.6-terra",
             "gpt-5.6-luna",
-            "gpt-5.5",
             // Current Claude generation (2026-07 refresh + Opus 5 release).
             // The retired 4-6/4-7/4-8 ids stay ROUTABLE (legacy arms, pinned
             // sessions) but are deliberately NOT in the menu, so they're
             // absent here too.
+            "claude-fable-5-2",
             "claude-fable-5-1",
             "claude-opus-5-5",
             "claude-sonnet-5-5",
-            "claude-haiku-4-5",
+            "claude-haiku-5-5",
             // API-cased ids: `resolve_model_selection` returns these as
             // current.model, and known_models() advertises the same string.
+            "MiniMax-M3",
+            "MiniMax-M3.1-Flash",
             "MiniMax-M2",
             "MiniMax-M2.7",
             "k3",
+            "kimi-k3.1-pro",
+            "kimi-k3.1-pro-highspeed",
             "kimi-k3",
             "kimi-k2.6",
             "kimi-k2",
             "glm-5.3-flash",
             "glm-5.3",
             "glm-5.2",
+            "glm-5.1",
+            "glm-5-turbo",
+            "glm-5",
             "glm-4.7",
             "glm-4.6",
             "glm-4.5",
+            "glm-4.5-air",
             "glm-4.5-flash",
-            "gemini-2.0-flash",
+            "gemini-4-hydrogen",
+            "gemini-4-carbon",
+            "gemini-4-argon",
+            "gemini-3.8-flash",
         ];
         let listed: std::collections::BTreeSet<String> =
             known_models().into_iter().map(|m| m.id).collect();
@@ -3168,12 +3329,98 @@ mod tests {
         // claude-code-* aliases remain routable but stay off the menu.
         let listed: std::collections::BTreeSet<String> =
             known_models().into_iter().map(|m| m.id).collect();
+        assert!(listed.contains("claude-fable-5-2"));
         assert!(listed.contains("claude-fable-5-1"));
         assert!(listed.contains("claude-sonnet-5-5"));
         assert!(listed.contains("claude-opus-5-5"));
-        assert!(listed.contains("claude-haiku-4-5"));
+        assert!(listed.contains("claude-haiku-5-5"));
+        assert!(!listed.contains("claude-haiku-4-5"));
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn november_2026_refresh_routes_new_ids_with_wire_casing_and_limits() {
+        let cases = [
+            (
+                "gpt-6.1-terra",
+                ProviderId::OpenAiCodex,
+                "gpt-6.1-terra",
+                500_000,
+            ),
+            (
+                "gpt-6.1-sol",
+                ProviderId::OpenAiCodex,
+                "gpt-6.1-sol",
+                500_000,
+            ),
+            (
+                "haiku",
+                ProviderId::ClaudeCode,
+                "claude-haiku-5-5",
+                1_000_000,
+            ),
+            (
+                "claude-haiku-4-5",
+                ProviderId::ClaudeCode,
+                "claude-haiku-4-5",
+                200_000,
+            ),
+            (
+                "deepseek-flash",
+                ProviderId::DeepSeek,
+                "deepseek-flash",
+                DEEPSEEK_CONTEXT_WINDOW,
+            ),
+            (
+                "minimax-m3.1-flash",
+                ProviderId::MiniMax,
+                "MiniMax-M3.1-Flash",
+                200_000,
+            ),
+            ("MiniMax-M3", ProviderId::MiniMax, "MiniMax-M3", 1_000_000),
+            (
+                "kimi-k3.1-pro",
+                ProviderId::Kimi,
+                "kimi-k3.1-pro",
+                KIMI_K3_CONTEXT_WINDOW,
+            ),
+            ("glm-5-1", ProviderId::Glm, "glm-5.1", 200_000),
+            (
+                "gemini-3-8-flash",
+                ProviderId::Google,
+                "gemini-3.8-flash",
+                1_000_000,
+            ),
+        ];
+        for (alias, provider, model, window) in cases {
+            let s = resolve_model_selection(&env(&[("OCEAN_MODEL", alias)])).unwrap();
+            assert_eq!(s.provider, provider, "{alias}");
+            assert_eq!(s.model, model, "{alias}");
+            assert_eq!(s.context_window, window, "{alias}");
+        }
+        assert_eq!(
+            minimax_api_casing("minimax-m3.1-flash"),
+            "MiniMax-M3.1-Flash"
+        );
+        assert_eq!(minimax_api_casing("minimax-m2.7"), "MiniMax-M2.7");
+        let pinned = resolve_model_selection(&env(&[
+            ("OCEAN_PROVIDER", "minimax"),
+            ("OCEAN_MODEL", "MiniMax-M3"),
+        ]))
+        .unwrap();
+        assert_eq!(pinned.model, "MiniMax-M3");
+        assert_eq!(pinned.context_window, 1_000_000);
+        assert!(openai_uses_responses("gpt-6.1-terra"));
+        assert_eq!(
+            model_effort_levels("gpt-6.1-terra"),
+            &["off", "low", "medium", "high", "xhigh", "max"]
+        );
+        assert_eq!(
+            model_effort_levels("claude-fable-5-2"),
+            &["low", "medium", "high", "xhigh", "max"]
+        );
+        assert!(model_effort_levels("gemini-4-argon").is_empty());
     }
 
     #[test]
@@ -3184,13 +3431,13 @@ mod tests {
         // default fallback order must not steer anyone onto a dead id.
         let listed: std::collections::BTreeSet<String> =
             known_models().into_iter().map(|m| m.id).collect();
-        for id in ["gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"] {
+        for id in ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"] {
             let sel = resolve_model_selection(&env(&[("OCEAN_MODEL", id)])).unwrap();
             assert_eq!(sel.provider, ProviderId::OpenAiCodex, "{id}");
             assert_eq!(sel.model, id);
             assert!(!listed.contains(id), "{id} must be off the menu");
         }
-        assert!(listed.contains("gpt-5.5"));
+        assert!(listed.contains("gpt-6.1-terra"));
         assert!(listed.contains("gpt-6-astra"));
         assert!(DEFAULT_FALLBACK_ORDER.contains(&"gpt-6-astra"));
         assert!(!DEFAULT_FALLBACK_ORDER.contains(&"gpt-5.4"));
