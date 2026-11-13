@@ -1755,7 +1755,11 @@ fn model_for_explicit_provider(
             ProviderId::OpenAiCodex,
             model,
             CODEX_BASE_URL,
-            400_000,
+            if matches!(model, "gpt-6.1-sol" | "gpt-6.1-terra") {
+                500_000
+            } else {
+                400_000
+            },
             128_000,
         )),
         "openai-chatgpt" => Ok(model_selection(
@@ -3421,6 +3425,61 @@ mod tests {
             &["low", "medium", "high", "xhigh", "max"]
         );
         assert!(model_effort_levels("gemini-4-argon").is_empty());
+    }
+
+    #[test]
+    fn codex_provider_pins_preserve_gpt_6_1_catalog_limits() {
+        for model in ["gpt-6.1-sol", "gpt-6.1-terra"] {
+            let bare = resolve_model_selection(&env(&[("OCEAN_MODEL", model)])).unwrap();
+            assert_eq!(
+                (bare.context_window, bare.max_output_tokens),
+                (500_000, 128_000)
+            );
+            let qualified = format!("openai-codex/{model}");
+            assert_eq!(
+                resolve_model_selection(&env(&[("OCEAN_MODEL", &qualified)])).unwrap(),
+                bare
+            );
+            for provider in ["openai-codex", "codex"] {
+                let pinned = resolve_model_selection(&env(&[
+                    ("OCEAN_PROVIDER", provider),
+                    ("OCEAN_MODEL", model),
+                ]))
+                .unwrap();
+                assert_eq!(pinned, bare, "{provider}/{model}");
+            }
+            for (provider, expected) in [
+                ("openai", ProviderId::OpenAi),
+                ("openai-chatgpt", ProviderId::OpenAiChatGpt),
+            ] {
+                let pinned = resolve_model_selection(&env(&[
+                    ("OCEAN_PROVIDER", provider),
+                    ("OCEAN_MODEL", model),
+                ]))
+                .unwrap();
+                assert_eq!(pinned.provider, expected);
+                assert_eq!(pinned.model, model);
+                assert_eq!(
+                    (pinned.context_window, pinned.max_output_tokens),
+                    (1_050_000, 128_000)
+                );
+            }
+        }
+        for provider in ["openai-codex", "codex"] {
+            for model in ["gpt-6-sol", "gpt-5.6-sol", "future-model"] {
+                let pinned = resolve_model_selection(&env(&[
+                    ("OCEAN_PROVIDER", provider),
+                    ("OCEAN_MODEL", model),
+                ]))
+                .unwrap();
+                assert_eq!(pinned.provider, ProviderId::OpenAiCodex);
+                assert_eq!(pinned.model, model);
+                assert_eq!(
+                    (pinned.context_window, pinned.max_output_tokens),
+                    (400_000, 128_000)
+                );
+            }
+        }
     }
 
     #[test]
