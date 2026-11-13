@@ -28,6 +28,9 @@ auth-file write custody. Provider wire encoding remains in `ocean-protocol`.
   fallback. Native Claude uses its captured environment and never borrows a
   different account after an explicit home/config selection.
 - Preserve forward model/catalog routes and feature credential isolation.
+- Explicit `openai-codex` and `codex` provider pins for `gpt-6.1-sol` and
+  `gpt-6.1-terra` retain the catalog's 500K context / 128K output limits.
+  Other explicit Codex model ids retain their existing 400K / 128K fallback.
 - Public Codex routes include GPT-6.1 Sol, GPT-6.1 Terra (both 500K on Codex),
   GPT-6 Sol, GPT-6 Luna and GPT-6 Astra; GPT-5.5 left the menu 2026-11-13
   (Codex 400s it) and stays routable. Claude Opus aliases track 5.5, Fable
