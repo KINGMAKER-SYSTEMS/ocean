@@ -1788,7 +1788,11 @@ fn model_for_explicit_provider(
             ProviderId::MiniMax,
             minimax_api_casing(model),
             minimax_base_url(env),
-            200_000,
+            if model == "minimax-m3" {
+                1_000_000
+            } else {
+                200_000
+            },
             8_192,
         )),
         "kimi" | "moonshot" => {
@@ -3400,6 +3404,13 @@ mod tests {
             "MiniMax-M3.1-Flash"
         );
         assert_eq!(minimax_api_casing("minimax-m2.7"), "MiniMax-M2.7");
+        let pinned = resolve_model_selection(&env(&[
+            ("OCEAN_PROVIDER", "minimax"),
+            ("OCEAN_MODEL", "MiniMax-M3"),
+        ]))
+        .unwrap();
+        assert_eq!(pinned.model, "MiniMax-M3");
+        assert_eq!(pinned.context_window, 1_000_000);
         assert!(openai_uses_responses("gpt-6.1-terra"));
         assert_eq!(
             model_effort_levels("gpt-6.1-terra"),
