@@ -4315,7 +4315,9 @@ fn model_from_provider_config(config: &ProviderConfig) -> anyhow::Result<Model> 
             "claude-sonnet-5-5" => Model::anthropic_claude_sonnet_5_5(),
             "claude-opus-5" => Model::anthropic_claude_opus_5(),
             "claude-sonnet-5" => Model::anthropic_claude_sonnet_5(),
+            "claude-haiku-5-5" => Model::anthropic_claude_haiku_5_5(),
             "claude-haiku-4-5" => Model::anthropic_claude_haiku_4_5(),
+            "claude-fable-5-2" => Model::anthropic_claude_fable_5_2(),
             "claude-fable-5-1" => Model::anthropic_claude_fable_5_1(),
             "claude-fable-5" => Model::anthropic_claude_fable_5(),
             // Legacy ids — pinned sessions from before the 2026-07 refresh.
@@ -4328,6 +4330,9 @@ fn model_from_provider_config(config: &ProviderConfig) -> anyhow::Result<Model> 
         }),
         ProviderId::Google => Ok(match selection.model.as_str() {
             "gemini-2.0-flash" => Model::gemini_2_0_flash(),
+            id if id.starts_with("gemini-") => {
+                Model::gemini(id, selection.context_window, selection.max_output_tokens)
+            }
             _ => {
                 anyhow::bail!("unsupported google model '{}'", selection.model);
             }
@@ -4337,10 +4342,12 @@ fn model_from_provider_config(config: &ProviderConfig) -> anyhow::Result<Model> 
             "claude-code-sonnet-5-5" | "claude-sonnet-5-5" => Model::anthropic_claude_sonnet_5_5(),
             // The claude-code alias maps to the REAL Anthropic API model id on
             // the wire — "claude-code-sonnet-5" is never sent to the API.
+            "claude-code-fable-5-2" | "claude-fable-5-2" => Model::anthropic_claude_fable_5_2(),
             "claude-code-fable-5-1" | "claude-fable-5-1" => Model::anthropic_claude_fable_5_1(),
             "claude-code-fable-5" | "claude-fable-5" => Model::anthropic_claude_fable_5(),
             "claude-code-opus-5" | "claude-opus-5" => Model::anthropic_claude_opus_5(),
             "claude-code-sonnet-5" | "claude-sonnet-5" => Model::anthropic_claude_sonnet_5(),
+            "claude-code-haiku-5-5" | "claude-haiku-5-5" => Model::anthropic_claude_haiku_5_5(),
             "claude-code-haiku-4-5" | "claude-haiku-4-5" => Model::anthropic_claude_haiku_4_5(),
             // Legacy ids — pinned sessions from before the 2026-07 refresh.
             "claude-code-opus-4-8" | "claude-opus-4-8" => Model::anthropic_claude_opus_4_8(),

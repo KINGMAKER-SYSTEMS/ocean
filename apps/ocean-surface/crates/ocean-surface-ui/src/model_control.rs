@@ -40,7 +40,7 @@ fn effort_levels(id: &str) -> &'static [&'static str] {
     let id = id.split_once('/').map_or(id, |(_, model)| model);
     if matches!(
         id,
-        "gpt-6-astra" | "gpt-6.1-sol" | "claude-fable-5-1" | "claude-opus-5-5"
+        "gpt-6-astra" | "gpt-6.1-sol" | "claude-fable-5-2" | "claude-fable-5-1" | "claude-opus-5-5"
     ) {
         &["low", "medium", "high", "xhigh"]
     } else if id.starts_with("gpt-6")
