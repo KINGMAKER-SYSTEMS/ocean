@@ -23,6 +23,7 @@ All four Kingmaker maintainers work from this repository.
 
 ## Work Guidance
 
+- In an authorized repository completion cycle, validate the change, satisfy enforced repository protections, merge it, and continue without waiting for reviewer sign-off or approval. Never bypass required checks or protections. Deployment, paid-provider use, and live posting require their own authority.
 - Automatic Actions are small and build-only: changed-component selection, docs-only compilation skips, development profiles, read-only permissions, timeouts, and same-ref cancellation.
 - Build Ocean daemon, TUI, CLI, ACP, MCP and their dependencies; Surface builds its real web bundle, proxy, Tauri shell, and editor extension. Release packaging keeps release profiles.
 - Run targeted checks for actual changes, not universal test/lint/audit/MSRV matrices.
