@@ -17,7 +17,8 @@ All four Kingmaker maintainers work from this repository.
 - Never import `org/`, `services/`, private deployments, production data, credentials, or mixed historical branches into this repository. Port selected public-component diffs onto public `main`.
 - Preserve component build systems, licenses, notices, and trademark restrictions. Public use must not require private components.
 - Keep runtime authority in Ocean OS; Surface renders state and gathers intent; reusable packages stay organization-neutral.
-- Record meaningful work in one new root `events/YYYY-MM-DD-HHMM-<branch-slug>.md` file per entry, naming the worktree branch/ref, time, agent, type, area, and validation. Existing event files and legacy `events.md` are frozen history; never edit, append to, or delete them. Imported historical ledgers remain private.
+- `events.md` in the canonical repository root is the single append-only chronological ledger. Linked worktrees and isolated checkouts write there, naming their branch/ref in `worktree:`, with 24-hour `HH:MM`, date, agent, type, area, and validation.
+- Preserve earlier ledger bytes, existing locks, and historical dated `events/` files. Do not create new dated event files or a worktree-local ledger. If canonical ledger ownership is unavailable, keep the receipt in task scratch until append is permitted. Imported historical ledgers remain private.
 - After changes, update the nearest owning devlog and affected child indexes.
 
 ## Work Guidance
