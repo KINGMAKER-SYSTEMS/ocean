@@ -533,9 +533,18 @@ public struct MessagesDatabase: Sendable {
         return sqlite3_column_int64(statement, 0)
     }
 
+    private static let batchLimit = 128
+
     public func scan(after cursor: Int64, roster: Roster, now: Date = Date()) throws -> MessageScan {
         let database = try open()
         defer { sqlite3_close(database) }
+        // One read transaction, so the admission query and the settled-cursor
+        // query see the same snapshot and a row committed between them cannot
+        // be passed without being looked at.
+        guard sqlite3_exec(database, "BEGIN", nil, nil, nil) == SQLITE_OK else {
+            throw BridgeError.databaseUnavailable
+        }
+        defer { sqlite3_exec(database, "COMMIT", nil, nil, nil) }
 
         let requiredMessageColumns = [
             "ROWID", "guid", "text", "attributedBody", "handle_id", "is_from_me", "service",
@@ -580,6 +589,8 @@ public struct MessagesDatabase: Sendable {
           AND m.associated_message_guid IS NULL
           AND COALESCE(m.associated_message_type, 0) = 0
           AND COALESCE(m.item_type, 0) = 0
+          AND (SELECT COUNT(DISTINCT link.chat_id) FROM chat_message_join AS link
+               WHERE link.message_id = m.ROWID) = 1
         GROUP BY m.ROWID
         HAVING COUNT(DISTINCT cmj.chat_id) = 1
            AND MIN(c.style) = \(Self.oneToOneChatStyle)
@@ -587,7 +598,7 @@ public struct MessagesDatabase: Sendable {
            AND COUNT(DISTINCT participant.id) = 1
            AND GROUP_CONCAT(DISTINCT participant.id) = h.id
         ORDER BY m.ROWID ASC
-        LIMIT 128
+        LIMIT \(Self.batchLimit)
         """
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK, let statement else {
@@ -606,6 +617,8 @@ public struct MessagesDatabase: Sendable {
 
         var admitted: [(Int64, AllowedMessage)] = []
         var newest = cursor
+        var returned = 0
+        var lastReturned = cursor
         while true {
             let step = sqlite3_step(statement)
             if step == SQLITE_DONE { break }
@@ -613,6 +626,8 @@ public struct MessagesDatabase: Sendable {
             guard step == SQLITE_ROW else { throw BridgeError.databaseUnavailable }
 
             let rowID = sqlite3_column_int64(statement, 0)
+            returned += 1
+            lastReturned = max(lastReturned, rowID)
             guard let id = text(statement, 1),
                   let remote = text(statement, 4), let local = text(statement, 5),
                   let service = text(statement, 6), let participants = text(statement, 14),
@@ -639,10 +654,15 @@ public struct MessagesDatabase: Sendable {
             }
         }
 
-        // Move the cursor over everything old enough to be complete, whether or
-        // not it was admitted, so a stale cursor catches up in one poll and
-        // unrelated traffic is not rescanned. Young unadmitted rows stay ahead
-        // of the cursor and are looked at again.
+        // A full batch may have more candidates behind it: stop at the last row
+        // this batch looked at and let the next poll continue from there.
+        if returned >= Self.batchLimit {
+            return MessageScan(cursor: max(cursor, lastReturned), admitted: admitted)
+        }
+        // Otherwise move the cursor over everything old enough to be complete,
+        // whether or not it was admitted, so a stale cursor catches up in one
+        // poll and unrelated traffic is not rescanned. Young unadmitted rows
+        // stay ahead of the cursor and are looked at again.
         let settled = try settledRowID(
             after: cursor, before: reference - BridgeLimits.settleInterval, database: database
         )

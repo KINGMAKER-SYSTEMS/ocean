@@ -128,6 +128,10 @@ codesign -dr - "$APP" 2>&1 | sed -n 's/^designated => /designated requirement: /
 
 if [ "$LOAD" -eq 1 ]; then
     mkdir -p "$HOME/Library/LaunchAgents"
+    # Start this build on a fresh log so its tail is unambiguous.
+    for name in service.err.log service.out.log; do
+        [ -s "$SUPPORT/$name" ] && mv -f "$SUPPORT/$name" "$SUPPORT/$name.previous"
+    done
     cat > "$PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -157,9 +161,10 @@ Next, by hand (this script cannot and does not do these):
   1. System Settings > Privacy & Security > Full Disk Access: enable "Ocean iMessage".
   2. Write the roster to "$SUPPORT/config.json" with mode 0600 (see README).
      The running bridge picks up roster edits on its own; no restart is needed.
-  3. Watch "$SUPPORT/service.err.log". "roster loaded" and no
-     "Messages database is unavailable" line means the app itself can read
-     Messages. Running "check" from a terminal tests the terminal's permissions,
+  3. Watch "$SUPPORT/service.err.log" (lines are timestamped). "roster loaded"
+     with no later "Messages database is unavailable" line means the app itself
+     can read Messages. After granting Full Disk Access the bridge recovers on
+     its own within about five minutes. Running "check" from a terminal tests the terminal's permissions,
      not the app's, so it cannot answer that question.
   4. Approve the Messages Automation prompt the first time a reply is sent.
 NEXT

@@ -70,3 +70,17 @@ replace the app under a loaded LaunchAgent without --load. Validation: swift
 test 41 passed; release build passed; cargo xtask docs-check passed; two further
 live-daemon rehearsals recorded in the manifest. Still not verified: the
 installed app reading the real Messages database, and a real send.
+
+Second review pass (01:45 on 11-14-26) over the fix commit: no blocker, original
+blocker confirmed fixed by the reviewer's own osascript experiment. Its
+should-fix and minor findings were closed in a third commit: only tool names
+declared in agent.toml count as an allowlist (a stray file in an agent's tools/
+folder had passed); a full scan batch no longer lets the settled cursor skip
+candidates, and both reader queries share one read transaction; a message's
+conversations are counted from the join table itself; an oversized stream line
+is dropped instead of failing every later turn in the session; a failed session
+write cancels the accepted turn; a rehearsal cannot name the live ledger; a
+removed ledger re-primes; logs are timestamped; and the process exits once
+every five minutes without Messages access so a newly granted permission is
+picked up. That third commit is not independently reviewed. swift test 41
+passed; cargo xtask docs-check passed.

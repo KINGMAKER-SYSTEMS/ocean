@@ -44,17 +44,31 @@ func turnPrompt(member: RosterMember, text: String, nonce: String) -> String {
 /// Foundation's line iterator also breaks on U+2028, U+2029, and U+0085, which
 /// JSON may carry raw inside a string; splitting there would cut an event's
 /// payload in half.
+///
+/// A line longer than the cap is dropped whole rather than failing the stream.
+/// The stream replays the session's history, so one huge tool result would
+/// otherwise fail every later turn in that member's session.
 struct LineSplitter {
     static let maximumLineBytes = 4 * 1024 * 1024
     private var buffer: [UInt8] = []
+    private var overflowed = false
 
-    mutating func consume(_ byte: UInt8) throws -> String? {
+    mutating func consume(_ byte: UInt8) -> String? {
         if byte == 0x0A {
-            defer { buffer.removeAll(keepingCapacity: true) }
+            defer {
+                buffer.removeAll(keepingCapacity: true)
+                overflowed = false
+            }
+            guard overflowed == false else { return nil }
             if buffer.last == 0x0D { buffer.removeLast() }
             return String(decoding: buffer, as: UTF8.self)
         }
-        guard buffer.count < Self.maximumLineBytes else { throw BridgeError.daemonFailure }
+        guard overflowed == false else { return nil }
+        guard buffer.count < Self.maximumLineBytes else {
+            overflowed = true
+            buffer.removeAll(keepingCapacity: false)
+            return nil
+        }
         buffer.append(byte)
         return nil
     }
@@ -108,16 +122,22 @@ struct ReplyAssembler {
 }
 
 /// A role's agent is its permission boundary. The daemon keeps the full
-/// toolset when a named agent's effective allowlist (`agent.toml` `tools` plus
-/// `tools/` entries) is empty, so such an agent is never usable here.
+/// toolset when a named agent's allowlist is empty or matches no real tool, so
+/// a role agent must declare tool names in `agent.toml`. Entries the daemon
+/// discovers from the agent's `tools/` folder do not count: it lists every
+/// file there, so a stray `.DS_Store` would look like an allowlist while
+/// narrowing nothing.
 func isUsableAgentDefinition(_ object: [String: Any], named name: String) -> Bool {
     guard object["ok"] as? Bool == true,
           let agent = object["agent"] as? [String: Any],
-          agent["name"] as? String == name
+          agent["name"] as? String == name,
+          let declared = (agent["config"] as? [String: Any])?["tools"] as? [String]
     else { return false }
-    let declared = (agent["config"] as? [String: Any])?["tools"] as? [String] ?? []
-    let discovered = agent["tools"] as? [String] ?? []
-    return (declared + discovered).contains { $0.isEmpty == false }
+    return declared.contains { tool in
+        tool.isEmpty == false && tool.unicodeScalars.allSatisfy {
+            ($0.value >= 0x61 && $0.value <= 0x7A) || ($0.value >= 0x30 && $0.value <= 0x39) || $0 == "_"
+        }
+    }
 }
 
 enum SessionProbe: Equatable {
@@ -242,10 +262,9 @@ struct OceanDaemonClient: Sendable {
               UUID(uuidString: turn.session_id) != nil, UUID(uuidString: turn.turn_id) != nil
         else { throw BridgeError.daemonFailure }
 
-        try store.setSession(turn.session_id, for: member.id, agent: policy.agent)
-
         let timeout = config.turnTimeout
         do {
+            try store.setSession(turn.session_id, for: member.id, agent: policy.agent)
             return try await withThrowingTaskGroup(of: String.self) { group in
                 group.addTask { try await self.awaitReply(sessionID: turn.session_id, turnID: turn.turn_id) }
                 group.addTask {
@@ -297,7 +316,7 @@ struct OceanDaemonClient: Sendable {
         var frames = SSEFrameReader()
         var assembler = ReplyAssembler()
         for try await byte in bytes {
-            guard let line = try lines.consume(byte), let frame = frames.consume(line) else { continue }
+            guard let line = lines.consume(byte), let frame = frames.consume(line) else { continue }
             // Replay gaps and live-lag frames require a fresh authoritative
             // synchronization. Never send text assembled across an event loss
             // boundary.

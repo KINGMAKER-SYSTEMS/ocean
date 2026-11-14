@@ -454,7 +454,7 @@ final class OceanIMessageTests: XCTestCase {
         try fixture.exec("""
         INSERT INTO handle VALUES (1, '\(Fixture.adminPhone)', 'iMessage'), (2, '\(Fixture.memberPhone)', 'iMessage'),
                                   (3, '\(Fixture.strangerPhone)', 'iMessage'), (4, '\(Fixture.adminPhone)', 'SMS');
-        INSERT INTO chat VALUES (11, 45), (12, 45), (13, 45), (20, 43), (21, 43), (22, 45);
+        INSERT INTO chat VALUES (11, 45), (12, 45), (13, 45), (20, 43), (21, 43), (22, 45), (23, 43);
         INSERT INTO chat_handle_join VALUES (11, 1), (12, 2), (13, 3),
                                             (20, 1), (20, 2),      -- a real group
                                             (21, 1),               -- group-style chat with one join row
@@ -470,6 +470,9 @@ final class OceanIMessageTests: XCTestCase {
         try fixture.add("group-style-single-join", body: "SENTINEL-GROUP-STYLE", handle: 1, chats: [21])
         try fixture.add("room-name", body: "SENTINEL-ROOM", handle: 1, chats: [11], roomName: "chat123")
         try fixture.add("two-chats", body: "SENTINEL-TWO-CHATS", handle: 1, chats: [11, 20])
+        // A second conversation that the joins cannot see still counts as a second conversation.
+        try fixture.add("second-chat-no-participants", body: "SENTINEL-EMPTY-GROUP", handle: 1, chats: [11, 23])
+        try fixture.add("second-chat-no-row", body: "SENTINEL-MISSING-CHAT", handle: 1, chats: [11, 99])
         try fixture.add("stranger", body: "SENTINEL-STRANGER", handle: 3, chats: [13])
         try fixture.add("other-identity", body: "SENTINEL-OTHER-IDENTITY", handle: 1, chats: [11], to: Fixture.strangerPhone)
         try fixture.add("outgoing", body: "SENTINEL-OUTGOING", handle: 1, chats: [11], fromMe: true)
@@ -522,6 +525,20 @@ final class OceanIMessageTests: XCTestCase {
         let second = try fixture.scan(after: first.cursor, roster: roster)
         XCTAssertTrue(second.admitted.isEmpty)
         XCTAssertGreaterThanOrEqual(second.cursor, first.cursor)
+
+        // More admissible rows than one batch holds: the cursor stops at the end
+        // of the batch instead of jumping to the settled row, so none is lost.
+        let flood = try MessagesFixture()
+        try flood.exec("INSERT INTO handle VALUES (1, '\(Fixture.adminPhone)', 'iMessage'); INSERT INTO chat VALUES (11, 45); INSERT INTO chat_handle_join VALUES (11, 1);")
+        for index in 1...150 {
+            try flood.add("flood-\(index)", body: "message \(index)", handle: 1, chats: [11], secondsAgo: 30)
+        }
+        let firstBatch = try flood.scan(after: 0, roster: roster)
+        XCTAssertEqual(firstBatch.admitted.count, 128)
+        XCTAssertEqual(firstBatch.cursor, 128)
+        let secondBatch = try flood.scan(after: firstBatch.cursor, roster: roster)
+        XCTAssertEqual(secondBatch.admitted.map(\.message.id), (129...150).map { "flood-\($0)" })
+        XCTAssertEqual(secondBatch.cursor, 150)
 
         // With nothing young and nothing admitted, the cursor reaches the newest settled row.
         let quiet = try MessagesFixture()
@@ -837,7 +854,7 @@ final class OceanIMessageTests: XCTestCase {
     func testStreamLinesSplitOnLineFeedOnly() throws {
         func lines(_ text: String) throws -> [String] {
             var splitter = LineSplitter()
-            return try Array(text.utf8).compactMap { try splitter.consume($0) }
+            return Array(text.utf8).compactMap { splitter.consume($0) }
         }
         // U+2028, U+2029, and U+0085 are legal raw inside a JSON string and
         // must not cut an event in half.
@@ -853,8 +870,15 @@ final class OceanIMessageTests: XCTestCase {
         let object = try JSONSerialization.jsonObject(with: Data(try XCTUnwrap(parsed.first).data.utf8)) as? [String: Any]
         XCTAssertEqual(object?["delta"] as? String, "a\u{2028}b\u{2029}c\u{85}d")
 
+        // One oversized line (a huge tool result replayed with the session) is
+        // dropped whole; the lines after it are still read.
         var splitter = LineSplitter()
-        XCTAssertThrowsError(try (0...LineSplitter.maximumLineBytes).forEach { _ in _ = try splitter.consume(0x41) })
+        var seen: [String] = []
+        let oversized = [UInt8](repeating: 0x41, count: LineSplitter.maximumLineBytes + 10) + [0x0A]
+        for byte in Array("before\n".utf8) + oversized + Array("after\n".utf8) {
+            if let line = splitter.consume(byte) { seen.append(line) }
+        }
+        XCTAssertEqual(seen, ["before", "after"])
     }
 
     func testAgentIsUsableOnlyWithAnEffectiveToolAllowlist() {
@@ -864,7 +888,12 @@ final class OceanIMessageTests: XCTestCase {
             return ["ok": ok, "agent": agent]
         }
         XCTAssertTrue(isUsableAgentDefinition(definition(declared: ["read"]), named: "text-member"))
-        XCTAssertTrue(isUsableAgentDefinition(definition(declared: [], discovered: ["read"]), named: "text-member"))
+        XCTAssertTrue(isUsableAgentDefinition(definition(declared: ["web_fetch", "ls"], discovered: [".DS_Store"]), named: "text-member"))
+        // The daemon lists every file in an agent's tools/ folder. A stray file
+        // there is not an allowlist: it matches no tool and narrows nothing.
+        XCTAssertFalse(isUsableAgentDefinition(definition(declared: [], discovered: ["read"]), named: "text-member"))
+        XCTAssertFalse(isUsableAgentDefinition(definition(declared: [], discovered: [".DS_Store"]), named: "text-member"))
+        XCTAssertFalse(isUsableAgentDefinition(definition(declared: [".DS_Store", "README.md", "Read"]), named: "text-member"))
         // No allowlist means the daemon would hand the member every tool.
         XCTAssertFalse(isUsableAgentDefinition(definition(), named: "text-member"))
         XCTAssertFalse(isUsableAgentDefinition(definition(declared: [], discovered: []), named: "text-member"))

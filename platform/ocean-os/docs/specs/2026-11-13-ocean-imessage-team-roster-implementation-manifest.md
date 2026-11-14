@@ -59,7 +59,8 @@ The roster lives in the operator's mode-0600 config beside the daemon URL:
 - **Role → agent.** Each role names a daemon folder-as-agent. The turn runs as
   that agent, so the agent's instructions and tool allowlist are what the role
   may do. The bridge refuses a turn when the agent is missing or declares no
-  tool allowlist.
+  tool names in `agent.toml`. Names the daemon discovers from an agent's
+  `tools/` folder do not count, because it lists every file there.
 - **One ongoing session per member.** Each member continues their own daemon
   session, bound to the agent that owns it; a role change that selects another
   agent starts clean. A member texting exactly `/new` drops their session.
@@ -80,7 +81,10 @@ The roster lives in the operator's mode-0600 config beside the daemon URL:
   and never stops the bridge. When the bridge stops waiting for a turn (timeout
   or stream failure) it cancels that turn in the daemon. An unreadable Messages
   database or a missing roster idles and retries with one log line per state
-  change instead of exiting.
+  change. After five minutes without Messages access the process exits once so
+  its supervisor starts a fresh one, since a newly granted permission may reach
+  only a new process; that is a slow retry, not a crash loop. Log lines are
+  timestamped.
 - **Stable signing.** `scripts/install-ocean-imessage` signs the app bundle with
   an identity-based signature and refuses ad-hoc signing, so permission grants
   survive rebuilds.
@@ -143,6 +147,12 @@ The roster lives in the operator's mode-0600 config beside the daemon URL:
   carry both columns and decoded all 1,316 text-NULL inbound rows. Apple does
   not document the layout; an OS update that changes it stops admission (fail
   closed) until the parser is updated.
+- **The cursor can pass a row that completes after it was inserted.** A row
+  younger than ten seconds stays ahead of the cursor, but an admitted row moves
+  the cursor to itself, and the ten seconds are measured from the send date.
+  If Messages ever writes a message row before its chat joins, a late-completed
+  row below an admitted one, or one delivered late, is skipped. Whether Messages
+  does that is unverified.
 - **Restart drops in-flight messages.** There is no drain on termination: a
   message mid-turn when the process stops is claimed and gets no reply, and its
   daemon turn is not cancelled. Restart only to upgrade.
@@ -188,4 +198,9 @@ Independent review (2026-11-13) found one blocker, since fixed and covered by a
 test that runs the real `osascript`: reply text beginning with `-e` was parsed
 as an `osascript` option and compiled as script. It also prompted the age bound,
 live roster reload, turn cancellation, the private URL session, LF-only stream
-splitting, and the installer's loaded-agent guard.
+splitting, and the installer's loaded-agent guard. A second pass over those
+fixes found no blocker and confirmed the first; its findings led to counting
+only declared tool names, batch-safe cursor movement inside one read
+transaction, counting a message's conversations from the join table itself,
+dropping rather than failing on an oversized stream line, and timestamped logs.
+The code added after that second pass has not been independently reviewed.

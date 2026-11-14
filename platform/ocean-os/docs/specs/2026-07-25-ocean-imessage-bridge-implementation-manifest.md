@@ -1,6 +1,6 @@
 # Ocean iMessage Bridge — Local Adapter Implementation Manifest
 
-**Status:** implementation slice 1 landed; its fixed-pair admission and sender are superseded by the [team roster manifest](2026-11-13-ocean-imessage-team-roster-implementation-manifest.md) (2026-11-13). The process, privilege, and extension-boundary rulings below remain in force; operator-managed only; autonomous extension integration requires a separately ratified privileged-service contract
+**Status:** implementation slice 1 landed; its fixed-pair admission and sender are superseded by the [team roster manifest](2026-11-13-ocean-imessage-team-roster-implementation-manifest.md) (2026-11-13). The process, privilege, and extension-boundary rulings below remain in force, except invariant 2: the installed bridge is one signed app that reads, calls the daemon, and sends, so the sender is not a separate unprivileged component (see invariant 2 and the known boundaries of the roster manifest); operator-managed only; autonomous extension integration requires a separately ratified privileged-service contract
 **Date:** 2026-07-25
 **Parent:** [Ocean Extensions Architecture and Migration Manifest](2026-07-14-ocean-extensions-architecture-and-migration-manifest.md)
 

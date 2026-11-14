@@ -66,9 +66,11 @@ that is not exactly the expected layout is not admitted.
   teammates allowed to text it. All are strict E.164.
 - `roles[].agent` names a folder under the daemon's agents root. **That agent's
   tool allowlist is what the role may do.** The bridge refuses to run a turn for
-  an agent that is missing or declares no `tools` allowlist. It cannot prove an
-  allowlist matches real tool names, so check `GET /v1/agents/<name>` yourself
-  before giving a role a powerful agent.
+  an agent that is missing or declares no tool names under `tools` in its
+  `agent.toml`; files in the agent's `tools/` folder do not count. It cannot
+  prove a declared name is a real tool, and the daemon keeps every tool when
+  none matches, so check `GET /v1/agents/<name>` yourself before giving a role a
+  powerful agent.
 - `repliesPerHour` defaults to 30 and is capped at 120. Optional
   `turnTimeoutSeconds` (30–1800, default 600) and `acknowledgeAfterSeconds`
   (5–300, default 25, `0` disables) tune long turns.
@@ -141,7 +143,9 @@ the LaunchAgent is already loaded it refuses to replace the app unless `--load`
 is passed; with `--load` it stops the agent, replaces the app, and starts it
 again. It never grants a permission and never writes the roster. A bridge with
 no roster or no Full Disk Access idles and says so once in its log instead of
-crash-looping, and it starts from the present, never from old messages.
+crash-looping, and it starts from the present, never from old messages. Without
+Messages access it exits once every five minutes so a fresh process can pick up
+a newly granted permission. `--load` moves the previous logs aside.
 
 Afterwards, by hand: enable the app under Full Disk Access, write the roster,
 and approve the Messages Automation prompt on the first reply. The service log

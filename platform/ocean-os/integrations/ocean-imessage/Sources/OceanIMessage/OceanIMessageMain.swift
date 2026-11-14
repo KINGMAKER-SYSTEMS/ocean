@@ -45,8 +45,10 @@ private actor MemberQueues {
 
 /// Diagnostics never carry message text, phone numbers, or Apple-event detail.
 /// Roster member ids and role names are operator-chosen labels and may appear.
+/// Every line is timestamped so the tail of the service log can be trusted.
 private func log(_ line: String) {
-    FileHandle.standardError.write(Data("ocean-imessage: \(line)\n".utf8))
+    let stamp = ISO8601DateFormatter().string(from: Date())
+    FileHandle.standardError.write(Data("\(stamp) ocean-imessage: \(line)\n".utf8))
 }
 
 private func describe(_ error: Error) -> String {
@@ -97,7 +99,9 @@ struct OceanIMessageMain {
                 if arguments.contains("--print-replies") {
                     // A rehearsal must never write its cursor and sessions into
                     // the live ledger, so it has to name its own state file.
-                    guard arguments.contains("--state") else { throw Usage.error }
+                    guard paths.state.standardizedFileURL != defaultStateURL().standardizedFileURL else {
+                        throw Usage.error
+                    }
                     sink = .standardOutput
                 } else {
                     sink = .messages
@@ -188,7 +192,7 @@ struct OceanIMessageMain {
         var rosterReady: Bool?
         var seenGeneration = 0
         var readerHealthy = true
-        var primed = FileManager.default.fileExists(atPath: stateURL.path)
+        var readerFailures = 0
         while true {
             let (loaded, generation) = live.refresh()
             guard let config = loaded, sink == .standardOutput || config.messagesAccountID != nil else {
@@ -208,11 +212,10 @@ struct OceanIMessageMain {
             }
 
             do {
-                if primed == false {
-                    // First run on this ledger: start from now, never from the
-                    // beginning of the account's history.
+                if FileManager.default.fileExists(atPath: stateURL.path) == false {
+                    // No ledger (first run, or it was removed): start from now,
+                    // never from the beginning of the account's history.
                     try store.advanceCursor(to: reader.latestRowID())
-                    primed = true
                 }
                 let state = try store.load()
                 let scan = try reader.scan(after: state.cursor, roster: config.roster)
@@ -220,6 +223,7 @@ struct OceanIMessageMain {
                     log("Messages reader recovered")
                     readerHealthy = true
                 }
+                readerFailures = 0
                 for (rowID, message) in scan.admitted {
                     guard try store.recordAdmission(message, cursor: rowID) else { continue }
                     await queues.enqueue(member: message.member) {
@@ -232,6 +236,14 @@ struct OceanIMessageMain {
                 if readerHealthy {
                     log("\(describe(error)); admitting nothing, retrying every 60s")
                     readerHealthy = false
+                }
+                readerFailures += 1
+                // A newly granted Full Disk Access permission may reach only a
+                // fresh process. Leave every five minutes so the supervisor
+                // starts one; this is a slow, quiet retry, not a crash loop.
+                if readerFailures >= 5 {
+                    log("still no Messages access; exiting so a fresh process can pick up a permission change")
+                    Foundation.exit(75)
                 }
                 try await Task.sleep(for: .seconds(60))
             }
@@ -246,7 +258,10 @@ struct OceanIMessageMain {
         live: LiveConfig,
         sink: ReplySink
     ) async {
-        guard let config = live.refresh().config else { return }
+        guard let config = live.refresh().config else {
+            log("member \(message.member): roster is missing or invalid; admitted message dropped")
+            return
+        }
 
         // Claim the single reply before any model work, so a member over their
         // hourly limit costs nothing and a duplicate watcher cannot double-run.
@@ -299,7 +314,11 @@ struct OceanIMessageMain {
     /// running receives nothing. AppleScript delivery blocks, so it runs off
     /// the cooperative pool.
     private static func deliver(_ bubbles: [String], toMember memberID: String, live: LiveConfig, sink: ReplySink) async {
-        guard let config = live.refresh().config, config.roster.member(id: memberID) != nil else {
+        guard let config = live.refresh().config else {
+            log("member \(memberID): roster is missing or invalid; reply dropped")
+            return
+        }
+        guard config.roster.member(id: memberID) != nil else {
             log("member \(memberID): no longer enrolled; reply dropped")
             return
         }
@@ -320,6 +339,11 @@ struct OceanIMessageMain {
         }
     }
 
+    private static func defaultStateURL() -> URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appending(path: "Library/Application Support/Ocean/iMessage/state.json")
+    }
+
     private static func parsePaths(arguments: [String]) -> (database: String, state: URL, config: URL) {
         func value(_ flag: String, default fallback: String) -> String {
             guard let index = arguments.firstIndex(of: flag), arguments.indices.contains(index + 1) else { return fallback }
@@ -328,7 +352,7 @@ struct OceanIMessageMain {
         let home = FileManager.default.homeDirectoryForCurrentUser
         return (
             value("--database", default: home.appending(path: "Library/Messages/chat.db").path),
-            URL(fileURLWithPath: value("--state", default: home.appending(path: "Library/Application Support/Ocean/iMessage/state.json").path)),
+            URL(fileURLWithPath: value("--state", default: defaultStateURL().path)),
             URL(fileURLWithPath: value("--config", default: home.appending(path: "Library/Application Support/Ocean/iMessage/config.json").path))
         )
     }
