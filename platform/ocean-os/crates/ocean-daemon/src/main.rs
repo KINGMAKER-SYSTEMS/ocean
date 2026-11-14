@@ -8039,8 +8039,8 @@ async fn agent_session(
     Query(q): Query<SessionDetailQuery>,
 ) -> (StatusCode, Json<AgentSessionResponse>) {
     let core_id = core_sid(session_id);
-    match state.runtime.session_detail(core_id) {
-        Ok(session) => {
+    match state.runtime.session_detail_optional(core_id) {
+        Ok(Some(session)) => {
             // Real cwd path: prefer the recorded cwd, fall back to the bound
             // workspace root; empty only for legacy pre-binding sessions.
             let cwd = session
@@ -8106,13 +8106,22 @@ async fn agent_session(
                 }),
             )
         }
-        Err(_) => (
+        Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(AgentSessionResponse {
                 ok: false,
                 session: None,
                 turns: vec![],
                 error: Some("session not found".into()),
+            }),
+        ),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(AgentSessionResponse {
+                ok: false,
+                session: None,
+                turns: vec![],
+                error: Some("internal server error".into()),
             }),
         ),
     }
@@ -16949,6 +16958,166 @@ mod tests {
         serde_json::from_str(raw).unwrap_or_else(|error| {
             panic!("session-config response is not JSON ({error}): {raw:?}")
         })
+    }
+
+    #[tokio::test]
+    async fn session_detail_http_distinguishes_missing_corrupt_and_unreadable_storage() {
+        let _guard = process_env_guard_async().await;
+        let _env = TestEnvRestore::capture(&[
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+            "OCEAN_AUTH_FILE",
+            "OCEAN_CODEX_AUTH_FILE",
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let state = isolated_room_fixture_state(&tmp);
+        let app =
+            app_router(BrowserOrigins::default(), AllowedHosts::default()).with_state(state.clone());
+        let bucket = tmp.path().join("sessions").join("legacy");
+        std::fs::create_dir_all(&bucket).unwrap();
+
+        let missing = AgentSessionId::new_v4();
+        let (status, raw) = session_config_http_request(
+            app.clone(),
+            Method::GET,
+            format!("/v1/agent/sessions/{missing}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&raw).unwrap(),
+            json!({ "ok": false, "turns": [], "error": "session not found" })
+        );
+        assert_eq!(std::fs::read_dir(&bucket).unwrap().count(), 0);
+
+        let corrupt = AgentSessionId::new_v4();
+        let corrupt_path = bucket.join(format!("{corrupt}.json"));
+        let corrupt_bytes = b"{ private transcript that must survive a failed read";
+        std::fs::write(&corrupt_path, corrupt_bytes).unwrap();
+        let unreadable = AgentSessionId::new_v4();
+        let unreadable_path = bucket.join(format!("{unreadable}.json"));
+        // A directory cannot be read as session JSON on supported hosts, even
+        // with elevated privileges; unlike chmod this is a portable I/O failure.
+        std::fs::create_dir(&unreadable_path).unwrap();
+        let sentinel = unreadable_path.join("preserve-me");
+        std::fs::write(&sentinel, b"retained storage").unwrap();
+
+        for id in [corrupt, unreadable] {
+            for _ in 0..2 {
+                let (status, raw) = session_config_http_request(
+                    app.clone(),
+                    Method::GET,
+                    format!("/v1/agent/sessions/{id}"),
+                    None,
+                )
+                .await;
+                assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&raw).unwrap(),
+                    json!({ "ok": false, "turns": [], "error": "internal server error" })
+                );
+                assert!(!raw.contains(tmp.path().to_string_lossy().as_ref()));
+                assert!(!raw.contains("private transcript"));
+            }
+        }
+        assert_eq!(std::fs::read(&corrupt_path).unwrap(), corrupt_bytes);
+        assert!(unreadable_path.is_dir());
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"retained storage");
+        assert_eq!(std::fs::read_dir(&bucket).unwrap().count(), 2);
+        assert!(state.requests.read().await.is_empty());
+        assert!(state.agent_events.history.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn session_detail_http_preserves_projection_and_workspace_scope() {
+        let _guard = process_env_guard_async().await;
+        let _env = TestEnvRestore::capture(&[
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+            "OCEAN_AUTH_FILE",
+            "OCEAN_CODEX_AUTH_FILE",
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let state = isolated_room_fixture_state(&tmp);
+        let id = AgentSessionId::new_v4();
+        let bucket = tmp.path().join("sessions").join("legacy");
+        std::fs::create_dir_all(&bucket).unwrap();
+        let path = bucket.join(format!("{id}.json"));
+        let bytes = serde_json::to_vec(&json!({
+            "id": id, "created_ms": 1000, "updated_ms": 5000,
+            "model": "fake-ok", "provider": "fake", "title": "preserved title",
+            "workspace_root": "/fixture/project", "cwd": "/fixture/project/sub",
+            "client_type": "surface-web",
+            "messages": [
+                { "role": "user", "content": [{"type": "text", "text": "first ask"}], "timestamp": 1000 },
+                { "role": "user", "content": [{"type": "text", "text": "second ask"}], "timestamp": 3000 }
+            ]
+        })).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        let request_id = RequestId::new_v4();
+        let mut control = status(request_id, RequestState::Running);
+        control.status.session_id = Some(core_sid(id));
+        state.requests.write().await.insert(request_id, control);
+        let app =
+            app_router(BrowserOrigins::default(), AllowedHosts::default()).with_state(state.clone());
+
+        for suffix in ["", "?workspace=/fixture/project"] {
+            let (status, raw) = session_config_http_request(
+                app.clone(),
+                Method::GET,
+                format!("/v1/agent/sessions/{id}{suffix}"),
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let response: AgentSessionResponse = serde_json::from_str(&raw).unwrap();
+            assert!(response.ok);
+            assert!(response.error.is_none());
+            let session = response.session.unwrap();
+            assert_eq!(session.id, id);
+            assert_eq!(session.title, "preserved title");
+            assert_eq!(session.cwd, "/fixture/project/sub");
+            assert_eq!(session.created_at, ms_to_datetime(1000));
+            assert_eq!(session.updated_at, ms_to_datetime(5000));
+            assert_eq!(session.client_type.as_deref(), Some("surface-web"));
+            assert_eq!(session.active_turn, Some(AgentTurnId(request_id)));
+            assert_eq!(
+                response
+                    .turns
+                    .iter()
+                    .map(|turn| turn.prompt.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["second ask", "first ask"]
+            );
+            assert!(response.turns.iter().all(|turn| turn.session_id == id));
+        }
+        let (status, raw) = session_config_http_request(
+            app,
+            Method::GET,
+            format!("/v1/agent/sessions/{id}?workspace=/fixture/other"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let response: AgentSessionResponse = serde_json::from_str(&raw).unwrap();
+        assert!(!response.ok);
+        assert!(response.session.is_none());
+        assert!(response.turns.is_empty());
+        assert_eq!(
+            response.error,
+            Some(
+                session_detail_scope_check(Some("/fixture/other"), Some("/fixture/project"),)
+                    .unwrap_err()
+                    .message()
+            )
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(std::fs::read_dir(&bucket).unwrap().count(), 1);
+        assert_eq!(state.requests.read().await.len(), 1);
+        assert!(state.agent_events.history.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
