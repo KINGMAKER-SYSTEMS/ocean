@@ -6112,6 +6112,7 @@ async fn agent_voice(
         advisor: None,
         // Voice turns run on the surface profile, not a named folder-as-agent.
         agent: None,
+        require_named_agent: false,
     };
     agent_turn(State(state), Json(turn)).await
 }
@@ -6137,6 +6138,47 @@ fn session_workspace_binding(
     }
 }
 
+/// Capture the named profile once at admission. Strict callers never substitute
+/// the surface profile after a missing, invalid, or unusable definition.
+fn resolve_turn_agent(
+    name: Option<&str>,
+    required: bool,
+) -> Result<Option<persistent_rooms::ResolvedAgent>, &'static str> {
+    if required && name.is_none_or(|name| name.trim().is_empty()) {
+        return Err("required_named_agent_missing");
+    }
+    match resolve_named_agent(name.unwrap_or("")) {
+        Ok(resolved) => {
+            if required {
+                if resolved
+                    .tool_allowlist
+                    .as_ref()
+                    .is_none_or(|tools| tools.is_empty())
+                {
+                    return Err("required_named_agent_tools_unavailable");
+                }
+                // The legacy subprocess builder launches before tool filtering.
+                // Strict process admission needs a separate authority contract.
+                if resolved
+                    .subprocess_caps
+                    .as_ref()
+                    .is_some_and(|(_, caps)| !caps.is_empty())
+                {
+                    return Err("required_named_agent_subprocess_unsupported");
+                }
+            }
+            Ok(Some(resolved))
+        }
+        Err(_) if required => Err("required_named_agent_unavailable"),
+        Err(error) => {
+            if let Some(name) = name {
+                tracing::warn!(agent = name, error = %error, "named agent did not resolve; using surface profile");
+            }
+            Ok(None)
+        }
+    }
+}
+
 async fn agent_turn(
     State(state): State<AppState>,
     Json(req): Json<AgentTurnRequest>,
@@ -6158,6 +6200,7 @@ async fn agent_turn(
         images,
         decision_token,
         agent,
+        require_named_agent,
         client_context,
         advisor: advisor_ctl,
     } = req;
@@ -6337,55 +6380,47 @@ async fn agent_turn(
 
     let guided_prompt = apply_turn_guidance(guidance.as_deref(), &prompt);
 
-    // Folder-as-agent: when the turn names an `agent`, prepend that agent's
-    // `instructions.md` as a steering layer — the same purely-additive prompt
-    // layering room/operator guidance uses, so it never touches permissions,
-    // tools, or AgentRuntime's own system-prompt composition. A missing/invalid
-    // agent or empty instructions leaves `guided_prompt` untouched (fail-open),
-    // so every existing client (`agent: None`) is unaffected. Discover names via
-    // GET /v1/agents; see docs/specs/folder-as-agent.md.
-    // Also capture the named agent's declared tool allowlist (agent.toml
-    // `tools` + `tools/` filenames), declared model, and tier-1 subprocess
-    // capabilities so the turn can apply them below. `agent_model` feeds the turn
-    // fail-soft (unresolvable -> global); `agent_capabilities` (A2) are launched
-    // per-turn and their tools merged into the registry (fail-soft: a spec that
-    // can't spawn is skipped, never breaking the turn).
-    //
-    // Resolution goes through the shared `resolve_named_agent` seam (the same
-    // helper the persistent-room convene path uses), so folder-as-agent binding
-    // truth has exactly one source. `agent: None` ⇒ empty name ⇒ `Err` ⇒ the
-    // unchanged fail-open defaults (no warning, surface profile preserved).
-    #[allow(clippy::type_complexity)]
-    let (guided_prompt, agent_tool_allowlist, agent_model, agent_capabilities): (
-        String,
-        Option<Vec<String>>,
-        Option<String>,
-        Option<(
-            std::path::PathBuf,
-            Vec<ocean_agent::agentdir::SubprocessCapability>,
-        )>,
-    ) = match resolve_named_agent(agent.as_deref().unwrap_or("")) {
-        Ok(resolved) => {
-            let prompt = match resolved.instructions_layer {
-                Some(instr) => compose_folder_agent_prompt(&instr, &guided_prompt),
-                None => guided_prompt,
-            };
-            (
-                prompt,
-                resolved.tool_allowlist,
-                resolved.model,
-                resolved.subprocess_caps,
-            )
-        }
-        Err(e) => {
-            // Match the prior behavior exactly: warn only when a name was
-            // actually supplied (the `agent: None` path stays silent).
-            if let Some(name) = agent.as_deref() {
-                tracing::warn!(agent = name, error = %e, "named agent did not resolve; using surface profile");
-            }
-            (guided_prompt, None, None, None)
+    // Resolve once before session lease/lifecycle/registration. The owned
+    // instructions/model/tool policy remains fixed for the admitted turn even
+    // if the on-disk profile is removed or edited while execution is queued.
+    let resolved_agent = match resolve_turn_agent(agent.as_deref(), require_named_agent) {
+        Ok(resolved) => resolved,
+        Err(code) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(AgentTurnResponse {
+                    ok: false,
+                    turn_id,
+                    session_id,
+                    status: AgentTurnStatus::Failed,
+                    event_id_prefix: String::new(),
+                    error: Some(code.to_string()),
+                    output_tokens: None,
+                    input_tokens: None,
+                    cache_read_tokens: None,
+                    tokens_per_second: None,
+                    context_usage: None,
+                    wall_ms: None,
+                }),
+            );
         }
     };
+    let (guided_prompt, agent_tool_allowlist, agent_model, agent_capabilities) =
+        match resolved_agent {
+            Some(resolved) => {
+                let prompt = match resolved.instructions_layer {
+                    Some(instr) => compose_folder_agent_prompt(&instr, &guided_prompt),
+                    None => guided_prompt,
+                };
+                (
+                    prompt,
+                    resolved.tool_allowlist,
+                    resolved.model,
+                    resolved.subprocess_caps,
+                )
+            }
+            None => (guided_prompt, None, None, None),
+        };
 
     // Resolve the complete model precedence only after folder-as-agent lookup,
     // then announce the same requested model the runtime will receive. A named
@@ -7041,6 +7076,7 @@ async fn agent_turn(
     // doesn't resolve). Both no-op for every non-agent turn (`agent: None`); the
     // agent model also defers to an explicit per-request model_id.
     let control = match agent_tool_allowlist {
+        Some(tools) if require_named_agent => control.with_strict_tool_allowlist(tools),
         Some(tools) => control.with_tool_allowlist(tools),
         None => control,
     };
@@ -14870,9 +14906,85 @@ mod tests {
             images: None,
             decision_token: None,
             agent: None,
+            require_named_agent: false,
             client_context: None,
             advisor: None,
         }
+    }
+
+    #[tokio::test]
+    async fn required_named_agent_refuses_before_lifecycle_or_registration() {
+        let _guard = process_env_guard_async().await;
+        let _env = TestEnvRestore::capture(&["OCEAN_AGENTS_DIR", "OCEAN_MODEL"]);
+        let root = tempfile::tempdir().unwrap();
+        std::env::set_var("OCEAN_AGENTS_DIR", root.path());
+        let state = capped_turn_state(1);
+        let cases = [
+            (None, None, "required_named_agent_missing"),
+            (Some(""), None, "required_named_agent_missing"),
+            (Some("missing"), None, "required_named_agent_unavailable"),
+            (
+                Some("invalid"),
+                Some("tools = ["),
+                "required_named_agent_unavailable",
+            ),
+            (
+                Some("empty"),
+                Some("tools = []"),
+                "required_named_agent_tools_unavailable",
+            ),
+            (
+                Some("process"),
+                Some("tools = ['read']\n[[subprocess_capability]]\ncommand = 'must-not-launch'"),
+                "required_named_agent_subprocess_unsupported",
+            ),
+        ];
+        for (name, config, code) in cases {
+            if let (Some(name), Some(config)) = (name, config) {
+                write_agent_fixture(root.path(), name, config, None);
+            }
+            let mut req = sample_agent_turn();
+            req.require_named_agent = true;
+            req.agent = name.map(str::to_owned);
+            let (status, body) = agent_turn(State(state.clone()), Json(req)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{name:?}");
+            assert_eq!(body.error.as_deref(), Some(code));
+            assert!(!body.ok);
+            assert!(state.requests.read().await.is_empty());
+            assert!(state.extension_lifecycle.attach().retained.is_empty());
+            assert!(state.agent_events.subscribe_with_full_replay().0.is_empty());
+            assert!(state.runtime.list_sessions(None).unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn required_named_agent_rechecks_preflight_and_captures_owned_policy() {
+        let _guard = process_env_guard();
+        let _env = TestEnvRestore::capture(&["OCEAN_AGENTS_DIR"]);
+        let root = tempfile::tempdir().unwrap();
+        std::env::set_var("OCEAN_AGENTS_DIR", root.path());
+        for replacement in [None, Some("tools = ["), Some("tools = []")] {
+            write_agent_fixture(root.path(), "reader", "tools = ['read']", Some("read only"));
+            // Simulate a client preview; admission must not trust that result.
+            assert!(resolve_named_agent("reader").is_ok());
+            match replacement {
+                Some(config) => {
+                    std::fs::write(root.path().join("reader/agent.toml"), config).unwrap()
+                }
+                None => std::fs::remove_dir_all(root.path().join("reader")).unwrap(),
+            }
+            assert!(resolve_turn_agent(Some("reader"), true).is_err());
+        }
+        write_agent_fixture(root.path(), "reader", "tools = ['read']", Some("read only"));
+        let admitted = resolve_turn_agent(Some("reader"), true).unwrap().unwrap();
+        std::fs::remove_dir_all(root.path().join("reader")).unwrap();
+        assert_eq!(admitted.tool_allowlist, Some(vec!["read".to_string()]));
+        assert_eq!(admitted.instructions_layer.as_deref(), Some("read only"));
+        assert!(resolve_turn_agent(Some("reader"), true).is_err());
+        assert!(resolve_turn_agent(Some("reader"), false).unwrap().is_none());
+        assert!(resolve_turn_agent(None, false).unwrap().is_none());
+        write_agent_fixture(root.path(), "empty", "", None);
+        assert!(resolve_turn_agent(Some("empty"), false).unwrap().is_some());
     }
 
     /// `max_concurrent_turns` honors a valid override, ignores zero/garbage, and

@@ -24,6 +24,11 @@ This child doc governs `crates/` and is the canonical ownership, entry-point, an
 - Every package manifest must inherit the root non-publication contract with `publish.workspace = true` / `publish = { workspace = true }`, or set `publish = false` explicitly. `cargo xtask docs-check` rejects a workspace member that omits this safeguard.
 - Keep entry points and narrow validation current; stale routing information is a correctness defect for agent work.
 - Agent turns are session/workspace scoped and do not carry a Track-0 `room_id`. Durable collaboration uses `RoomKey` and `/v1/rooms/persistent/*`; LiveKit token minting remains independent at `/v1/rooms/{room_id}/livekit-token`.
+- SDK `AgentTurnRequest::require_named_agent` is an opt-in product-turn contract:
+  daemon admission captures a resolved nonempty exact-name tool policy; Agent
+  enforces that ceiling after all tool additions and across provider fallback.
+  Existing callers omit false. It requires a supporting daemon (older servers
+  can ignore unknown fields), and conveys no caller identity or member grant.
 - The current desktop product client is `surface-tauri`; removed client
   identifiers and parallel desktop prompt families must not be restored.
 - Daemon Room execution uses immutable persisted binding/generation admission,

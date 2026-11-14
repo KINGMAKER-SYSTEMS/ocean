@@ -6445,6 +6445,7 @@ impl App {
                 project_id: None,
                 client_type: Some("tui".into()),
                 agent: None,
+                require_named_agent: false,
                 role: None,
                 thinking_level: thinking,
                 model_id,

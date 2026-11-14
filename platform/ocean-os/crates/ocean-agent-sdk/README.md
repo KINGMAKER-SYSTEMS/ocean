@@ -124,6 +124,13 @@ Clients should ignore unrecognised `type` values to stay forward-compatible.
 > types are real and match the daemon; treat the transport scaffolding as a
 > sketch you adapt to your HTTP/SSE stack of choice.
 
+Integrations that rely on a named agent's exact tool ceiling must use a supporting
+daemon and send `require_named_agent: true` with `agent`. Missing/invalid/empty
+policies and subprocess declarations refuse admission; zero available matches
+refuse execution. Older daemons may ignore the additive field, so sending it is
+not capability negotiation. The flag does not authenticate a member or isolate
+operator context. Existing clients default to `false`.
+
 ```rust,ignore
 use ocean_agent_sdk::{AgentTurnEvent, AgentTurnRequest, AgentTurnResponse};
 
@@ -143,6 +150,7 @@ async fn main() -> anyhow::Result<()> {
         project_id: None,
         client_type: Some("my-integration".into()),
         agent: None,
+        require_named_agent: false,
         thinking_level: None,
         model_id: None,
         role: None,

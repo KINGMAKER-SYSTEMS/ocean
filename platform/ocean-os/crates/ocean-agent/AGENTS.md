@@ -166,7 +166,15 @@ transcripts by session id.
 - Desktop Surface guidance is exclusively `surface-tauri` and uses the shared
   Leptos component contract; do not add parallel desktop prompt families.
 - Persisted history search reads only display-projected user/assistant transcript text; it must never inspect tool payloads/raw provider messages or invoke providers/embeddings. Preflight cumulative raw session-file size against the 64 MiB request budget, then enforce the same cumulative bound while reading so concurrent replacement/growth cannot bypass it.
-- `PromptControl::without_tools()` is the fail-closed no-capabilities boundary. Empty or unmatched folder-agent allowlists intentionally remain fail-open and must never represent a no-tools posture.
+- `PromptControl::without_tools()` is the fail-closed no-capabilities boundary.
+  Legacy `with_tool_allowlist` remains fail-open for empty/unmatched lists.
+  `with_strict_tool_allowlist` instead captures an exact-name ceiling applied
+  after ambient, extra and admitted Room tools; empty/zero-match fails before
+  inference with a fixed error ineligible for provider fallback. The ceiling
+  survives retries. Strict subprocess capabilities refuse before dispatch;
+  `without_tools()` remains stronger. Text-only fake providers cannot establish
+  a usable strict ceiling and refuse it. This is tool selection, not caller
+  authentication, filesystem confinement, memory isolation or runtime revocation.
 - Room controls carry one exclusive memory mode: operator, disabled, or an
   opaque admitted Room handle. Only `AgentRuntime::admit_room_memory` issues the
   latter from typed admission evidence using the same factory as ordinary
@@ -282,6 +290,9 @@ transcripts by session id.
 - Memory guidance must not encourage unconditional recall. Call `recall` only when prior conversations, preferences, or decisions are needed and not already injected.
 
 ## Verification
+
+- `cargo test -p ocean-agent strict_named_agent --locked` — synthetic real-loop
+  tool visibility, zero-match refusal, fallback preservation and subprocess refusal.
 
 - Explicit live diagnostic: `OCEAN_LIVE_MODEL_PROBE=1 cargo test -p ocean-agent live_catalog_models_complete_tool_free_prompt --locked -- --ignored --nocapture` (contacts configured providers).
 - Explicit live diagnostic for the Anthropic thinking-binding check: `OCEAN_LIVE_MODEL_PROBE=1 OCEAN_MODEL_PROBE_IDS=<one id> cargo test -p ocean-agent live_edited_history_still_completes_with_replayed_thinking --locked -- --ignored --nocapture` (two requests to one model; the second replays a thinking block under a changed system prompt and must complete, cleanly on an account the check is not enforced on, or through the adapter's one retry on one it is; it prints which).

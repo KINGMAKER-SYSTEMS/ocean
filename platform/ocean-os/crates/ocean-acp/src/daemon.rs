@@ -260,6 +260,7 @@ impl DaemonClient {
             decision_token,
             // ACP bridge does not select a named folder-as-agent.
             agent: None,
+            require_named_agent: false,
             // ACP bridge is not an in-browser surface (OCEAN-40).
             client_context: None,
             advisor: None,
