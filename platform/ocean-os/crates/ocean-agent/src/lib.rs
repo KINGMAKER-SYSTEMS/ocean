@@ -1623,6 +1623,24 @@ impl AgentRuntime {
         snapshot: &RuntimeState,
         reuse_accepted_user: bool,
     ) -> anyhow::Result<(SessionId, String, String, TokenUsage)> {
+        // Validate before any provider attempt, persistence, or subprocess launch.
+        // A plain fixed error is deliberately ineligible for provider failover.
+        if control.strict_tool_allowlist.is_some() && !control.tools_disabled {
+            anyhow::ensure!(
+                control
+                    .agent_capabilities
+                    .as_ref()
+                    .is_none_or(|(_, caps)| caps.is_empty()),
+                "required_named_agent_subprocess_unsupported"
+            );
+            anyhow::ensure!(
+                control
+                    .strict_tool_allowlist
+                    .as_ref()
+                    .is_some_and(|tools| !tools.is_empty()),
+                "required_named_agent_tools_unavailable"
+            );
+        }
         #[cfg(test)]
         self.test_dispatch_attempts
             .lock()
@@ -1642,6 +1660,12 @@ impl AgentRuntime {
             && (snapshot.model.id == ocean_runtime::FAKE_TOOL_MODEL
                 || snapshot.model.id == ocean_runtime::FAKE_SURFACE_MODEL);
         if is_fake && !is_fake_real_loop {
+            // This diagnostic route has no tool assembly at all. It cannot
+            // establish a strict role's usable tool ceiling.
+            anyhow::ensure!(
+                control.strict_tool_allowlist.is_none() || control.tools_disabled,
+                "required_named_agent_tools_unavailable"
+            );
             self.run_fake_prompt(req, control, snapshot, reuse_accepted_user)
                 .await
         } else {
@@ -2686,6 +2710,7 @@ impl AgentRuntime {
             model_id: _,
             agent_model: _,
             tool_allowlist,
+            strict_tool_allowlist,
             agent_capabilities,
             authorized_capabilities,
             memory,
@@ -2789,6 +2814,11 @@ impl AgentRuntime {
             room_turn_tools.as_ref(),
             tools_disabled,
         );
+
+        // Final exact-name ceiling: includes extra tools and admitted Room tools,
+        // so nothing appended above can escape a strict caller's captured policy.
+        tools =
+            apply_strict_tool_allowlist(tools, strict_tool_allowlist.as_deref(), tools_disabled)?;
 
         let mut system_prompt = match &memory {
             PromptMemory::Operator => {
@@ -3321,6 +3351,9 @@ pub struct PromptControl {
     /// the allowlist matches NO available tool (e.g. a typo), narrowing is
     /// skipped and a warning logged rather than running the agent toolless.
     pub tool_allowlist: Option<Vec<String>>,
+    /// Optional exact tool ceiling captured by daemon strict named-agent admission.
+    /// Unlike the legacy allowlist, empty or zero-match policies fail closed.
+    strict_tool_allowlist: Option<Vec<String>>,
     /// Per-turn model declared by a folder-as-agent (`agent.toml` `model`). Used
     /// ONLY when `model_id` (an explicit per-request override) is unset. Unlike
     /// `model_id` it fails SOFT — an unresolvable agent model falls back to the
@@ -3437,6 +3470,22 @@ fn narrow_tools(tools: Vec<SharedTool>, allowlist: Option<&[String]>) -> Vec<Sha
     } else {
         narrowed
     }
+}
+
+/// Strict named-agent policy is separate from the legacy fail-open narrowing.
+fn apply_strict_tool_allowlist(
+    mut tools: Vec<SharedTool>,
+    allowlist: Option<&[String]>,
+    tools_disabled: bool,
+) -> anyhow::Result<Vec<SharedTool>> {
+    if tools_disabled {
+        return Ok(Vec::new());
+    }
+    if let Some(allowlist) = allowlist {
+        tools.retain(|tool| allowlist.iter().any(|name| name == tool.name()));
+        anyhow::ensure!(!tools.is_empty(), "required_named_agent_tools_unavailable");
+    }
+    Ok(tools)
 }
 
 /// Whether one immutable admission capability permits a concrete runtime tool.
@@ -3568,6 +3617,7 @@ impl PromptControl {
             thinking_level: None,
             model_id: None,
             tool_allowlist: None,
+            strict_tool_allowlist: None,
             agent_model: None,
             agent_capabilities: None,
             authorized_capabilities: None,
@@ -3635,6 +3685,13 @@ impl PromptControl {
     /// Narrow this turn's toolset to the named tools (folder-as-agent allowlist).
     pub fn with_tool_allowlist(mut self, tools: Vec<String>) -> Self {
         self.tool_allowlist = (!tools.is_empty()).then_some(tools);
+        self
+    }
+
+    /// Capture a strict exact-name ceiling, enforced after every tool addition.
+    /// An empty ceiling refuses execution; use `without_tools` for a no-tools turn.
+    pub fn with_strict_tool_allowlist(mut self, tools: Vec<String>) -> Self {
+        self.strict_tool_allowlist = Some(tools);
         self
     }
 
@@ -4875,6 +4932,212 @@ mod tests {
             3,
             "no match must fail safe to the full toolset"
         );
+    }
+
+    #[test]
+    fn strict_named_agent_tool_ceiling_is_exact_and_fail_closed() {
+        let all = || vec![tool("read"), tool("write"), tool("plugin__reader__read")];
+        let names = |tools: Vec<SharedTool>| {
+            tools
+                .iter()
+                .map(|tool| tool.name().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names(apply_strict_tool_allowlist(all(), Some(&["read".into()]), false).unwrap()),
+            ["read"]
+        );
+        for allow in [
+            vec![],
+            vec!["missing".into()],
+            vec!["builtin:read".into()],
+            vec!["read*".into()],
+        ] {
+            let error = apply_strict_tool_allowlist(all(), Some(&allow), false)
+                .err()
+                .unwrap();
+            assert_eq!(error.to_string(), "required_named_agent_tools_unavailable");
+            assert!(!failover_eligible(&error));
+        }
+        assert_eq!(
+            apply_strict_tool_allowlist(all(), None, false)
+                .unwrap()
+                .len(),
+            3
+        );
+        assert!(apply_strict_tool_allowlist(all(), Some(&[]), true)
+            .unwrap()
+            .is_empty());
+    }
+
+    struct StrictToolCaptureProvider(Arc<std::sync::Mutex<Vec<Vec<String>>>>);
+    #[async_trait]
+    impl ocean_protocol::Provider for StrictToolCaptureProvider {
+        async fn stream(
+            &self,
+            _model: &ocean_protocol::Model,
+            ctx: &ocean_protocol::Context,
+            _options: &ocean_protocol::StreamOptions,
+        ) -> ocean_protocol::Result<ocean_protocol::AssistantMessageEventStream> {
+            self.0
+                .lock()
+                .unwrap()
+                .push(ctx.tools.iter().map(|tool| tool.name.clone()).collect());
+            Ok(Box::pin(futures::stream::iter(vec![Ok(
+                ocean_protocol::AssistantMessageEvent::Done {
+                    reason: ocean_protocol::StopReason::Stop,
+                    message: scripted_assistant("done"),
+                },
+            )])))
+        }
+    }
+
+    #[tokio::test]
+    async fn strict_named_agent_real_loop_enforces_final_tools_before_provider() {
+        for (allow, disabled, expected) in [
+            (
+                vec!["read".to_string()],
+                false,
+                Some(vec!["read".to_string()]),
+            ),
+            (
+                vec!["late_allowed".to_string()],
+                false,
+                Some(vec!["late_allowed".to_string()]),
+            ),
+            (vec!["missing".to_string()], false, None),
+            (vec!["read".to_string()], true, Some(vec![])),
+        ] {
+            let config_dir = temp_config_dir("strict-named-agent-loop");
+            let mut runtime = runtime_with_env(
+                config_dir.clone(),
+                provider_config(ProviderId::Fake, ocean_runtime::FAKE_TOOL_MODEL, false),
+                Some(provider_env(&[("OCEAN_PROVIDER_FALLBACK", "fake-ok")])),
+            );
+            let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+            runtime.test_turn_provider = Some(TestCompactProvider(Arc::new(
+                StrictToolCaptureProvider(seen.clone()),
+            )));
+            let mut control = PromptControl::yolo(true)
+                .with_strict_tool_allowlist(allow)
+                .with_extra_tools(vec![tool("late_allowed"), tool("late_forbidden")]);
+            if disabled {
+                control = control.without_tools();
+            }
+            let result = runtime
+                .prompt(
+                    PromptRequest {
+                        prompt: "inspect".into(),
+                        images: None,
+                        request_id: None,
+                        session_id: None,
+                        create_if_missing: true,
+                        max_turns: Some(1),
+                        yolo: true,
+                        cwd: config_dir.display().to_string(),
+                        project_id: None,
+                        client_type: None,
+                        decision_token: None,
+                    },
+                    control,
+                )
+                .await;
+            match expected {
+                Some(tools) => {
+                    assert!(result.ok, "{}", result.stderr);
+                    assert_eq!(*seen.lock().unwrap(), vec![tools]);
+                }
+                None => {
+                    assert!(!result.ok);
+                    assert!(result
+                        .stderr
+                        .contains("required_named_agent_tools_unavailable"));
+                    assert!(
+                        seen.lock().unwrap().is_empty(),
+                        "policy refusal must precede inference"
+                    );
+                    assert_eq!(
+                        runtime.test_dispatch_attempts.lock().unwrap().len(),
+                        1,
+                        "policy refusal must not retry on a provider fallback"
+                    );
+                }
+            }
+            std::fs::remove_dir_all(config_dir).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn strict_named_agent_ceiling_survives_provider_fallback() {
+        let mut runtime = provider_refusal_runtime(
+            "strict-agent-fallback",
+            provider_env(&[("OCEAN_PROVIDER_FALLBACK", "fake-tool")]),
+        );
+        runtime
+            .test_dispatch_status
+            .insert(ProviderId::Google.as_str(), 503);
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        runtime.test_turn_provider = Some(TestCompactProvider(Arc::new(
+            StrictToolCaptureProvider(seen.clone()),
+        )));
+        let result = runtime
+            .prompt(
+                provider_refusal_prompt(&runtime),
+                PromptControl::yolo(false)
+                    .with_strict_tool_allowlist(vec!["read".into()])
+                    .with_extra_tools(vec![tool("late_forbidden")]),
+            )
+            .await;
+        assert!(result.ok, "{}", result.stderr);
+        assert_eq!(*seen.lock().unwrap(), vec![vec!["read".to_string()]]);
+        assert_eq!(
+            *runtime.test_dispatch_attempts.lock().unwrap(),
+            [ProviderId::Google.as_str(), ProviderId::Fake.as_str()]
+        );
+        std::fs::remove_dir_all(&runtime.config_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn strict_named_agent_subprocess_refusal_precedes_dispatch_and_persistence() {
+        let config_dir = temp_config_dir("strict-agent-subprocess");
+        let runtime = runtime(
+            config_dir.clone(),
+            provider_config(ProviderId::Fake, ocean_runtime::FAKE_TOOL_MODEL, false),
+        );
+        let cap = agentdir::SubprocessCapability {
+            name: Some("must-not-start".into()),
+            command: "must-not-start".into(),
+            args: vec![],
+            cwd: None,
+            env: Default::default(),
+        };
+        let result = runtime
+            .prompt(
+                PromptRequest {
+                    prompt: "inspect".into(),
+                    images: None,
+                    request_id: None,
+                    session_id: None,
+                    create_if_missing: true,
+                    max_turns: Some(1),
+                    yolo: true,
+                    cwd: config_dir.display().to_string(),
+                    project_id: None,
+                    client_type: None,
+                    decision_token: None,
+                },
+                PromptControl::yolo(true)
+                    .with_strict_tool_allowlist(vec!["read".into()])
+                    .with_agent_capabilities(config_dir.clone(), vec![cap]),
+            )
+            .await;
+        assert!(!result.ok);
+        assert!(result
+            .stderr
+            .contains("required_named_agent_subprocess_unsupported"));
+        assert!(runtime.test_dispatch_attempts.lock().unwrap().is_empty());
+        assert!(runtime.list_sessions(None).unwrap().is_empty());
+        assert!(!config_dir.exists(), "refusal must not create runtime storage");
     }
 
     #[test]

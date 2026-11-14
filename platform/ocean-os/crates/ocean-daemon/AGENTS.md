@@ -148,6 +148,15 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   and keep project-less/session-less conversations on render + handoff only.
 
 - `POST /v1/ocean-buddy/events` is the deliberately narrow first Buddy ingress: it accepts only a typed mocked `attached` lifecycle event, carries attachment metadata but no image bytes, performs no camera/session/tool work, and returns a typed Watch result card. Watch approval remains in the Watch-to-iPhone adapter flow.
+- Product `AgentTurnRequest::require_named_agent` defaults false. Opt-in admission
+  requires a name, successful folder resolution and nonempty tool policy; reject
+  declared subprocess capabilities until their strict process admission is defined.
+  Refuse with fixed codes before session/lifecycle/request publication. Capture
+  instructions/model/tool policy once and pass the exact tool ceiling to Agent;
+  removal/editing after admission never substitutes the surface defaults. Final
+  zero-match refusal belongs to Agent tool assembly. Legacy named-agent routing
+  remains fail-open. This flag requires a supporting daemon and is not member
+  authentication, a grant, confinement, operator-context isolation or revocation.
 - Session behavior lives in `ocean-agent`; route changes must not create a separate session model.
 - `extension_lifecycle.rs` is the metadata-only Stage A lifecycle authority: it owns deterministic source adaptation, synchronous registered-project classification, globally ordered non-blocking publication, bounded correlation, request-scoped exactly-once terminal authority, cleanup, and boot-local count/byte retention. `main.rs` wires only the nine ratified authoritative producers; `session_stopped` remains schema-only. This boundary must not gain process launch, transport, registry mutation, routes, persistence, Observatory coupling, or content-bearing fields.
 - `extension_registry.rs` and its private `src/extension_registry/` child are the sole coherent extension registry authority. Shared-lock reads preserve the three A0 schema shapes, strict fourth-file service authority, descriptor/reparse-safe artifacts, digests and inspect/doctor behavior. The internal A3a writer owns local acquisition, mutations, journaled four-file publication/recovery, retention and exact grant confirmation; it is not bound into AppState, startup, routes, CLI or live supervision. Strict `stage-a-publication.json` is created only by complete journaled or atomic absent-root publication; marked missing companions fail incomplete, unmarked A0 absence remains the sole empty upgrade form. The `registry-portability-check` feature removes only daemon route coupling and excludes the Unix-only writer for the actual-source Windows reader; it never weakens reader or platform validation. The child contract owns transaction details and narrow fixtures. Independent A3a acceptance and later A3b/A4/A5 authority remain separate.
@@ -658,6 +667,9 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   use the full durable sequence. Deploy with Surface's matching attention filter.
 
 ## Verification
+
+- `cargo test -p ocean-daemon required_named_agent --locked -- --test-threads=1`
+  — preflight changes, immutable capture and pre-lifecycle refusal fixtures.
 
 - `cargo test -p ocean-daemon room_summary --locked -- --test-threads=1`
 - `cargo test -p ocean-daemon identity::tests --locked -- --test-threads=1`
