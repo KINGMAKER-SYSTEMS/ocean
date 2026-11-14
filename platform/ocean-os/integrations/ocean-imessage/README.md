@@ -67,10 +67,12 @@ that is not exactly the expected layout is not admitted.
 - `roles[].agent` names a folder under the daemon's agents root. **That agent's
   tool allowlist is what the role may do.** The bridge refuses to run a turn for
   an agent that is missing or declares no tool names under `tools` in its
-  `agent.toml`; files in the agent's `tools/` folder do not count. It cannot
-  prove a declared name is a real tool, and the daemon keeps every tool when
-  none matches, so check `GET /v1/agents/<name>` yourself before giving a role a
-  powerful agent.
+  `agent.toml`; files in the agent's `tools/` folder do not count. Every turn
+  also sends `require_named_agent: true`, which makes a supporting daemon refuse
+  the turn when the agent is missing, invalid, or matches no tool. A daemon that
+  predates that field ignores it and keeps every tool in those cases, and the
+  bridge cannot tell the difference, so do not enroll anyone in a restricted
+  role until the running daemon supports it.
 - `repliesPerHour` defaults to 30 and is capped at 120. Optional
   `turnTimeoutSeconds` (30–1800, default 600) and `acknowledgeAfterSeconds`
   (5–300, default 25, `0` disables) tune long turns.

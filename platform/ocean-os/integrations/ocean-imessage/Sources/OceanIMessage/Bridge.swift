@@ -12,9 +12,13 @@ public enum BridgeLimits {
     public static let maximumMembers = 64
     public static let defaultRepliesPerHour = 30
     public static let maximumRepliesPerHour = 120
-    /// Ledger entries kept per member. Retention is per member so one busy
-    /// teammate can never evict another teammate's pending message.
+    /// Answered ledger entries kept per member, for duplicate suppression.
+    /// Retention is per member so one busy teammate can never evict another's.
+    /// A message still waiting for its turn is never evicted.
     public static let retainedAdmissionsPerMember = 128
+    /// Messages one member may have waiting for a turn. Past this the bridge
+    /// refuses new ones from that member, and says so, until the queue drains.
+    public static let maximumPendingPerMember = 512
     /// A message older than this is never admitted. The bridge answers what was
     /// just sent; it must not wake up and act on a backlog.
     public static let maximumMessageAge: TimeInterval = 900
@@ -215,6 +219,7 @@ public enum BridgeError: LocalizedError, Equatable {
     case unknownMessage
     case alreadyReplied
     case rateLimited
+    case backlogFull
     case unsafeReply
     case agentUnavailable
     case daemonFailure
@@ -231,6 +236,7 @@ public enum BridgeError: LocalizedError, Equatable {
         case .unknownMessage: return "message is not admitted"
         case .alreadyReplied: return "message already has a reply"
         case .rateLimited: return "member reply rate limit reached"
+        case .backlogFull: return "member has too many messages waiting; newer ones are refused"
         case .unsafeReply: return "reply violates bridge policy"
         case .agentUnavailable: return "role agent is missing or has no tool allowlist"
         case .daemonFailure: return "Ocean did not accept the message"
@@ -346,6 +352,11 @@ public final class StateStore: @unchecked Sendable {
             else {
                 return false
             }
+            let resolved = Set(state.replied)
+            let waiting = state.admitted.reduce(into: 0) { count, id in
+                if state.owners[id] == message.member, resolved.contains(id) == false { count += 1 }
+            }
+            guard waiting < BridgeLimits.maximumPendingPerMember else { throw BridgeError.backlogFull }
             state.cursor = cursor
             state.admitted.append(message.id)
             state.owners[message.id] = message.member
@@ -374,18 +385,25 @@ public final class StateStore: @unchecked Sendable {
     ) throws -> String {
         try withExclusiveLock {
             var state = try loadUnlocked()
-            guard state.admitted.contains(messageID), let member = state.owners[messageID],
-                  let limit = repliesPerHour(member)
-            else { throw BridgeError.unknownMessage }
+            guard state.admitted.contains(messageID) else { throw BridgeError.unknownMessage }
             guard state.replied.contains(messageID) == false else { throw BridgeError.alreadyReplied }
+            // Whatever happens next, this message has had its one chance: it
+            // stops counting as waiting and can be retired from the ledger.
+            state.replied.append(messageID)
+            guard let member = state.owners[messageID], let limit = repliesPerHour(member) else {
+                prune(&state)
+                try saveUnlocked(state)
+                throw BridgeError.unknownMessage
+            }
             let cutoff = now.addingTimeInterval(-3600)
             var times = (state.replyTimes[member] ?? []).filter { $0 >= cutoff }
             guard times.count < min(limit, BridgeLimits.maximumRepliesPerHour) else {
+                prune(&state)
+                try saveUnlocked(state)
                 throw BridgeError.rateLimited
             }
             times.append(now)
             state.replyTimes[member] = times
-            state.replied.append(messageID)
             prune(&state)
             try saveUnlocked(state)
             return member
@@ -425,15 +443,36 @@ public final class StateStore: @unchecked Sendable {
         }
     }
 
-    /// Keep each member's most recent admissions. Reply markers and owner
-    /// bindings live exactly as long as their retained admission; never evict
-    /// one independently while its message is claimable.
+    /// Close every message still waiting. Called once when a bridge process
+    /// starts: the turns that would have claimed them died with the previous
+    /// process, so they can never be answered and must not count as waiting.
+    public func resolvePending() throws {
+        try withExclusiveLock {
+            var state = try loadUnlocked()
+            let resolved = Set(state.replied)
+            let orphans = state.admitted.filter { resolved.contains($0) == false }
+            guard orphans.isEmpty == false else { return }
+            state.replied.append(contentsOf: orphans)
+            prune(&state)
+            try saveUnlocked(state)
+        }
+    }
+
+    /// Keep every message still waiting for its turn, plus each member's most
+    /// recent answered ones. Reply markers and owner bindings live exactly as
+    /// long as their retained admission.
     private func prune(_ state: inout BridgeState) {
+        let resolved = Set(state.replied)
         var kept: [String] = []
         var perOwner: [String: Int] = [:]
         for id in state.admitted.reversed() {
-            // Unowned ids come from the fixed-pair era and share one bucket.
+            // Unowned ids come from the fixed-pair era: never claimable, so
+            // they are retained like answered ones, in one shared bucket.
             let owner = state.owners[id] ?? ""
+            if owner.isEmpty == false, resolved.contains(id) == false {
+                kept.append(id)
+                continue
+            }
             guard perOwner[owner, default: 0] < BridgeLimits.retainedAdmissionsPerMember else { continue }
             perOwner[owner, default: 0] += 1
             kept.append(id)

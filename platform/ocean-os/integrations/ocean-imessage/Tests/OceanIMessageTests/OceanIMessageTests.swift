@@ -222,19 +222,94 @@ final class OceanIMessageTests: XCTestCase {
         }
     }
 
-    func testOneMembersFloodCannotEvictAnotherMembersPendingMessage() throws {
-        let roster = try Fixture.roster()
+    func testAnsweredHistoryIsTrimmedPerMemberAndNeverEvictsAnotherMembersWaitingMessage() throws {
+        let generous = try Roster(
+            localIdentity: Fixture.local, members: Fixture.members,
+            roles: ["admin": RolePolicy(agent: "text-admin", repliesPerHour: 120),
+                    "member": RolePolicy(agent: "text-member", repliesPerHour: 120)]
+        )
         let (store, _, root) = temporaryStore()
         defer { try? FileManager.default.removeItem(at: root) }
         try store.recordAdmission(AllowedMessage(id: "ben-waiting", member: "ben", text: "ok"), cursor: 1)
         for index in 1...(BridgeLimits.retainedAdmissionsPerMember * 3) {
-            try store.recordAdmission(
-                AllowedMessage(id: "ada-\(index)", member: "ada", text: "ok"), cursor: Int64(index + 1)
+            let id = "ada-\(index)"
+            try store.recordAdmission(AllowedMessage(id: id, member: "ada", text: "ok"), cursor: Int64(index + 1))
+            try store.claimReply(
+                for: id, now: Date(timeIntervalSince1970: Double(index * 3_601)), repliesPerHour: limits(generous)
             )
         }
         let state = try store.load()
         XCTAssertEqual(state.admitted.filter { state.owners[$0] == "ada" }.count, BridgeLimits.retainedAdmissionsPerMember)
-        XCTAssertEqual(try store.claimReply(for: "ben-waiting", repliesPerHour: limits(roster)), "ben")
+        XCTAssertEqual(try store.claimReply(for: "ben-waiting", repliesPerHour: limits(generous)), "ben")
+    }
+
+    func testAMembersWaitingMessagesAreNeverEvictedByTheirOwnLaterMessages() throws {
+        let roster = try Fixture.roster()
+        let (store, _, root) = temporaryStore()
+        defer { try? FileManager.default.removeItem(at: root) }
+        // One more waiting message than the answered-history window holds.
+        let waiting = BridgeLimits.retainedAdmissionsPerMember + 1
+        for index in 1...waiting {
+            XCTAssertTrue(try store.recordAdmission(
+                AllowedMessage(id: "queued-\(index)", member: "ada", text: "ok"), cursor: Int64(index)
+            ))
+        }
+        XCTAssertEqual(try store.load().admitted.count, waiting)
+        // The oldest one is still there when its turn finally comes.
+        XCTAssertEqual(try store.claimReply(for: "queued-1", repliesPerHour: limits(roster)), "ada")
+        XCTAssertEqual(try store.claimReply(for: "queued-\(waiting)", repliesPerHour: limits(roster)), "ada")
+    }
+
+    func testOverloadRefusesNewMessagesExplicitlyAndRecoversWhenTheQueueDrains() throws {
+        let roster = try Fixture.roster()
+        let (store, _, root) = temporaryStore()
+        defer { try? FileManager.default.removeItem(at: root) }
+        for index in 1...BridgeLimits.maximumPendingPerMember {
+            try store.recordAdmission(AllowedMessage(id: "q-\(index)", member: "ada", text: "ok"), cursor: Int64(index))
+        }
+        let next = Int64(BridgeLimits.maximumPendingPerMember + 1)
+        XCTAssertThrowsError(
+            try store.recordAdmission(AllowedMessage(id: "one-too-many", member: "ada", text: "ok"), cursor: next)
+        ) { error in
+            XCTAssertEqual(error as? BridgeError, .backlogFull)
+        }
+        // Another member is not affected by ada's queue.
+        XCTAssertTrue(try store.recordAdmission(AllowedMessage(id: "ben-1", member: "ben", text: "ok"), cursor: next))
+        // Once one of ada's waiting messages has had its turn, she is admitted again.
+        try store.claimReply(for: "q-1", repliesPerHour: limits(roster))
+        XCTAssertTrue(try store.recordAdmission(
+            AllowedMessage(id: "after-drain", member: "ada", text: "ok"), cursor: next + 1
+        ))
+    }
+
+    func testEveryClaimAttemptClosesTheMessageAndARestartClosesOrphans() throws {
+        let roster = try Fixture.roster()
+        let (store, _, root) = temporaryStore()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let now = Date(timeIntervalSince1970: 5_000)
+        // ben's role allows two replies an hour: the third claim is refused, and
+        // that refusal is final for that message rather than leaving it waiting.
+        for index in 1...3 {
+            try store.recordAdmission(AllowedMessage(id: "b-\(index)", member: "ben", text: "ok"), cursor: Int64(index))
+        }
+        try store.claimReply(for: "b-1", now: now, repliesPerHour: limits(roster))
+        try store.claimReply(for: "b-2", now: now, repliesPerHour: limits(roster))
+        XCTAssertThrowsError(try store.claimReply(for: "b-3", now: now, repliesPerHour: limits(roster))) { error in
+            XCTAssertEqual(error as? BridgeError, .rateLimited)
+        }
+        XCTAssertThrowsError(
+            try store.claimReply(for: "b-3", now: now.addingTimeInterval(7_200), repliesPerHour: limits(roster))
+        ) { error in
+            XCTAssertEqual(error as? BridgeError, .alreadyReplied)
+        }
+
+        // A message admitted by a process that then died can never be answered.
+        try store.recordAdmission(AllowedMessage(id: "orphan", member: "ada", text: "ok"), cursor: 10)
+        try store.resolvePending()
+        XCTAssertThrowsError(try store.claimReply(for: "orphan", repliesPerHour: limits(roster))) { error in
+            XCTAssertEqual(error as? BridgeError, .alreadyReplied)
+        }
+        XCTAssertEqual(Set(try store.load().replied), Set(try store.load().admitted))
     }
 
     func testReplyRateLimitIsPerMemberAndFailsClosed() throws {
@@ -530,15 +605,15 @@ final class OceanIMessageTests: XCTestCase {
         // of the batch instead of jumping to the settled row, so none is lost.
         let flood = try MessagesFixture()
         try flood.exec("INSERT INTO handle VALUES (1, '\(Fixture.adminPhone)', 'iMessage'); INSERT INTO chat VALUES (11, 45); INSERT INTO chat_handle_join VALUES (11, 1);")
-        for index in 1...150 {
+        for index in 1...129 {
             try flood.add("flood-\(index)", body: "message \(index)", handle: 1, chats: [11], secondsAgo: 30)
         }
         let firstBatch = try flood.scan(after: 0, roster: roster)
         XCTAssertEqual(firstBatch.admitted.count, 128)
         XCTAssertEqual(firstBatch.cursor, 128)
         let secondBatch = try flood.scan(after: firstBatch.cursor, roster: roster)
-        XCTAssertEqual(secondBatch.admitted.map(\.message.id), (129...150).map { "flood-\($0)" })
-        XCTAssertEqual(secondBatch.cursor, 150)
+        XCTAssertEqual(secondBatch.admitted.map(\.message.id), ["flood-129"])
+        XCTAssertEqual(secondBatch.cursor, 129)
 
         // With nothing young and nothing admitted, the cursor reaches the newest settled row.
         let quiet = try MessagesFixture()

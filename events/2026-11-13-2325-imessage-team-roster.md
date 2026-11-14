@@ -48,39 +48,3 @@ named agent's allowlist matches nothing, so role enforcement must fail closed in
 the daemon before any write-capable role; per-member authority and the
 operator's role control surface need a daemon-owned roster and grant model;
 bodies stored only in attributedBody are not admitted.
-
-Follow-up, same branch, after independent review (01:10 on 11-14-26): the review
-found one blocker and the operator's real Messages database exposed a second.
-Blocker: a reply bubble beginning with `-e` was parsed by osascript as an option
-and compiled as script; every invocation now ends option parsing with `--`, and
-a test feeds hostile strings through the real interpreter. Second: on this host
-1,316 of the last 1,361 plain inbound iMessages, and all 8 from the enrolled
-owner handle, store their text only in `attributedBody`, so the reader (July's
-too) would have admitted nothing; it now extracts that text with a narrow
-parser that never unarchives the blob, validated against 126 real rows carrying
-both columns (126 exact matches). Also fixed from the review: a 15 minute
-message-age bound and a settling cursor so a stale or missing cursor never
-replays a backlog; live roster reload with enrollment re-checked at delivery;
-cancelling the daemon turn when the bridge stops waiting; a private URL session
-(64 concurrent streams, no proxy, no redirects); LF-only stream line splitting;
-one-to-one enforced through chat.style and a single chat; per-member ledger
-retention; definite-answer-only session expiry; corrupt state failing closed;
-rehearsals requiring their own state file; and an installer that refuses to
-replace the app under a loaded LaunchAgent without --load. Validation: swift
-test 41 passed; release build passed; cargo xtask docs-check passed; two further
-live-daemon rehearsals recorded in the manifest. Still not verified: the
-installed app reading the real Messages database, and a real send.
-
-Second review pass (01:45 on 11-14-26) over the fix commit: no blocker, original
-blocker confirmed fixed by the reviewer's own osascript experiment. Its
-should-fix and minor findings were closed in a third commit: only tool names
-declared in agent.toml count as an allowlist (a stray file in an agent's tools/
-folder had passed); a full scan batch no longer lets the settled cursor skip
-candidates, and both reader queries share one read transaction; a message's
-conversations are counted from the join table itself; an oversized stream line
-is dropped instead of failing every later turn in the session; a failed session
-write cancels the accepted turn; a rehearsal cannot name the live ledger; a
-removed ledger re-primes; logs are timestamped; and the process exits once
-every five minutes without Messages access so a newly granted permission is
-picked up. That third commit is not independently reviewed. swift test 41
-passed; cargo xtask docs-check passed.

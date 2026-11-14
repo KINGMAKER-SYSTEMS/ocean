@@ -72,7 +72,13 @@ The roster lives in the operator's mode-0600 config beside the daemon URL:
   that outlasts the acknowledgement delay gets one "working on it" bubble first.
 - **Per-member limits and concurrency.** Reply limits are per member, per hour,
   claimed before any model work. Members are served concurrently; one member's
-  messages stay in order.
+  messages stay in order. A message waiting for its turn is never evicted from
+  the ledger; a member with 512 messages already waiting is refused, with a log
+  line, until their queue drains. Every claim attempt closes its message, and a
+  restart closes messages the previous process left waiting.
+- **Strict role agent.** Every turn sends `require_named_agent: true`, so a
+  daemon that supports it refuses the turn rather than widening it when the role
+  agent is missing, invalid, or matches no tool.
 - **Live roster.** The bridge re-reads the roster whenever the file changes.
   Removing or demoting a member takes effect on the next poll without a restart,
   and delivery re-checks enrollment, so a reply to a member removed mid-turn is
@@ -135,10 +141,12 @@ The roster lives in the operator's mode-0600 config beside the daemon URL:
   asked for (set what each person may do by org level and role) needs a
   daemon-owned roster, role, and grant model with an authenticated,
   package-attributed inbound seam; the config file here is its stand-in.
-- **A named agent that fails to resolve at turn time runs on the surface
-  profile.** The bridge checks the agent just before each turn, but the daemon
-  re-resolves it and falls back to the full toolset if the folder is unreadable
-  in that instant. The daemon must refuse the turn instead.
+- **The strict role agent needs a supporting daemon.** A daemon without
+  `require_named_agent` (added in KINGMAKER-SYSTEMS/ocean#201) ignores the field
+  and still falls back to the surface profile, with every tool, when a named
+  agent fails to resolve at turn time or its allowlist matches nothing. The
+  bridge cannot tell which daemon it is talking to. Do not enroll anyone in a
+  restricted role until the running daemon includes that change.
 - **Reader and sender share one process.** The `osascript` child runs inside the
   app that holds Full Disk Access. Splitting the sender into a helper with
   Automation only is the stronger shape and is not done here.

@@ -19,7 +19,8 @@ This package is the local-only macOS adapter that lets an operator-enrolled team
 - The reader is the sole component that may receive Full Disk Access; the daemon, shell wrappers, and agent process must not receive it.
 - A reply goes only to the member whose message was admitted. The sender takes a roster member id resolved from the reply ledger, never a handle; it must reject unknown or removed members and never use Accessibility/UI scripting or interpolate a handle or text into script source.
 - Every `osascript` invocation goes through `osascriptArguments`, which ends option parsing with `--` before any caller-supplied argument. Reply text is model output; without the separator a bubble beginning with `-e` runs as AppleScript.
-- A role's named agent is its permission boundary. Never run a member turn on the surface profile or on an agent that is missing or declares no tool allowlist.
+- A role's named agent is its permission boundary. Never run a member turn on the surface profile or on an agent that is missing or declares no tool names in `agent.toml`, and always send `require_named_agent: true`.
+- A message waiting for its turn is never evicted from the ledger. Every claim attempt closes its message; a new process closes whatever the previous one left waiting.
 - Each member's session is their own and is bound to the agent that owns it. Never share or reuse a session across members or across agents.
 - The roster file is re-read whenever it changes; a missing, non-private, or invalid file means no roster and nothing is admitted or sent. Do not cache roster decisions across polls or deliver a reply without re-checking enrollment.
 - When the bridge stops waiting for a turn, it cancels that turn in the daemon.
@@ -52,5 +53,5 @@ sh -n integrations/ocean-imessage/scripts/install-ocean-imessage
 - `Sources/OceanIMessage/Daemon.swift` — turn prompt, stream line and SSE readers, final-answer assembly, daemon client and turn cancellation.
 - `Sources/OceanIMessage/Reply.swift` — reply sanitizing and bubble splitting.
 - `Sources/OceanIMessage/OceanIMessageMain.swift` — CLI and the concurrent run loop.
-- `Tests/` — roster, admission, ledger, reader, sender, reply, protocol, and config safety tests.
+- `Tests/` — roster, admission, ledger, reader, sender, reply, protocol, and config safety tests; `DaemonClientTests.swift` drives the daemon client against a stand-in daemon.
 - `scripts/` — operator-run signed installer and build wrapper.

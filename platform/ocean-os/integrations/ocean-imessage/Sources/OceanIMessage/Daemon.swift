@@ -189,10 +189,12 @@ struct OceanDaemonClient: Sendable {
     }()
 
     private let config: BridgeConfig
-    private var session: URLSession { Self.session }
+    private let session: URLSession
 
-    init(config: BridgeConfig) {
+    /// `session` is replaceable only so tests can stand in for the daemon.
+    init(config: BridgeConfig, session: URLSession? = nil) {
         self.config = config
+        self.session = session ?? Self.session
     }
 
     func agentIsUsable(_ name: String) async -> Bool {
@@ -247,6 +249,11 @@ struct OceanDaemonClient: Sendable {
             "cwd": config.cwd,
             "client_type": "ocean-imessage",
             "agent": policy.agent,
+            // Ask the daemon to refuse the turn rather than widen it when the
+            // role agent is missing, invalid, or its allowlist matches no tool.
+            // Daemons older than this field ignore it, so it strengthens the
+            // preflight above without replacing it.
+            "require_named_agent": true,
             "advisor": ["enabled": false],
         ]
         if let resumed { body["session_id"] = resumed }

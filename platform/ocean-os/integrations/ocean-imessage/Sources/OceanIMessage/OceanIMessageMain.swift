@@ -168,7 +168,11 @@ struct OceanIMessageMain {
         for (rowID, message) in scan.admitted {
             // Commit the opaque id before emitting text. A crash can cause at-most
             // one lost message, never duplicate auto-replies or a rejected row leak.
-            guard try store.recordAdmission(message, cursor: rowID) else { continue }
+            do {
+                guard try store.recordAdmission(message, cursor: rowID) else { continue }
+            } catch BridgeError.backlogFull {
+                continue
+            }
             let line = try JSONEncoder().encode(message)
             FileHandle.standardOutput.write(line)
             FileHandle.standardOutput.write(Data([0x0A]))
@@ -185,6 +189,8 @@ struct OceanIMessageMain {
     ) async throws {
         let queues = MemberQueues()
         let reader = MessagesDatabase(path: database)
+        // Messages admitted by a previous process have no turn left to claim them.
+        try store.resolvePending()
 
         // Neither a missing roster nor an unreadable database ends the process:
         // under a supervisor that becomes a crash loop. The bridge stays up,
@@ -224,8 +230,16 @@ struct OceanIMessageMain {
                     readerHealthy = true
                 }
                 readerFailures = 0
+                var refused = Set<String>()
                 for (rowID, message) in scan.admitted {
-                    guard try store.recordAdmission(message, cursor: rowID) else { continue }
+                    do {
+                        guard try store.recordAdmission(message, cursor: rowID) else { continue }
+                    } catch BridgeError.backlogFull {
+                        if refused.insert(message.member).inserted {
+                            log("member \(message.member): \(describe(BridgeError.backlogFull))")
+                        }
+                        continue
+                    }
                     await queues.enqueue(member: message.member) {
                         await handle(message, store: store, live: live, sink: sink)
                     }
@@ -260,6 +274,8 @@ struct OceanIMessageMain {
     ) async {
         guard let config = live.refresh().config else {
             log("member \(message.member): roster is missing or invalid; admitted message dropped")
+            // Close it so it does not sit in the ledger as waiting forever.
+            _ = try? store.claimReply(for: message.id) { _ in nil }
             return
         }
 
