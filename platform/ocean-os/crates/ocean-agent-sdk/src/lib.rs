@@ -337,6 +337,13 @@ pub struct AgentTurnRequest {
     /// See `docs/specs/folder-as-agent.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
+    /// Require a resolved named agent with a nonempty exact tool ceiling.
+    /// Missing/invalid policies and unsupported subprocess capabilities refuse
+    /// admission; zero available tool matches refuse execution. This is not
+    /// caller authentication or a per-member grant. Omission keeps legacy behavior.
+    /// Requires a supporting daemon: older servers may ignore this additive field.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub require_named_agent: bool,
     /// Per-turn reasoning effort override. When set, the daemon applies this
     /// `ThinkingLevel` to *this turn only* — it does not mutate the runtime's
     /// global `thinking_level`. `None` leaves the global default in force.
@@ -1608,6 +1615,7 @@ mod tests {
             images: None,
             decision_token: None,
             agent: None,
+            require_named_agent: false,
             client_context: None,
             advisor: None,
         };
@@ -1619,6 +1627,30 @@ mod tests {
         let back: AgentTurnRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(back.prompt, "list the src directory");
         assert_eq!(back.thinking_level, Some(ThinkingLevel::High));
+    }
+
+    #[test]
+    fn agent_turn_request_required_named_agent_round_trip_and_legacy_default() {
+        let legacy: AgentTurnRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "inspect", "cwd": "/tmp", "agent": "reader"
+        }))
+        .unwrap();
+        assert!(!legacy.require_named_agent);
+        assert!(serde_json::to_value(&legacy)
+            .unwrap()
+            .get("require_named_agent")
+            .is_none());
+        let strict: AgentTurnRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "inspect", "cwd": "/tmp", "agent": "reader", "require_named_agent": true
+        }))
+        .unwrap();
+        let encoded = serde_json::to_value(&strict).unwrap();
+        assert_eq!(encoded["require_named_agent"], true);
+        assert!(
+            serde_json::from_value::<AgentTurnRequest>(encoded)
+                .unwrap()
+                .require_named_agent
+        );
     }
 
     #[test]
@@ -1638,6 +1670,7 @@ mod tests {
             images: None,
             decision_token: None,
             agent: None,
+            require_named_agent: false,
             client_context: None,
             advisor: None,
         };
@@ -1688,6 +1721,7 @@ mod tests {
             images: None,
             decision_token: None,
             agent: None,
+            require_named_agent: false,
             client_context: Some(ClientContext {
                 client_type: "surface-extension".into(),
                 browser: Some(BrowserContext {
