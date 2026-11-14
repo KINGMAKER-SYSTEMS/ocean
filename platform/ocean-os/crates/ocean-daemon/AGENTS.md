@@ -210,6 +210,11 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   model/provider atomically with the new session at `config_revision: 1` before
   returning or publishing `SessionCreated`; unknown model ids fail 400 without
   creating a session. This is the first-turn pin path, not a create→PATCH pair.
+- `GET /v1/agent/sessions/{id}` preserves the runtime's optional-session result:
+  absence returns 404; runtime-reported read/parse failures return a fixed 500
+  `internal server error`, without storage paths or error text. Keep successful
+  session/turn/active-request projections and the existing workspace-scope guard
+  unchanged; this mapping adds no storage mutation or new session authority.
 - Session-config RPC v1 is `GET/PATCH /v1/agent/sessions/{id}/config`;
   PATCH accepts strict model-only JSON (malformed or extra-key bodies return
   exact `400 {"ok":false,"error":"invalid_request"}`), persists the catalog
@@ -667,6 +672,10 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   use the full durable sequence. Deploy with Surface's matching attention filter.
 
 ## Verification
+
+- `cargo test -p ocean-daemon session_detail_http_ --locked -- --test-threads=1`
+  — registered-route absence, corrupt/non-file storage, retained bytes, successful
+  transcript/active-turn projection and workspace-scope fixtures.
 
 - `cargo test -p ocean-daemon required_named_agent --locked -- --test-threads=1`
   — preflight changes, immutable capture and pre-lifecycle refusal fixtures.
