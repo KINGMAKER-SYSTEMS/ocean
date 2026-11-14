@@ -401,6 +401,11 @@ final class OceanIMessageTests: XCTestCase {
         XCTAssertEqual(try store.resolvePending(), 0)
         try store.retainMembers(Set(roster.members.map(\.id)))
         let reader = MessagesDatabase(path: fixture.url.path)
+        // Control: without the prime, that earlier message would be acted on.
+        XCTAssertEqual(
+            try reader.scan(after: try store.load().cursor, roster: roster, now: fixture.now).admitted.map(\.message.id),
+            ["before-first-start"]
+        )
         let primed = try store.primeIfUnscanned { try reader.latestRowID() }
         XCTAssertEqual(primed.cursor, earlier)
         XCTAssertTrue(try reader.scan(after: primed.cursor, roster: roster, now: fixture.now).admitted.isEmpty)
@@ -412,10 +417,52 @@ final class OceanIMessageTests: XCTestCase {
             ["after-start"]
         )
 
-        // A ledger that has scanned is never re-primed, and the database is not even asked.
+        // A primed ledger is never re-primed, and the database is not even asked.
         try store.advanceCursor(to: 7)
         XCTAssertEqual(try store.primeIfUnscanned { XCTFail("must not ask"); return 99 }.cursor, max(7, earlier))
+        // The scan reports when each admitted message was sent, for the turn deadline.
+        let sent = try XCTUnwrap(try reader.scan(after: primed.cursor, roster: roster, now: fixture.now).admitted.first?.sent)
+        XCTAssertEqual(fixture.now.timeIntervalSince(sent), 2, accuracy: 1.5)
         withExtendedLifetime(custody) {}
+    }
+
+    func testAnEmptyMessagesDatabaseIsPrimedOnceAndItsFirstMessageIsAnswered() throws {
+        let roster = try Fixture.roster()
+        let fixture = try MessagesFixture()
+        try fixture.exec("""
+        INSERT INTO handle VALUES (1, '\(Fixture.adminPhone)', 'iMessage');
+        INSERT INTO chat VALUES (11, 45);
+        INSERT INTO chat_handle_join VALUES (11, 1);
+        """)
+        let (store, _, root) = temporaryStore()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let reader = MessagesDatabase(path: fixture.url.path)
+
+        // Nothing in the database yet: the starting point is row zero, and that is a real start.
+        let primed = try store.primeIfUnscanned { try reader.latestRowID() }
+        XCTAssertEqual(primed.cursor, 0)
+        XCTAssertTrue(primed.primed)
+
+        // The first message ever arrives while the bridge is running.
+        try fixture.add("first-ever", body: "hello ocean", handle: 1, chats: [11], secondsAgo: 2)
+        // The run loop primes before every scan; this must not jump past the new row.
+        let state = try store.primeIfUnscanned { XCTFail("already primed"); return try reader.latestRowID() }
+        XCTAssertEqual(state.cursor, 0)
+        XCTAssertEqual(
+            try reader.scan(after: state.cursor, roster: roster, now: fixture.now).admitted.map(\.message.id),
+            ["first-ever"]
+        )
+
+        // A ledger written before the marker existed counts as started only if it ever scanned.
+        let legacyRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: legacyRoot) }
+        try FileManager.default.createDirectory(at: legacyRoot, withIntermediateDirectories: true)
+        let scanned = legacyRoot.appendingPathComponent("scanned.json")
+        let unscanned = legacyRoot.appendingPathComponent("unscanned.json")
+        try Data(#"{"cursor":77,"admitted":[],"replied":[]}"#.utf8).write(to: scanned)
+        try Data(#"{"cursor":0,"admitted":[],"replied":[]}"#.utf8).write(to: unscanned)
+        XCTAssertEqual(try StateStore(url: scanned).primeIfUnscanned { XCTFail("already started"); return 5 }.cursor, 77)
+        XCTAssertEqual(try StateStore(url: unscanned).primeIfUnscanned { 5 }.cursor, 5)
     }
 
     func testOnlyOneRunnerCanHoldALedgerSoTheStartupSweepCannotCloseALiveRunnersQueue() throws {

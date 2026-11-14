@@ -165,7 +165,7 @@ struct OceanIMessageMain {
     private static func poll(database: String, store: StateStore, roster: Roster) throws {
         let state = try store.load()
         let scan = try MessagesDatabase(path: database).scan(after: state.cursor, roster: roster)
-        for (rowID, message) in scan.admitted {
+        for (rowID, message, _) in scan.admitted {
             // Commit the opaque id before emitting text. A crash can cause at-most
             // one lost message, never duplicate auto-replies or a rejected row leak.
             do {
@@ -241,7 +241,7 @@ struct OceanIMessageMain {
                 readerEverWorked = true
                 readerFailures = 0
                 var refused = Set<String>()
-                for (rowID, message) in scan.admitted {
+                for (rowID, message, sent) in scan.admitted {
                     do {
                         guard try store.recordAdmission(message, cursor: rowID) else { continue }
                     } catch BridgeError.backlogFull {
@@ -250,9 +250,8 @@ struct OceanIMessageMain {
                         }
                         continue
                     }
-                    let admittedAt = Date()
                     await queues.enqueue(member: message.member) {
-                        await handle(message, admittedAt: admittedAt, store: store, live: live, sink: sink)
+                        await handle(message, sent: sent, store: store, live: live, sink: sink)
                     }
                 }
                 try store.advanceCursor(to: scan.cursor)
@@ -281,7 +280,7 @@ struct OceanIMessageMain {
     /// bad turn for one member never stops the bridge for the others.
     private static func handle(
         _ message: AllowedMessage,
-        admittedAt: Date,
+        sent: Date,
         store: StateStore,
         live: LiveConfig,
         sink: ReplySink
@@ -292,9 +291,10 @@ struct OceanIMessageMain {
             try? store.resolve(message.id)
             return
         }
-        // The age rule holds when the turn comes, not only at admission: a
-        // message that queued behind long turns is not acted on late.
-        guard Date().timeIntervalSince(admittedAt) <= BridgeLimits.maximumMessageAge else {
+        // The age rule holds when the turn comes, not only at admission, and it
+        // runs from when the member sent the message: one that queued behind
+        // long turns is not acted on late.
+        guard Date().timeIntervalSince(sent) <= BridgeLimits.maximumMessageAge else {
             log("member \(message.member): message waited too long for its turn; dropped")
             try? store.resolve(message.id)
             return

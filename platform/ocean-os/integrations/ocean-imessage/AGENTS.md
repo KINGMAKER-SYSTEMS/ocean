@@ -21,8 +21,9 @@ This package is the local-only macOS adapter that lets an operator-enrolled team
 - Every `osascript` invocation goes through `osascriptArguments`, which ends option parsing with `--` before any caller-supplied argument. Reply text is model output; without the separator a bubble beginning with `-e` runs as AppleScript.
 - A role's named agent is its permission boundary. Never run a member turn on the surface profile or on an agent that is missing or declares no tool names in `agent.toml`, and always send `require_named_agent: true`.
 - A message waiting for its turn is never evicted from the ledger. Every claim attempt closes its message. `run` takes `RunnerLock` custody of its ledger before the startup sweep that closes what a previous process left waiting; never sweep without it.
-- A ledger that has never scanned (cursor zero) is primed to the newest row before the first scan. Housekeeping must not create the ledger file.
-- Never return a reply assembled across a lost stream frame. An oversized frame may be skipped only when `lostFrameIsIrrelevant` says it cannot shape the reply.
+- A ledger is primed to the newest row exactly once, before its first scan, and that fact is stored in `primed`, never inferred from the cursor. Housekeeping must not create the ledger file.
+- The 15 minute bound runs from when the member sent the message and is checked at admission and again when the turn starts.
+- Never return a reply assembled across a lost stream frame, and never accept any frame of a turn before that turn's `turn_started` has been seen. An oversized frame may be skipped only when `lostFrameIsIrrelevant` says it cannot shape the reply.
 - Each member's session is their own and is bound to the agent that owns it. Never share or reuse a session across members or across agents.
 - The roster file is re-read whenever it changes; a missing, non-private, or invalid file means no roster and nothing is admitted or sent. Do not cache roster decisions across polls or deliver a reply without re-checking enrollment.
 - When the bridge stops waiting for a turn, it cancels that turn in the daemon.

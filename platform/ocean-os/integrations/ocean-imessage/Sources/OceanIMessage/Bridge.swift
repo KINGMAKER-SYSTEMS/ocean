@@ -271,6 +271,10 @@ public struct BridgeState: Codable, Equatable, Sendable {
     public var owners: [String: String]
     public var replyTimes: [String: [Date]]
     public var sessions: [String: SessionBinding]
+    /// Whether this ledger has been given its starting point. Kept apart from
+    /// the cursor because the starting point of an empty Messages database is
+    /// row zero, which a cursor alone cannot tell from "never started".
+    public var primed: Bool
 
     public static let empty = BridgeState(
         cursor: 0, admitted: [], replied: [], owners: [:], replyTimes: [:], sessions: [:]
@@ -282,8 +286,10 @@ public struct BridgeState: Codable, Equatable, Sendable {
         replied: [String],
         owners: [String: String],
         replyTimes: [String: [Date]],
-        sessions: [String: SessionBinding]
+        sessions: [String: SessionBinding],
+        primed: Bool = false
     ) {
+        self.primed = primed
         self.cursor = cursor
         self.admitted = admitted
         self.replied = replied
@@ -293,7 +299,7 @@ public struct BridgeState: Codable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case cursor, admitted, replied, owners, replyTimes, sessions
+        case cursor, admitted, replied, owners, replyTimes, sessions, primed
     }
 
     public init(from decoder: Decoder) throws {
@@ -313,6 +319,8 @@ public struct BridgeState: Codable, Equatable, Sendable {
             replyTimes = [:]
         }
         sessions = try container.decodeIfPresent([String: SessionBinding].self, forKey: .sessions) ?? [:]
+        // A ledger written before this field existed has started if it ever scanned.
+        primed = try container.decodeIfPresent(Bool.self, forKey: .primed) ?? (cursor > 0)
     }
 }
 
@@ -368,16 +376,22 @@ public final class StateStore: @unchecked Sendable {
         }
     }
 
-    /// A ledger that has never scanned (cursor zero: a first run, or the file
-    /// was removed) starts at the newest row, so the bridge begins from the
-    /// present rather than answering whatever arrived before it was enabled.
-    /// `latestRowID` is asked only when priming is needed.
+    /// A ledger that has not been given its starting point (a first run, or the
+    /// file was removed) starts at the newest row, so the bridge begins from
+    /// the present rather than answering whatever arrived before it was
+    /// enabled. This happens exactly once per ledger, including when the
+    /// Messages database is empty and the newest row is zero. `latestRowID` is
+    /// asked only when priming is needed.
     @discardableResult
     public func primeIfUnscanned(latestRowID: () throws -> Int64) throws -> BridgeState {
-        let state = try load()
-        guard state.cursor == 0 else { return state }
-        try advanceCursor(to: try latestRowID())
-        return try load()
+        try withExclusiveLock {
+            var state = try loadUnlocked()
+            guard state.primed == false else { return state }
+            state.cursor = max(state.cursor, try latestRowID())
+            state.primed = true
+            try saveUnlocked(state)
+            return state
+        }
     }
 
     public func advanceCursor(to cursor: Int64) throws {
@@ -613,7 +627,8 @@ private func holdExclusively(_ descriptor: Int32) -> Bool {
 public struct MessageScan {
     /// Where the next scan starts. Never behind the cursor passed in.
     public let cursor: Int64
-    public let admitted: [(rowID: Int64, message: AllowedMessage)]
+    /// `sent` is when the member sent it; the turn deadline runs from there.
+    public let admitted: [(rowID: Int64, message: AllowedMessage, sent: Date)]
 }
 
 public struct MessagesDatabase: Sendable {
@@ -725,7 +740,7 @@ public struct MessagesDatabase: Sendable {
         sqlite3_bind_text(statement, index + 1, roster.localIdentity, -1, sqliteTransient)
         sqlite3_bind_int64(statement, index + 2, Int64(reference - BridgeLimits.maximumMessageAge))
 
-        var admitted: [(Int64, AllowedMessage)] = []
+        var admitted: [(Int64, AllowedMessage, Date)] = []
         var newest = cursor
         var returned = 0
         var lastReturned = cursor
@@ -759,7 +774,7 @@ public struct MessagesDatabase: Sendable {
             )
             guard participants == remote else { continue }
             if case let .accepted(message) = admit(candidate, roster: roster, now: now) {
-                admitted.append((rowID, message))
+                admitted.append((rowID, message, candidate.sent))
                 newest = max(newest, rowID)
             }
         }

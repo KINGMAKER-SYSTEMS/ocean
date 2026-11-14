@@ -174,7 +174,8 @@ final class DaemonClientTests: XCTestCase {
         let (store, root) = store()
         defer { try? FileManager.default.removeItem(at: root) }
         StubDaemon.reset(stream: .lines(
-            frame("assistant_text_delta", ["delta": "Let me check the campaigns."])
+            frame("turn_started", [:])
+                + frame("assistant_text_delta", ["delta": "Let me check the campaigns."])
                 + frame("tool_call_started", ["name": "read"])
                 + frame("assistant_text_delta", ["delta": "someone else's turn", "turn_id": "other"])
                 + frame("assistant_text_delta", ["delta": "Twelve posts are live\u{2028}today."])
@@ -220,9 +221,9 @@ final class DaemonClientTests: XCTestCase {
         let (store, root) = store()
         defer { try? FileManager.default.removeItem(at: root) }
         for lines in [
-            frame("turn_finished", ["status": "failed"]),
-            ["event: error", "data: {\"lagged\":3}", ""],
-            frame("assistant_text_delta", ["delta": "cut off mid-stream"]),
+            frame("turn_started", [:]) + frame("turn_finished", ["status": "failed"]),
+            frame("turn_started", [:]) + ["event: error", "data: {\"lagged\":3}", ""],
+            frame("turn_started", [:]) + frame("assistant_text_delta", ["delta": "cut off mid-stream"]),
         ] {
             StubDaemon.reset(stream: .lines(lines))
             do {
@@ -254,6 +255,38 @@ final class DaemonClientTests: XCTestCase {
             do {
                 let reply = try await ask(client(maximumLineBytes: 512), store)
                 XCTFail("\(name): sent a reply assembled across a lost frame: \(reply)")
+            } catch {
+                XCTAssertEqual(error as? BridgeError, .daemonFailure, name)
+            }
+            XCTAssertTrue(
+                StubDaemon.calls.contains(.init(method: "POST", path: "/v1/requests/\(StubDaemon.turnID)/cancel")), name
+            )
+        }
+    }
+
+    func testAReplayThatBeginsAfterThisTurnsStartMarkerIsNeverTrusted() async throws {
+        let (store, root) = store()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let huge = String(repeating: "x", count: 2_000)
+        // Bounded replay history can start mid-turn: the start marker is gone,
+        // and so, possibly, are frames that shaped the reply.
+        let truncated: [(String, [String])] = [
+            ("complete-looking turn without its marker",
+             frame("assistant_text_delta", ["delta": "Nine campaigns are live."]) + frame("turn_finished", ["status": "completed"])),
+            ("lost delta, then text and completion, no marker",
+             frame("assistant_text_delta", ["delta": huge])
+                + frame("assistant_text_delta", ["delta": "and that is all."]) + frame("turn_finished", ["status": "completed"])),
+            ("only the terminal event survives",
+             frame("turn_finished", ["status": "completed"])),
+            ("another turn's marker does not count",
+             frame("turn_started", ["turn_id": "earlier"])
+                + frame("assistant_text_delta", ["delta": "Nine campaigns are live."]) + frame("turn_finished", ["status": "completed"])),
+        ]
+        for (name, lines) in truncated {
+            StubDaemon.reset(stream: .lines(lines))
+            do {
+                let reply = try await ask(client(maximumLineBytes: 512), store)
+                XCTFail("\(name): trusted a turn whose start was never seen: \(reply)")
             } catch {
                 XCTAssertEqual(error as? BridgeError, .daemonFailure, name)
             }
@@ -297,7 +330,8 @@ final class DaemonClientTests: XCTestCase {
         try store.advanceCursor(to: 1)
         try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: root.path)
         StubDaemon.reset(stream: .lines(
-            frame("assistant_text_delta", ["delta": "done"]) + frame("turn_finished", ["status": "completed"])
+            frame("turn_started", [:])
+                + frame("assistant_text_delta", ["delta": "done"]) + frame("turn_finished", ["status": "completed"])
         ))
 
         do {

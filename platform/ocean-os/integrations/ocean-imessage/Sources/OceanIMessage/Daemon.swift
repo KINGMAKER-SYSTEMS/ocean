@@ -139,6 +139,10 @@ private let replyShapingEvents: Set<String> = ["assistant_text_delta", "tool_cal
 /// marker this rule depends on) cannot affect the reply. Once the turn is
 /// active, a lost frame is safe only if it is not one that shapes the reply:
 /// in practice a large tool result.
+///
+/// The rule is sound only because the reader also refuses any frame of this
+/// turn that arrives before its `turn_started` was seen (replay history is
+/// bounded and can begin mid-turn), so "not yet active" really means history.
 func lostFrameIsIrrelevant(event: String, turnActive: Bool) -> Bool {
     guard event.isEmpty == false, event != "turn_started" else { return false }
     return turnActive ? replyShapingEvents.contains(event) == false : true
@@ -397,6 +401,11 @@ struct OceanDaemonClient: Sendable {
                   let object = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
                   object["turn_id"] as? String == turnID
             else { continue }
+            // Replay history is bounded and can begin after this turn's start
+            // marker. Without the marker there is no proof of what came before,
+            // including frames lost to the line cap, so nothing of this turn is
+            // accepted: fail closed rather than return a possibly partial reply.
+            guard frame.event == "turn_started" || turnActive else { throw BridgeError.daemonFailure }
             switch frame.event {
             case "turn_started":
                 turnActive = true

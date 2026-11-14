@@ -47,9 +47,12 @@ The roster lives in the operator's mode-0600 config beside the daemon URL:
 - **Recent messages only.** A message older than 15 minutes is never admitted.
   The cursor moves past everything old enough to be complete, so a stale or
   missing cursor catches up in one poll without answering the backlog, and a
-  ledger that has never scanned starts from the present. The same bound applies
-  when a message's turn comes: one that waited longer than 15 minutes behind
-  other turns is dropped, with a log line, rather than acted on late.
+  ledger that has not been given a starting point is primed to the newest row
+  exactly once, recorded separately from the cursor so an empty Messages
+  database (newest row zero) is not primed again past its first message. The
+  same 15 minute bound, counted from when the member sent the message, applies
+  again when its turn comes: one that waited too long behind other turns is
+  dropped, with a log line, rather than acted on late.
 - **Text from `attributedBody`.** Current macOS stores most message text only in
   the `attributedBody` column (on the operator's host, 1,316 of the last 1,361
   plain inbound iMessages had `text` NULL). The reader takes `text` when present
@@ -75,7 +78,9 @@ The roster lives in the operator's mode-0600 config beside the daemon URL:
   A stream frame too large to keep is never silently skipped: it is ignored only
   when it provably cannot shape the reply (history before this turn started, or
   a non-text event such as a tool result during it); otherwise the turn fails
-  closed and is cancelled rather than answered with partial text.
+  closed and is cancelled rather than answered with partial text. Because the
+  daemon's replay history is bounded and can begin mid-turn, no frame of a turn
+  is accepted until that turn's own start marker has been seen.
 - **Per-member limits and concurrency.** Reply limits are per member, per hour,
   claimed before any model work. Members are served concurrently; one member's
   messages stay in order. A message waiting for its turn is never evicted from
@@ -173,6 +178,12 @@ The roster lives in the operator's mode-0600 config beside the daemon URL:
 - **Restart drops in-flight messages.** There is no drain on termination: a
   message mid-turn when the process stops is claimed and gets no reply, and its
   daemon turn is not cancelled. Restart only to upgrade.
+- **Ledger custody follows the lock file's path.** Deleting the lock file while
+  a runner is alive, or reaching the same ledger through a different path,
+  lets a second runner start.
+- **A working reader does not restart itself.** Once a process has read
+  Messages it stays up through a later outage so replies in flight still
+  arrive; if access is revoked and granted again, restart it.
 - **`poll` and `watch` are inspection modes.** They do not take custody of the
   ledger, and an admission they record counts as waiting until it is answered
   with `send` or the next `run` starts. Do not point them at a ledger a runner
