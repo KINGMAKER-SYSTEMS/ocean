@@ -97,3 +97,46 @@ func loadConfig(_ url: URL) throws -> BridgeConfig {
     else { throw BridgeError.invalidState }
     return try parseConfig(data)
 }
+
+/// The roster on disk is the authority. The run loop re-reads it whenever the
+/// file changes, so removing or demoting a member takes effect on the next poll
+/// without a restart. A missing, non-private, or invalid file means there is no
+/// roster: the bridge admits nothing and sends nothing until it is valid again.
+final class LiveConfig: @unchecked Sendable {
+    private struct Stamp: Equatable {
+        let modified: Date?
+        let size: Int?
+        let inode: Int?
+        let permissions: Int?
+    }
+
+    private let lock = NSLock()
+    private let url: URL
+    private var stamp: Stamp?
+    private var value: BridgeConfig?
+    private var generation = 0
+
+    init(url: URL) {
+        self.url = url
+    }
+
+    /// The config as of now, and a counter that rises each time the file was
+    /// re-read, whichever caller noticed the change.
+    @discardableResult
+    func refresh() -> (config: BridgeConfig?, generation: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+        let observed = Stamp(
+            modified: attributes?[.modificationDate] as? Date,
+            size: (attributes?[.size] as? NSNumber)?.intValue,
+            inode: (attributes?[.systemFileNumber] as? NSNumber)?.intValue,
+            permissions: (attributes?[.posixPermissions] as? NSNumber)?.intValue
+        )
+        if let stamp, stamp == observed { return (value, generation) }
+        stamp = observed
+        value = try? loadConfig(url)
+        generation += 1
+        return (value, generation)
+    }
+}

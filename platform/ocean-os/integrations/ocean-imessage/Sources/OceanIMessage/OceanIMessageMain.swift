@@ -20,7 +20,7 @@ enum BridgeText {
 /// Where finished replies go. `standardOutput` is the operator's rehearsal
 /// mode: the whole pipeline runs, but nothing is handed to Messages.
 private enum ReplySink: Sendable {
-    case messages(RosterSender)
+    case messages
     case standardOutput
 }
 
@@ -77,8 +77,9 @@ struct OceanIMessageMain {
             case .prime:
                 try store.advanceCursor(to: try MessagesDatabase(path: paths.database).latestRowID())
             case .watch:
-                let roster = try loadConfig(paths.config).roster
+                let live = LiveConfig(url: paths.config)
                 while true {
+                    guard let roster = live.refresh().config?.roster else { throw BridgeError.invalidState }
                     try poll(database: paths.database, store: store, roster: roster)
                     try await Task.sleep(for: .seconds(2))
                 }
@@ -92,15 +93,22 @@ struct OceanIMessageMain {
                 try RosterSender(accountID: config.messagesAccountID, roster: config.roster)
                     .send(bubbles, toMember: member)
             case .run:
-                let config = try loadConfig(paths.config)
                 let sink: ReplySink
                 if arguments.contains("--print-replies") {
+                    // A rehearsal must never write its cursor and sessions into
+                    // the live ledger, so it has to name its own state file.
+                    guard arguments.contains("--state") else { throw Usage.error }
                     sink = .standardOutput
                 } else {
-                    guard config.messagesAccountID != nil else { throw BridgeError.invalidState }
-                    sink = .messages(RosterSender(accountID: config.messagesAccountID, roster: config.roster))
+                    sink = .messages
                 }
-                try await run(database: paths.database, store: store, config: config, sink: sink)
+                try await run(
+                    database: paths.database,
+                    store: store,
+                    stateURL: paths.state,
+                    live: LiveConfig(url: paths.config),
+                    sink: sink
+                )
             }
         } catch {
             // Errors intentionally carry no iMessage content, database SQL, or
@@ -115,7 +123,9 @@ struct OceanIMessageMain {
     }
 
     /// Operator preflight. Prints only counts, role names, agent names, and
-    /// pass/fail; never a phone number or message.
+    /// pass/fail; never a phone number or message. Run from a terminal it
+    /// exercises the terminal's privacy grants, not the installed app's: the
+    /// service log is the authority on whether the app itself can read Messages.
     private static func check(database: String, config: BridgeConfig) async throws -> Bool {
         let client = OceanDaemonClient(config: config)
         var healthy = true
@@ -140,7 +150,7 @@ struct OceanIMessageMain {
         }
         do {
             _ = try MessagesDatabase(path: database).scan(after: Int64.max - 1, roster: config.roster)
-            print("messages database: readable")
+            print("messages database: readable by this process")
         } catch {
             print("messages database: \(describe(error))")
             healthy = false
@@ -165,20 +175,45 @@ struct OceanIMessageMain {
     private static func run(
         database: String,
         store: StateStore,
-        config: BridgeConfig,
+        stateURL: URL,
+        live: LiveConfig,
         sink: ReplySink
     ) async throws {
-        let client = OceanDaemonClient(config: config)
         let queues = MemberQueues()
         let reader = MessagesDatabase(path: database)
-        try store.retainMembers(Set(config.roster.members.map(\.id)))
 
-        // A reader that cannot open the database stays alive and retries
-        // instead of exiting, so a revoked permission does not become a
-        // supervisor crash loop. It logs once per state change.
+        // Neither a missing roster nor an unreadable database ends the process:
+        // under a supervisor that becomes a crash loop. The bridge stays up,
+        // admits nothing, says so once, and recovers on its own.
+        var rosterReady: Bool?
+        var seenGeneration = 0
         var readerHealthy = true
+        var primed = FileManager.default.fileExists(atPath: stateURL.path)
         while true {
+            let (loaded, generation) = live.refresh()
+            guard let config = loaded, sink == .standardOutput || config.messagesAccountID != nil else {
+                if rosterReady != false {
+                    log("configuration is missing, not private, or invalid; admitting nothing until it is fixed")
+                    rosterReady = false
+                }
+                seenGeneration = generation
+                try await Task.sleep(for: .seconds(5))
+                continue
+            }
+            if generation != seenGeneration || rosterReady != true {
+                log("roster loaded: \(config.roster.members.count) members, \(config.roster.roles.count) roles")
+                try store.retainMembers(Set(config.roster.members.map(\.id)))
+                seenGeneration = generation
+                rosterReady = true
+            }
+
             do {
+                if primed == false {
+                    // First run on this ledger: start from now, never from the
+                    // beginning of the account's history.
+                    try store.advanceCursor(to: reader.latestRowID())
+                    primed = true
+                }
                 let state = try store.load()
                 let scan = try reader.scan(after: state.cursor, roster: config.roster)
                 if readerHealthy == false {
@@ -188,7 +223,7 @@ struct OceanIMessageMain {
                 for (rowID, message) in scan.admitted {
                     guard try store.recordAdmission(message, cursor: rowID) else { continue }
                     await queues.enqueue(member: message.member) {
-                        await handle(message, store: store, config: config, client: client, sink: sink)
+                        await handle(message, store: store, live: live, sink: sink)
                     }
                 }
                 try store.advanceCursor(to: scan.cursor)
@@ -208,26 +243,28 @@ struct OceanIMessageMain {
     private static func handle(
         _ message: AllowedMessage,
         store: StateStore,
-        config: BridgeConfig,
-        client: OceanDaemonClient,
+        live: LiveConfig,
         sink: ReplySink
     ) async {
-        guard let member = config.roster.member(id: message.member),
-              let policy = config.roster.policy(for: member)
-        else { return }
+        guard let config = live.refresh().config else { return }
 
         // Claim the single reply before any model work, so a member over their
         // hourly limit costs nothing and a duplicate watcher cannot double-run.
+        // The ledger, not the caller, says who the reply belongs to.
+        let owner: String
         do {
-            _ = try store.claimReply(for: message.id) { repliesPerHour(for: $0, in: config.roster) }
+            owner = try store.claimReply(for: message.id) { repliesPerHour(for: $0, in: config.roster) }
         } catch {
-            log("member \(member.id): \(describe(error))")
+            log("member \(message.member): \(describe(error))")
+            return
+        }
+        guard let member = config.roster.member(id: owner), let policy = config.roster.policy(for: member) else {
             return
         }
 
         if isResetCommand(message.text) {
             try? store.clearSession(for: member.id)
-            await deliver([BridgeText.reset], to: member, sink: sink)
+            await deliver([BridgeText.reset], toMember: owner, live: live, sink: sink)
             return
         }
 
@@ -236,46 +273,50 @@ struct OceanIMessageMain {
                   (try? await Task.sleep(for: delay)) != nil,
                   Task.isCancelled == false
             else { return }
-            await deliver([BridgeText.acknowledgement], to: member, sink: sink)
+            await deliver([BridgeText.acknowledgement], toMember: owner, live: live, sink: sink)
         }
 
         let bubbles: [String]
         do {
-            let reply = try await client.reply(to: message, member: member, policy: policy, store: store)
+            let reply = try await OceanDaemonClient(config: config)
+                .reply(to: message, member: member, policy: policy, store: store)
             bubbles = splitReply(reply)
             guard bubbles.isEmpty == false else { throw BridgeError.unsafeReply }
         } catch {
             acknowledgement.cancel()
             await acknowledgement.value
             log("member \(member.id) role \(member.role): \(describe(error))")
-            await deliver([BridgeText.failure], to: member, sink: sink)
+            await deliver([BridgeText.failure], toMember: owner, live: live, sink: sink)
             return
         }
         // Let an in-flight acknowledgement land first so bubbles stay ordered.
         acknowledgement.cancel()
         await acknowledgement.value
-        await deliver(bubbles, to: member, sink: sink)
+        await deliver(bubbles, toMember: owner, live: live, sink: sink)
     }
 
-    /// AppleScript delivery blocks, so it runs off the cooperative pool.
-    private static func deliver(_ bubbles: [String], to member: RosterMember, sink: ReplySink) async {
-        let sender: RosterSender
-        switch sink {
-        case let .messages(configured):
-            sender = configured
-        case .standardOutput:
-            if let line = try? JSONEncoder().encode(PrintedReply(member: member.id, bubbles: bubbles)) {
+    /// Delivery re-reads the roster, so a member removed while their turn was
+    /// running receives nothing. AppleScript delivery blocks, so it runs off
+    /// the cooperative pool.
+    private static func deliver(_ bubbles: [String], toMember memberID: String, live: LiveConfig, sink: ReplySink) async {
+        guard let config = live.refresh().config, config.roster.member(id: memberID) != nil else {
+            log("member \(memberID): no longer enrolled; reply dropped")
+            return
+        }
+        if sink == .standardOutput {
+            if let line = try? JSONEncoder().encode(PrintedReply(member: memberID, bubbles: bubbles)) {
                 FileHandle.standardOutput.write(line + Data([0x0A]))
             }
             return
         }
+        let sender = RosterSender(accountID: config.messagesAccountID, roster: config.roster)
         let result: Result<Void, Error> = await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .utility).async {
-                continuation.resume(returning: Result { try sender.send(bubbles, toMember: member.id) })
+                continuation.resume(returning: Result { try sender.send(bubbles, toMember: memberID) })
             }
         }
         if case let .failure(error) = result {
-            log("member \(member.id): \(describe(error))")
+            log("member \(memberID): \(describe(error))")
         }
     }
 
@@ -307,6 +348,6 @@ struct OceanIMessageMain {
 private enum Usage: Error, LocalizedError {
     case error
     var errorDescription: String? {
-        "usage: ocean-imessage <accounts|check|poll|prime|watch|run> [--database PATH] [--state PATH] [--config PATH], ocean-imessage run --print-replies, or ocean-imessage send <accepted-message-id> <text>"
+        "usage: ocean-imessage <accounts|check|poll|prime|watch|run> [--database PATH] [--state PATH] [--config PATH], ocean-imessage run --print-replies --state PATH, or ocean-imessage send <accepted-message-id> <text>"
     }
 }

@@ -7,22 +7,30 @@ set -eu
 # signs it with a STABLE code-signing identity. macOS ties Full Disk Access and
 # Automation grants to an app's designated requirement. An ad-hoc signature's
 # requirement is the binary hash, so every rebuild silently voids the grants and
-# the reader starts failing; an identity-based signature keeps them across
-# rebuilds. This script therefore refuses ad-hoc signing.
+# the reader stops seeing Messages; an identity-based signature keeps them
+# across rebuilds. This script therefore refuses ad-hoc signing.
 #
-# It never grants a permission, never writes the roster, and loads the
-# LaunchAgent only when --load is passed.
+# Replacing the app bundle changes what a loaded LaunchAgent runs. The script
+# refuses to do that implicitly: if the agent is loaded you must pass --load,
+# which stops it, replaces the bundle, and starts it again. It never grants a
+# permission and never writes the roster. A bridge started without a roster or
+# without Full Disk Access idles and says so in its log; it does not crash-loop.
 
 usage() {
     cat >&2 <<'USAGE'
 usage: install-ocean-imessage --sign-identity "<identity name or SHA-1>"
-           [--app-dir DIR]        default: ~/Applications
-           [--bundle-id ID]       default: dev.risingtides.ocean-imessage
-           [--load]               write and (re)load the LaunchAgent
+           [--app-dir /ABSOLUTE/DIR]   default: ~/Applications
+           [--bundle-id ID]            default: dev.risingtides.ocean-imessage
+           [--load]                    stop, replace, and (re)start the LaunchAgent
 
 List identities with: security find-identity -v -p codesigning
 USAGE
     exit 2
+}
+
+fail() {
+    echo "install-ocean-imessage: $1" >&2
+    exit "${2:-1}"
 }
 
 IDENTITY=""
@@ -41,22 +49,38 @@ while [ $# -gt 0 ]; do
 done
 
 [ -n "$IDENTITY" ] || usage
-if [ "$IDENTITY" = "-" ]; then
-    echo "install-ocean-imessage: ad-hoc signing is refused; permission grants would not survive a rebuild" >&2
-    exit 2
-fi
+[ "$IDENTITY" != "-" ] || fail "ad-hoc signing is refused; permission grants would not survive a rebuild" 2
 case "$BUNDLE_ID" in
-    *[!A-Za-z0-9.-]* | "") echo "install-ocean-imessage: invalid bundle id" >&2; exit 2 ;;
+    *[!A-Za-z0-9.-]* | "") fail "invalid bundle id" 2 ;;
+esac
+# The path is written into a property list; keep it absolute and free of XML
+# metacharacters and newlines.
+case "$APP_DIR" in
+    /*) ;;
+    *) fail "--app-dir must be an absolute path" 2 ;;
+esac
+case "$APP_DIR" in
+    *"<"* | *">"* | *"&"* | *'"'* | *"
+"*) fail "--app-dir contains an unsupported character" 2 ;;
 esac
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 APP="$APP_DIR/Ocean iMessage.app"
 SUPPORT="$HOME/Library/Application Support/Ocean/iMessage"
 PLIST="$HOME/Library/LaunchAgents/$BUNDLE_ID.plist"
+DOMAIN="gui/$(id -u)"
+
+agent_loaded() {
+    launchctl print "$DOMAIN/$BUNDLE_ID" >/dev/null 2>&1
+}
+
+if agent_loaded && [ "$LOAD" -ne 1 ]; then
+    fail "LaunchAgent $BUNDLE_ID is loaded and would start running the new build; pass --load to replace and restart it, or unload it first"
+fi
 
 swift build -c release --package-path "$ROOT"
 BINARY="$ROOT/.build/release/ocean-imessage"
-[ -x "$BINARY" ] || { echo "install-ocean-imessage: release binary missing" >&2; exit 1; }
+[ -x "$BINARY" ] || fail "release binary missing"
 
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
@@ -81,8 +105,18 @@ PLIST
 codesign --force --sign "$IDENTITY" --identifier "$BUNDLE_ID" "$STAGED_APP"
 codesign --verify --strict "$STAGED_APP"
 if codesign -dv "$STAGED_APP" 2>&1 | grep -q 'Signature=adhoc'; then
-    echo "install-ocean-imessage: signature is ad-hoc; refusing to install" >&2
-    exit 1
+    fail "signature is ad-hoc; refusing to install"
+fi
+
+if agent_loaded; then
+    launchctl bootout "$DOMAIN/$BUNDLE_ID" 2>/dev/null || true
+    # bootout returns before the job is gone; a bootstrap that races it fails.
+    tries=0
+    while agent_loaded; do
+        tries=$((tries + 1))
+        [ "$tries" -le 40 ] || fail "LaunchAgent did not stop; nothing was replaced"
+        sleep 0.25
+    done
 fi
 
 mkdir -p "$APP_DIR" "$SUPPORT"
@@ -108,9 +142,12 @@ if [ "$LOAD" -eq 1 ]; then
   <key>StandardErrorPath</key><string>$SUPPORT/service.err.log</string>
 </dict></plist>
 PLIST
-    DOMAIN="gui/$(id -u)"
-    launchctl bootout "$DOMAIN/$BUNDLE_ID" 2>/dev/null || true
-    launchctl bootstrap "$DOMAIN" "$PLIST"
+    tries=0
+    until launchctl bootstrap "$DOMAIN" "$PLIST" 2>/dev/null; do
+        tries=$((tries + 1))
+        [ "$tries" -le 8 ] || fail "LaunchAgent did not start; the app is installed but not running"
+        sleep 0.5
+    done
     echo "loaded: $DOMAIN/$BUNDLE_ID"
 fi
 
@@ -119,6 +156,10 @@ cat <<NEXT
 Next, by hand (this script cannot and does not do these):
   1. System Settings > Privacy & Security > Full Disk Access: enable "Ocean iMessage".
   2. Write the roster to "$SUPPORT/config.json" with mode 0600 (see README).
-  3. "$APP/Contents/MacOS/ocean-imessage" check
+     The running bridge picks up roster edits on its own; no restart is needed.
+  3. Watch "$SUPPORT/service.err.log". "roster loaded" and no
+     "Messages database is unavailable" line means the app itself can read
+     Messages. Running "check" from a terminal tests the terminal's permissions,
+     not the app's, so it cannot answer that question.
   4. Approve the Messages Automation prompt the first time a reply is sent.
 NEXT

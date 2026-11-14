@@ -12,7 +12,17 @@ public enum BridgeLimits {
     public static let maximumMembers = 64
     public static let defaultRepliesPerHour = 30
     public static let maximumRepliesPerHour = 120
-    public static let retainedAdmissions = 256
+    /// Ledger entries kept per member. Retention is per member so one busy
+    /// teammate can never evict another teammate's pending message.
+    public static let retainedAdmissionsPerMember = 128
+    /// A message older than this is never admitted. The bridge answers what was
+    /// just sent; it must not wake up and act on a backlog.
+    public static let maximumMessageAge: TimeInterval = 900
+    /// Tolerated clock skew for a message dated in the future.
+    public static let maximumMessageSkew: TimeInterval = 300
+    /// The cursor does not pass an unadmitted row younger than this, so a row
+    /// whose joins land a moment after it is still seen on the next poll.
+    public static let settleInterval: TimeInterval = 10
 }
 
 // MARK: - Roster
@@ -128,6 +138,7 @@ public struct IncomingMessage: Equatable {
     public let isFromMe: Bool
     public let hasAttachment: Bool
     public let isReaction: Bool
+    public let sent: Date
 
     public init(
         id: String,
@@ -138,7 +149,8 @@ public struct IncomingMessage: Equatable {
         participantCount: Int,
         isFromMe: Bool,
         hasAttachment: Bool,
-        isReaction: Bool
+        isReaction: Bool,
+        sent: Date
     ) {
         self.id = id
         self.remote = remote
@@ -149,6 +161,7 @@ public struct IncomingMessage: Equatable {
         self.isFromMe = isFromMe
         self.hasAttachment = hasAttachment
         self.isReaction = isReaction
+        self.sent = sent
     }
 }
 
@@ -173,8 +186,12 @@ public struct AllowedMessage: Equatable, Codable, Sendable {
 /// This is deliberately the only content admission point. Every failure is
 /// indistinguishable to callers so rejected rows are not reflected in logs,
 /// output, or daemon prompts.
-public func admit(_ message: IncomingMessage, roster: Roster) -> Admission {
+public func admit(_ message: IncomingMessage, roster: Roster, now: Date = Date()) -> Admission {
+    let age = now.timeIntervalSince(message.sent)
     guard message.id.isEmpty == false,
+          age <= BridgeLimits.maximumMessageAge,
+          age >= -BridgeLimits.maximumMessageSkew,
+          message.text.unicodeScalars.contains("\u{FFFC}") == false,
           message.isFromMe == false,
           message.service == "iMessage",
           message.participantCount == 1,
@@ -279,7 +296,14 @@ public struct BridgeState: Codable, Equatable, Sendable {
         owners = try container.decodeIfPresent([String: String].self, forKey: .owners) ?? [:]
         // The fixed-pair slice stored one unowned list of reply times. It names
         // no member, so it cannot seed a per-member window and is dropped.
-        replyTimes = (try? container.decode([String: [Date]].self, forKey: .replyTimes)) ?? [:]
+        if container.contains(.replyTimes) == false {
+            replyTimes = [:]
+        } else if let windows = try? container.decode([String: [Date]].self, forKey: .replyTimes) {
+            replyTimes = windows
+        } else {
+            _ = try container.decode([Date].self, forKey: .replyTimes)
+            replyTimes = [:]
+        }
         sessions = try container.decodeIfPresent([String: SessionBinding].self, forKey: .sessions) ?? [:]
     }
 }
@@ -323,7 +347,7 @@ public final class StateStore: @unchecked Sendable {
                 return false
             }
             state.cursor = cursor
-            state.admitted = Array((state.admitted + [message.id]).suffix(BridgeLimits.retainedAdmissions))
+            state.admitted.append(message.id)
             state.owners[message.id] = message.member
             prune(&state)
             try saveUnlocked(state)
@@ -401,9 +425,20 @@ public final class StateStore: @unchecked Sendable {
         }
     }
 
-    /// Reply markers and owner bindings live exactly as long as their retained
-    /// admission; never evict one independently while its message is claimable.
+    /// Keep each member's most recent admissions. Reply markers and owner
+    /// bindings live exactly as long as their retained admission; never evict
+    /// one independently while its message is claimable.
     private func prune(_ state: inout BridgeState) {
+        var kept: [String] = []
+        var perOwner: [String: Int] = [:]
+        for id in state.admitted.reversed() {
+            // Unowned ids come from the fixed-pair era and share one bucket.
+            let owner = state.owners[id] ?? ""
+            guard perOwner[owner, default: 0] < BridgeLimits.retainedAdmissionsPerMember else { continue }
+            perOwner[owner, default: 0] += 1
+            kept.append(id)
+        }
+        state.admitted = kept.reversed()
         let retained = Set(state.admitted)
         state.replied = state.replied.filter { retained.contains($0) }
         state.owners = state.owners.filter { retained.contains($0.key) }
@@ -466,11 +501,20 @@ public final class StateStore: @unchecked Sendable {
 // MARK: - Messages reader
 
 public struct MessageScan {
+    /// Where the next scan starts. Never behind the cursor passed in.
     public let cursor: Int64
     public let admitted: [(rowID: Int64, message: AllowedMessage)]
 }
 
 public struct MessagesDatabase: Sendable {
+    /// Messages marks a one-to-one conversation with this `chat.style`; group
+    /// conversations use 43.
+    private static let oneToOneChatStyle: Int32 = 45
+    /// `message.date` is nanoseconds since 2001 on current macOS and seconds on
+    /// very old databases. Both are normalized to seconds since 2001.
+    private static let dateSeconds =
+        "(CASE WHEN m.date > 1000000000000 THEN m.date / 1000000000 ELSE m.date END)"
+
     private let path: String
 
     public init(path: String = ("~/Library/Messages/chat.db" as NSString).expandingTildeInPath) {
@@ -478,11 +522,7 @@ public struct MessagesDatabase: Sendable {
     }
 
     public func latestRowID() throws -> Int64 {
-        var database: OpaquePointer?
-        guard sqlite3_open_v2(path, &database, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK, let database else {
-            sqlite3_close(database)
-            throw BridgeError.databaseUnavailable
-        }
+        let database = try open()
         defer { sqlite3_close(database) }
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(database, "SELECT COALESCE(MAX(ROWID), 0) FROM message", -1, &statement, nil) == SQLITE_OK, let statement else {
@@ -493,54 +533,58 @@ public struct MessagesDatabase: Sendable {
         return sqlite3_column_int64(statement, 0)
     }
 
-    public func scan(after cursor: Int64, roster: Roster) throws -> MessageScan {
-        var database: OpaquePointer?
-        guard sqlite3_open_v2(path, &database, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK, let database else {
-            sqlite3_close(database)
-            throw BridgeError.databaseUnavailable
-        }
+    public func scan(after cursor: Int64, roster: Roster, now: Date = Date()) throws -> MessageScan {
+        let database = try open()
         defer { sqlite3_close(database) }
 
         let requiredMessageColumns = [
-            "ROWID", "guid", "text", "handle_id", "is_from_me", "service",
-            "destination_caller_id", "cache_has_attachments", "associated_message_guid",
-            "associated_message_type", "item_type"
+            "ROWID", "guid", "text", "attributedBody", "handle_id", "is_from_me", "service",
+            "destination_caller_id", "cache_has_attachments", "cache_roomnames",
+            "associated_message_guid", "associated_message_type", "item_type", "date"
         ]
         guard try hasColumns(requiredMessageColumns, table: "message", database: database),
               try hasColumns(["ROWID", "id"], table: "handle", database: database),
+              try hasColumns(["ROWID", "style"], table: "chat", database: database),
               try hasColumns(["chat_id", "message_id"], table: "chat_message_join", database: database),
               try hasColumns(["chat_id", "handle_id"], table: "chat_handle_join", database: database)
         else { throw BridgeError.unsafeDatabaseSchema }
 
-        // Do not select attributedBody, attachments, account metadata, chat names,
-        // or any row that fails the SQL pre-filter. The sender must be an
-        // enrolled handle, the destination must be the agent's own identity, and
-        // the conversation must have exactly that one participant. Swift repeats
-        // the roster check before a body can leave this reader.
+        // The SQL pre-filter selects a body only for a recent inbound iMessage
+        // from an enrolled handle, to the agent's identity, in exactly one
+        // conversation that Messages itself marks one-to-one and whose only
+        // participant address is that handle. Attachments, account metadata,
+        // and chat names are never selected. Swift repeats the roster and
+        // shape checks before a body can leave this reader.
         let phones = roster.members.map(\.phone)
         let placeholders = Array(repeating: "?", count: phones.count).joined(separator: ",")
         let sql = """
-        SELECT m.ROWID, m.guid, m.text, h.id, m.destination_caller_id, m.service,
-               m.is_from_me, m.cache_has_attachments, m.associated_message_guid,
-               m.associated_message_type, m.item_type,
-               COUNT(DISTINCT participant.ROWID), GROUP_CONCAT(DISTINCT participant.id)
+        SELECT m.ROWID, m.guid, m.text, m.attributedBody, h.id, m.destination_caller_id,
+               m.service, m.is_from_me, m.cache_has_attachments, m.associated_message_guid,
+               m.associated_message_type, m.item_type, \(Self.dateSeconds),
+               COUNT(DISTINCT participant.id), GROUP_CONCAT(DISTINCT participant.id)
         FROM message AS m
         JOIN handle AS h ON h.ROWID = m.handle_id
         JOIN chat_message_join AS cmj ON cmj.message_id = m.ROWID
+        JOIN chat AS c ON c.ROWID = cmj.chat_id
         JOIN chat_handle_join AS chj ON chj.chat_id = cmj.chat_id
         JOIN handle AS participant ON participant.ROWID = chj.handle_id
         WHERE m.ROWID > ?
           AND h.id IN (\(placeholders))
           AND m.destination_caller_id = ?
+          AND \(Self.dateSeconds) >= ?
           AND m.is_from_me = 0
           AND m.service = 'iMessage'
-          AND m.text IS NOT NULL
+          AND (m.text IS NOT NULL OR m.attributedBody IS NOT NULL)
           AND m.cache_has_attachments = 0
+          AND m.cache_roomnames IS NULL
           AND m.associated_message_guid IS NULL
           AND COALESCE(m.associated_message_type, 0) = 0
           AND COALESCE(m.item_type, 0) = 0
         GROUP BY m.ROWID
-        HAVING COUNT(DISTINCT participant.ROWID) = 1
+        HAVING COUNT(DISTINCT cmj.chat_id) = 1
+           AND MIN(c.style) = \(Self.oneToOneChatStyle)
+           AND MAX(c.style) = \(Self.oneToOneChatStyle)
+           AND COUNT(DISTINCT participant.id) = 1
            AND GROUP_CONCAT(DISTINCT participant.id) = h.id
         ORDER BY m.ROWID ASC
         LIMIT 128
@@ -550,6 +594,7 @@ public struct MessagesDatabase: Sendable {
             throw BridgeError.unsafeDatabaseSchema
         }
         defer { sqlite3_finalize(statement) }
+        let reference = now.timeIntervalSinceReferenceDate
         var index: Int32 = 1
         sqlite3_bind_int64(statement, index, cursor)
         for phone in phones {
@@ -557,15 +602,21 @@ public struct MessagesDatabase: Sendable {
             sqlite3_bind_text(statement, index, phone, -1, sqliteTransient)
         }
         sqlite3_bind_text(statement, index + 1, roster.localIdentity, -1, sqliteTransient)
+        sqlite3_bind_int64(statement, index + 2, Int64(reference - BridgeLimits.maximumMessageAge))
 
         var admitted: [(Int64, AllowedMessage)] = []
-        var scannedCursor = cursor
-        while sqlite3_step(statement) == SQLITE_ROW {
+        var newest = cursor
+        while true {
+            let step = sqlite3_step(statement)
+            if step == SQLITE_DONE { break }
+            // A failed step is a read failure, not the end of the rows.
+            guard step == SQLITE_ROW else { throw BridgeError.databaseUnavailable }
+
             let rowID = sqlite3_column_int64(statement, 0)
-            scannedCursor = max(scannedCursor, rowID)
-            guard let id = text(statement, 1), let body = text(statement, 2),
-                  let remote = text(statement, 3), let local = text(statement, 4),
-                  let service = text(statement, 5), let participants = text(statement, 12)
+            guard let id = text(statement, 1),
+                  let remote = text(statement, 4), let local = text(statement, 5),
+                  let service = text(statement, 6), let participants = text(statement, 14),
+                  let body = text(statement, 2) ?? blob(statement, 3).flatMap(decodeAttributedBody)
             else { continue }
             let candidate = IncomingMessage(
                 id: id,
@@ -573,22 +624,51 @@ public struct MessagesDatabase: Sendable {
                 local: local,
                 service: service,
                 text: body,
-                participantCount: Int(sqlite3_column_int(statement, 11)),
-                isFromMe: sqlite3_column_int(statement, 6) != 0,
-                hasAttachment: sqlite3_column_int(statement, 7) != 0,
-                isReaction: sqlite3_column_type(statement, 8) != SQLITE_NULL
-                    || sqlite3_column_int(statement, 9) != 0
+                participantCount: Int(sqlite3_column_int(statement, 13)),
+                isFromMe: sqlite3_column_int(statement, 7) != 0,
+                hasAttachment: sqlite3_column_int(statement, 8) != 0,
+                isReaction: sqlite3_column_type(statement, 9) != SQLITE_NULL
                     || sqlite3_column_int(statement, 10) != 0
+                    || sqlite3_column_int(statement, 11) != 0,
+                sent: Date(timeIntervalSinceReferenceDate: TimeInterval(sqlite3_column_int64(statement, 12)))
             )
-            // SQL prefilters the enrolled sender and one-to-one shape before
-            // selecting text; Swift repeats both the participant and admission
-            // checks before content can leave the reader boundary.
             guard participants == remote else { continue }
-            if case let .accepted(message) = admit(candidate, roster: roster) {
+            if case let .accepted(message) = admit(candidate, roster: roster, now: now) {
                 admitted.append((rowID, message))
+                newest = max(newest, rowID)
             }
         }
-        return MessageScan(cursor: scannedCursor, admitted: admitted)
+
+        // Move the cursor over everything old enough to be complete, whether or
+        // not it was admitted, so a stale cursor catches up in one poll and
+        // unrelated traffic is not rescanned. Young unadmitted rows stay ahead
+        // of the cursor and are looked at again.
+        let settled = try settledRowID(
+            after: cursor, before: reference - BridgeLimits.settleInterval, database: database
+        )
+        return MessageScan(cursor: max(cursor, settled, newest), admitted: admitted)
+    }
+
+    private func open() throws -> OpaquePointer {
+        var database: OpaquePointer?
+        guard sqlite3_open_v2(path, &database, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK, let database else {
+            sqlite3_close(database)
+            throw BridgeError.databaseUnavailable
+        }
+        return database
+    }
+
+    private func settledRowID(after cursor: Int64, before reference: TimeInterval, database: OpaquePointer) throws -> Int64 {
+        let sql = "SELECT COALESCE(MAX(m.ROWID), 0) FROM message AS m WHERE m.ROWID > ? AND \(Self.dateSeconds) < ?"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK, let statement else {
+            throw BridgeError.unsafeDatabaseSchema
+        }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int64(statement, 1, cursor)
+        sqlite3_bind_int64(statement, 2, Int64(reference))
+        guard sqlite3_step(statement) == SQLITE_ROW else { throw BridgeError.databaseUnavailable }
+        return sqlite3_column_int64(statement, 0)
     }
 
     private func hasColumns(_ required: [String], table: String, database: OpaquePointer) throws -> Bool {
@@ -605,8 +685,17 @@ public struct MessagesDatabase: Sendable {
     }
 
     private func text(_ statement: OpaquePointer, _ column: Int32) -> String? {
-        guard let pointer = sqlite3_column_text(statement, column) else { return nil }
+        guard sqlite3_column_type(statement, column) != SQLITE_NULL,
+              let pointer = sqlite3_column_text(statement, column)
+        else { return nil }
         return String(cString: pointer)
+    }
+
+    private func blob(_ statement: OpaquePointer, _ column: Int32) -> Data? {
+        guard sqlite3_column_type(statement, column) == SQLITE_BLOB,
+              let pointer = sqlite3_column_blob(statement, column)
+        else { return nil }
+        return Data(bytes: pointer, count: Int(sqlite3_column_bytes(statement, column)))
     }
 }
 
@@ -615,10 +704,17 @@ public struct MessagesDatabase: Sendable {
 /// Runs one AppleScript with positional arguments and returns its output.
 public typealias AppleScriptRunner = @Sendable (_ source: String, _ arguments: [String]) throws -> String
 
-func runMessagesAppleScript(_ source: String, arguments: [String] = []) throws -> String {
+/// `osascript` argument vector for a script and its positional arguments. The
+/// `--` ends option parsing: without it, an argument beginning with `-e` is
+/// compiled as an extra script line, which would let reply text run code.
+func osascriptArguments(source: String, arguments: [String]) -> [String] {
+    ["-e", source, "--"] + arguments
+}
+
+func runAppleScript(_ source: String, arguments: [String] = []) throws -> String {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-    process.arguments = ["-e", source] + arguments
+    process.arguments = osascriptArguments(source: source, arguments: arguments)
     let output = Pipe()
     process.standardOutput = output
     // Never return AppleScript diagnostics: they can contain local account
@@ -646,7 +742,7 @@ public enum MessagesAccounts {
             get id of every account whose enabled is true and service type is iMessage
         end tell
         """
-        return try runMessagesAppleScript(source)
+        return try runAppleScript(source)
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .split(separator: ",")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -656,8 +752,9 @@ public enum MessagesAccounts {
 
 /// Sends reply bubbles to an enrolled member. The caller names a roster member
 /// id; the handle is read from the roster and passed to AppleScript as a
-/// positional argument, never interpolated into script source. There is no way
-/// to address a handle that is not on the roster.
+/// positional argument after `--`, never interpolated into script source and
+/// never parsed as an option. There is no way to address a handle that is not
+/// on the roster.
 public struct RosterSender: Sendable {
     private let configuredAccountID: String?
     private let roster: Roster
@@ -677,7 +774,7 @@ public struct RosterSender: Sendable {
         self.roster = roster
         self.bubbleDelay = bubbleDelay
         self.runner = runner ?? { source, arguments in
-            try runMessagesAppleScript(source, arguments: arguments)
+            try runAppleScript(source, arguments: arguments)
         }
     }
 

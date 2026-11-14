@@ -4,13 +4,16 @@ This macOS-only adapter lets an operator-enrolled team text one Ocean agent
 identity. Before Ocean receives a single byte of message content, a message
 must be:
 
-- a one-to-one iMessage conversation,
+- a one-to-one iMessage conversation (one that Messages itself marks one-to-one),
 - **from** a handle on the operator's roster,
-- **to** the agent's own identity.
+- **to** the agent's own identity,
+- sent within the last 15 minutes.
 
 It rejects outgoing rows, SMS, group conversations, strangers, attachments,
 reactions, other identities signed in on the host, non-E.164 identifiers,
-overlong text, and unknown Messages schemas. Rejected rows are never printed,
+overlong text, anything older than 15 minutes, and unknown Messages schemas.
+The bridge answers what was just sent; after an outage or a stale cursor it
+skips the backlog instead of acting on it. Rejected rows are never printed,
 written to state, or sent to Ocean. The state file holds opaque message ids,
 roster member ids, daemon session ids, a cursor, and reply timestamps — never
 message text or phone numbers.
@@ -29,7 +32,14 @@ message text or phone numbers.
 
 Each member has a separate session, so one teammate's conversation is not
 visible to another. Texting exactly `/new` starts that member's session over.
-A turn that takes a while is preceded by a short "working on it" bubble.
+A turn that takes a while is preceded by a short "working on it" bubble. A turn
+that outlasts `turnTimeoutSeconds` gets a failure notice and is cancelled in the
+daemon, so it does not keep working behind the notice.
+
+Current macOS stores most message text only in the `attributedBody` column. The
+reader takes `text` when present and otherwise extracts the string from
+`attributedBody` with a narrow parser. It never unarchives the blob, and a blob
+that is not exactly the expected layout is not admitted.
 
 ## Roster
 
@@ -65,7 +75,14 @@ A turn that takes a while is preceded by a short "working on it" bubble.
 - Up to 64 members. Ids, roles, and agent names are lowercase
   `[a-z0-9][a-z0-9_-]*`.
 
-Removing a member stops admitting them and makes them unaddressable at once.
+The running bridge re-reads the roster whenever the file changes; no restart
+is needed. Removing a member stops admitting them on the next poll (about two
+seconds) and drops any reply still on its way to them. A roster file that is
+missing, not mode 0600, or invalid means no roster: the bridge admits nothing
+until it is fixed.
+
+Never reuse a member id for a different person: sessions are keyed by member id,
+so the new person would continue the previous person's conversation.
 
 ## Security boundary
 
@@ -74,11 +91,14 @@ package builds; never to `ocean-daemon`, a shell, Python, Node, or a general
 agent runtime. Prefer running it under a macOS user whose Messages account is
 the agent's own Apple ID, so FDA exposes only conversations with the agent.
 
-The sender separately needs Automation access to Messages. It addresses only
-roster members: the recipient comes from the reply ledger and the roster, and
-travels to AppleScript as a positional argument. It selects only the explicit,
+That one app is the reader, the daemon client, and the sender. To send, it runs
+`/usr/bin/osascript` with a constant script. The reply text and the recipient
+handle are passed as positional arguments after `--`, so neither can be read as
+an `osascript` option or become script source. The recipient comes from the
+reply ledger and the roster. The sender selects only the explicit,
 operator-enrolled Messages account id; it never falls back to the first
-account, uses Accessibility, or uses GUI scripting.
+account, uses Accessibility, or uses GUI scripting. Sending needs Automation
+access to Messages, granted to the same app.
 
 Message text is untrusted agent input. It cannot select a recipient, alter the
 roster, change bridge configuration, or gain Messages database access. It is
@@ -99,9 +119,11 @@ integrations/ocean-imessage/.build/release/ocean-imessage check
 ```
 
 `poll` prints admitted messages as JSON lines and contacts nothing.
-`run --print-replies` runs the whole pipeline against the daemon and prints the
-replies instead of handing them to Messages, so a roster and its agents can be
-rehearsed without texting anyone.
+`run --print-replies --state <path>` runs the whole pipeline against the daemon
+and prints the replies instead of handing them to Messages, so a roster and its
+agents can be rehearsed without texting anyone. It requires its own `--state`
+file so a rehearsal can never write into the live ledger; pair it with
+`--database` pointing at a fixture.
 
 ## Install
 
@@ -114,11 +136,19 @@ security find-identity -v -p codesigning
 integrations/ocean-imessage/scripts/install-ocean-imessage --sign-identity "<identity>" --load
 ```
 
-The script builds, signs, installs `~/Applications/Ocean iMessage.app`, and with
-`--load` writes and loads the LaunchAgent. It never grants a permission and
-never writes the roster. Afterwards, by hand: enable the app under Full Disk
-Access, write the roster, run `check`, and approve the Messages Automation
-prompt on the first reply. Enroll the Messages account id from
+The script builds, signs, and installs `~/Applications/Ocean iMessage.app`. If
+the LaunchAgent is already loaded it refuses to replace the app unless `--load`
+is passed; with `--load` it stops the agent, replaces the app, and starts it
+again. It never grants a permission and never writes the roster. A bridge with
+no roster or no Full Disk Access idles and says so once in its log instead of
+crash-looping, and it starts from the present, never from old messages.
+
+Afterwards, by hand: enable the app under Full Disk Access, write the roster,
+and approve the Messages Automation prompt on the first reply. The service log
+(`~/Library/Application Support/Ocean/iMessage/service.err.log`) is the
+authority on whether the installed app can read Messages: `check` run from a
+terminal tests the terminal's permissions, not the app's. Restarting the bridge
+drops messages that are mid-turn, so restart only to upgrade. Enroll the Messages account id from
 `ocean-imessage accounts` only after confirming in Messages that it is the
 agent's identity; Apple provides no public account-id-to-number proof.
 

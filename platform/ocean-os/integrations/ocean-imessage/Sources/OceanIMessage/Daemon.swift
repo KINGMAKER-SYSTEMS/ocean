@@ -40,10 +40,30 @@ func turnPrompt(member: RosterMember, text: String, nonce: String) -> String {
     """
 }
 
+/// Splits a byte stream into lines on LF only (dropping one trailing CR).
+/// Foundation's line iterator also breaks on U+2028, U+2029, and U+0085, which
+/// JSON may carry raw inside a string; splitting there would cut an event's
+/// payload in half.
+struct LineSplitter {
+    static let maximumLineBytes = 4 * 1024 * 1024
+    private var buffer: [UInt8] = []
+
+    mutating func consume(_ byte: UInt8) throws -> String? {
+        if byte == 0x0A {
+            defer { buffer.removeAll(keepingCapacity: true) }
+            if buffer.last == 0x0D { buffer.removeLast() }
+            return String(decoding: buffer, as: UTF8.self)
+        }
+        guard buffer.count < Self.maximumLineBytes else { throw BridgeError.daemonFailure }
+        buffer.append(byte)
+        return nil
+    }
+}
+
 /// Incremental Server-Sent Events reader. The daemon writes one `event:` line
 /// and one single-line JSON `data:` line per frame; a frame is emitted as soon
 /// as its data line arrives, so the reader does not depend on blank separator
-/// lines, which some line iterators drop.
+/// lines.
 struct SSEFrameReader {
     private var event = ""
 
@@ -87,41 +107,86 @@ struct ReplyAssembler {
     }
 }
 
+/// A role's agent is its permission boundary. The daemon keeps the full
+/// toolset when a named agent's effective allowlist (`agent.toml` `tools` plus
+/// `tools/` entries) is empty, so such an agent is never usable here.
+func isUsableAgentDefinition(_ object: [String: Any], named name: String) -> Bool {
+    guard object["ok"] as? Bool == true,
+          let agent = object["agent"] as? [String: Any],
+          agent["name"] as? String == name
+    else { return false }
+    let declared = (agent["config"] as? [String: Any])?["tools"] as? [String] ?? []
+    let discovered = agent["tools"] as? [String] ?? []
+    return (declared + discovered).contains { $0.isEmpty == false }
+}
+
+enum SessionProbe: Equatable {
+    case exists
+    case gone
+    /// The daemon did not give a definite answer. Never treat this as gone.
+    case unknown
+}
+
+func classifySessionProbe(statusCode: Int?, body: [String: Any]?) -> SessionProbe {
+    switch (statusCode, body?["ok"] as? Bool) {
+    case (200, true): return .exists
+    case (404, _), (200, false): return .gone
+    default: return .unknown
+    }
+}
+
 private struct TurnResponse: Decodable {
     let ok: Bool
     let turn_id: String
     let session_id: String
 }
 
-struct OceanDaemonClient: Sendable {
-    private let config: BridgeConfig
-    private let session: URLSession
+/// Content may reach only the configured local daemon origin, so a redirect is
+/// never followed.
+private final class RedirectRefuser: NSObject, URLSessionTaskDelegate {
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest
+    ) async -> URLRequest? {
+        nil
+    }
+}
 
-    init(config: BridgeConfig, session: URLSession = .shared) {
+struct OceanDaemonClient: Sendable {
+    /// One private session for the bridge: no proxy, cookies, or cache, no
+    /// redirects, and enough connections that every enrolled member can hold a
+    /// long-lived event stream at once (the shared session allows six a host).
+    private static let session: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpMaximumConnectionsPerHost = BridgeLimits.maximumMembers * 2
+        configuration.connectionProxyDictionary = [:]
+        configuration.httpCookieStorage = nil
+        configuration.urlCache = nil
+        configuration.httpShouldSetCookies = false
+        return URLSession(configuration: configuration, delegate: RedirectRefuser(), delegateQueue: nil)
+    }()
+
+    private let config: BridgeConfig
+    private var session: URLSession { Self.session }
+
+    init(config: BridgeConfig) {
         self.config = config
-        self.session = session
     }
 
-    /// A role's agent is its permission boundary. The daemon keeps the full
-    /// toolset when a named agent declares no tool allowlist, so the bridge
-    /// refuses any agent that is missing or declares none.
     func agentIsUsable(_ name: String) async -> Bool {
         guard isSlug(name, maximumLength: 64),
-              let object = await getJSON(path: "v1/agents/\(name)"),
-              object["ok"] as? Bool == true,
-              let agent = object["agent"] as? [String: Any],
-              agent["name"] as? String == name,
-              let agentConfig = agent["config"] as? [String: Any],
-              let tools = agentConfig["tools"] as? [String]
+              let (status, object) = await getJSON(path: "v1/agents/\(name)"),
+              status == 200, let object
         else { return false }
-        return tools.isEmpty == false
+        return isUsableAgentDefinition(object, named: name)
     }
 
-    func sessionExists(_ id: String) async -> Bool {
-        guard UUID(uuidString: id) != nil,
-              let object = await getJSON(path: "v1/agent/sessions/\(id)")
-        else { return false }
-        return object["ok"] as? Bool == true
+    func probeSession(_ id: String) async -> SessionProbe {
+        guard UUID(uuidString: id) != nil else { return .gone }
+        guard let (status, object) = await getJSON(path: "v1/agent/sessions/\(id)") else { return .unknown }
+        return classifySessionProbe(statusCode: status, body: object)
     }
 
     func daemonIsHealthy() async -> Bool {
@@ -134,7 +199,9 @@ struct OceanDaemonClient: Sendable {
     }
 
     /// Run one turn for an admitted message in the member's ongoing session and
-    /// return the agent's final answer.
+    /// return the agent's final answer. If the bridge stops waiting for any
+    /// reason, it asks the daemon to cancel the turn so work does not continue
+    /// behind a failure notice.
     func reply(
         to message: AllowedMessage,
         member: RosterMember,
@@ -144,9 +211,15 @@ struct OceanDaemonClient: Sendable {
         guard await agentIsUsable(policy.agent) else { throw BridgeError.agentUnavailable }
 
         var resumed = try store.session(for: member.id, agent: policy.agent)
-        if let existing = resumed, await sessionExists(existing) == false {
-            try store.clearSession(for: member.id)
-            resumed = nil
+        if let existing = resumed {
+            switch await probeSession(existing) {
+            case .exists: break
+            case .gone:
+                try store.clearSession(for: member.id)
+                resumed = nil
+            case .unknown:
+                throw BridgeError.daemonFailure
+            }
         }
 
         var body: [String: Any] = [
@@ -166,22 +239,42 @@ struct OceanDaemonClient: Sendable {
         guard let (data, response) = try? await session.data(for: request),
               let http = response as? HTTPURLResponse, isAcceptedDaemonTurnStatus(http.statusCode),
               let turn = try? JSONDecoder().decode(TurnResponse.self, from: data), turn.ok,
-              UUID(uuidString: turn.session_id) != nil
+              UUID(uuidString: turn.session_id) != nil, UUID(uuidString: turn.turn_id) != nil
         else { throw BridgeError.daemonFailure }
 
         try store.setSession(turn.session_id, for: member.id, agent: policy.agent)
 
         let timeout = config.turnTimeout
-        return try await withThrowingTaskGroup(of: String.self) { group in
-            group.addTask { try await self.awaitReply(sessionID: turn.session_id, turnID: turn.turn_id) }
-            group.addTask {
-                try await Task.sleep(for: timeout)
-                throw BridgeError.daemonTimeout
+        do {
+            return try await withThrowingTaskGroup(of: String.self) { group in
+                group.addTask { try await self.awaitReply(sessionID: turn.session_id, turnID: turn.turn_id) }
+                group.addTask {
+                    try await Task.sleep(for: timeout)
+                    throw BridgeError.daemonTimeout
+                }
+                defer { group.cancelAll() }
+                guard let reply = try await group.next() else { throw BridgeError.daemonFailure }
+                return reply
             }
-            defer { group.cancelAll() }
-            guard let reply = try await group.next() else { throw BridgeError.daemonFailure }
-            return reply
+        } catch {
+            await cancelTurn(turn.turn_id)
+            throw error
         }
+    }
+
+    /// Best effort. A turn that already finished reports "already terminal",
+    /// which is fine.
+    @discardableResult
+    func cancelTurn(_ turnID: String) async -> Bool {
+        guard UUID(uuidString: turnID) != nil else { return false }
+        var request = URLRequest(url: config.daemonURL.appending(path: "v1/requests/\(turnID)/cancel"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 10
+        guard let (data, response) = try? await session.data(for: request),
+              let http = response as? HTTPURLResponse, http.statusCode == 200,
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return false }
+        return object["ok"] as? Bool == true
     }
 
     private func awaitReply(sessionID: String, turnID: String) async throws -> String {
@@ -200,10 +293,11 @@ struct OceanDaemonClient: Sendable {
         let (bytes, response) = try await session.bytes(for: request)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { throw BridgeError.daemonFailure }
 
+        var lines = LineSplitter()
         var frames = SSEFrameReader()
         var assembler = ReplyAssembler()
-        for try await line in bytes.lines {
-            guard let frame = frames.consume(line) else { continue }
+        for try await byte in bytes {
+            guard let line = try lines.consume(byte), let frame = frames.consume(line) else { continue }
             // Replay gaps and live-lag frames require a fresh authoritative
             // synchronization. Never send text assembled across an event loss
             // boundary.
@@ -229,12 +323,12 @@ struct OceanDaemonClient: Sendable {
         throw BridgeError.daemonFailure
     }
 
-    private func getJSON(path: String) async -> [String: Any]? {
+    private func getJSON(path: String) async -> (status: Int, body: [String: Any]?)? {
         var request = URLRequest(url: config.daemonURL.appending(path: path))
         request.timeoutInterval = 10
         guard let (data, response) = try? await session.data(for: request),
-              let http = response as? HTTPURLResponse, http.statusCode == 200
+              let http = response as? HTTPURLResponse
         else { return nil }
-        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        return (http.statusCode, try? JSONSerialization.jsonObject(with: data) as? [String: Any])
     }
 }

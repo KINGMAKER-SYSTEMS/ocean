@@ -33,11 +33,13 @@ final class OceanIMessageTests: XCTestCase {
         participants: Int = 1,
         fromMe: Bool = false,
         attachment: Bool = false,
-        reaction: Bool = false
+        reaction: Bool = false,
+        sent: Date = Date()
     ) -> IncomingMessage {
         IncomingMessage(
             id: "opaque-id", remote: remote, local: local, service: service, text: text,
-            participantCount: participants, isFromMe: fromMe, hasAttachment: attachment, isReaction: reaction
+            participantCount: participants, isFromMe: fromMe, hasAttachment: attachment, isReaction: reaction,
+            sent: sent
         )
     }
 
@@ -136,10 +138,26 @@ final class OceanIMessageTests: XCTestCase {
             message(reaction: true),
             message(text: ""),
             message(text: String(repeating: "x", count: BridgeLimits.maximumInboundCharacters + 1)),
+            message(text: "photo \u{FFFC} inline"),
+            message(sent: Date().addingTimeInterval(-(BridgeLimits.maximumMessageAge + 5))),
+            message(sent: Date().addingTimeInterval(BridgeLimits.maximumMessageSkew + 60)),
+            message(sent: Date(timeIntervalSinceReferenceDate: 0)),
         ]
         for candidate in cases {
             XCTAssertEqual(admit(candidate, roster: roster), .rejected)
         }
+    }
+
+    func testOnlyRecentMessagesAreAdmitted() throws {
+        let roster = try Fixture.roster()
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        func sent(_ secondsAgo: TimeInterval) -> IncomingMessage { message(sent: now.addingTimeInterval(-secondsAgo)) }
+        XCTAssertNotEqual(admit(sent(0), roster: roster, now: now), .rejected)
+        XCTAssertNotEqual(admit(sent(BridgeLimits.maximumMessageAge - 1), roster: roster, now: now), .rejected)
+        XCTAssertNotEqual(admit(sent(-30), roster: roster, now: now), .rejected)
+        // A backlog is never answered: not after an outage, not after a stale cursor.
+        XCTAssertEqual(admit(sent(BridgeLimits.maximumMessageAge + 1), roster: roster, now: now), .rejected)
+        XCTAssertEqual(admit(sent(86_400 * 100), roster: roster, now: now), .rejected)
     }
 
     // MARK: State
@@ -185,12 +203,38 @@ final class OceanIMessageTests: XCTestCase {
         }
     }
 
-    func testCursorCanAdvancePastRejectedRowsWithoutPersistingBodies() throws {
+    func testCorruptStateFailsClosedInsteadOfResettingLimits() throws {
+        let roster = try Fixture.roster()
         let (store, url, root) = temporaryStore()
         defer { try? FileManager.default.removeItem(at: root) }
-        try store.advanceCursor(to: 42)
-        XCTAssertEqual(try store.load().cursor, 42)
-        XCTAssertFalse(try String(contentsOf: url, encoding: .utf8).contains("untrusted body"))
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        for corrupt in [
+            #"{"cursor":1,"admitted":[],"replied":[],"replyTimes":"none"}"#,
+            #"{"cursor":1,"admitted":[],"replied":[],"replyTimes":{"ada":"soon"}}"#,
+            #"{"cursor":"x","admitted":[],"replied":[]}"#,
+            "not json",
+        ] {
+            try Data(corrupt.utf8).write(to: url)
+            XCTAssertThrowsError(try store.load()) { error in
+                XCTAssertEqual(error as? BridgeError, .invalidState)
+            }
+            XCTAssertThrowsError(try store.claimReply(for: "m", repliesPerHour: limits(roster)))
+        }
+    }
+
+    func testOneMembersFloodCannotEvictAnotherMembersPendingMessage() throws {
+        let roster = try Fixture.roster()
+        let (store, _, root) = temporaryStore()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try store.recordAdmission(AllowedMessage(id: "ben-waiting", member: "ben", text: "ok"), cursor: 1)
+        for index in 1...(BridgeLimits.retainedAdmissionsPerMember * 3) {
+            try store.recordAdmission(
+                AllowedMessage(id: "ada-\(index)", member: "ada", text: "ok"), cursor: Int64(index + 1)
+            )
+        }
+        let state = try store.load()
+        XCTAssertEqual(state.admitted.filter { state.owners[$0] == "ada" }.count, BridgeLimits.retainedAdmissionsPerMember)
+        XCTAssertEqual(try store.claimReply(for: "ben-waiting", repliesPerHour: limits(roster)), "ben")
     }
 
     func testReplyRateLimitIsPerMemberAndFailsClosed() throws {
@@ -280,15 +324,16 @@ final class OceanIMessageTests: XCTestCase {
         let (store, _, root) = temporaryStore()
         defer { try? FileManager.default.removeItem(at: root) }
 
-        for index in 1...256 {
+        let kept = BridgeLimits.retainedAdmissionsPerMember
+        for index in 1...kept {
             XCTAssertTrue(try store.recordAdmission(
                 AllowedMessage(id: "m-\(index)", member: "ada", text: "allowed"),
                 cursor: Int64(index)
             ))
         }
-        // Reverse claim order makes m-256 the oldest reply marker while it is
-        // still the newest retained admission.
-        for (offset, index) in (1...256).reversed().enumerated() {
+        // Reverse claim order makes the newest admission the oldest reply marker
+        // while it is still retained.
+        for (offset, index) in (1...kept).reversed().enumerated() {
             try store.claimReply(
                 for: "m-\(index)",
                 now: Date(timeIntervalSince1970: Double(offset * 3_601)),
@@ -296,11 +341,11 @@ final class OceanIMessageTests: XCTestCase {
             )
         }
         XCTAssertTrue(try store.recordAdmission(
-            AllowedMessage(id: "m-257", member: "ada", text: "allowed"),
-            cursor: 257
+            AllowedMessage(id: "m-next", member: "ada", text: "allowed"),
+            cursor: Int64(kept + 1)
         ))
         try store.claimReply(
-            for: "m-257", now: Date(timeIntervalSince1970: Double(257 * 3_601)), repliesPerHour: limits(generous)
+            for: "m-next", now: Date(timeIntervalSince1970: Double((kept + 1) * 3_601)), repliesPerHour: limits(generous)
         )
 
         XCTAssertFalse(try store.recordAdmission(
@@ -309,7 +354,7 @@ final class OceanIMessageTests: XCTestCase {
         ))
         XCTAssertThrowsError(
             try store.claimReply(
-                for: "m-256", now: Date(timeIntervalSince1970: Double(258 * 3_601)), repliesPerHour: limits(generous)
+                for: "m-\(kept)", now: Date(timeIntervalSince1970: Double((kept + 2) * 3_601)), repliesPerHour: limits(generous)
             )
         ) { error in
             XCTAssertEqual(error as? BridgeError, .alreadyReplied)
@@ -321,88 +366,168 @@ final class OceanIMessageTests: XCTestCase {
 
     // MARK: Messages reader
 
-    func testDatabaseScanAdmitsOnlyEnrolledOneToOneConversations() throws {
+    /// A fixture shaped like the real Messages database on current macOS: text
+    /// usually lives only in `attributedBody`, chats carry a `style`, and dates
+    /// are nanoseconds since 2001.
+    private final class MessagesFixture {
+        let url: URL
+        let root: URL
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        private let db: OpaquePointer
+        private var nextRow: Int64 = 0
+
+        init() throws {
+            root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            url = root.appendingPathComponent("chat.db")
+            var handle: OpaquePointer?
+            guard sqlite3_open(url.path, &handle) == SQLITE_OK, let handle else { throw BridgeError.databaseUnavailable }
+            db = handle
+            try exec("""
+            CREATE TABLE message (
+              ROWID INTEGER PRIMARY KEY, guid TEXT, text TEXT, attributedBody BLOB, handle_id INTEGER,
+              is_from_me INTEGER, service TEXT, destination_caller_id TEXT,
+              cache_has_attachments INTEGER, cache_roomnames TEXT, associated_message_guid TEXT,
+              associated_message_type INTEGER, item_type INTEGER, date INTEGER
+            );
+            CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT, service TEXT);
+            CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, style INTEGER);
+            CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER);
+            CREATE TABLE chat_handle_join (chat_id INTEGER, handle_id INTEGER);
+            """)
+        }
+
+        deinit {
+            sqlite3_close(db)
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        func exec(_ sql: String) throws {
+            var message: UnsafeMutablePointer<CChar>?
+            defer { sqlite3_free(message) }
+            guard sqlite3_exec(db, sql, nil, nil, &message) == SQLITE_OK else {
+                throw NSError(domain: "fixture", code: 1, userInfo: [
+                    NSLocalizedDescriptionKey: message.map { String(cString: $0) } ?? "sqlite"
+                ])
+            }
+        }
+
+        /// Insert one message and return its ROWID.
+        @discardableResult
+        func add(
+            _ guid: String,
+            body: String,
+            asPlainText: Bool = false,
+            handle: Int,
+            chats: [Int],
+            to local: String = Fixture.local,
+            fromMe: Bool = false,
+            service: String = "iMessage",
+            attachment: Bool = false,
+            roomName: String? = nil,
+            reactionTo: String? = nil,
+            secondsAgo: TimeInterval = 5,
+            rawBlob: Data? = nil
+        ) throws -> Int64 {
+            nextRow += 1
+            let blob = rawBlob ?? typedStream(body)
+            let hex = blob.map { String(format: "%02X", $0) }.joined()
+            let nanoseconds = Int64((now.timeIntervalSinceReferenceDate - secondsAgo) * 1_000_000_000)
+            let text = asPlainText ? "'\(body)'" : "NULL"
+            try exec("""
+            INSERT INTO message VALUES (\(nextRow), '\(guid)', \(text), X'\(hex)', \(handle), \(fromMe ? 1 : 0),
+              '\(service)', '\(local)', \(attachment ? 1 : 0), \(roomName.map { "'\($0)'" } ?? "NULL"),
+              \(reactionTo.map { "'\($0)'" } ?? "NULL"), \(reactionTo == nil ? 0 : 2000), 0, \(nanoseconds));
+            """)
+            for chat in chats { try exec("INSERT INTO chat_message_join VALUES (\(chat), \(nextRow));") }
+            return nextRow
+        }
+
+        func scan(after cursor: Int64 = 0, roster: Roster) throws -> MessageScan {
+            try MessagesDatabase(path: url.path).scan(after: cursor, roster: roster, now: now)
+        }
+    }
+
+    func testDatabaseScanAdmitsOnlyRecentEnrolledOneToOneConversations() throws {
         let roster = try Fixture.roster()
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: root) }
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        let databaseURL = root.appendingPathComponent("chat.db")
-        var database: OpaquePointer?
-        XCTAssertEqual(sqlite3_open(databaseURL.path, &database), SQLITE_OK)
-        let db = try XCTUnwrap(database)
-        defer { sqlite3_close(db) }
-
-        try execute(db, """
-        CREATE TABLE message (
-          ROWID INTEGER PRIMARY KEY, guid TEXT, text TEXT, handle_id INTEGER,
-          is_from_me INTEGER, service TEXT, destination_caller_id TEXT,
-          cache_has_attachments INTEGER, associated_message_guid TEXT,
-          associated_message_type INTEGER, item_type INTEGER
-        );
-        CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT);
-        CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER);
-        CREATE TABLE chat_handle_join (chat_id INTEGER, handle_id INTEGER);
-        INSERT INTO handle VALUES (1, '\(Fixture.adminPhone)');
-        INSERT INTO handle VALUES (2, '\(Fixture.memberPhone)');
-        INSERT INTO handle VALUES (3, '\(Fixture.strangerPhone)');
-
-        -- 1: enrolled handle, but the chat belongs to a stranger.
-        INSERT INTO message VALUES (1, 'wrong-chat', 'SENTINEL-WRONG-CHAT', 1, 0, 'iMessage', '\(Fixture.local)', 0, NULL, 0, 0);
-        INSERT INTO chat_message_join VALUES (10, 1);
-        INSERT INTO chat_handle_join VALUES (10, 3);
-
-        -- 2: ada, one-to-one, to the agent identity.
-        INSERT INTO message VALUES (2, 'ada-chat', 'ada body', 1, 0, 'iMessage', '\(Fixture.local)', 0, NULL, 0, 0);
-        INSERT INTO chat_message_join VALUES (11, 2);
-        INSERT INTO chat_handle_join VALUES (11, 1);
-
-        -- 3: ben, one-to-one, to the agent identity.
-        INSERT INTO message VALUES (3, 'ben-chat', 'ben body', 2, 0, 'iMessage', '\(Fixture.local)', 0, NULL, 0, 0);
-        INSERT INTO chat_message_join VALUES (12, 3);
-        INSERT INTO chat_handle_join VALUES (12, 2);
-
-        -- 4: two enrolled members in one group chat.
-        INSERT INTO message VALUES (4, 'group-chat', 'SENTINEL-GROUP', 1, 0, 'iMessage', '\(Fixture.local)', 0, NULL, 0, 0);
-        INSERT INTO chat_message_join VALUES (13, 4);
-        INSERT INTO chat_handle_join VALUES (13, 1);
-        INSERT INTO chat_handle_join VALUES (13, 2);
-
-        -- 5: a stranger texting the agent identity directly.
-        INSERT INTO message VALUES (5, 'stranger-chat', 'SENTINEL-STRANGER', 3, 0, 'iMessage', '\(Fixture.local)', 0, NULL, 0, 0);
-        INSERT INTO chat_message_join VALUES (14, 5);
-        INSERT INTO chat_handle_join VALUES (14, 3);
-
-        -- 6: ada texting some other identity signed in on this Mac.
-        INSERT INTO message VALUES (6, 'other-identity', 'SENTINEL-OTHER-IDENTITY', 1, 0, 'iMessage', '\(Fixture.strangerPhone)', 0, NULL, 0, 0);
-        INSERT INTO chat_message_join VALUES (11, 6);
-
-        -- 7: the agent's own outgoing reply to ada.
-        INSERT INTO message VALUES (7, 'outgoing', 'SENTINEL-OUTGOING', 1, 1, 'iMessage', '\(Fixture.local)', 0, NULL, 0, 0);
-        INSERT INTO chat_message_join VALUES (11, 7);
-
-        -- 8: ada over SMS, 9: with an attachment, 10: a tapback.
-        INSERT INTO message VALUES (8, 'sms', 'SENTINEL-SMS', 1, 0, 'SMS', '\(Fixture.local)', 0, NULL, 0, 0);
-        INSERT INTO chat_message_join VALUES (11, 8);
-        INSERT INTO message VALUES (9, 'attachment', 'SENTINEL-ATTACHMENT', 1, 0, 'iMessage', '\(Fixture.local)', 1, NULL, 0, 0);
-        INSERT INTO chat_message_join VALUES (11, 9);
-        INSERT INTO message VALUES (10, 'tapback', 'SENTINEL-TAPBACK', 1, 0, 'iMessage', '\(Fixture.local)', 0, 'ada-chat', 2000, 0);
-        INSERT INTO chat_message_join VALUES (11, 10);
+        let fixture = try MessagesFixture()
+        try fixture.exec("""
+        INSERT INTO handle VALUES (1, '\(Fixture.adminPhone)', 'iMessage'), (2, '\(Fixture.memberPhone)', 'iMessage'),
+                                  (3, '\(Fixture.strangerPhone)', 'iMessage'), (4, '\(Fixture.adminPhone)', 'SMS');
+        INSERT INTO chat VALUES (11, 45), (12, 45), (13, 45), (20, 43), (21, 43), (22, 45);
+        INSERT INTO chat_handle_join VALUES (11, 1), (12, 2), (13, 3),
+                                            (20, 1), (20, 2),      -- a real group
+                                            (21, 1),               -- group-style chat with one join row
+                                            (22, 1), (22, 4);      -- one person, two handle rows
         """)
 
-        let scan = try MessagesDatabase(path: databaseURL.path).scan(after: 0, roster: roster)
+        try fixture.add("ada-attributed", body: "ada body from attributedBody", handle: 1, chats: [11])
+        try fixture.add("ben-plain", body: "ben plain text", asPlainText: true, handle: 2, chats: [12])
+        try fixture.add("ada-two-handles", body: "same person, two handle rows", handle: 1, chats: [22])
+
+        try fixture.add("wrong-chat", body: "SENTINEL-WRONG-CHAT", handle: 1, chats: [13])
+        try fixture.add("group", body: "SENTINEL-GROUP", handle: 1, chats: [20])
+        try fixture.add("group-style-single-join", body: "SENTINEL-GROUP-STYLE", handle: 1, chats: [21])
+        try fixture.add("room-name", body: "SENTINEL-ROOM", handle: 1, chats: [11], roomName: "chat123")
+        try fixture.add("two-chats", body: "SENTINEL-TWO-CHATS", handle: 1, chats: [11, 20])
+        try fixture.add("stranger", body: "SENTINEL-STRANGER", handle: 3, chats: [13])
+        try fixture.add("other-identity", body: "SENTINEL-OTHER-IDENTITY", handle: 1, chats: [11], to: Fixture.strangerPhone)
+        try fixture.add("outgoing", body: "SENTINEL-OUTGOING", handle: 1, chats: [11], fromMe: true)
+        try fixture.add("sms", body: "SENTINEL-SMS", handle: 1, chats: [11], service: "SMS")
+        try fixture.add("attachment", body: "SENTINEL-ATTACHMENT", handle: 1, chats: [11], attachment: true)
+        try fixture.add("tapback", body: "SENTINEL-TAPBACK", handle: 1, chats: [11], reactionTo: "ada-attributed")
+        try fixture.add("stale", body: "SENTINEL-STALE", handle: 1, chats: [11],
+                        secondsAgo: BridgeLimits.maximumMessageAge + 60)
+        try fixture.add("months-old", body: "SENTINEL-MONTHS-OLD", handle: 1, chats: [11], secondsAgo: 86_400 * 110)
+        try fixture.add("malformed-body", body: "", handle: 1, chats: [11], rawBlob: Data("SENTINEL-NOT-A-TYPEDSTREAM".utf8))
+
+        let scan = try fixture.scan(roster: roster)
         XCTAssertEqual(scan.admitted.map(\.message), [
-            AllowedMessage(id: "ada-chat", member: "ada", text: "ada body"),
-            AllowedMessage(id: "ben-chat", member: "ben", text: "ben body"),
+            AllowedMessage(id: "ada-attributed", member: "ada", text: "ada body from attributedBody"),
+            AllowedMessage(id: "ben-plain", member: "ben", text: "ben plain text"),
+            AllowedMessage(id: "ada-two-handles", member: "ada", text: "same person, two handle rows"),
         ])
         XCTAssertFalse(scan.admitted.map(\.message.text).contains { $0.contains("SENTINEL") })
-        XCTAssertEqual(scan.cursor, 3)
 
         // Removing a member from the roster stops admitting them at once.
         let adaOnly = try Roster(localIdentity: Fixture.local, members: [Fixture.members[0]], roles: Fixture.roles)
-        XCTAssertEqual(
-            try MessagesDatabase(path: databaseURL.path).scan(after: 0, roster: adaOnly).admitted.map(\.message.id),
-            ["ada-chat"]
-        )
+        XCTAssertEqual(try fixture.scan(roster: adaOnly).admitted.map(\.message.id), ["ada-attributed", "ada-two-handles"])
+    }
+
+    func testStaleCursorCatchesUpWithoutAnsweringTheBacklog() throws {
+        let roster = try Fixture.roster()
+        let fixture = try MessagesFixture()
+        try fixture.exec("""
+        INSERT INTO handle VALUES (1, '\(Fixture.adminPhone)', 'iMessage'), (3, '\(Fixture.strangerPhone)', 'iMessage');
+        INSERT INTO chat VALUES (11, 45), (13, 45);
+        INSERT INTO chat_handle_join VALUES (11, 1), (13, 3);
+        """)
+        // Three and a half months of traffic sits behind a cursor of zero.
+        for index in 1...40 {
+            try fixture.add("old-\(index)", body: "SENTINEL-OLD", handle: 1, chats: [11], secondsAgo: 86_400 * 100)
+            try fixture.add("noise-\(index)", body: "SENTINEL-NOISE", handle: 3, chats: [13], secondsAgo: 3_600)
+        }
+        let settledThrough = try fixture.add("just-settled", body: "SENTINEL-UNRELATED", handle: 3, chats: [13], secondsAgo: 30)
+        let fresh = try fixture.add("fresh", body: "what is live today", handle: 1, chats: [11], secondsAgo: 3)
+        let young = try fixture.add("young-unrelated", body: "SENTINEL-YOUNG", handle: 3, chats: [13], secondsAgo: 1)
+
+        let first = try fixture.scan(after: 0, roster: roster)
+        XCTAssertEqual(first.admitted.map(\.message.id), ["fresh"])
+        // One poll moves past the whole backlog, and past the admitted row.
+        XCTAssertEqual(first.cursor, fresh)
+        XCTAssertGreaterThan(first.cursor, settledThrough)
+        XCTAssertLessThan(first.cursor, young)
+
+        // The young unadmitted row is still ahead of the cursor and is looked at again.
+        let second = try fixture.scan(after: first.cursor, roster: roster)
+        XCTAssertTrue(second.admitted.isEmpty)
+        XCTAssertGreaterThanOrEqual(second.cursor, first.cursor)
+
+        // With nothing young and nothing admitted, the cursor reaches the newest settled row.
+        let quiet = try MessagesFixture()
+        try quiet.exec("INSERT INTO handle VALUES (3, '\(Fixture.strangerPhone)', 'iMessage'); INSERT INTO chat VALUES (13, 45); INSERT INTO chat_handle_join VALUES (13, 3);")
+        let last = try quiet.add("unrelated", body: "SENTINEL", handle: 3, chats: [13], secondsAgo: 60)
+        XCTAssertEqual(try quiet.scan(after: 0, roster: roster).cursor, last)
     }
 
     func testUnknownMessagesSchemaFailsClosed() throws {
@@ -424,6 +549,46 @@ final class OceanIMessageTests: XCTestCase {
             try MessagesDatabase(path: root.appendingPathComponent("missing/chat.db").path).scan(after: 0, roster: roster)
         ) { error in
             XCTAssertEqual(error as? BridgeError, .databaseUnavailable)
+        }
+    }
+
+    // MARK: attributedBody
+
+    func testAttributedBodyTextIsExtractedForEveryLengthEncoding() {
+        XCTAssertEqual(decodeAttributedBody(typedStream("hi")), "hi")
+        XCTAssertEqual(decodeAttributedBody(typedStream("hi", referenceTag: 0x95)), "hi")
+        XCTAssertEqual(decodeAttributedBody(typedStream("caf\u{E9} \u{1F30A} ok")), "caf\u{E9} \u{1F30A} ok")
+        let medium = String(repeating: "m", count: 300)
+        XCTAssertEqual(decodeAttributedBody(typedStream(medium)), medium)
+        let large = String(repeating: "L", count: 70_000)
+        XCTAssertEqual(decodeAttributedBody(typedStream(large)), large)
+        XCTAssertEqual(decodeAttributedBody(typedStream("")), "")
+    }
+
+    func testMalformedAttributedBodyIsRejectedNotGuessed() {
+        let good = [UInt8](typedStream("hello world"))
+        let marker = Array("NSString".utf8)
+        let markerAt = good.indices.first { good[$0...].starts(with: marker) }!
+        func mutated(_ change: (inout [UInt8]) -> Void) -> Data {
+            var copy = good
+            change(&copy)
+            return Data(copy)
+        }
+        let cases: [Data] = [
+            Data(),
+            Data("plain text, not an archive".utf8),
+            mutated { $0[0] = 0x05 },                                  // wrong stream header
+            mutated { $0.removeSubrange(markerAt..<(markerAt + 8)) },  // no NSString record
+            mutated { $0[markerAt + 8] = 0x02 },                       // unexpected class version
+            mutated { $0[markerAt + 12] = 0x40 },                      // not a UTF-8 bytes value
+            mutated { $0[markerAt + 13] = 0x7F },                      // length runs past the end
+            mutated { $0[markerAt + 13] = 0x83 },                      // unknown length tag
+            mutated { $0[markerAt + 14] = 0xFF },                      // invalid UTF-8
+            Data(good.prefix(markerAt + 13)),                          // truncated before the length
+            mutated { $0 = Array($0.prefix(markerAt + 13)) + [0x81, 0x10] }, // truncated two-byte length
+        ]
+        for blob in cases {
+            XCTAssertNil(decodeAttributedBody(blob))
         }
     }
 
@@ -466,6 +631,42 @@ final class OceanIMessageTests: XCTestCase {
             }
         }
         XCTAssertEqual(calls.arguments.count, 2)
+    }
+
+    func testReplyTextIsNeverParsedAsAnOsascriptOption() throws {
+        let hostile = [
+            "-e property p : (do shell script \"exit 9\")",
+            "- item one",
+            "-5 degrees",
+            "-- a comment",
+            "-s o",
+            "-",
+            "--",
+            "-l JavaScript",
+        ]
+        for text in hostile {
+            XCTAssertEqual(
+                osascriptArguments(source: "SCRIPT", arguments: [text, "account", "+15550100101"]),
+                ["-e", "SCRIPT", "--", text, "account", "+15550100101"]
+            )
+        }
+
+        // The real interpreter, with a script that only echoes its arguments:
+        // every hostile string must come back as data, and a marker file a
+        // smuggled script would create must not exist.
+        let marker = FileManager.default.temporaryDirectory.appendingPathComponent("ocean-imessage-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: marker) }
+        let echo = """
+        on run argv
+            return (item 1 of argv) & "|" & (count of argv)
+        end run
+        """
+        let smuggled = "-e property p : (do shell script \"touch \(marker.path)\")"
+        for text in hostile + [smuggled] {
+            let output = try runAppleScript(echo, arguments: [text, "account", "+15550100101"])
+            XCTAssertEqual(output.trimmingCharacters(in: .newlines), "\(text)|3", text)
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
     }
 
     func testSenderRejectsUnsafeBubbles() throws {
@@ -633,6 +834,58 @@ final class OceanIMessageTests: XCTestCase {
         XCTAssertEqual(ReplyAssembler().finalText, "")
     }
 
+    func testStreamLinesSplitOnLineFeedOnly() throws {
+        func lines(_ text: String) throws -> [String] {
+            var splitter = LineSplitter()
+            return try Array(text.utf8).compactMap { try splitter.consume($0) }
+        }
+        // U+2028, U+2029, and U+0085 are legal raw inside a JSON string and
+        // must not cut an event in half.
+        let payload = "data: {\"delta\":\"a\u{2028}b\u{2029}c\u{85}d\"}"
+        XCTAssertEqual(try lines("event: assistant_text_delta\n\(payload)\n\n"), [
+            "event: assistant_text_delta", payload, "",
+        ])
+        XCTAssertEqual(try lines("one\r\ntwo\n"), ["one", "two"])
+        XCTAssertEqual(try lines("no newline yet"), [])
+
+        var frames = SSEFrameReader()
+        let parsed = try lines("event: assistant_text_delta\n\(payload)\n").compactMap { frames.consume($0) }
+        let object = try JSONSerialization.jsonObject(with: Data(try XCTUnwrap(parsed.first).data.utf8)) as? [String: Any]
+        XCTAssertEqual(object?["delta"] as? String, "a\u{2028}b\u{2029}c\u{85}d")
+
+        var splitter = LineSplitter()
+        XCTAssertThrowsError(try (0...LineSplitter.maximumLineBytes).forEach { _ in _ = try splitter.consume(0x41) })
+    }
+
+    func testAgentIsUsableOnlyWithAnEffectiveToolAllowlist() {
+        func definition(name: String = "text-member", declared: [String]? = nil, discovered: [String]? = nil, ok: Bool = true) -> [String: Any] {
+            var agent: [String: Any] = ["name": name, "config": declared.map { ["tools": $0] } ?? [:]]
+            if let discovered { agent["tools"] = discovered }
+            return ["ok": ok, "agent": agent]
+        }
+        XCTAssertTrue(isUsableAgentDefinition(definition(declared: ["read"]), named: "text-member"))
+        XCTAssertTrue(isUsableAgentDefinition(definition(declared: [], discovered: ["read"]), named: "text-member"))
+        // No allowlist means the daemon would hand the member every tool.
+        XCTAssertFalse(isUsableAgentDefinition(definition(), named: "text-member"))
+        XCTAssertFalse(isUsableAgentDefinition(definition(declared: [], discovered: []), named: "text-member"))
+        XCTAssertFalse(isUsableAgentDefinition(definition(declared: [""]), named: "text-member"))
+        XCTAssertFalse(isUsableAgentDefinition(definition(declared: ["read"], ok: false), named: "text-member"))
+        XCTAssertFalse(isUsableAgentDefinition(definition(name: "other", declared: ["read"]), named: "text-member"))
+        XCTAssertFalse(isUsableAgentDefinition(["ok": true], named: "text-member"))
+    }
+
+    func testSessionIsForgottenOnlyOnADefiniteAnswer() {
+        XCTAssertEqual(classifySessionProbe(statusCode: 200, body: ["ok": true]), .exists)
+        XCTAssertEqual(classifySessionProbe(statusCode: 404, body: ["ok": false]), .gone)
+        XCTAssertEqual(classifySessionProbe(statusCode: 404, body: nil), .gone)
+        XCTAssertEqual(classifySessionProbe(statusCode: 200, body: ["ok": false]), .gone)
+        // A timeout or a server error must not wipe a member's conversation.
+        XCTAssertEqual(classifySessionProbe(statusCode: nil, body: nil), .unknown)
+        XCTAssertEqual(classifySessionProbe(statusCode: 500, body: ["ok": false]), .unknown)
+        XCTAssertEqual(classifySessionProbe(statusCode: 200, body: nil), .unknown)
+        XCTAssertEqual(classifySessionProbe(statusCode: 302, body: nil), .unknown)
+    }
+
     // MARK: Configuration
 
     private func configJSON(_ overrides: [String: Any] = [:], removing: [String] = []) throws -> Data {
@@ -719,6 +972,45 @@ final class OceanIMessageTests: XCTestCase {
         XCTAssertThrowsError(try loadConfig(root.appendingPathComponent("absent.json")))
     }
 
+    func testRosterEditsTakeEffectWithoutARestartAndBadEditsFailClosed() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let url = root.appendingPathComponent("config.json")
+        func write(_ data: Data, mode: Int = 0o600) throws {
+            try data.write(to: url)
+            try FileManager.default.setAttributes([.posixPermissions: mode], ofItemAtPath: url.path)
+        }
+        let live = LiveConfig(url: url)
+
+        // No file yet: there is no roster.
+        var seen = live.refresh()
+        XCTAssertNil(seen.config)
+
+        try write(configJSON())
+        seen = live.refresh()
+        XCTAssertEqual(seen.config?.roster.members.map(\.id), ["ada", "ben"])
+        let loadedGeneration = seen.generation
+        XCTAssertEqual(live.refresh().generation, loadedGeneration)
+
+        // The operator removes ben: gone on the next read, no restart.
+        try write(configJSON(["members": [["id": "ada", "phone": Fixture.adminPhone, "role": "admin", "name": "Ada"]]]))
+        seen = live.refresh()
+        XCTAssertEqual(seen.config?.roster.members.map(\.id), ["ada"])
+        XCTAssertNil(seen.config?.roster.member(forPhone: Fixture.memberPhone))
+        XCTAssertGreaterThan(seen.generation, loadedGeneration)
+
+        // A broken edit, or a file made readable by others, means no roster at all.
+        try write(Data("{ not json".utf8))
+        XCTAssertNil(live.refresh().config)
+        try write(configJSON(), mode: 0o644)
+        XCTAssertNil(live.refresh().config)
+        try write(configJSON())
+        XCTAssertEqual(live.refresh().config?.roster.members.count, 2)
+        try FileManager.default.removeItem(at: url)
+        XCTAssertNil(live.refresh().config)
+    }
+
     // MARK: Helpers
 
     private func execute(_ database: OpaquePointer, _ sql: String) throws {
@@ -775,4 +1067,27 @@ private final class Recorder: @unchecked Sendable {
         defer { lock.unlock() }
         return recordedArguments
     }
+}
+
+/// Build an `attributedBody` blob the way Messages archives an attributed
+/// string: typedstream header, class records, then the string as one
+/// length-prefixed UTF-8 run after the `NSString` record.
+private func typedStream(_ text: String, referenceTag: UInt8 = 0x94) -> Data {
+    var bytes: [UInt8] = [0x04, 0x0B] + Array("streamtyped".utf8) + [0x81, 0xE8, 0x03, 0x84, 0x01, 0x40, 0x84, 0x84, 0x84, 0x12]
+    bytes += Array("NSAttributedString".utf8) + [0x00, 0x84, 0x84, 0x08]
+    bytes += Array("NSObject".utf8) + [0x00, 0x85, 0x92, 0x84, 0x84, 0x84, 0x08]
+    bytes += Array("NSString".utf8) + [0x01, referenceTag, 0x84, 0x01, 0x2B]
+    let utf8 = Array(text.utf8)
+    switch utf8.count {
+    case ..<0x80:
+        bytes.append(UInt8(utf8.count))
+    case ..<0x1_0000:
+        bytes += [0x81, UInt8(utf8.count & 0xFF), UInt8(utf8.count >> 8)]
+    default:
+        bytes += [0x82] + (0..<4).map { UInt8((utf8.count >> ($0 * 8)) & 0xFF) }
+    }
+    bytes += utf8
+    bytes += [0x86, 0x84, 0x02, 0x69, 0x49, 0x01, 0x0B, 0x92, 0x84, 0x84, 0x84, 0x0C]
+    bytes += Array("NSDictionary".utf8) + [0x00, 0x94, 0x84, 0x01, 0x69, 0x00, 0x86, 0x86]
+    return Data(bytes)
 }
