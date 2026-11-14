@@ -1,0 +1,124 @@
+#!/bin/sh
+set -eu
+
+# Operator-run installer for the Ocean iMessage bridge.
+#
+# Builds the release binary, assembles a minimal background app bundle, and
+# signs it with a STABLE code-signing identity. macOS ties Full Disk Access and
+# Automation grants to an app's designated requirement. An ad-hoc signature's
+# requirement is the binary hash, so every rebuild silently voids the grants and
+# the reader starts failing; an identity-based signature keeps them across
+# rebuilds. This script therefore refuses ad-hoc signing.
+#
+# It never grants a permission, never writes the roster, and loads the
+# LaunchAgent only when --load is passed.
+
+usage() {
+    cat >&2 <<'USAGE'
+usage: install-ocean-imessage --sign-identity "<identity name or SHA-1>"
+           [--app-dir DIR]        default: ~/Applications
+           [--bundle-id ID]       default: dev.risingtides.ocean-imessage
+           [--load]               write and (re)load the LaunchAgent
+
+List identities with: security find-identity -v -p codesigning
+USAGE
+    exit 2
+}
+
+IDENTITY=""
+APP_DIR="$HOME/Applications"
+BUNDLE_ID="dev.risingtides.ocean-imessage"
+LOAD=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --sign-identity) [ $# -ge 2 ] || usage; IDENTITY=$2; shift 2 ;;
+        --app-dir) [ $# -ge 2 ] || usage; APP_DIR=$2; shift 2 ;;
+        --bundle-id) [ $# -ge 2 ] || usage; BUNDLE_ID=$2; shift 2 ;;
+        --load) LOAD=1; shift ;;
+        *) usage ;;
+    esac
+done
+
+[ -n "$IDENTITY" ] || usage
+if [ "$IDENTITY" = "-" ]; then
+    echo "install-ocean-imessage: ad-hoc signing is refused; permission grants would not survive a rebuild" >&2
+    exit 2
+fi
+case "$BUNDLE_ID" in
+    *[!A-Za-z0-9.-]* | "") echo "install-ocean-imessage: invalid bundle id" >&2; exit 2 ;;
+esac
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+APP="$APP_DIR/Ocean iMessage.app"
+SUPPORT="$HOME/Library/Application Support/Ocean/iMessage"
+PLIST="$HOME/Library/LaunchAgents/$BUNDLE_ID.plist"
+
+swift build -c release --package-path "$ROOT"
+BINARY="$ROOT/.build/release/ocean-imessage"
+[ -x "$BINARY" ] || { echo "install-ocean-imessage: release binary missing" >&2; exit 1; }
+
+STAGE=$(mktemp -d)
+trap 'rm -rf "$STAGE"' EXIT
+STAGED_APP="$STAGE/Ocean iMessage.app"
+mkdir -p "$STAGED_APP/Contents/MacOS"
+cp "$BINARY" "$STAGED_APP/Contents/MacOS/ocean-imessage"
+cat > "$STAGED_APP/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleExecutable</key><string>ocean-imessage</string>
+  <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
+  <key>CFBundleName</key><string>Ocean iMessage</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>0.2.0</string>
+  <key>CFBundleVersion</key><string>2</string>
+  <key>LSBackgroundOnly</key><true/>
+  <key>NSAppleEventsUsageDescription</key><string>Ocean iMessage sends replies only to teammates enrolled on the operator's roster.</string>
+</dict></plist>
+PLIST
+
+codesign --force --sign "$IDENTITY" --identifier "$BUNDLE_ID" "$STAGED_APP"
+codesign --verify --strict "$STAGED_APP"
+if codesign -dv "$STAGED_APP" 2>&1 | grep -q 'Signature=adhoc'; then
+    echo "install-ocean-imessage: signature is ad-hoc; refusing to install" >&2
+    exit 1
+fi
+
+mkdir -p "$APP_DIR" "$SUPPORT"
+chmod 700 "$SUPPORT"
+rm -rf "$APP"
+mv "$STAGED_APP" "$APP"
+echo "installed: $APP"
+codesign -dr - "$APP" 2>&1 | sed -n 's/^designated => /designated requirement: /p'
+
+if [ "$LOAD" -eq 1 ]; then
+    mkdir -p "$HOME/Library/LaunchAgents"
+    cat > "$PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>$BUNDLE_ID</string>
+  <key>ProgramArguments</key><array><string>$APP/Contents/MacOS/ocean-imessage</string><string>run</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>30</integer>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>$SUPPORT/service.out.log</string>
+  <key>StandardErrorPath</key><string>$SUPPORT/service.err.log</string>
+</dict></plist>
+PLIST
+    DOMAIN="gui/$(id -u)"
+    launchctl bootout "$DOMAIN/$BUNDLE_ID" 2>/dev/null || true
+    launchctl bootstrap "$DOMAIN" "$PLIST"
+    echo "loaded: $DOMAIN/$BUNDLE_ID"
+fi
+
+cat <<NEXT
+
+Next, by hand (this script cannot and does not do these):
+  1. System Settings > Privacy & Security > Full Disk Access: enable "Ocean iMessage".
+  2. Write the roster to "$SUPPORT/config.json" with mode 0600 (see README).
+  3. "$APP/Contents/MacOS/ocean-imessage" check
+  4. Approve the Messages Automation prompt the first time a reply is sent.
+NEXT

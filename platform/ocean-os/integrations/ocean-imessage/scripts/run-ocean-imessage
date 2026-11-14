@@ -3,6 +3,7 @@ set -eu
 
 # Deliberately does not build, download, or install anything. This is an
 # operator-managed convenience wrapper, not an Ocean extension service entry.
-# Invoke only after reviewing the fixed-pair FDA/Automation checklist.
+# Invoke only after reviewing the roster and the FDA/Automation checklist in the
+# README. For a supervised install use install-ocean-imessage instead.
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 exec "$ROOT/.build/release/ocean-imessage" "$@"

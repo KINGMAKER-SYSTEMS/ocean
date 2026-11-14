@@ -1,6 +1,6 @@
 # Ocean iMessage Bridge — Local Adapter Implementation Manifest
 
-**Status:** implementation slice 1 landed; operator-managed only; autonomous extension integration requires a separately ratified privileged-service contract
+**Status:** implementation slice 1 landed; its fixed-pair admission and sender are superseded by the [team roster manifest](2026-11-13-ocean-imessage-team-roster-implementation-manifest.md) (2026-11-13). The process, privilege, and extension-boundary rulings below remain in force; operator-managed only; autonomous extension integration requires a separately ratified privileged-service contract
 **Date:** 2026-07-25
 **Parent:** [Ocean Extensions Architecture and Migration Manifest](2026-07-14-ocean-extensions-architecture-and-migration-manifest.md)
 
@@ -10,9 +10,12 @@
 operator-approved iMessage pair:
 
 ```text
-inbound:  +15717451650 -> +17035081859
-outbound: +15717451650 only
+inbound:  the operator's one enrolled remote handle -> the local identity
+outbound: that one remote handle only
 ```
+
+The literal handles were removed from this record on 2026-11-13; the package no
+longer compiles any phone number.
 
 It is a client adapter and future extension-service package, not an Ocean core
 hook, daemon plugin, Ocean Buddy adapter, or a general Messages bridge.
