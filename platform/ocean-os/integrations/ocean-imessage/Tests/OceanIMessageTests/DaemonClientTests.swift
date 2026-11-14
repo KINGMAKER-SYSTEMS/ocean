@@ -132,7 +132,10 @@ final class DaemonClientTests: XCTestCase {
         roles: ["admin": RolePolicy(agent: "text-admin", repliesPerHour: 30)]
     )
 
-    private func client(timeout: Duration = .seconds(5)) -> OceanDaemonClient {
+    private func client(
+        timeout: Duration = .seconds(5),
+        maximumLineBytes: Int = LineSplitter.defaultMaximumLineBytes
+    ) -> OceanDaemonClient {
         OceanDaemonClient(
             config: BridgeConfig(
                 daemonURL: URL(string: "http://127.0.0.1:4780/")!,
@@ -142,7 +145,8 @@ final class DaemonClientTests: XCTestCase {
                 turnTimeout: timeout,
                 acknowledgeAfter: nil
             ),
-            session: StubDaemon.session()
+            session: StubDaemon.session(),
+            maximumLineBytes: maximumLineBytes
         )
     }
 
@@ -229,6 +233,58 @@ final class DaemonClientTests: XCTestCase {
             }
             XCTAssertTrue(StubDaemon.calls.contains(.init(method: "POST", path: "/v1/requests/\(StubDaemon.turnID)/cancel")))
         }
+    }
+
+    func testAnOversizedFrameThatCouldShapeTheReplyFailsClosedInsteadOfSendingAPartialAnswer() async throws {
+        let (store, root) = store()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let huge = String(repeating: "x", count: 2_000)
+        let started = frame("turn_started", [:])
+        let narration = frame("assistant_text_delta", ["delta": "Let me look that up."])
+        let finished = frame("turn_finished", ["status": "completed"])
+        let unsafeStreams: [(String, [String])] = [
+            ("current-turn delta lost", started + narration + frame("assistant_text_delta", ["delta": huge]) + finished),
+            ("current-turn tool boundary lost", started + narration + frame("tool_call_started", ["arguments": huge]) + frame("assistant_text_delta", ["delta": "Done."]) + finished),
+            ("terminal event lost", started + narration + frame("turn_finished", ["status": "completed", "error": huge])),
+            ("turn start marker lost", frame("turn_started", ["note": huge]) + narration + finished),
+            ("unidentifiable line lost", started + narration + ["event: \(huge)", "data: {}", ""] + finished),
+        ]
+        for (name, lines) in unsafeStreams {
+            StubDaemon.reset(stream: .lines(lines))
+            do {
+                let reply = try await ask(client(maximumLineBytes: 512), store)
+                XCTFail("\(name): sent a reply assembled across a lost frame: \(reply)")
+            } catch {
+                XCTAssertEqual(error as? BridgeError, .daemonFailure, name)
+            }
+            XCTAssertTrue(
+                StubDaemon.calls.contains(.init(method: "POST", path: "/v1/requests/\(StubDaemon.turnID)/cancel")), name
+            )
+        }
+    }
+
+    func testOversizedFramesThatCannotShapeTheReplyAreSkippedAndTheAnswerIsIntact() async throws {
+        let (store, root) = store()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let huge = String(repeating: "x", count: 2_000)
+        // Replayed history from an earlier turn in the same session, including
+        // oversized frames of every kind, then this turn with a large tool result.
+        let history = frame("turn_started", ["turn_id": "earlier"])
+            + frame("assistant_text_delta", ["turn_id": "earlier", "delta": huge])
+            + frame("tool_call_started", ["turn_id": "earlier", "arguments": huge])
+            + frame("tool_call_finished", ["turn_id": "earlier", "result": huge])
+            + frame("turn_finished", ["turn_id": "earlier", "status": "completed", "error": huge])
+        let current = frame("turn_started", [:])
+            + frame("assistant_text_delta", ["delta": "Checking the export."])
+            + frame("tool_call_started", ["name": "read"])
+            + frame("tool_call_finished", ["result": huge])
+            + frame("assistant_text_delta", ["delta": "Nine campaigns are live."])
+            + frame("turn_finished", ["status": "completed"])
+        StubDaemon.reset(stream: .lines(history + current))
+
+        let reply = try await ask(client(maximumLineBytes: 512), store)
+        XCTAssertEqual(reply, "Nine campaigns are live.")
+        XCTAssertFalse(StubDaemon.calls.contains { $0.path.hasSuffix("/cancel") })
     }
 
     func testALedgerWriteFailureAfterTheTurnIsAcceptedCancelsThatTurn() async throws {

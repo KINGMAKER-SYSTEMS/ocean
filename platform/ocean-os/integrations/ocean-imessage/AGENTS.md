@@ -20,7 +20,9 @@ This package is the local-only macOS adapter that lets an operator-enrolled team
 - A reply goes only to the member whose message was admitted. The sender takes a roster member id resolved from the reply ledger, never a handle; it must reject unknown or removed members and never use Accessibility/UI scripting or interpolate a handle or text into script source.
 - Every `osascript` invocation goes through `osascriptArguments`, which ends option parsing with `--` before any caller-supplied argument. Reply text is model output; without the separator a bubble beginning with `-e` runs as AppleScript.
 - A role's named agent is its permission boundary. Never run a member turn on the surface profile or on an agent that is missing or declares no tool names in `agent.toml`, and always send `require_named_agent: true`.
-- A message waiting for its turn is never evicted from the ledger. Every claim attempt closes its message; a new process closes whatever the previous one left waiting.
+- A message waiting for its turn is never evicted from the ledger. Every claim attempt closes its message. `run` takes `RunnerLock` custody of its ledger before the startup sweep that closes what a previous process left waiting; never sweep without it.
+- A ledger that has never scanned (cursor zero) is primed to the newest row before the first scan. Housekeeping must not create the ledger file.
+- Never return a reply assembled across a lost stream frame. An oversized frame may be skipped only when `lostFrameIsIrrelevant` says it cannot shape the reply.
 - Each member's session is their own and is bound to the agent that owns it. Never share or reuse a session across members or across agents.
 - The roster file is re-read whenever it changes; a missing, non-private, or invalid file means no roster and nothing is admitted or sent. Do not cache roster decisions across polls or deliver a reply without re-checking enrollment.
 - When the bridge stops waiting for a turn, it cancels that turn in the daemon.

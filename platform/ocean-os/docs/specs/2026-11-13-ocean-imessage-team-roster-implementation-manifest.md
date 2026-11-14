@@ -47,7 +47,9 @@ The roster lives in the operator's mode-0600 config beside the daemon URL:
 - **Recent messages only.** A message older than 15 minutes is never admitted.
   The cursor moves past everything old enough to be complete, so a stale or
   missing cursor catches up in one poll without answering the backlog, and a
-  first run starts from the present.
+  ledger that has never scanned starts from the present. The same bound applies
+  when a message's turn comes: one that waited longer than 15 minutes behind
+  other turns is dropped, with a log line, rather than acted on late.
 - **Text from `attributedBody`.** Current macOS stores most message text only in
   the `attributedBody` column (on the operator's host, 1,316 of the last 1,361
   plain inbound iMessages had `text` NULL). The reader takes `text` when present
@@ -70,12 +72,18 @@ The roster lives in the operator's mode-0600 config beside the daemon URL:
 - **Text-message replies.** Only what the agent says after its last tool call is
   sent, split into at most eight bubbles of at most 1,000 characters. A turn
   that outlasts the acknowledgement delay gets one "working on it" bubble first.
+  A stream frame too large to keep is never silently skipped: it is ignored only
+  when it provably cannot shape the reply (history before this turn started, or
+  a non-text event such as a tool result during it); otherwise the turn fails
+  closed and is cancelled rather than answered with partial text.
 - **Per-member limits and concurrency.** Reply limits are per member, per hour,
   claimed before any model work. Members are served concurrently; one member's
   messages stay in order. A message waiting for its turn is never evicted from
   the ledger; a member with 512 messages already waiting is refused, with a log
-  line, until their queue drains. Every claim attempt closes its message, and a
-  restart closes messages the previous process left waiting.
+  line, until their queue drains. Every claim attempt closes its message. One
+  runner holds a ledger for the life of its process (a kernel file lock that is
+  released when the process exits); a second runner is refused, so the startup
+  sweep that closes messages left waiting can only ever close a dead runner's.
 - **Strict role agent.** Every turn sends `require_named_agent: true`, so a
   daemon that supports it refuses the turn rather than widening it when the role
   agent is missing, invalid, or matches no tool.
@@ -87,10 +95,11 @@ The roster lives in the operator's mode-0600 config beside the daemon URL:
   and never stops the bridge. When the bridge stops waiting for a turn (timeout
   or stream failure) it cancels that turn in the daemon. An unreadable Messages
   database or a missing roster idles and retries with one log line per state
-  change. After five minutes without Messages access the process exits once so
-  its supervisor starts a fresh one, since a newly granted permission may reach
-  only a new process; that is a slow retry, not a crash loop. Log lines are
-  timestamped.
+  change. A process that has never read Messages exits after five minutes so its
+  supervisor starts a fresh one, since a newly granted permission may reach only
+  a new process; that is a slow retry, not a crash loop. A process that was
+  working keeps running through an outage so replies in flight still arrive. Log
+  lines are timestamped.
 - **Stable signing.** `scripts/install-ocean-imessage` signs the app bundle with
   an identity-based signature and refuses ad-hoc signing, so permission grants
   survive rebuilds.
@@ -164,6 +173,15 @@ The roster lives in the operator's mode-0600 config beside the daemon URL:
 - **Restart drops in-flight messages.** There is no drain on termination: a
   message mid-turn when the process stops is claimed and gets no reply, and its
   daemon turn is not cancelled. Restart only to upgrade.
+- **`poll` and `watch` are inspection modes.** They do not take custody of the
+  ledger, and an admission they record counts as waiting until it is answered
+  with `send` or the next `run` starts. Do not point them at a ledger a runner
+  is using.
+- **Preflight and a strict daemon can disagree.** An agent that declares only
+  names matching no real tool, or that declares subprocess capabilities, passes
+  `check` and is then refused by a daemon enforcing `require_named_agent`; an
+  allowlist made only of tool names outside `[a-z0-9_]` is refused by the
+  bridge. Both fail closed.
 - **Member ids must not be reused.** Sessions are keyed by member id; a
   different person given an old id continues that conversation.
 - **Dedicated account recommended.** Run the bridge under a macOS user whose
@@ -211,4 +229,13 @@ fixes found no blocker and confirmed the first; its findings led to counting
 only declared tool names, batch-safe cursor movement inside one read
 transaction, counting a message's conversations from the join table itself,
 dropping rather than failing on an oversized stream line, and timestamped logs.
-The code added after that second pass has not been independently reviewed.
+A third pass over the changes that followed (waiting-message retention, the
+strict agent flag, the daemon client tests) again found no blocker; it caught a
+regression in the first-run prime, fixed with the minors it raised. The last
+commit, which made those fixes, has not itself been independently reviewed.
+
+The factory's independent reviewer held successive heads on findings tracked in
+issues 200, 202, and 206: named-agent authority (closed daemon-side by #201 and
+adopted here), waiting-message loss, cancellation after acceptance, the first-run
+prime order, oversized stream frames, and ledger custody before the startup
+sweep. Each has a regression test named in the pull request.

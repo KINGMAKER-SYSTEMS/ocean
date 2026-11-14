@@ -220,6 +220,7 @@ public enum BridgeError: LocalizedError, Equatable {
     case alreadyReplied
     case rateLimited
     case backlogFull
+    case alreadyRunning
     case unsafeReply
     case agentUnavailable
     case daemonFailure
@@ -237,6 +238,7 @@ public enum BridgeError: LocalizedError, Equatable {
         case .alreadyReplied: return "message already has a reply"
         case .rateLimited: return "member reply rate limit reached"
         case .backlogFull: return "member has too many messages waiting; newer ones are refused"
+        case .alreadyRunning: return "another bridge is already running on this ledger"
         case .unsafeReply: return "reply violates bridge policy"
         case .agentUnavailable: return "role agent is missing or has no tool allowlist"
         case .daemonFailure: return "Ocean did not accept the message"
@@ -366,6 +368,18 @@ public final class StateStore: @unchecked Sendable {
         }
     }
 
+    /// A ledger that has never scanned (cursor zero: a first run, or the file
+    /// was removed) starts at the newest row, so the bridge begins from the
+    /// present rather than answering whatever arrived before it was enabled.
+    /// `latestRowID` is asked only when priming is needed.
+    @discardableResult
+    public func primeIfUnscanned(latestRowID: () throws -> Int64) throws -> BridgeState {
+        let state = try load()
+        guard state.cursor == 0 else { return state }
+        try advanceCursor(to: try latestRowID())
+        return try load()
+    }
+
     public func advanceCursor(to cursor: Int64) throws {
         try withExclusiveLock {
             var state = try loadUnlocked()
@@ -437,8 +451,12 @@ public final class StateStore: @unchecked Sendable {
     public func retainMembers(_ members: Set<String>) throws {
         try withExclusiveLock {
             var state = try loadUnlocked()
+            let before = state
             state.sessions = state.sessions.filter { members.contains($0.key) }
             state.replyTimes = state.replyTimes.filter { members.contains($0.key) }
+            // Never write when nothing changed: an empty ledger created here
+            // would hide the fact that this is a first run.
+            guard state != before else { return }
             try saveUnlocked(state)
         }
     }
@@ -446,13 +464,28 @@ public final class StateStore: @unchecked Sendable {
     /// Close every message still waiting. Called once when a bridge process
     /// starts: the turns that would have claimed them died with the previous
     /// process, so they can never be answered and must not count as waiting.
-    public func resolvePending() throws {
+    /// One bridge process owns a ledger: a second `run` on the same file would
+    /// close the first one's waiting messages. Returns how many were closed.
+    @discardableResult
+    public func resolvePending() throws -> Int {
         try withExclusiveLock {
             var state = try loadUnlocked()
             let resolved = Set(state.replied)
             let orphans = state.admitted.filter { resolved.contains($0) == false }
-            guard orphans.isEmpty == false else { return }
+            guard orphans.isEmpty == false else { return 0 }
             state.replied.append(contentsOf: orphans)
+            prune(&state)
+            try saveUnlocked(state)
+            return orphans.count
+        }
+    }
+
+    /// Close one message without answering it.
+    public func resolve(_ messageID: String) throws {
+        try withExclusiveLock {
+            var state = try loadUnlocked()
+            guard state.admitted.contains(messageID), state.replied.contains(messageID) == false else { return }
+            state.replied.append(messageID)
             prune(&state)
             try saveUnlocked(state)
         }
@@ -535,6 +568,44 @@ public final class StateStore: @unchecked Sendable {
         }
         return try body()
     }
+}
+
+/// Exclusive custody of a ledger for the life of one bridge process. The
+/// per-operation state lock only orders individual writes; this is what makes
+/// it safe to close "abandoned" waiting messages at startup, because no other
+/// runner can be alive on the same ledger while it is held. The kernel releases
+/// it when the process exits, however it exits.
+public final class RunnerLock {
+    private let descriptor: Int32
+
+    /// Fails with `alreadyRunning` when another runner holds the ledger.
+    public init(stateURL: URL) throws {
+        let directory = stateURL.deletingLastPathComponent()
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700]
+        )
+        let path = directory.appendingPathComponent(".\(stateURL.lastPathComponent).runner.lock").path
+        let opened = Darwin.open(path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
+        guard opened >= 0 else { throw BridgeError.invalidState }
+        guard holdExclusively(opened) else {
+            Darwin.close(opened)
+            throw BridgeError.alreadyRunning
+        }
+        descriptor = opened
+    }
+
+    deinit {
+        Darwin.close(descriptor)
+    }
+}
+
+/// BSD `flock`: unlike the `fcntl` record locks used for individual ledger
+/// writes, it belongs to the open file, so two opens conflict even inside one
+/// process and the lock is dropped when the descriptor closes.
+private func holdExclusively(_ descriptor: Int32) -> Bool {
+    // `flock` names both a struct and a function in Darwin; bind the function.
+    let lockFile: (Int32, Int32) -> Int32 = flock
+    return lockFile(descriptor, LOCK_EX | LOCK_NB) == 0
 }
 
 // MARK: - Messages reader

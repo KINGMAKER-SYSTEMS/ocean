@@ -171,6 +171,9 @@ struct OceanIMessageMain {
             do {
                 guard try store.recordAdmission(message, cursor: rowID) else { continue }
             } catch BridgeError.backlogFull {
+                // In this inspection mode nothing closes an admission except
+                // `send` or the next `run`, so say when a member hits the cap.
+                log("member \(message.member): \(describe(BridgeError.backlogFull))")
                 continue
             }
             let line = try JSONEncoder().encode(message)
@@ -189,8 +192,15 @@ struct OceanIMessageMain {
     ) async throws {
         let queues = MemberQueues()
         let reader = MessagesDatabase(path: database)
-        // Messages admitted by a previous process have no turn left to claim them.
-        try store.resolvePending()
+        // Hold the ledger for the life of this process. Only then is it true
+        // that messages still waiting were left by a runner that has exited,
+        // with no turn left to claim them.
+        let custody = try RunnerLock(stateURL: stateURL)
+        defer { withExtendedLifetime(custody) {} }
+        let orphans = try store.resolvePending()
+        if orphans > 0 {
+            log("closed \(orphans) messages a previous run admitted but never answered")
+        }
 
         // Neither a missing roster nor an unreadable database ends the process:
         // under a supervisor that becomes a crash loop. The bridge stays up,
@@ -198,6 +208,7 @@ struct OceanIMessageMain {
         var rosterReady: Bool?
         var seenGeneration = 0
         var readerHealthy = true
+        var readerEverWorked = false
         var readerFailures = 0
         while true {
             let (loaded, generation) = live.refresh()
@@ -218,17 +229,16 @@ struct OceanIMessageMain {
             }
 
             do {
-                if FileManager.default.fileExists(atPath: stateURL.path) == false {
-                    // No ledger (first run, or it was removed): start from now,
-                    // never from the beginning of the account's history.
-                    try store.advanceCursor(to: reader.latestRowID())
-                }
-                let state = try store.load()
+                // A ledger that has never scanned (first run, or it was
+                // removed) starts from now, not from the last 15 minutes and
+                // never from the beginning of the account's history.
+                let state = try store.primeIfUnscanned { try reader.latestRowID() }
                 let scan = try reader.scan(after: state.cursor, roster: config.roster)
                 if readerHealthy == false {
                     log("Messages reader recovered")
                     readerHealthy = true
                 }
+                readerEverWorked = true
                 readerFailures = 0
                 var refused = Set<String>()
                 for (rowID, message) in scan.admitted {
@@ -240,8 +250,9 @@ struct OceanIMessageMain {
                         }
                         continue
                     }
+                    let admittedAt = Date()
                     await queues.enqueue(member: message.member) {
-                        await handle(message, store: store, live: live, sink: sink)
+                        await handle(message, admittedAt: admittedAt, store: store, live: live, sink: sink)
                     }
                 }
                 try store.advanceCursor(to: scan.cursor)
@@ -253,9 +264,11 @@ struct OceanIMessageMain {
                 }
                 readerFailures += 1
                 // A newly granted Full Disk Access permission may reach only a
-                // fresh process. Leave every five minutes so the supervisor
-                // starts one; this is a slow, quiet retry, not a crash loop.
-                if readerFailures >= 5 {
+                // fresh process. If this process has never read Messages, leave
+                // every five minutes so the supervisor starts one; this is a
+                // slow, quiet retry, not a crash loop. A process that was
+                // working keeps running so replies in flight are still delivered.
+                if readerEverWorked == false, readerFailures >= 5 {
                     log("still no Messages access; exiting so a fresh process can pick up a permission change")
                     Foundation.exit(75)
                 }
@@ -268,6 +281,7 @@ struct OceanIMessageMain {
     /// bad turn for one member never stops the bridge for the others.
     private static func handle(
         _ message: AllowedMessage,
+        admittedAt: Date,
         store: StateStore,
         live: LiveConfig,
         sink: ReplySink
@@ -275,7 +289,14 @@ struct OceanIMessageMain {
         guard let config = live.refresh().config else {
             log("member \(message.member): roster is missing or invalid; admitted message dropped")
             // Close it so it does not sit in the ledger as waiting forever.
-            _ = try? store.claimReply(for: message.id) { _ in nil }
+            try? store.resolve(message.id)
+            return
+        }
+        // The age rule holds when the turn comes, not only at admission: a
+        // message that queued behind long turns is not acted on late.
+        guard Date().timeIntervalSince(admittedAt) <= BridgeLimits.maximumMessageAge else {
+            log("member \(message.member): message waited too long for its turn; dropped")
+            try? store.resolve(message.id)
             return
         }
 

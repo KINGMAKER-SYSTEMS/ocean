@@ -45,27 +45,40 @@ func turnPrompt(member: RosterMember, text: String, nonce: String) -> String {
 /// JSON may carry raw inside a string; splitting there would cut an event's
 /// payload in half.
 ///
-/// A line longer than the cap is dropped whole rather than failing the stream.
-/// The stream replays the session's history, so one huge tool result would
-/// otherwise fail every later turn in that member's session.
+/// A line longer than the cap is not kept, but it is never silently skipped:
+/// the caller is told a line was lost and how it began, and decides whether
+/// that loss can matter.
 struct LineSplitter {
-    static let maximumLineBytes = 4 * 1024 * 1024
-    private var buffer: [UInt8] = []
-    private var overflowed = false
+    static let defaultMaximumLineBytes = 4 * 1024 * 1024
+    private static let retainedPrefixBytes = 16
 
-    mutating func consume(_ byte: UInt8) -> String? {
+    enum Line: Equatable {
+        case text(String)
+        /// A line over the cap. Only its first few bytes survive.
+        case oversized(prefix: String)
+    }
+
+    private let maximumLineBytes: Int
+    private var buffer: [UInt8] = []
+    private var overflowPrefix: [UInt8]?
+
+    init(maximumLineBytes: Int = LineSplitter.defaultMaximumLineBytes) {
+        self.maximumLineBytes = max(maximumLineBytes, Self.retainedPrefixBytes)
+    }
+
+    mutating func consume(_ byte: UInt8) -> Line? {
         if byte == 0x0A {
             defer {
                 buffer.removeAll(keepingCapacity: true)
-                overflowed = false
+                overflowPrefix = nil
             }
-            guard overflowed == false else { return nil }
+            if let overflowPrefix { return .oversized(prefix: String(decoding: overflowPrefix, as: UTF8.self)) }
             if buffer.last == 0x0D { buffer.removeLast() }
-            return String(decoding: buffer, as: UTF8.self)
+            return .text(String(decoding: buffer, as: UTF8.self))
         }
-        guard overflowed == false else { return nil }
-        guard buffer.count < Self.maximumLineBytes else {
-            overflowed = true
+        guard overflowPrefix == nil else { return nil }
+        guard buffer.count < maximumLineBytes else {
+            overflowPrefix = Array(buffer.prefix(Self.retainedPrefixBytes))
             buffer.removeAll(keepingCapacity: false)
             return nil
         }
@@ -78,21 +91,57 @@ struct LineSplitter {
 /// and one single-line JSON `data:` line per frame; a frame is emitted as soon
 /// as its data line arrives, so the reader does not depend on blank separator
 /// lines.
+///
+/// A frame whose payload was too large to keep is still emitted, with its
+/// event name and no data, so the loss is visible to the caller. A lost line
+/// that was not a data line leaves the event name unknown (empty).
 struct SSEFrameReader {
+    struct Frame: Equatable {
+        let event: String
+        /// `nil` when the payload was lost to the line cap.
+        let data: String?
+    }
+
     private var event = ""
 
-    mutating func consume(_ line: String) -> (event: String, data: String)? {
-        if line.hasPrefix("event:") {
-            event = line.dropFirst(6).trimmingCharacters(in: .whitespaces)
-            return nil
-        }
-        if line.hasPrefix("data:") {
-            defer { event = "" }
-            guard event.isEmpty == false else { return nil }
-            return (event, line.dropFirst(5).trimmingCharacters(in: .whitespaces))
-        }
-        return nil
+    mutating func consume(_ line: String) -> Frame? {
+        consume(.text(line))
     }
+
+    mutating func consume(_ line: LineSplitter.Line) -> Frame? {
+        switch line {
+        case let .text(text):
+            if text.hasPrefix("event:") {
+                event = text.dropFirst(6).trimmingCharacters(in: .whitespaces)
+                return nil
+            }
+            if text.hasPrefix("data:") {
+                defer { event = "" }
+                guard event.isEmpty == false else { return nil }
+                return Frame(event: event, data: text.dropFirst(5).trimmingCharacters(in: .whitespaces))
+            }
+            return nil
+        case let .oversized(prefix):
+            defer { event = "" }
+            // Only a data line can be attributed to the event named before it.
+            return Frame(event: prefix.hasPrefix("data:") ? event : "", data: nil)
+        }
+    }
+}
+
+/// Events that decide what the reply says. Losing one of these for the turn
+/// being awaited means the assembled text cannot be trusted.
+private let replyShapingEvents: Set<String> = ["assistant_text_delta", "tool_call_started", "turn_finished"]
+
+/// Whether a frame whose payload was lost can be ignored. The session stream
+/// is ordered and one turn runs at a time, so everything before this turn's
+/// `turn_started` is history. History that is not itself a `turn_started` (the
+/// marker this rule depends on) cannot affect the reply. Once the turn is
+/// active, a lost frame is safe only if it is not one that shapes the reply:
+/// in practice a large tool result.
+func lostFrameIsIrrelevant(event: String, turnActive: Bool) -> Bool {
+    guard event.isEmpty == false, event != "turn_started" else { return false }
+    return turnActive ? replyShapingEvents.contains(event) == false : true
 }
 
 /// Keeps only what the agent said after its last tool call. An agentic turn
@@ -190,11 +239,18 @@ struct OceanDaemonClient: Sendable {
 
     private let config: BridgeConfig
     private let session: URLSession
+    private let maximumLineBytes: Int
 
-    /// `session` is replaceable only so tests can stand in for the daemon.
-    init(config: BridgeConfig, session: URLSession? = nil) {
+    /// `session` and `maximumLineBytes` are replaceable only so tests can stand
+    /// in for the daemon and exercise the line cap without megabytes of data.
+    init(
+        config: BridgeConfig,
+        session: URLSession? = nil,
+        maximumLineBytes: Int = LineSplitter.defaultMaximumLineBytes
+    ) {
         self.config = config
         self.session = session ?? Self.session
+        self.maximumLineBytes = maximumLineBytes
     }
 
     func agentIsUsable(_ name: String) async -> Bool {
@@ -319,20 +375,31 @@ struct OceanDaemonClient: Sendable {
         let (bytes, response) = try await session.bytes(for: request)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { throw BridgeError.daemonFailure }
 
-        var lines = LineSplitter()
+        var lines = LineSplitter(maximumLineBytes: maximumLineBytes)
         var frames = SSEFrameReader()
         var assembler = ReplyAssembler()
+        var turnActive = false
         for try await byte in bytes {
             guard let line = lines.consume(byte), let frame = frames.consume(line) else { continue }
             // Replay gaps and live-lag frames require a fresh authoritative
             // synchronization. Never send text assembled across an event loss
             // boundary.
             if isFatalDaemonSSEEvent(frame.event) { throw BridgeError.daemonFailure }
-            guard let payload = frame.data.data(using: .utf8),
+            guard let data = frame.data else {
+                // A frame too large to keep. Skip it only when it provably
+                // cannot change this turn's reply; otherwise fail closed.
+                guard lostFrameIsIrrelevant(event: frame.event, turnActive: turnActive) else {
+                    throw BridgeError.daemonFailure
+                }
+                continue
+            }
+            guard let payload = data.data(using: .utf8),
                   let object = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
                   object["turn_id"] as? String == turnID
             else { continue }
             switch frame.event {
+            case "turn_started":
+                turnActive = true
             case "assistant_text_delta":
                 if let delta = object["delta"] as? String { assembler.appendDelta(delta) }
             case "tool_call_started":

@@ -122,7 +122,10 @@ and pass/fail:
 integrations/ocean-imessage/.build/release/ocean-imessage check
 ```
 
-`poll` prints admitted messages as JSON lines and contacts nothing.
+`poll` and `watch` print admitted messages as JSON lines and contact nothing.
+They are inspection modes: a message they admit counts as waiting until it is
+answered with `send` or the next `run` starts. `run` holds its state file for
+the life of the process and refuses to start if another `run` already holds it.
 `run --print-replies --state <path>` runs the whole pipeline against the daemon
 and prints the replies instead of handing them to Messages, so a roster and its
 agents can be rehearsed without texting anyone. It requires its own `--state`

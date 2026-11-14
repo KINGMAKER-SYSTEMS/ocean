@@ -305,7 +305,13 @@ final class OceanIMessageTests: XCTestCase {
 
         // A message admitted by a process that then died can never be answered.
         try store.recordAdmission(AllowedMessage(id: "orphan", member: "ada", text: "ok"), cursor: 10)
-        try store.resolvePending()
+        try store.recordAdmission(AllowedMessage(id: "dropped", member: "ada", text: "ok"), cursor: 11)
+        try store.resolve("dropped")
+        XCTAssertEqual(try store.resolvePending(), 1)
+        XCTAssertEqual(try store.resolvePending(), 0)
+        XCTAssertThrowsError(try store.claimReply(for: "dropped", repliesPerHour: limits(roster))) { error in
+            XCTAssertEqual(error as? BridgeError, .alreadyReplied)
+        }
         XCTAssertThrowsError(try store.claimReply(for: "orphan", repliesPerHour: limits(roster))) { error in
             XCTAssertEqual(error as? BridgeError, .alreadyReplied)
         }
@@ -374,6 +380,78 @@ final class OceanIMessageTests: XCTestCase {
 
         try store.retainMembers(["ada"])
         XCTAssertNil(try store.session(for: "ben", agent: "text-member"))
+    }
+
+    func testFirstStartBeginsFromThePresentWhateverRunsBeforeThePrime() throws {
+        let roster = try Fixture.roster()
+        let fixture = try MessagesFixture()
+        try fixture.exec("""
+        INSERT INTO handle VALUES (1, '\(Fixture.adminPhone)', 'iMessage');
+        INSERT INTO chat VALUES (11, 45);
+        INSERT INTO chat_handle_join VALUES (11, 1);
+        """)
+        // Sent five minutes before the bridge is first enabled: inside the age
+        // bound, so only the prime keeps it from being acted on.
+        let earlier = try fixture.add("before-first-start", body: "SENTINEL-BEFORE-START", handle: 1, chats: [11], secondsAgo: 300)
+
+        let (store, url, root) = temporaryStore()
+        defer { try? FileManager.default.removeItem(at: root) }
+        // The run loop's startup order: custody, orphan sweep, roster cleanup, then the prime.
+        let custody = try RunnerLock(stateURL: url)
+        XCTAssertEqual(try store.resolvePending(), 0)
+        try store.retainMembers(Set(roster.members.map(\.id)))
+        let reader = MessagesDatabase(path: fixture.url.path)
+        let primed = try store.primeIfUnscanned { try reader.latestRowID() }
+        XCTAssertEqual(primed.cursor, earlier)
+        XCTAssertTrue(try reader.scan(after: primed.cursor, roster: roster, now: fixture.now).admitted.isEmpty)
+
+        // What arrives after the start is answered.
+        try fixture.add("after-start", body: "what is live", handle: 1, chats: [11], secondsAgo: 2)
+        XCTAssertEqual(
+            try reader.scan(after: primed.cursor, roster: roster, now: fixture.now).admitted.map(\.message.id),
+            ["after-start"]
+        )
+
+        // A ledger that has scanned is never re-primed, and the database is not even asked.
+        try store.advanceCursor(to: 7)
+        XCTAssertEqual(try store.primeIfUnscanned { XCTFail("must not ask"); return 99 }.cursor, max(7, earlier))
+        withExtendedLifetime(custody) {}
+    }
+
+    func testOnlyOneRunnerCanHoldALedgerSoTheStartupSweepCannotCloseALiveRunnersQueue() throws {
+        let (store, url, root) = temporaryStore()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var first: RunnerLock? = try RunnerLock(stateURL: url)
+        try store.recordAdmission(AllowedMessage(id: "queued-by-first", member: "ada", text: "ok"), cursor: 1)
+
+        // A second runner is refused before it can reach the sweep.
+        XCTAssertThrowsError(try RunnerLock(stateURL: url)) { error in
+            XCTAssertEqual(error as? BridgeError, .alreadyRunning)
+        }
+        XCTAssertEqual(try store.load().replied, [])
+
+        // Another ledger in the same folder is independent.
+        XCTAssertNoThrow(try RunnerLock(stateURL: root.appendingPathComponent("rehearsal.json")))
+
+        // Once the first runner is gone, the next one takes custody and may sweep.
+        withExtendedLifetime(first) {}
+        first = nil
+        let second = try RunnerLock(stateURL: url)
+        XCTAssertEqual(try store.resolvePending(), 1)
+        withExtendedLifetime(second) {}
+    }
+
+    func testHousekeepingNeverCreatesALedgerSoAFirstRunIsStillRecognizable() throws {
+        let (store, url, root) = temporaryStore()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try store.retainMembers(["ada", "ben"])
+        XCTAssertEqual(try store.resolvePending(), 0)
+        try store.resolve("nothing")
+        try store.clearSession(for: "ada")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+        // A ledger that has never scanned reports cursor zero, which is what
+        // tells the run loop to start from the present.
+        XCTAssertEqual(try store.load().cursor, 0)
     }
 
     func testConcurrentClaimsInOneProcessYieldExactlyOneReply() throws {
@@ -904,6 +982,7 @@ final class OceanIMessageTests: XCTestCase {
         let frames = stream.compactMap { reader.consume($0) }
         XCTAssertEqual(frames.map(\.event), ["turn_started", "assistant_text_delta", "turn_finished"])
         XCTAssertEqual(frames.map(\.data), ["{\"turn_id\":\"t\"}", "{\"delta\":\"hi\"}", "{\"status\":\"completed\"}"])
+        XCTAssertFalse(frames.contains { $0.data == nil })
     }
 
     func testReplyAssemblerKeepsOnlyTheAnswerAfterTheLastTool() {
@@ -929,7 +1008,10 @@ final class OceanIMessageTests: XCTestCase {
     func testStreamLinesSplitOnLineFeedOnly() throws {
         func lines(_ text: String) throws -> [String] {
             var splitter = LineSplitter()
-            return Array(text.utf8).compactMap { splitter.consume($0) }
+            return Array(text.utf8).compactMap { byte in
+                if case let .text(line) = splitter.consume(byte) { return line }
+                return nil
+            }
         }
         // U+2028, U+2029, and U+0085 are legal raw inside a JSON string and
         // must not cut an event in half.
@@ -942,18 +1024,41 @@ final class OceanIMessageTests: XCTestCase {
 
         var frames = SSEFrameReader()
         let parsed = try lines("event: assistant_text_delta\n\(payload)\n").compactMap { frames.consume($0) }
-        let object = try JSONSerialization.jsonObject(with: Data(try XCTUnwrap(parsed.first).data.utf8)) as? [String: Any]
+        let object = try JSONSerialization.jsonObject(with: Data(try XCTUnwrap(parsed.first?.data).utf8)) as? [String: Any]
         XCTAssertEqual(object?["delta"] as? String, "a\u{2028}b\u{2029}c\u{85}d")
 
-        // One oversized line (a huge tool result replayed with the session) is
-        // dropped whole; the lines after it are still read.
-        var splitter = LineSplitter()
-        var seen: [String] = []
-        let oversized = [UInt8](repeating: 0x41, count: LineSplitter.maximumLineBytes + 10) + [0x0A]
+        // An oversized line is not kept, but it is reported, with how it began,
+        // and the lines after it are still read.
+        var splitter = LineSplitter(maximumLineBytes: 64)
+        var seen: [LineSplitter.Line] = []
+        let oversized = Array("data: {\"delta\":\"".utf8) + [UInt8](repeating: 0x41, count: 200) + [0x0A]
         for byte in Array("before\n".utf8) + oversized + Array("after\n".utf8) {
             if let line = splitter.consume(byte) { seen.append(line) }
         }
-        XCTAssertEqual(seen, ["before", "after"])
+        XCTAssertEqual(seen, [.text("before"), .oversized(prefix: "data: {\"delta\":\""), .text("after")])
+    }
+
+    func testALostFrameIsReportedAndIgnoredOnlyWhenItCannotShapeTheReply() {
+        var reader = SSEFrameReader()
+        XCTAssertNil(reader.consume(.text("event: assistant_text_delta")))
+        XCTAssertEqual(reader.consume(.oversized(prefix: "data: {\"delta\"")), .init(event: "assistant_text_delta", data: nil))
+        // The event name does not carry over to the next frame.
+        XCTAssertNil(reader.consume(.text("data: {\"orphan\":true}")))
+        // A lost line that was not a data line leaves the event unknown.
+        XCTAssertEqual(reader.consume(.oversized(prefix: "event: tool_call")), .init(event: "", data: nil))
+
+        // Before this turn starts, everything is history and cannot change the reply...
+        for event in ["assistant_text_delta", "tool_call_started", "turn_finished", "tool_call_finished"] {
+            XCTAssertTrue(lostFrameIsIrrelevant(event: event, turnActive: false), event)
+        }
+        // ...except the marker that tells history from the present, and anything unidentifiable.
+        XCTAssertFalse(lostFrameIsIrrelevant(event: "turn_started", turnActive: false))
+        XCTAssertFalse(lostFrameIsIrrelevant(event: "", turnActive: false))
+        // During the turn, only frames that do not shape the reply may be lost.
+        XCTAssertTrue(lostFrameIsIrrelevant(event: "tool_call_finished", turnActive: true))
+        for event in ["assistant_text_delta", "tool_call_started", "turn_finished", "turn_started", ""] {
+            XCTAssertFalse(lostFrameIsIrrelevant(event: event, turnActive: true), event)
+        }
     }
 
     func testAgentIsUsableOnlyWithAnEffectiveToolAllowlist() {
