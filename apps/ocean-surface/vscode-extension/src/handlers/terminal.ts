@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { spawn, type ChildProcess } from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
 import type {
   CreateTerminalRequest,
   CreateTerminalResponse,
@@ -47,7 +48,7 @@ export class TerminalHandler {
     const child = spawn(params.command, params.args ?? [], {
       cwd: params.cwd || undefined,
       env,
-      shell: true,
+      shell: false,
       stdio: ["pipe", "pipe", "pipe"],
     });
 
@@ -66,13 +67,6 @@ export class TerminalHandler {
       resolveExit = resolve;
     });
 
-    child.stdout?.on("data", (data: Buffer) => {
-      writeEmitter.fire(data.toString().replace(/\n/g, "\r\n"));
-    });
-    child.stderr?.on("data", (data: Buffer) => {
-      writeEmitter.fire(data.toString().replace(/\n/g, "\r\n"));
-    });
-
     const managed: ManagedTerminal = {
       id: terminalId,
       process: child,
@@ -86,15 +80,19 @@ export class TerminalHandler {
     };
     this.terminals.set(terminalId, managed);
 
-    const appendOutput = (data: Buffer) => {
-      managed.output += data.toString();
+    const appendOutput = (text: string) => {
+      writeEmitter.fire(text.replace(/\n/g, "\r\n"));
+      managed.output += text;
       const trimmed = trimToByteLimit(managed.output, managed.outputByteLimit);
       managed.output = trimmed.output;
       managed.truncated = managed.truncated || trimmed.truncated;
     };
 
-    child.stdout?.on("data", appendOutput);
-    child.stderr?.on("data", appendOutput);
+    for (const stream of [child.stdout, child.stderr]) {
+      const decoder = new StringDecoder("utf8");
+      stream?.on("data", (data: Buffer) => appendOutput(decoder.write(data)));
+      stream?.on("end", () => appendOutput(decoder.end()));
+    }
 
     child.on("close", (code, signal) => {
       managed.exitCode = code;
@@ -103,7 +101,7 @@ export class TerminalHandler {
       resolveExit();
     });
     child.on("error", (error) => {
-      appendOutput(Buffer.from(`${error.message}\n`, "utf-8"));
+      appendOutput(`${error.message}\n`);
       managed.exited = true;
       resolveExit();
     });
