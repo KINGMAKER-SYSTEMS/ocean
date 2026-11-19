@@ -72,7 +72,10 @@ export class FileSystemHandler {
         if (!applied) {
           throw new Error(`VS Code rejected edit for ${params.path}`);
         }
-        await openDoc.save();
+        const saved = await openDoc.save();
+        if (!saved) {
+          throw new Error(`VS Code could not save ${params.path}`);
+        }
         doc = openDoc;
       } else {
         oldText = await readExistingText(uri);
@@ -106,8 +109,11 @@ async function readExistingText(uri: vscode.Uri): Promise<string | null> {
   try {
     const raw = await vscode.workspace.fs.readFile(uri);
     return Buffer.from(raw).toString("utf-8");
-  } catch {
-    return null;
+  } catch (error) {
+    if (error instanceof vscode.FileSystemError && error.code === "FileNotFound") {
+      return null;
+    }
+    throw error;
   }
 }
 
