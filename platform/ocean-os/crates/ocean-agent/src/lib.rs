@@ -8228,6 +8228,169 @@ done
         let config_dir = temp_config_dir("resumable-none");
         let result = session::load_resumable(&config_dir, SessionId::new_v4()).unwrap();
         assert!(result.is_none());
+        std::fs::create_dir_all(session::sessions_dir(&config_dir).join("legacy")).unwrap();
+        assert!(session::load_resumable(&config_dir, SessionId::new_v4())
+            .unwrap()
+            .is_none());
+        let _ = std::fs::remove_dir_all(config_dir);
+    }
+
+    #[test]
+    fn load_resumable_errors_when_sessions_root_is_a_file() {
+        let config_dir = temp_config_dir("resumable-root-file");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let root = session::sessions_dir(&config_dir);
+        std::fs::write(&root, b"not a directory").unwrap();
+
+        assert!(session::load_resumable(&config_dir, SessionId::new_v4()).is_err());
+        assert_eq!(std::fs::read(&root).unwrap(), b"not a directory");
+        let _ = std::fs::remove_dir_all(config_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_resumable_discovery_errors_preserve_readable_duplicates() {
+        use std::os::unix::fs::symlink;
+
+        // A symlink through a regular file reliably produces ENOTDIR even
+        // when tests run as root; chmod-based permission fixtures do not.
+        for candidate_error in [false, true] {
+            let config_dir = temp_config_dir("resumable-discovery-error");
+            let root = session::sessions_dir(&config_dir);
+            let model = ocean_protocol::Model::anthropic_claude_sonnet_4_6();
+            let s = session::Session::new(&model);
+            let name = format!("{}.json", s.id);
+            let json = serde_json::to_vec(&s).unwrap();
+            let copies = [root.join("a").join(&name), root.join("b").join(&name)];
+            for copy in &copies {
+                std::fs::create_dir_all(copy.parent().unwrap()).unwrap();
+                std::fs::write(copy, &json).unwrap();
+            }
+            let obstacle = config_dir.join("regular-file");
+            std::fs::write(&obstacle, b"not a directory").unwrap();
+            let bad_link = if candidate_error {
+                let bucket = root.join("inaccessible-candidate");
+                std::fs::create_dir_all(&bucket).unwrap();
+                bucket.join(&name)
+            } else {
+                root.join("inaccessible-bucket")
+            };
+            symlink(obstacle.join("child"), &bad_link).unwrap();
+
+            let error = session::load_resumable(&config_dir, s.id).unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<std::io::Error>().unwrap().kind(),
+                std::io::ErrorKind::NotADirectory
+            );
+            for copy in &copies {
+                assert_eq!(std::fs::read(copy).unwrap(), json);
+            }
+            assert_eq!(
+                std::fs::read_link(&bad_link).unwrap(),
+                obstacle.join("child")
+            );
+            let _ = std::fs::remove_dir_all(config_dir);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_resumable_treats_dangling_bucket_and_candidate_as_absent() {
+        use std::os::unix::fs::symlink;
+
+        let config_dir = temp_config_dir("resumable-dangling");
+        let root = session::sessions_dir(&config_dir);
+        let bucket = root.join("legacy");
+        std::fs::create_dir_all(&bucket).unwrap();
+        let id = SessionId::new_v4();
+        let missing = config_dir.join("missing");
+        symlink(&missing, root.join("dangling-bucket")).unwrap();
+        symlink(&missing, bucket.join(format!("{id}.json"))).unwrap();
+
+        assert!(session::load_resumable(&config_dir, id).unwrap().is_none());
+        let _ = std::fs::remove_dir_all(config_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_resumable_follows_readable_bucket_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let config_dir = temp_config_dir("resumable-linked-bucket");
+        let root = session::sessions_dir(&config_dir);
+        let bucket = config_dir.join("linked-bucket");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&bucket).unwrap();
+        let model = ocean_protocol::Model::anthropic_claude_sonnet_4_6();
+        let s = session::Session::new(&model);
+        let path = bucket.join(format!("{}.json", s.id));
+        std::fs::write(&path, serde_json::to_vec(&s).unwrap()).unwrap();
+        symlink(&bucket, root.join("alias")).unwrap();
+
+        assert_eq!(
+            session::load_resumable(&config_dir, s.id)
+                .unwrap()
+                .unwrap()
+                .id,
+            s.id
+        );
+        assert!(path.exists());
+        let _ = std::fs::remove_dir_all(config_dir);
+    }
+
+    #[test]
+    fn load_resumable_resolves_loose_legacy_copy_with_bucket_copy() {
+        let config_dir = temp_config_dir("resumable-loose-legacy");
+        let root = session::sessions_dir(&config_dir);
+        let bucket = root.join("legacy");
+        std::fs::create_dir_all(&bucket).unwrap();
+        let model = ocean_protocol::Model::anthropic_claude_sonnet_4_6();
+        let mut s = session::Session::new(&model);
+        let name = format!("{}.json", s.id);
+        s.updated_ms = 1;
+        let stale = bucket.join(&name);
+        std::fs::write(&stale, serde_json::to_vec(&s).unwrap()).unwrap();
+        s.updated_ms = 2;
+        let latest = root.join(&name);
+        std::fs::write(&latest, serde_json::to_vec(&s).unwrap()).unwrap();
+
+        assert_eq!(
+            session::load_resumable(&config_dir, s.id)
+                .unwrap()
+                .unwrap()
+                .updated_ms,
+            2
+        );
+        assert!(latest.exists());
+        assert!(!stale.exists());
+        let _ = std::fs::remove_dir_all(config_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_preserves_success_when_duplicate_discovery_fails() {
+        use std::os::unix::fs::symlink;
+
+        let config_dir = temp_config_dir("save-discovery-error");
+        let root = session::sessions_dir(&config_dir);
+        let orphan_bucket = root.join("orphan");
+        std::fs::create_dir_all(&orphan_bucket).unwrap();
+        let model = ocean_protocol::Model::anthropic_claude_sonnet_4_6();
+        let mut s = session::Session::new(&model);
+        let orphan = orphan_bucket.join(format!("{}.json", s.id));
+        let old_json = serde_json::to_vec(&s).unwrap();
+        std::fs::write(&orphan, &old_json).unwrap();
+        let obstacle = config_dir.join("regular-file");
+        std::fs::write(&obstacle, b"not a directory").unwrap();
+        symlink(obstacle.join("child"), root.join("inaccessible-bucket")).unwrap();
+
+        s.replace_messages(vec![Message::user_text("saved despite cleanup failure")]);
+        let written = session::save(&config_dir, &s).unwrap();
+        let saved: session::Session =
+            serde_json::from_slice(&std::fs::read(written).unwrap()).unwrap();
+        assert_eq!(saved.id, s.id);
+        assert_eq!(saved.messages.len(), 1);
+        assert_eq!(std::fs::read(&orphan).unwrap(), old_json);
         let _ = std::fs::remove_dir_all(config_dir);
     }
 

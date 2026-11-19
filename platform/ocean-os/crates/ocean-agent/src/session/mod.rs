@@ -473,13 +473,24 @@ pub fn save(config_dir: &Path, session: &Session) -> anyhow::Result<PathBuf> {
     Ok(path)
 }
 
-/// Remove every `<id>.json` for `id` except `keep`. Best-effort: failed
-/// unlinks are warned, never fatal. Enforces the one-id-one-file invariant
-/// both on save (clearing the pre-rebind orphan) and as the loader's
+/// Remove every `<id>.json` for `id` except `keep`. Best-effort: discovery
+/// failures and failed unlinks are warned, never fatal. Enforces the
+/// one-id-one-file invariant both on save (clearing the pre-rebind orphan) and as the loader's
 /// self-heal (collapsing duplicates it just resolved).
 fn purge_duplicate_session_files(config_dir: &Path, id: SessionId, keep: &Path) {
     let target = format!("{id}.json");
-    for candidate in candidate_session_paths(config_dir, &target) {
+    let candidates = match candidate_session_paths(config_dir, &target) {
+        Ok(candidates) => candidates,
+        Err(error) => {
+            tracing::warn!(
+                session_id = %id,
+                error = %error,
+                "session: failed to discover orphaned duplicate session files"
+            );
+            return;
+        }
+    };
+    for candidate in candidates {
         if candidate.as_path() == keep || !candidate.exists() {
             continue;
         }
@@ -501,16 +512,25 @@ pub fn load(config_dir: &Path, id: SessionId) -> anyhow::Result<Session> {
 }
 
 /// Load a session for resumption, distinguishing "no session file exists"
-/// (Ok(None) — safe to start fresh) from "a session file exists but could
-/// not be read or parsed" (Err — must NOT be treated as a fresh session,
-/// or the entire prior transcript is silently discarded mid-chat).
+/// (Ok(None) — safe to start fresh) from failed storage discovery or a file
+/// that could not be read or parsed (Err — must NOT be treated as a fresh
+/// session, or the entire prior transcript is silently discarded mid-chat).
 pub fn load_resumable(config_dir: &Path, id: SessionId) -> anyhow::Result<Option<Session>> {
     let target = format!("{id}.json");
-    // Gather every existing copy across all workspace buckets + top-level.
-    let existing: Vec<PathBuf> = candidate_session_paths(config_dir, &target)
-        .into_iter()
-        .filter(|p| p.exists())
-        .collect();
+    // Finish discovery and existence checks before choosing or deleting any
+    // copy. An inaccessible bucket/candidate must not look like absence, nor
+    // let a readable sibling win while another copy's state is unknown.
+    let candidates = candidate_session_paths(config_dir, &target)
+        .with_context(|| format!("discover session {id}"))?;
+    let mut existing = Vec::new();
+    for path in candidates {
+        if path
+            .try_exists()
+            .with_context(|| format!("stat {}", path.display()))?
+        {
+            existing.push(path);
+        }
+    }
     if existing.is_empty() {
         return Ok(None);
     }
@@ -570,20 +590,28 @@ pub fn load_resumable(config_dir: &Path, id: SessionId) -> anyhow::Result<Option
     Ok(Some(winner))
 }
 
-fn candidate_session_paths(config_dir: &Path, filename: &str) -> Vec<PathBuf> {
+fn candidate_session_paths(config_dir: &Path, filename: &str) -> std::io::Result<Vec<PathBuf>> {
     let root = sessions_dir(config_dir);
     let mut out = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&root) {
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if p.is_dir() {
-                out.push(p.join(filename));
-            }
+    let entries = match std::fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
+        let path = entry?.path();
+        // Follow directory symlinks as before; vanished entries and dangling
+        // symlinks are absence, but all other metadata failures are errors.
+        match std::fs::metadata(&path) {
+            Ok(metadata) if metadata.is_dir() => out.push(path.join(filename)),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
         }
     }
     // Final fallback: a loose file in the legacy layout we haven't migrated yet.
     out.push(root.join(filename));
-    out
+    Ok(out)
 }
 
 pub fn detail(config_dir: &Path, id: SessionId) -> anyhow::Result<SessionDetail> {

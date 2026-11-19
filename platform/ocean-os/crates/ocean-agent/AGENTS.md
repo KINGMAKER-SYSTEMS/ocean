@@ -88,6 +88,11 @@ transcripts by session id.
   Detail and bounded sync projections carry the same revision. Optional config reads must distinguish
   an absent session from unreadable/corrupt storage so daemon adapters map only
   genuine absence to 404.
+- Resumable session discovery propagates directory enumeration, entry metadata,
+  and candidate existence errors before selecting or healing duplicates. Only
+  `NotFound` means absence; following directory symlinks and loose legacy files
+  remain supported. Duplicate discovery after a successful atomic save is
+  best-effort: warn on failure without failing the completed save.
 - Session model-pin provenance uses the existing monotonic `config_revision`:
   a positive revision proves an explicit config mutation, while revision zero
   (new inherited or legacy) retains the former model-difference fallback. The
@@ -308,6 +313,10 @@ transcripts by session id.
 - `cargo test -p ocean-agent oauth_refresh --locked -- --test-threads=1`
 - `cargo test -p ocean-agent system_prompt`
 - `cargo test -p ocean-agent session`
+- `cargo test -p ocean-agent load_resumable --locked` — missing/storage-error
+  distinction, symlink and legacy layouts, and duplicate selection/preservation.
+- `cargo test -p ocean-agent save_preserves_success_when_duplicate_discovery_fails --locked`
+- `cargo test -p ocean-agent save_removes_orphaned_duplicate_session_files_across_buckets --locked`
 - `cargo test -p ocean-agent project_prompt_loads_ocean_agents_md_from_ancestor`
 - `cargo test -p ocean-agent room_history --locked`
 - `cargo test -p ocean-agent room_resources --locked -- --nocapture` — includes
