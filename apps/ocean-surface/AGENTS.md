@@ -1632,5 +1632,7 @@ wasm32-unknown-unknown --no-run`, `cargo test -p ocean-surface-ui`.
 
 ## Child devlog Index
 
+- `vscode-extension/` — editor ACP filesystem/terminal behavior and handler verification →
+  `vscode-extension/AGENTS.md`. Shared Surface UI direction remains owned by this parent.
 - `packaging/` — native desktop candidates, bundled daemon/MCP bridge and legal payload →
   `packaging/AGENTS.md`. Existing proxy deployment remains owned by this parent.
