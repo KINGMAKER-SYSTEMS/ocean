@@ -1705,6 +1705,7 @@ fn banner_routes() -> &'static [&'static str] {
         "POST /v1/rooms/persistent/invites/redeem",
         "POST /v1/rooms/persistent/{key}/members/agents",
         "GET /v1/rooms/persistent/{key}/transcript",
+        "GET /v1/rooms/persistent/{key}/board",
         "POST /v1/rooms/persistent/{key}/artifacts",
         "GET /v1/rooms/persistent/{key}/artifacts",
         "GET /v1/rooms/persistent/{key}/artifacts/{artifact_id}",
@@ -3204,6 +3205,10 @@ fn room_routes() -> Router<AppState> {
         .route(
             "/v1/rooms/persistent/{key}/members/agents",
             post(room_register_agents),
+        )
+        .route(
+            "/v1/rooms/persistent/{key}/board",
+            get(persistent_rooms::room_board),
         )
         .route(
             "/v1/rooms/persistent/{key}/transcript",
@@ -7224,6 +7229,12 @@ async fn agent_turn_admission(
         // this turn's wall_ms/ok into the metrics (OCEAN-303).
         drop(in_flight);
         bg_state.metrics.record_turn(res.wall_ms, res.ok);
+        if let Err(error) = bg_state
+            .runtime
+            .record_turn_completed_with_lease(&session_lease, &res)
+        {
+            tracing::warn!(%session_id, %error, "could not persist the last turn outcome");
+        }
         // Wait for the bridge to drain (the sender has been dropped by now).
         let _ = bridge.await;
         // The bridge has drained, so every steer delivery relay for this turn
@@ -12523,6 +12534,8 @@ mod tests {
             reroute_reason: None,
             effective_model: None,
             effective_provider: None,
+            last_turn_status: None,
+            last_turn_error: None,
             config_revision: 0,
             turns: 2,
             title: "fix the thing".into(),
@@ -15011,7 +15024,11 @@ mod tests {
         use std::time::Duration;
 
         let state = capped_turn_state(1);
-        let mut handler = Box::pin(agent_turn(State(state.clone()), Json(sample_agent_turn())));
+        let mut turn = sample_agent_turn();
+        let (created, _, _) = state.runtime.create_session(&turn.cwd, None).unwrap();
+        let session_id = AgentSessionId(created);
+        turn.session_id = Some(session_id);
+        let mut handler = Box::pin(agent_turn(State(state.clone()), Json(turn)));
         poll_fn(|context| {
             assert!(handler.as_mut().poll(context).is_pending());
             Poll::Ready(())
@@ -15035,6 +15052,9 @@ mod tests {
         })
         .await
         .expect("an admitted turn must finish and release its permit after disconnect");
+        let detail = state.runtime.session_detail(core_sid(session_id)).unwrap();
+        assert_eq!(detail.last_turn_status.as_deref(), Some("completed"));
+        assert_eq!(detail.last_turn_error, None);
     }
 
     #[tokio::test]
@@ -22450,6 +22470,44 @@ mod tests {
         std::env::remove_var("OCEAN_YOLO");
     }
 
+    #[tokio::test]
+    async fn room_board_projects_card_posts_and_rejects_unknown_rooms() {
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let state = fake_convene_state(&tmp);
+        let key = RoomKey::new("board-fixture");
+        let card = ocean_board::CardEnvelope::new(
+            "card-1",
+            ocean_board::CardOp::Create {
+                title: "Ship the fix".into(),
+                column: "todo".into(),
+            },
+        )
+        .encode()
+        .unwrap();
+        with_rooms(&state, |store| {
+            store.create(key.clone(), "Board fixture", None, Utc::now())?;
+            for body in ["plain chat", &card] {
+                store.append_message(
+                    &key,
+                    "fixture",
+                    RoomParticipantKind::Human,
+                    RoomMessageKind::Message,
+                    body,
+                    Utc::now(),
+                )?;
+            }
+            Ok::<(), ocean_store::RoomStoreError>(())
+        })
+        .unwrap();
+        let (status, Json(value)) =
+            persistent_rooms::room_board(State(state.clone()), Path("board-fixture".into())).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["board"]["cards"]["card-1"]["title"], "Ship the fix");
+        let (status, _) = persistent_rooms::room_board(State(state), Path("absent".into())).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
     /// `GET /v1/rooms/persistent/{key}/transcript` is bounded + pageable
     /// (OCEAN-249). A transcript longer than the requested `limit` returns only
     /// `limit` rows plus a `next_seq` cursor and `has_more=true`; replaying the
@@ -27146,7 +27204,7 @@ mod tests {
         assert_eq!(admission_routes, expected_admission_routes);
         assert_eq!(
             banner.len(),
-            150,
+            151,
             "route baseline changed; review the manifest"
         );
 

@@ -62,6 +62,10 @@ pub struct Session {
     /// The provider route that actually ran (see [`Session::effective_model`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_turn_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_turn_error: Option<String>,
 }
 
 impl Session {
@@ -111,6 +115,8 @@ impl Session {
             reroute_reason: None,
             effective_model: None,
             effective_provider: None,
+            last_turn_status: None,
+            last_turn_error: None,
         }
     }
 
@@ -1241,6 +1247,8 @@ pub(crate) fn session_detail(session: Session) -> SessionDetail {
         reroute_reason: session.reroute_reason,
         effective_model: session.effective_model,
         effective_provider: session.effective_provider,
+        last_turn_status: session.last_turn_status,
+        last_turn_error: session.last_turn_error,
         config_revision: session.config_revision,
         turns: session.messages.len() as u32,
         title,
@@ -1554,6 +1562,8 @@ mod history_search_tests {
             reroute_reason: None,
             effective_model: None,
             effective_provider: None,
+            last_turn_status: None,
+            last_turn_error: None,
         }
     }
 

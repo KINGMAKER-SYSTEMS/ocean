@@ -461,6 +461,10 @@ pub struct SessionDetail {
     /// distinguishable in the report (see `effective_model`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_turn_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_turn_error: Option<String>,
     /// Monotonic persisted model-config revision. Legacy sessions begin at 0.
     #[serde(default)]
     pub config_revision: u64,

@@ -2015,6 +2015,24 @@ impl AgentRuntime {
     }
 
     /// Check existence/readability without constructing the unbounded ordinary
+    /// Save terminal status using the same lease as the turn transcript.
+    pub fn record_turn_completed_with_lease(
+        &self,
+        lease: &SessionOperationLease,
+        result: &PromptResponse,
+    ) -> anyhow::Result<()> {
+        let Some(mut session) = session::load_resumable(&self.config_dir, lease.id)? else {
+            return Ok(());
+        };
+        session.last_turn_status = Some(if result.ok { "completed" } else { "failed" }.into());
+        session.last_turn_error = (!result.ok).then(|| {
+            // Persist the fixed terminal classification, never a raw provider body.
+            result.stop_reason.clone()
+        });
+        session::save(&self.config_dir, &session)?;
+        Ok(())
+    }
+
     /// `SessionDetail` projection. Callers already hold the matching lane.
     pub fn session_exists_with_lease(&self, lease: &SessionOperationLease) -> anyhow::Result<bool> {
         Ok(session::load_resumable(&self.config_dir, lease.id)?.is_some())

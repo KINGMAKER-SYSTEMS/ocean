@@ -24,6 +24,12 @@ export OCEAN_LLAMA_CPP_MODELS=local-model
 export OCEAN_LLAMA_CPP_BASE_URL=http://127.0.0.1:8080/v1
 ```
 
+## Run from source
+
+From the Ocean OS component directory, run `./ocean` to build missing local
+release binaries and launch the TUI. Set `OCEAN_DAEMON_BIN` to use an existing
+daemon binary.
+
 ## ocean-daemon is supervised by launchd (OCEAN-253)
 
 The **daemon** (`crates/ocean-daemon`, built to `target/release/ocean-daemon`) is
