@@ -28,6 +28,7 @@ auth-file write custody. Provider wire encoding remains in `ocean-protocol`.
   fallback. Native Claude uses its captured environment and never borrows a
   different account after an explicit home/config selection.
 - Configured Ollama and llama.cpp routes keep exact wire IDs beneath their provider-qualified picker IDs. A local inference failure never falls back to a hosted model.
+- Route retired DeepSeek Flash aliases to deepseek-flash and expose only the current wire ID in new picker entries. Keep old qualified pins resolvable.
 - Preserve forward model/catalog routes and feature credential isolation.
 - Explicit `openai-codex` and `codex` provider pins for `gpt-6.1-sol` and
   `gpt-6.1-terra` retain the catalog's 500K context / 128K output limits.

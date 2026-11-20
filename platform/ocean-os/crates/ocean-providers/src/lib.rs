@@ -17,6 +17,18 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
+const DEEPSEEK_FLASH_MODEL: &str = "deepseek-flash";
+const DEEPSEEK_FLASH_ALIASES: &[&str] = &[
+    DEEPSEEK_FLASH_MODEL,
+    "deepseek-v4.1-flash",
+    "deepseek-v4-1-flash",
+    "deepseek-v4-flash",
+    "deepseek-v4-flash-vision-exp",
+    "deepseek-pro-flash",
+    "deepseek-chat",
+    "deepseek-reasoner",
+    "deepseek-r1",
+];
 const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com/v1";
 // DeepSeek V4 capacity. Both V4 models carry a 1M context window; the output cap
 // is the API's own hard ceiling, reported verbatim in its 400 on an over-large
@@ -810,12 +822,8 @@ pub fn known_models() -> Vec<KnownModel> {
         // `resolve_model_selection`, but the picker must stop offering models that
         // are about to stop existing.
         m("deepseek-v4-pro", "deepseek", "DeepSeek V4 Pro"),
-        // 2026-11 refresh: DeepSeek's docs now publish `deepseek-flash`
-        // (V4.1 Flash) as the flash id; `deepseek-v4-flash` stays accepted and
-        // on the menu because the operator key on this Mac was revoked when the
-        // refresh ran, so the new id is docs-verified, not live-verified.
-        m("deepseek-flash", "deepseek", "DeepSeek V4.1 Flash"),
-        m("deepseek-v4-flash", "deepseek", "DeepSeek V4 Flash"),
+        // Legacy Flash ids resolve forward but are omitted from the picker.
+        m(DEEPSEEK_FLASH_MODEL, "deepseek", "DeepSeek V4.1 Flash"),
         m("gpt-6.1-sol", "openai-codex", "GPT-6.1 Sol (Codex)"),
         m("gpt-6.1-terra", "openai-codex", "GPT-6.1 Terra (Codex)"),
         m("gpt-6-sol", "openai-codex", "GPT-6 Sol (Codex)"),
@@ -1038,7 +1046,14 @@ pub fn model_routes() -> Vec<ModelRoute> {
                 .iter()
                 .map(|s| (*s).into())
                 .collect(),
-            aliases: vec![model.id.clone()],
+            aliases: if model.provider == "deepseek" && model.id == DEEPSEEK_FLASH_MODEL {
+                DEEPSEEK_FLASH_ALIASES
+                    .iter()
+                    .flat_map(|alias| [alias.to_string(), format!("deepseek/{alias}")])
+                    .collect()
+            } else {
+                vec![model.id.clone()]
+            },
         });
     }
     for model in legacy {
@@ -1214,31 +1229,13 @@ pub fn resolve_model_selection(env: &ProviderEnv) -> Result<ModelSelection, Prov
     }
 
     match model.as_str() {
-        // `deepseek-chat` / `deepseek-reasoner` are RETIRED by DeepSeek after
-        // 2026-07-24 15:59 UTC — after that they stop resolving at the API and any
-        // session pinned to them dies. They are already only aliases for V4 Flash
-        // (non-thinking / thinking), and `GET /models` no longer lists them at all
-        // (verified live 2026-07-12: the API serves exactly deepseek-v4-pro and
-        // deepseek-v4-flash). So they survive here purely as legacy aliases that
-        // resolve FORWARD onto v4-flash, keeping pinned sessions alive across the
-        // cutover — the same pattern the retired Claude 4-6/4-7 ids use. They are
-        // dropped from `known_models()` so the picker stops advertising them.
-        "deepseek-flash" | "deepseek-v4.1-flash" | "deepseek-v4-1-flash" => Ok(model_selection(
+        alias if DEEPSEEK_FLASH_ALIASES.contains(&alias) => Ok(model_selection(
             ProviderId::DeepSeek,
-            "deepseek-flash",
+            DEEPSEEK_FLASH_MODEL,
             DEEPSEEK_BASE_URL,
             DEEPSEEK_CONTEXT_WINDOW,
             DEEPSEEK_MAX_OUTPUT_TOKENS,
         )),
-        "deepseek-chat" | "deepseek-reasoner" | "deepseek-r1" | "deepseek-v4-flash" => {
-            Ok(model_selection(
-                ProviderId::DeepSeek,
-                "deepseek-v4-flash",
-                DEEPSEEK_BASE_URL,
-                DEEPSEEK_CONTEXT_WINDOW,
-                DEEPSEEK_MAX_OUTPUT_TOKENS,
-            ))
-        }
         "deepseek" | "deepseek-v4-pro" | "deepseek-v4" | "deepseek-pro" | "v4-pro" => {
             Ok(model_selection(
                 ProviderId::DeepSeek,
@@ -1835,7 +1832,11 @@ fn model_for_explicit_provider(
     match provider {
         "deepseek" => Ok(model_selection(
             ProviderId::DeepSeek,
-            model,
+            if DEEPSEEK_FLASH_ALIASES.contains(&model) {
+                DEEPSEEK_FLASH_MODEL
+            } else {
+                model
+            },
             DEEPSEEK_BASE_URL,
             DEEPSEEK_CONTEXT_WINDOW,
             DEEPSEEK_MAX_OUTPUT_TOKENS,
@@ -2246,28 +2247,24 @@ mod tests {
     }
 
     #[test]
-    fn maps_deepseek_v4_flash_to_deepseek_provider() {
-        let selection =
-            resolve_model_selection(&env(&[("OCEAN_MODEL", "deepseek-v4-flash")])).unwrap();
-        assert_eq!(selection.provider, ProviderId::DeepSeek);
-        assert_eq!(selection.model, "deepseek-v4-flash");
-        assert_eq!(selection.base_url, DEEPSEEK_BASE_URL);
-    }
-
-    // DeepSeek hard-retires `deepseek-chat` / `deepseek-reasoner` on 2026-07-24;
-    // after that the API stops resolving them and any session still pinned to one
-    // dies mid-conversation. They must therefore resolve FORWARD onto the model
-    // that actually exists, not pass through as themselves.
-    #[test]
-    fn retiring_deepseek_aliases_resolve_forward_onto_v4_flash() {
-        for legacy in ["deepseek-chat", "deepseek-reasoner", "deepseek-r1"] {
-            let selection = resolve_model_selection(&env(&[("OCEAN_MODEL", legacy)])).unwrap();
-            assert_eq!(
-                selection.model, "deepseek-v4-flash",
-                "{legacy:?} must forward onto a model that still exists after 2026-07-24"
-            );
-            assert_eq!(selection.provider, ProviderId::DeepSeek);
+    fn deepseek_flash_aliases_resolve_to_the_current_wire_id() {
+        for alias in DEEPSEEK_FLASH_ALIASES {
+            let qualified = format!("deepseek/{alias}");
+            for env in [
+                env(&[("OCEAN_MODEL", alias)]),
+                env(&[("OCEAN_MODEL", alias), ("OCEAN_PROVIDER", "deepseek")]),
+                env(&[("OCEAN_MODEL", &qualified), ("OCEAN_PROVIDER", "openai")]),
+            ] {
+                let selection = resolve_model_selection(&env).unwrap();
+                assert_eq!(selection.provider, ProviderId::DeepSeek);
+                assert_eq!(selection.model, DEEPSEEK_FLASH_MODEL);
+                assert_eq!(selection.base_url, DEEPSEEK_BASE_URL);
+            }
+            assert_eq!(catalog_model(&qualified).unwrap().id, DEEPSEEK_FLASH_MODEL);
         }
+        assert!(!known_models()
+            .iter()
+            .any(|model| model.id == "deepseek-v4-flash"));
     }
 
     // The registry's capacity numbers feed `compact_history` / `trim_to_context_window`.
@@ -3046,7 +3043,6 @@ mod tests {
             // so they stay ROUTABLE as forward aliases onto v4-flash (pinned
             // sessions survive the cutover) but must not be in the menu.
             "deepseek-flash",
-            "deepseek-v4-flash",
             "deepseek-v4-pro",
             "gpt-4o",
             "gpt-4o-mini",

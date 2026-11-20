@@ -2900,3 +2900,14 @@ existing room message authority. Persist the latest session turn status
 under its turn lease without retaining raw provider failure bodies.
 Validated with board/TUI tests, room API and route contract tests, and
 the disconnected-turn test with last-outcome readback.
+
+_________________________________________________________________________________
+time: [14:10] [20-11-26]
+agent: [Codex desktop]
+worktree: [codex/port-deepseek-aliases]
+type: [bug report]
+area: [backend]
+
+Completed the fork's DeepSeek Flash route migration. Forward retired aliases
+and qualified session pins to deepseek-flash, and show the current Flash route
+in the picker. Locked ocean-providers tests passed.
