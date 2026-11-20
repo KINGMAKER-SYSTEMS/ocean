@@ -440,6 +440,7 @@ fn search_dynamic_tools(
 pub struct AgentRun {
     pub messages: Vec<Message>,
     pub stopped_at_turn_limit: bool,
+    pub stop_reason: &'static str,
     /// Real provider token usage, summed across every round of the turn.
     /// `Usage::default()` (all zero) when the provider reported none.
     /// Provider-reported total context consumption for the final provider round.
@@ -518,6 +519,7 @@ pub async fn run_agent_with_history(
     let mut session_allowed: HashSet<String> = HashSet::new();
     let mut turn: u32 = 0;
     let mut stopped_at_turn_limit = false;
+    let mut stop_reason = "completed";
     let mut total_usage = ocean_protocol::Usage::default();
     // Zero is the protocol's unavailable-total sentinel. Once any completed
     // round lacks an authoritative provider total, the aggregate stays unknown
@@ -607,12 +609,31 @@ pub async fn run_agent_with_history(
         } else {
             tool_defs.clone()
         };
-        let kept = trim_indices_to_context_window(
+        let mut kept = trim_indices_to_context_window(
             &messages,
             &system_prompt,
             config.model.context_window,
             config.model.max_tokens,
         );
+        if config.model.provider == "glm"
+            && !kept
+                .iter()
+                .any(|&index| matches!(&messages[index], Message::User { .. }))
+        {
+            // Preserve the most recent real user instruction when a long tool
+            // loop outlasts it. Large inputs fall back to the wire continuation
+            // so a whole old prompt cannot expand the trimmed suffix arbitrarily.
+            if let Some(index) = messages
+                .iter()
+                .rposition(|message| matches!(message, Message::User { .. }))
+            {
+                if estimate_tokens_json(&messages[index])
+                    <= (config.model.context_window as usize / 20)
+                {
+                    kept.insert(0, index);
+                }
+            }
+        }
         let trimmed_messages = provider_overrides.provider_messages(&messages, &kept);
         let dynamic_tool_declarations = if dynamic_tool_mode {
             dynamic_declarations_for_messages(&trimmed_messages, &loaded_state, &tool_defs)
@@ -765,12 +786,12 @@ pub async fn run_agent_with_history(
                             final_message = Some(message);
                             break;
                         }
-                        AssistantMessageEvent::Error { reason: _, error } => {
-                            let err_msg = error
-                                .error_message
-                                .clone()
-                                .unwrap_or_else(|| "provider error".into());
-                            return Err(AgentError::Other(err_msg));
+                        AssistantMessageEvent::Error { reason, error } => {
+                            if reason == StopReason::Aborted {
+                                return Err(AgentError::Cancelled);
+                            }
+                            let detail = error.error_message.unwrap_or_else(|| "provider error".into());
+                            return Err(ocean_protocol::Error::InvalidResponse(detail).into());
                         }
                         AssistantMessageEvent::TextDelta { delta, .. } => {
                             attempt_emitted = true;
@@ -932,6 +953,17 @@ pub async fn run_agent_with_history(
             for (id, name, _args) in &tool_calls {
                 messages.push(truncated_tool_use_result(id, name));
             }
+            stop_reason = if final_answer_round {
+                "max_turns"
+            } else {
+                match stop {
+                    StopReason::Stop => "completed",
+                    StopReason::Length => "provider_length",
+                    StopReason::Error => "provider_error",
+                    StopReason::Aborted => "cancelled",
+                    StopReason::ToolUse => "provider_tool_use_without_calls",
+                }
+            };
             emit(
                 &events,
                 AgentEvent::TurnEnd {
@@ -1256,6 +1288,7 @@ pub async fn run_agent_with_history(
         // A terminating tool ends the turn, unless the operator steered while
         // it ran: their message supersedes the stop.
         if any_terminate && !steering_waiting(config) {
+            stop_reason = "tool_terminated";
             break;
         }
     }
@@ -1276,6 +1309,7 @@ pub async fn run_agent_with_history(
 
     if turn >= config.max_turns && matches!(messages.last(), Some(Message::ToolResult(_))) {
         stopped_at_turn_limit = true;
+        stop_reason = "max_turns";
         let reply = tool_limit_fallback_reply(&messages);
         emit(
             &events,
@@ -1307,6 +1341,7 @@ pub async fn run_agent_with_history(
     Ok(AgentRun {
         messages,
         stopped_at_turn_limit,
+        stop_reason,
         usage: total_usage,
         context_tokens: latest_context_tokens,
     })

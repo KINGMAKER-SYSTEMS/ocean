@@ -1093,7 +1093,8 @@ impl AgentRuntime {
                         request_id: Some(request_id),
                         ok: false,
                         session_id: req.session_id,
-                        code: None,
+                        code: Some(400),
+                        stop_reason: "invalid_request".into(),
                         wall_ms: start.elapsed().as_millis() as u64,
                         stdout: String::new(),
                         stderr: e.to_string(),
@@ -1155,7 +1156,8 @@ impl AgentRuntime {
                     request_id: Some(request_id),
                     ok: false,
                     session_id: req.session_id,
-                    code: None,
+                    code: Some(503),
+                    stop_reason: "provider_unavailable".into(),
                     wall_ms: start.elapsed().as_millis() as u64,
                     stdout: String::new(),
                     stderr,
@@ -1203,24 +1205,18 @@ impl AgentRuntime {
         // the next ready alternate (bounded — see `run_turn_with_failover`). This
         // never fails over mid-stream: the moment any output streamed, the attempt
         // is final.
-        let mut failed_usage = TokenUsage::default();
+        let mut failure = FailedTurnOutput::default();
         let result = self
-            .run_turn_with_failover(
-                req.clone(),
-                control,
-                effective,
-                &env,
-                lease,
-                &mut failed_usage,
-            )
+            .run_turn_with_failover(req.clone(), control, effective, &env, lease, &mut failure)
             .await;
 
         match result {
-            Ok((session_id, stdout, stderr, usage)) => PromptResponse {
+            Ok((session_id, stdout, stderr, usage, stop_reason)) => PromptResponse {
                 request_id: Some(request_id),
                 ok: true,
                 session_id: Some(session_id),
                 code: Some(0),
+                stop_reason: stop_reason.into(),
                 wall_ms: start.elapsed().as_millis() as u64,
                 stdout,
                 stderr,
@@ -1228,25 +1224,23 @@ impl AgentRuntime {
                 usage,
             },
             Err(e) => {
-                // Surface a per-turn timeout distinctly so the daemon can map it
-                // to HTTP 408. `run_agent_with_history` propagates the failure as
-                // an `anyhow::Error`, so recover the concrete `AgentError` variant
-                // by downcast; a `Timeout` sets code 408, everything else stays
-                // `None` (generic failure).
-                let code = e
-                    .downcast_ref::<AgentError>()
-                    .filter(|err| matches!(err, AgentError::Timeout { .. }))
-                    .map(|_| 408);
+                let (code, stop_reason) = prompt_error_status(&e);
+                let mut stderr = failure.stderr;
+                if !stderr.is_empty() && !stderr.ends_with('\n') {
+                    stderr.push('\n');
+                }
+                stderr.push_str(&e.to_string());
                 PromptResponse {
                     request_id: Some(request_id),
                     ok: false,
-                    session_id: req.session_id,
-                    code,
+                    session_id: failure.session_id.or(req.session_id),
+                    code: Some(code),
+                    stop_reason: stop_reason.into(),
                     wall_ms: start.elapsed().as_millis() as u64,
-                    stdout: String::new(),
-                    stderr: e.to_string(),
+                    stdout: failure.stdout,
+                    stderr,
                     cwd,
-                    usage: failed_usage,
+                    usage: failure.usage,
                 }
             }
         }
@@ -1341,7 +1335,7 @@ impl AgentRuntime {
     /// failover, so the connect-failure fallback draws from the identical
     /// candidate list.
     ///
-    /// On `Err`, `failed_usage` holds what the failed attempt was already
+    /// On `Err`, `failure` holds output and usage from the failed attempt, including what was already
     /// billed for (the rounds it completed and checkpointed); it stays zero
     /// when the attempt failed before any round finished.
     async fn run_turn_with_failover(
@@ -1351,8 +1345,8 @@ impl AgentRuntime {
         state: RuntimeState,
         env: &ProviderEnv,
         admitted_lease: Option<&SessionOperationLease>,
-        failed_usage: &mut TokenUsage,
-    ) -> anyhow::Result<(SessionId, String, String, TokenUsage)> {
+        failure: &mut FailedTurnOutput,
+    ) -> anyhow::Result<(SessionId, String, String, TokenUsage, &'static str)> {
         // Pin an implicit new session once for the whole primary+fallback
         // attempt. Otherwise each dispatch mints independently, orphaning the
         // primary's durable accepted-user checkpoint on pre-stream failover.
@@ -1360,6 +1354,7 @@ impl AgentRuntime {
             req.session_id = Some(SessionId::new_v4());
             req.create_if_missing = true;
         }
+        failure.session_id = req.session_id;
 
         let session_id = req
             .session_id
@@ -1396,7 +1391,7 @@ impl AgentRuntime {
                 if !failover_eligible(&e) {
                     // Mid-stream, user-error, or non-availability — final. Unwrap
                     // any TurnFailure wrapper so the caller sees the bare error.
-                    return Err(take_turn_failure(e, failed_usage));
+                    return Err(take_turn_failure(e, failure));
                 }
                 // Pre-stream availability failure: try ONE ready alternate.
                 let alternate = self
@@ -1407,7 +1402,7 @@ impl AgentRuntime {
                     .and_then(|cfg| state_from_provider_config(cfg).ok());
                 let Some(alt_state) = alternate else {
                     // No alternate to try — return the original failure as-is.
-                    return Err(take_turn_failure(e, failed_usage));
+                    return Err(take_turn_failure(e, failure));
                 };
                 tracing::warn!(
                     primary_provider = attempted_provider.as_str(),
@@ -1491,7 +1486,7 @@ impl AgentRuntime {
                     }
                     Err(error) => {
                         self.note_auth_rejection(&error, &alt_provider);
-                        return Err(take_turn_failure(error, failed_usage));
+                        return Err(take_turn_failure(error, failure));
                     }
                 };
                 (ok, alt_state)
@@ -1539,11 +1534,11 @@ impl AgentRuntime {
     ///   appended to stderr and never fail the already-completed turn.
     async fn run_stop_hook_continuations(
         &self,
-        turn: (SessionId, String, String, TokenUsage),
+        turn: (SessionId, String, String, TokenUsage, &'static str),
         req: &PromptRequest,
         control: &PromptControl,
         state: &RuntimeState,
-    ) -> (SessionId, String, String, TokenUsage) {
+    ) -> (SessionId, String, String, TokenUsage, &'static str) {
         use ocean_hooks::{HookEvent, HookOutcome};
 
         /// Hard upper bound on hook-driven continuation turns per operator
@@ -1554,7 +1549,7 @@ impl AgentRuntime {
         if self.hooks.count_for(HookEvent::Stop) == 0 {
             return turn;
         }
-        let (session_id, mut stdout, mut stderr, mut usage) = turn;
+        let (session_id, mut stdout, mut stderr, mut usage, mut stop_reason) = turn;
         let context = ocean_hooks::HookContext::new(req.cwd.clone(), session_id.to_string());
         let mut stop_hook_active = false;
         for _ in 0..=MAX_STOP_HOOK_CONTINUATIONS {
@@ -1585,29 +1580,35 @@ impl AgentRuntime {
                 .dispatch_turn(follow, control.clone(), state, false)
                 .await
             {
-                Ok((_, cont_stdout, cont_stderr, cont_usage)) => {
+                Ok((_, cont_stdout, cont_stderr, cont_usage, cont_stop_reason)) => {
                     if !stdout.is_empty() && !stdout.ends_with('\n') {
                         stdout.push('\n');
                     }
                     stdout.push_str(&cont_stdout);
                     stderr.push_str(&cont_stderr);
                     add_continuation_usage(&mut usage, &cont_usage);
+                    stop_reason = cont_stop_reason;
                 }
                 Err(e) => {
                     // Fail-open: the operator's turn already completed and
                     // persisted; a failed continuation is reported, not fatal.
                     // The rounds it completed before failing were billed and
                     // checkpointed, so they count like any other.
-                    let mut billed = TokenUsage::default();
-                    let e = take_turn_failure(e, &mut billed);
-                    add_continuation_usage(&mut usage, &billed);
+                    let mut failure = FailedTurnOutput::default();
+                    let e = take_turn_failure(e, &mut failure);
+                    if !failure.stdout.is_empty() && !stdout.is_empty() && !stdout.ends_with('\n') {
+                        stdout.push('\n');
+                    }
+                    stdout.push_str(&failure.stdout);
+                    stderr.push_str(&failure.stderr);
+                    add_continuation_usage(&mut usage, &failure.usage);
                     tracing::warn!(%session_id, error = %e, "stop-hook continuation turn failed");
                     stderr.push_str(&format!("stop-hook continuation failed: {e}\n"));
                     break;
                 }
             }
         }
-        (session_id, stdout, stderr, usage)
+        (session_id, stdout, stderr, usage, stop_reason)
     }
 
     /// Dispatch a single turn to the fake echo path or the real agent loop,
@@ -1622,7 +1623,7 @@ impl AgentRuntime {
         control: PromptControl,
         snapshot: &RuntimeState,
         reuse_accepted_user: bool,
-    ) -> anyhow::Result<(SessionId, String, String, TokenUsage)> {
+    ) -> anyhow::Result<(SessionId, String, String, TokenUsage, &'static str)> {
         // Validate before any provider attempt, persistence, or subprocess launch.
         // A plain fixed error is deliberately ineligible for provider failover.
         if control.strict_tool_allowlist.is_some() && !control.tools_disabled {
@@ -2351,7 +2352,7 @@ impl AgentRuntime {
         control: PromptControl,
         snapshot: &RuntimeState,
         reuse_accepted_user: bool,
-    ) -> anyhow::Result<(SessionId, String, String, TokenUsage)> {
+    ) -> anyhow::Result<(SessionId, String, String, TokenUsage, &'static str)> {
         anyhow::ensure!(!req.prompt.trim().is_empty(), "prompt cannot be empty");
 
         let session_id = req.session_id.unwrap_or_else(SessionId::new_v4);
@@ -2471,7 +2472,13 @@ impl AgentRuntime {
         session::save(&self.config_dir, &session)?;
 
         // The fake provider does no real inference; report zero usage.
-        Ok((session.id, stdout, String::new(), TokenUsage::default()))
+        Ok((
+            session.id,
+            stdout,
+            String::new(),
+            TokenUsage::default(),
+            "completed",
+        ))
     }
 
     // OCEAN-274: the `runtime.prompt` span — the session/history layer's slice of
@@ -2488,7 +2495,7 @@ impl AgentRuntime {
         control: PromptControl,
         snapshot: &RuntimeState,
         reuse_accepted_user: bool,
-    ) -> anyhow::Result<(SessionId, String, String, TokenUsage)> {
+    ) -> anyhow::Result<(SessionId, String, String, TokenUsage, &'static str)> {
         anyhow::ensure!(!req.prompt.trim().is_empty(), "prompt cannot be empty");
 
         // Session label for a first-turn (the daemon-supplied pre-composition
@@ -2688,6 +2695,8 @@ impl AgentRuntime {
             .get(snapshot.provider_config.selection.provider.as_str())
         {
             return Err(TurnFailure {
+                stdout: String::new(),
+                stderr: String::new(),
                 streamed_output: false,
                 usage: TokenUsage::default(),
                 error: anyhow::Error::new(AgentError::Provider(
@@ -3011,6 +3020,8 @@ impl AgentRuntime {
             // history with no partial/duplicated state.
             Err(e) => {
                 return Err(TurnFailure {
+                    stdout,
+                    stderr,
                     streamed_output,
                     // Box as anyhow so the failover classifier can downcast back
                     // to the concrete `AgentError`/protocol cause.
@@ -3064,7 +3075,7 @@ impl AgentRuntime {
             context_is_floor: run.stopped_at_turn_limit,
         };
 
-        Ok((session.id, stdout, stderr, usage))
+        Ok((session.id, stdout, stderr, usage, run.stop_reason))
     }
 }
 
@@ -3112,6 +3123,8 @@ impl<T> Drop for AbortOnDropJoinHandle<T> {
 
 #[derive(Debug)]
 struct TurnFailure {
+    stdout: String,
+    stderr: String,
     streamed_output: bool,
     error: anyhow::Error,
     /// What the provider reported for the rounds that completed before the
@@ -3293,18 +3306,40 @@ fn auth_rejection_status(error: &anyhow::Error) -> Option<u16> {
 /// failover-bookkeeping wrapper. A non-`TurnFailure` error passes through.
 #[cfg(test)]
 fn unwrap_turn_failure(err: anyhow::Error) -> anyhow::Error {
-    take_turn_failure(err, &mut TokenUsage::default())
+    take_turn_failure(err, &mut FailedTurnOutput::default())
 }
 
-/// [`unwrap_turn_failure`], also handing back the usage the failed attempt had
-/// already been billed for. A non-`TurnFailure` error leaves `usage` untouched.
-fn take_turn_failure(err: anyhow::Error, usage: &mut TokenUsage) -> anyhow::Error {
+#[derive(Default)]
+struct FailedTurnOutput {
+    session_id: Option<SessionId>,
+    stdout: String,
+    stderr: String,
+    usage: TokenUsage,
+}
+
+fn take_turn_failure(err: anyhow::Error, output: &mut FailedTurnOutput) -> anyhow::Error {
     match err.downcast::<TurnFailure>() {
         Ok(turn) => {
-            *usage = turn.usage;
+            output.stdout = turn.stdout;
+            output.stderr = turn.stderr;
+            output.usage = turn.usage;
             turn.error
         }
         Err(other) => other,
+    }
+}
+
+fn prompt_error_status(error: &anyhow::Error) -> (i32, &'static str) {
+    match error.downcast_ref::<AgentError>() {
+        Some(AgentError::Cancelled) => (1, "cancelled"),
+        Some(AgentError::MaxTurns(_)) => (1, "max_turns"),
+        Some(AgentError::Timeout { .. }) => (408, "provider_round_timeout"),
+        Some(AgentError::Tool { .. }) => (1, "tool_error"),
+        Some(AgentError::Provider(ocean_protocol::Error::ProviderError { status, .. })) => {
+            (i32::from(*status), "provider_rejected")
+        }
+        Some(AgentError::Provider(_)) => (1, "provider_error"),
+        _ => (1, "runtime_error"),
     }
 }
 
@@ -5923,11 +5958,14 @@ mod tests {
             provider_config(ProviderId::Fake, ocean_runtime::FAKE_TOOL_MODEL, false),
         );
         let tool_round = ocean_protocol::AssistantMessage {
-            content: vec![Content::ToolCall {
-                id: "call-1".into(),
-                name: "ls".into(),
-                arguments: serde_json::json!({ "path": "." }),
-            }],
+            content: vec![
+                Content::text("partial progress"),
+                Content::ToolCall {
+                    id: "call-1".into(),
+                    name: "ls".into(),
+                    arguments: serde_json::json!({ "path": "." }),
+                },
+            ],
             api: "test".into(),
             provider: "test".into(),
             model: "scripted".into(),
@@ -5992,6 +6030,9 @@ mod tests {
             .await;
 
         assert!(!res.ok, "the second round fails the turn");
+        assert!(res.stdout.contains("partial progress"), "{}", res.stdout);
+        assert!(res.code.is_some());
+        assert_eq!(res.stop_reason, "provider_error");
         assert!(res.stderr.contains("scripted outage"), "{}", res.stderr);
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
         assert_eq!(res.usage.input, 1_000);
@@ -9911,6 +9952,8 @@ done
 
     fn provider_refusal_error(status: u16) -> anyhow::Error {
         TurnFailure {
+            stdout: String::new(),
+            stderr: String::new(),
             streamed_output: false,
             usage: TokenUsage::default(),
             error: anyhow::Error::new(AgentError::Provider(ocean_protocol::Error::ProviderError {
@@ -10317,6 +10360,8 @@ done
     #[test]
     fn failover_eligible_for_prestream_availability_error() {
         let err: anyhow::Error = TurnFailure {
+            stdout: String::new(),
+            stderr: String::new(),
             streamed_output: false,
             usage: TokenUsage::default(),
             error: anyhow::Error::new(AgentError::Provider(ocean_protocol::Error::ProviderError {
@@ -10334,6 +10379,8 @@ done
     #[test]
     fn no_failover_after_output_streamed_even_on_availability_error() {
         let err: anyhow::Error = TurnFailure {
+            stdout: String::new(),
+            stderr: String::new(),
             streamed_output: true,
             usage: TokenUsage::default(),
             error: anyhow::Error::new(AgentError::Provider(ocean_protocol::Error::ProviderError {
@@ -10353,6 +10400,8 @@ done
     #[test]
     fn no_failover_on_user_error() {
         let err: anyhow::Error = TurnFailure {
+            stdout: String::new(),
+            stderr: String::new(),
             streamed_output: false,
             usage: TokenUsage::default(),
             error: anyhow::Error::new(AgentError::Provider(ocean_protocol::Error::ProviderError {
@@ -10377,6 +10426,8 @@ done
     #[test]
     fn unwrap_turn_failure_recovers_the_inner_agent_error() {
         let wrapped: anyhow::Error = TurnFailure {
+            stdout: String::new(),
+            stderr: String::new(),
             streamed_output: false,
             usage: TokenUsage::default(),
             error: anyhow::Error::new(AgentError::Timeout { secs: 300 }),

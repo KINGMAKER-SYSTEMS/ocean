@@ -299,8 +299,8 @@ fn format_onboard_summary(base_url: &str, token: &str, info: &serde_json::Value)
 fn usage_footer(res: &PromptResponse) -> String {
     let u = &res.usage;
     format!(
-        "\n[ocean-rs: ok={} wall={}ms rss=daemon tokens: in={} out={} cache_read={} cache_write={} total={}]",
-        res.ok, res.wall_ms, u.input, u.output, u.cache_read, u.cache_write, u.total_tokens
+        "\n[ocean-rs: ok={} wall={}ms code={} stop_reason={} rss=daemon tokens: in={} out={} cache_read={} cache_write={} total={}]",
+        res.ok, res.wall_ms, res.code.unwrap_or(if res.ok { 0 } else { 1 }), res.stop_reason, u.input, u.output, u.cache_read, u.cache_write, u.total_tokens
     )
 }
 
@@ -604,14 +604,16 @@ async fn main() -> anyhow::Result<()> {
                 decision_token: Some(decision_token.clone()),
             };
             let res: anyhow::Result<PromptResponse> = async {
-                Ok(client
+                let response = client
                     .post(format!("{}/v1/prompt", cli.url))
                     .json(&req)
                     .send()
-                    .await?
-                    .error_for_status()?
+                    .await?;
+                let status = response.status();
+                response
                     .json()
-                    .await?)
+                    .await
+                    .with_context(|| format!("invalid prompt response (HTTP {status})"))
             }
             .await;
 
@@ -851,7 +853,8 @@ mod tests {
             ok,
             request_id: None,
             session_id: None,
-            code: None,
+            code: Some(if ok { 0 } else { 1 }),
+            stop_reason: "unknown".into(),
             wall_ms: 1234,
             stdout: "out".into(),
             stderr: "boom".into(),
