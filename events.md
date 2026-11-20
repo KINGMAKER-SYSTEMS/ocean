@@ -2886,3 +2886,17 @@ area: [backend]
 Ported heartbeat model preflight. Prefer Kingmaker's qualified picker routes
 and keep compatibility with older catalogs. An unavailable or misspelled
 model fails before turn admission. Locked heartbeat tests passed.
+
+_________________________________________________________________________________
+time: [14:07] [20-11-26]
+agent: [Codex desktop]
+worktree: [codex/team-manager-runtime]
+type: [feature-request]
+area: [backend] [frontend]
+
+Ported the Team Manager room board endpoint, terminal board, Kimi coding
+credential row and source launcher. Use the daemon's owner identity and
+existing room message authority. Persist the latest session turn status
+under its turn lease without retaining raw provider failure bodies.
+Validated with board/TUI tests, room API and route contract tests, and
+the disconnected-turn test with last-outcome readback.

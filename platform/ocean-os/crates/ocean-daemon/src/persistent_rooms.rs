@@ -4436,6 +4436,60 @@ pub(super) async fn room_transcript(
     }
 }
 
+/// Fold the transcript into the same card projection used by the TUI.
+pub(super) async fn room_board(
+    State(state): State<AppState>,
+    Path(key): Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let key = RoomKey::new(key.trim());
+    let board =
+        tokio::task::spawn_blocking(move || {
+            with_rooms(&state, |store| {
+                let mut rows = Vec::new();
+                let mut cursor = None;
+                loop {
+                    let page = read_transcript_page(store, &key, cursor, None)?;
+                    rows.extend(projected_transcript(page.messages).into_iter().filter(
+                        |message| {
+                            !matches!(
+                                ocean_board::decode(&message.body),
+                                ocean_board::Decoded::NotCardEvent
+                            )
+                        },
+                    ));
+                    if !page.has_more {
+                        break;
+                    }
+                    cursor = page.next_seq;
+                }
+                Ok(ocean_board::project(rows.iter().map(|message| {
+                    ocean_board::BoardEvent {
+                        clock: message
+                            .federated
+                            .as_ref()
+                            .map_or(ocean_board::EventClock::Pending(message.seq), |metadata| {
+                                ocean_board::EventClock::Confirmed(metadata.global_sequence)
+                            }),
+                        author_id: &message.author_id,
+                        body: &message.body,
+                    }
+                })))
+            })
+        })
+        .await;
+    match board {
+        Ok(Ok(board)) => (StatusCode::OK, Json(json!({"ok": true, "board": board}))),
+        Ok(Err(error)) => room_store_error_response(error),
+        Err(error) => {
+            tracing::warn!(%error, "room board worker failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"ok": false, "error": "board unavailable"})),
+            )
+        }
+    }
+}
+
 /// `GET /v1/rooms/persistent/{key}/snapshot` — full room hydration in one read:
 /// the room entity (id, name, roster, timestamps, trigger policy), its complete
 /// transcript, and `last_seq` so the caller can immediately tail live updates via

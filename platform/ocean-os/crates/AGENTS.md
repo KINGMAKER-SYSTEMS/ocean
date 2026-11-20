@@ -93,7 +93,7 @@ The workspace currently contains 30 Rust packages.
 ## Non-default Members
 
 - `ocean-ast` is standalone and not yet wired into the live runtime. It stays outside `default-members` to avoid adding its multi-grammar compile cost to ordinary default builds; validate it explicitly or through `--workspace`.
-- `ocean-board` is a pure transcript projector outside the default build until the room and TUI integration lands. Validate it with `cargo test -p ocean-board`.
+- `ocean-board` is a pure transcript projector. Daemon and TUI already compile it as a dependency, so it has no separate default-member entry. Validate its wire fixtures with `cargo test -p ocean-board`.
 - `ocean-minimizer` is a standalone, dependency-free M1 library and is not yet wired into command capture or a harness profile. It stays outside `default-members` so ordinary builds do not imply live minimization; validate it explicitly or through `--workspace`.
 - `ocean-walker` is a standalone M1 traversal/cache library used by standalone `ocean-search` but not wired into live runtime grep/glob. It stays outside `default-members` so ordinary builds do not imply production filesystem-tool adoption; validate it explicitly or through `--workspace`.
 - `ocean-search` is a standalone M1 typed-search library over trusted roots and is not wired into runtime grep/glob, capabilities, profiles, or sessions. It stays outside `default-members` so ordinary builds do not imply live search adoption; validate it explicitly or through `--workspace`.

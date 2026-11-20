@@ -131,6 +131,12 @@ pub const COMMANDS: &[SlashCommand] = &[
         soon: false,
     },
     SlashCommand {
+        name: "/board",
+        desc: "open a room's Kanban board (/board <room-key>; bare re-enters)",
+        group: "workspace",
+        soon: false,
+    },
+    SlashCommand {
         name: "/terminal",
         desc: "focus the terminal",
         group: "workspace",
@@ -386,6 +392,14 @@ mod tests {
             Some(false),
             "/login should be live, not a roadmap placeholder"
         );
+    }
+
+    #[test]
+    fn board_is_registered_and_boa_ranks_it_first() {
+        assert!(is_command("/board"), "/board should be a live slash command");
+        let ranked = filter("boa");
+        assert_eq!(ranked[0].0.name, "/board", "\"boa\" should rank /board first");
+        assert!(!ranked[0].0.soon, "/board is live, not a roadmap placeholder");
     }
 
     #[test]
