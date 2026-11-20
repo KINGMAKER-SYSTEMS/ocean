@@ -2851,3 +2851,16 @@ and provider timeout fixes. Keep the admitted turn alive after disconnect and
 move session/project intake reads off async workers. Maintain Kingmaker's
 permission, catalog, and provider compatibility. Focused disconnect,
 refresh, heartbeat, hung-tool, and streaming timeout regressions passed.
+
+_________________________________________________________________________________
+time: [13:58] [20-11-26]
+agent: [Codex desktop]
+worktree: [codex/port-prompt-results]
+type: [bug report]
+area: [backend]
+
+Ported the fork's long-session prompt results. Return the integer result code,
+terminal classification, and streamed partial output when a later provider
+round fails. Preserve successful max-round synthesis and keep a recent GLM
+user instruction when it fits the trimming margin. Validated with agent
+partial-output, core/CLI, and runtime integration tests.

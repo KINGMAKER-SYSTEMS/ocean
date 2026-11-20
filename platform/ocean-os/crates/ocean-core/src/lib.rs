@@ -202,6 +202,10 @@ pub struct ProjectResponse {
     pub error: Option<String>,
 }
 
+fn default_prompt_stop_reason() -> String {
+    "unknown".into()
+}
+
 /// Response payload for `POST /v1/prompt`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PromptResponse {
@@ -212,6 +216,8 @@ pub struct PromptResponse {
     pub session_id: Option<SessionId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<i32>,
+    #[serde(default = "default_prompt_stop_reason")]
+    pub stop_reason: String,
     pub wall_ms: u64,
     pub stdout: String,
     pub stderr: String,
@@ -1753,6 +1759,23 @@ impl EventEnvelope {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prompt_response_reports_terminal_fields_and_accepts_older_daemons() {
+        let mut value = serde_json::json!({
+            "ok": false, "wall_ms": 12, "stdout": "partial", "stderr": "timeout",
+        });
+        let legacy: PromptResponse = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(legacy.stop_reason, "unknown");
+        assert_eq!(legacy.code, None);
+        value["code"] = 408.into();
+        value["stop_reason"] = "provider_round_timeout".into();
+        let current: PromptResponse = serde_json::from_value(value).unwrap();
+        let serialized = serde_json::to_value(current).unwrap();
+        assert_eq!(serialized["code"], 408);
+        assert_eq!(serialized["stop_reason"], "provider_round_timeout");
+        assert_eq!(serialized["stdout"], "partial");
+    }
 
     #[test]
     fn prompt_request_defaults_for_legacy_clients() {

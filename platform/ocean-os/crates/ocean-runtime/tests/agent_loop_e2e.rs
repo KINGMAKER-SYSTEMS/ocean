@@ -614,6 +614,7 @@ async fn final_round_after_tool_result_disables_tools_and_forces_reply() {
         "only the first round runs a tool"
     );
     assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(run.stop_reason, "max_turns");
     assert!(*provider.saw_empty_tools.lock().unwrap());
     assert!(!run.stopped_at_turn_limit);
     let last_text = run

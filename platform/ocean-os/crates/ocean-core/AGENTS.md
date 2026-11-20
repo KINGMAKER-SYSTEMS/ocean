@@ -12,6 +12,7 @@ This crate owns shared protocol types used across Ocean clients, daemon, runtime
 
 ## Local Contracts
 
+- Prompt responses include a stable terminal reason and integer result code; decode older daemons without either field.
 - Treat public type changes as cross-crate contract changes.
 - Preserve serde compatibility unless the breaking change is intentional and documented.
 - Keep protocol types free of daemon/runtime implementation details.

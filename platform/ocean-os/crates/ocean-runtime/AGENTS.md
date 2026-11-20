@@ -12,6 +12,7 @@ This crate owns the Ocean agent loop and permission-gated tool execution runtime
 
 ## Local Contracts
 
+- Report max-round synthesis as max_turns while retaining a successful reply. Preserve the recent user instruction in tight GLM tool loops when it fits the trimming margin.
 - Bound tool execution after permission resolves. A deadline produces an ordinary tool error so the session can continue. Bash, component waits and offshore dispatch preserve their own timeouts plus cleanup grace.
 - A turn that is waiting must say why. Both retry layers — the provider layer's
   request retry (via the `retry_observer` the loop installs on `StreamOptions`)
