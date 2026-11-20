@@ -2825,3 +2825,16 @@ Tool-call turns keep their IDs and receive compatible text placeholders. A
 trimmed transcript gets a user continuation when needed. Kingmaker's GLM
 vision content remains intact. Validated with locked ocean-protocol tests
 covering mixed text/tool turns, trimmed history, and image parts.
+
+_________________________________________________________________________________
+time: [13:46] [20-11-26]
+agent: [Codex desktop]
+worktree: [codex/local-providers]
+type: [feature-request]
+area: [backend]
+
+Ported the Ollama and llama.cpp pilot to Kingmaker's provider-qualified model
+catalog. Keep exact wire model IDs in requests and saved pins, recognize
+operator-configured models in the picker, and keep failed local turns from
+rerouting to a hosted provider. Validated with locked provider and protocol
+tests plus a daemon build.

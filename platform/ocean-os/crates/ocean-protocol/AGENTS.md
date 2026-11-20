@@ -16,6 +16,7 @@ This crate owns the multi-provider LLM wire protocol layer for Anthropic, OpenAI
   omits private reasoning and visible assistant text alongside tool calls, and
   preserves image parts on vision routes. Add a user continuation if trimming
   removed every user message.
+- Ollama and llama.cpp reuse OpenAI Chat Completions streaming and can send keyless requests. These routes never inherit the OpenAI API key.
 - Keep provider-specific behavior isolated behind protocol abstractions.
 - Do not leak provider quirks into shared `ocean-core` types unless the shared contract intentionally changes.
 - Treat streaming event shape changes as compatibility-sensitive.

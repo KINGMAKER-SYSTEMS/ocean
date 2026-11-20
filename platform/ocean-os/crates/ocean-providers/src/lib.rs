@@ -91,6 +91,8 @@ pub enum ProviderId {
     /// Google Generative AI (Gemini family; v1beta generativelanguage API).
     Google,
     OpenAiCompatible,
+    Ollama,
+    LlamaCpp,
     Fake,
 }
 
@@ -109,6 +111,8 @@ impl ProviderId {
             Self::Glm => "glm",
             Self::Google => "google",
             Self::OpenAiCompatible => "openai-compatible",
+            Self::Ollama => "ollama",
+            Self::LlamaCpp => "llama-cpp",
             Self::Fake => "fake",
         }
     }
@@ -141,13 +145,69 @@ impl ProviderId {
             // only GEMINI_API_KEY fails preflight ("missing credential") and
             // Gemini is silently unroutable even though the provider could auth.
             Self::Google => &["OCEAN_GOOGLE_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY"],
-            Self::Fake => &[],
+            Self::Ollama | Self::LlamaCpp | Self::Fake => &[],
         }
     }
 
     pub fn requires_credential(&self) -> bool {
-        !matches!(self, Self::Fake)
+        !matches!(self, Self::Ollama | Self::LlamaCpp | Self::Fake)
     }
+}
+
+const LOCAL_PROVIDERS: [(ProviderId, &str, &str, &str); 2] = [
+    (
+        ProviderId::Ollama,
+        "OCEAN_OLLAMA_MODELS",
+        "OCEAN_OLLAMA_BASE_URL",
+        "http://127.0.0.1:11434/v1",
+    ),
+    (
+        ProviderId::LlamaCpp,
+        "OCEAN_LLAMA_CPP_MODELS",
+        "OCEAN_LLAMA_CPP_BASE_URL",
+        "http://127.0.0.1:8080/v1",
+    ),
+];
+
+fn local_model_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control())
+}
+
+fn qualified_local_model(spec: &str) -> Option<(&str, &str)> {
+    let (provider, name) = spec.split_once('/')?;
+    LOCAL_PROVIDERS
+        .iter()
+        .any(|(id, _, _, _)| id.as_str() == provider)
+        .then_some((provider, name))
+}
+
+fn local_model_routes(env: &ProviderEnv) -> Vec<ModelRoute> {
+    let mut routes = Vec::new();
+    for (provider, models_var, _, _) in LOCAL_PROVIDERS {
+        let mut seen = std::collections::BTreeSet::new();
+        for name in env
+            .get(models_var)
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+        {
+            if local_model_name(name) && seen.insert(name) {
+                routes.push(ModelRoute {
+                    id: format!("{}/{name}", provider.as_str()),
+                    model_id: name.into(),
+                    provider: provider.as_str().into(),
+                    label: format!("{name} ({})", provider.as_str()),
+                    ready: false,
+                    effort_levels: Vec::new(),
+                    aliases: Vec::new(),
+                });
+            }
+        }
+    }
+    routes
 }
 
 /// Source label for a resolved credential. Never contains the credential value.
@@ -564,6 +624,10 @@ pub fn fallback_candidates(
     env: &ProviderEnv,
     exclude_provider: &ProviderId,
 ) -> Vec<ProviderConfig> {
+    // An unavailable local service must never send its session history to a hosted model.
+    if matches!(exclude_provider, ProviderId::Ollama | ProviderId::LlamaCpp) {
+        return Vec::new();
+    }
     let mut out: Vec<ProviderConfig> = Vec::new();
     for alias in fallback_order(env) {
         // Resolve this alias as if it were the selected model: same env, so the
@@ -1041,6 +1105,15 @@ pub fn catalog_model(spec: &str) -> Option<KnownModel> {
             label: route.label,
         })
         .or_else(|| chatgpt_account_model(spec))
+        .or_else(|| {
+            let (provider, name) =
+                qualified_local_model(spec).filter(|(_, name)| local_model_name(name))?;
+            Some(KnownModel {
+                id: name.into(),
+                provider: provider.into(),
+                label: name.into(),
+            })
+        })
 }
 
 /// ChatGPT-plan exposes an account-scoped catalog, so newly listed slugs
@@ -1065,6 +1138,7 @@ pub fn model_routes_with_readiness(env: &ProviderEnv) -> Vec<ModelRoute> {
     let mut readiness = BTreeMap::new();
     model_routes()
         .into_iter()
+        .chain(local_model_routes(env))
         .map(|mut route| {
             route.ready = *readiness.entry(route.provider.clone()).or_insert_with(|| {
                 let mut probe = env.clone();
@@ -1101,6 +1175,19 @@ pub fn resolve_model_selection(env: &ProviderEnv) -> Result<ModelSelection, Prov
             catalog_model(chosen).filter(|route| route.provider == "openai-chatgpt")
         {
             return model_for_explicit_provider(&route.provider, &route.id, env);
+        }
+    }
+    if let Some((provider, model)) = qualified_local_model(chosen) {
+        return model_for_explicit_provider(provider, model, env);
+    }
+    // Model ids are case-sensitive in local backends and may contain slashes.
+    if let Some(provider) = env.get("OCEAN_PROVIDER").map(str::trim) {
+        if !chosen.contains('/')
+            && LOCAL_PROVIDERS
+                .iter()
+                .any(|(id, _, _, _)| id.as_str() == provider)
+        {
+            return model_for_explicit_provider(provider, chosen, env);
         }
     }
     let model = normalize_model_id(chosen);
@@ -1728,6 +1815,23 @@ fn model_for_explicit_provider(
     model: &str,
     env: &ProviderEnv,
 ) -> Result<ModelSelection, ProviderConfigError> {
+    if let Some((id, _, url_var, default_url)) = LOCAL_PROVIDERS
+        .into_iter()
+        .find(|(id, _, _, _)| id.as_str() == provider)
+    {
+        if !local_model_name(model) {
+            return Err(ProviderConfigError::UnknownModel {
+                model: format!("{provider}/{model}"),
+            });
+        }
+        let url = env
+            .get(url_var)
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .unwrap_or(default_url);
+        return Ok(model_selection(id, model, url, 16_384, 2_048));
+    }
+
     match provider {
         "deepseek" => Ok(model_selection(
             ProviderId::DeepSeek,
@@ -2789,6 +2893,39 @@ mod tests {
             .unwrap();
         assert!(sol.effort_levels.iter().any(|level| level == "max"));
         assert!(!sol.ready);
+    }
+
+    #[test]
+    fn configured_local_routes_keep_exact_wire_ids_and_never_fail_over() {
+        let mut env = env(&[
+            ("OCEAN_PROVIDER", "openai"),
+            ("OPENAI_API_KEY", "synthetic-key"),
+            (
+                "OCEAN_OLLAMA_MODELS",
+                " hf.co/Owner/Model:Q4_K_M, , hf.co/Owner/Model:Q4_K_M",
+            ),
+            ("OCEAN_LLAMA_CPP_MODELS", "Seat_C"),
+            ("OCEAN_LLAMA_CPP_BASE_URL", "http://127.0.0.1:8103/v1"),
+        ]);
+        let routes: Vec<_> = model_routes_with_readiness(&env)
+            .into_iter()
+            .filter(|route| matches!(route.provider.as_str(), "ollama" | "llama-cpp"))
+            .collect();
+        assert_eq!(routes.len(), 2);
+        for (route, url) in routes
+            .iter()
+            .zip(["http://127.0.0.1:11434/v1", "http://127.0.0.1:8103/v1"])
+        {
+            assert!(route.ready);
+            assert_eq!(catalog_model(&route.id).unwrap().id, route.model_id);
+            env.vars.insert("OCEAN_MODEL".into(), route.id.clone());
+            let config = resolve_provider_config(&env).unwrap();
+            assert_eq!(config.selection.provider.as_str(), route.provider);
+            assert_eq!(config.selection.model, route.model_id);
+            assert_eq!(config.selection.base_url, url);
+            assert!(config.credential.is_none());
+            assert!(fallback_candidates(&env, &config.selection.provider).is_empty());
+        }
     }
 
     #[test]

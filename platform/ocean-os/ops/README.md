@@ -1,5 +1,29 @@
 # Ocean OS — Ops
 
+## Local model sessions
+
+Configure local models in the **Ocean daemon** environment. Each list takes
+comma-separated backend model names, including tags. The two servers use
+OpenAI-compatible Chat Completions streaming. Ocean stores provider-qualified
+IDs in the normal session config and owns the conversation history and tool
+permissions. Local provider failures stay in that session without hosted
+failover. These routes use a 16,384-token context budget and a 2,048-token
+output cap in Ocean.
+
+| Provider | Picker model list | Base URL override | Default base URL |
+|---|---|---|---|
+| Ollama | `OCEAN_OLLAMA_MODELS` | `OCEAN_OLLAMA_BASE_URL` | `http://127.0.0.1:11434/v1` |
+| llama.cpp | `OCEAN_LLAMA_CPP_MODELS` | `OCEAN_LLAMA_CPP_BASE_URL` | `http://127.0.0.1:8080/v1` |
+
+Add these variables to the daemon environment, then open a normal Ocean session
+and select the provider-qualified model in the picker. Example configuration:
+
+```sh
+export OCEAN_OLLAMA_MODELS=model:tag
+export OCEAN_LLAMA_CPP_MODELS=local-model
+export OCEAN_LLAMA_CPP_BASE_URL=http://127.0.0.1:8080/v1
+```
+
 ## ocean-daemon is supervised by launchd (OCEAN-253)
 
 The **daemon** (`crates/ocean-daemon`, built to `target/release/ocean-daemon`) is

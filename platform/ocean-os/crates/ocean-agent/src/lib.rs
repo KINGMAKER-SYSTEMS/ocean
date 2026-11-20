@@ -4314,6 +4314,8 @@ fn model_from_provider_config(config: &ProviderConfig) -> anyhow::Result<Model> 
         }
         ProviderId::DeepSeek
         | ProviderId::OpenAiCompatible
+        | ProviderId::Ollama
+        | ProviderId::LlamaCpp
         | ProviderId::MiniMax
         | ProviderId::Kimi
         | ProviderId::Fake => Ok(Model::openai_compat(
@@ -4616,7 +4618,11 @@ fn should_strip_assistant_thinking(provider: &ProviderId, model: &str) -> bool {
     // cross-provider privacy drop still holds on that route.
     matches!(
         provider,
-        ProviderId::DeepSeek | ProviderId::OpenAiCompatible | ProviderId::MiniMax
+        ProviderId::DeepSeek
+            | ProviderId::OpenAiCompatible
+            | ProviderId::MiniMax
+            | ProviderId::Ollama
+            | ProviderId::LlamaCpp
     ) || (*provider == ProviderId::OpenAi && !ocean_providers::openai_uses_responses(model))
         || (*provider == ProviderId::Kimi && model != "kimi-k3")
 }
