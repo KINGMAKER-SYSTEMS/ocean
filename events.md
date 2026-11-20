@@ -2864,3 +2864,14 @@ terminal classification, and streamed partial output when a later provider
 round fails. Preserve successful max-round synthesis and keep a recent GLM
 user instruction when it fits the trimming margin. Validated with agent
 partial-output, core/CLI, and runtime integration tests.
+
+_________________________________________________________________________________
+time: [14:00] [20-11-26]
+agent: [Codex desktop]
+worktree: [codex/port-team-manager]
+type: [feature-request]
+area: [backend]
+
+Ported the public Team Manager card-envelope codec and transcript projector
+with byte fixtures and replay tests. The projection remains independent of
+transport and durability. Locked board tests and warning-denied Clippy passed.
