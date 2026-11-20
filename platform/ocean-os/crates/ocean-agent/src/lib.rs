@@ -2849,7 +2849,11 @@ impl AgentRuntime {
         }
         let mut cfg = AgentConfig::new(snapshot.model.clone(), system_prompt)
             .with_tools(tools)
-            .with_max_turns(req.max_turns.unwrap_or(32))
+            .with_max_turns(
+                req.max_turns
+                    .or_else(|| positive_env_u32("OCEAN_AGENT_MAX_TURNS"))
+                    .unwrap_or(AgentConfig::DEFAULT_MAX_TURNS),
+            )
             .with_turn_timeout_secs(turn_timeout_secs_from_env())
             .with_permission(permission)
             // Stamp the session onto every runtime AgentEvent so the daemon SSE
@@ -3304,19 +3308,17 @@ fn take_turn_failure(err: anyhow::Error, usage: &mut TokenUsage) -> anyhow::Erro
     }
 }
 
-/// Per-turn timeout (seconds) from the environment.
-///
-/// Reads `OCEAN_TURN_TIMEOUT_SECS`. Returns `Some(n)` for a valid positive
-/// integer, and `None` when the variable is unset, empty, unparseable, or `0`
-/// — in which case [`AgentConfig`] falls back to
-/// [`AgentConfig::DEFAULT_TURN_TIMEOUT_SECS`] (300s). A `0` is treated as
-/// "unset" rather than "deadline of zero" so a stray value can never make every
-/// turn time out instantly.
+/// Per-provider-round timeout with the historical environment alias as fallback.
 fn turn_timeout_secs_from_env() -> Option<u32> {
-    std::env::var("OCEAN_TURN_TIMEOUT_SECS")
+    positive_env_u32("OCEAN_PROVIDER_ROUND_TIMEOUT_SECS")
+        .or_else(|| positive_env_u32("OCEAN_TURN_TIMEOUT_SECS"))
+}
+
+fn positive_env_u32(name: &str) -> Option<u32> {
+    std::env::var(name)
         .ok()
-        .and_then(|raw| raw.trim().parse::<u32>().ok())
-        .filter(|secs| *secs > 0)
+        .and_then(|raw| raw.trim().parse().ok())
+        .filter(|value| *value > 0)
 }
 
 #[derive(Clone, Debug)]

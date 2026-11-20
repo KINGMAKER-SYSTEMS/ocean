@@ -210,6 +210,14 @@ const WAKE_DELIVERED: i32 = 0;
 const WAKE_FAILED: i32 = 1;
 const WAKE_DEFERRED: i32 = 3;
 
+fn wake_ack_timeout(raw: Option<&str>) -> Duration {
+    Duration::from_secs(
+        raw.and_then(|value| value.trim().parse().ok())
+            .filter(|seconds| *seconds > 0)
+            .unwrap_or(300),
+    )
+}
+
 struct WakeArgs {
     session_id: Option<String>,
     session_file: Option<PathBuf>,
@@ -299,7 +307,14 @@ async fn wake_once(daemon_url: &str, args: WakeArgs) -> Result<i32> {
         chrono::Utc::now().to_rfc3339(),
         session_id.as_deref().unwrap_or("<new>")
     );
-    let response = client.post(&url).json(&body).send().await?;
+    // The admission ACK can take longer than the health probe.
+    let ack_timeout = std::env::var("OCEAN_HEARTBEAT_TIMEOUT_SECS").ok();
+    let response = client
+        .post(&url)
+        .timeout(wake_ack_timeout(ack_timeout.as_deref()))
+        .json(&body)
+        .send()
+        .await?;
     // Backpressure is a defer, not a failure: the daemon sheds load with 429
     // and an honest busy body; the caller's gate stays open for a retry.
     if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
@@ -666,4 +681,18 @@ fn launchd_plist(
         stdout,
         stderr
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wake_ack_timeout_defaults_and_accepts_positive_overrides() {
+        assert_eq!(wake_ack_timeout(None), Duration::from_secs(300));
+        assert_eq!(wake_ack_timeout(Some(" 45 ")), Duration::from_secs(45));
+        for invalid in ["0", "", "invalid"] {
+            assert_eq!(wake_ack_timeout(Some(invalid)), Duration::from_secs(300));
+        }
+    }
 }

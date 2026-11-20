@@ -1416,35 +1416,47 @@ async fn run_one(
         tool_call_id = %id
     );
     match tool {
-        Some(tool) => match tool.execute_for_run(&id, args).instrument(tool_span).await {
-            Ok(execution) => {
-                let (
-                    AgentToolResult {
+        Some(tool) => {
+            let deadline = tool.execute_timeout(&args);
+            let result = tokio::time::timeout(
+                deadline,
+                tool.execute_for_run(&id, args).instrument(tool_span),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                tracing::warn!(tool_name = %name, tool_call_id = %id, ?deadline, "tool execution timed out");
+                Err(format!("execution exceeded its {deadline:?} deadline"))
+            });
+            match result {
+                Ok(execution) => {
+                    let (
+                        AgentToolResult {
+                            content,
+                            details,
+                            terminate,
+                            side_effects,
+                        },
+                        projection,
+                    ) = execution.into_parts();
+                    Outcome {
                         content,
-                        details,
+                        is_error: false,
                         terminate,
                         side_effects,
-                    },
-                    projection,
-                ) = execution.into_parts();
-                Outcome {
-                    content,
-                    is_error: false,
-                    terminate,
-                    side_effects,
-                    details,
-                    projection,
+                        details,
+                        projection,
+                    }
                 }
+                Err(e) => Outcome {
+                    content: vec![Content::text(format!("tool error: {e}"))],
+                    is_error: true,
+                    terminate: false,
+                    side_effects: Vec::new(),
+                    details: Value::Null,
+                    projection: None,
+                },
             }
-            Err(e) => Outcome {
-                content: vec![Content::text(format!("tool error: {e}"))],
-                is_error: true,
-                terminate: false,
-                side_effects: Vec::new(),
-                details: Value::Null,
-                projection: None,
-            },
-        },
+        }
         None => Outcome {
             content: vec![Content::text(format!("unknown tool: {name}"))],
             is_error: true,
@@ -2000,6 +2012,50 @@ mod tests {
             is_error: false,
             timestamp: 0,
         })
+    }
+
+    #[tokio::test]
+    async fn hung_tool_returns_an_error_at_its_deadline() {
+        struct HungTool;
+
+        #[async_trait::async_trait]
+        impl AgentTool for HungTool {
+            fn name(&self) -> &str {
+                "hung"
+            }
+            fn description(&self) -> &str {
+                "fixture"
+            }
+            fn parameters(&self) -> Value {
+                serde_json::json!({})
+            }
+            fn execute_timeout(&self, _: &Value) -> std::time::Duration {
+                std::time::Duration::from_millis(5)
+            }
+            async fn execute(
+                &self,
+                _: &str,
+                _: Value,
+            ) -> std::result::Result<AgentToolResult, String> {
+                std::future::pending().await
+            }
+        }
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            run_one(
+                Some(Arc::new(HungTool)),
+                "call".into(),
+                "hung".into(),
+                Value::Null,
+                &tracing::Span::none(),
+            ),
+        )
+        .await
+        .expect("tool deadline must return control to the loop");
+        assert!(outcome.is_error);
+        assert!(!outcome.terminate);
+        assert!(outcome.content[0].as_text().unwrap().contains("exceeded"));
     }
 
     #[test]

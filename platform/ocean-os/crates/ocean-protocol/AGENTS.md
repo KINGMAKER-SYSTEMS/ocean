@@ -12,6 +12,7 @@ This crate owns the multi-provider LLM wire protocol layer for Anthropic, OpenAI
 
 ## Local Contracts
 
+- Positive OCEAN_PROVIDER_CONNECT_SECS and OCEAN_PROVIDER_STALL_SECS override the streaming transport deadlines. Keep the historical defaults when unset or invalid.
 - GLM Chat Completions replay uses nonempty string content for text messages,
   omits private reasoning and visible assistant text alongside tool calls, and
   preserves image parts on vision routes. Add a user continuation if trimming

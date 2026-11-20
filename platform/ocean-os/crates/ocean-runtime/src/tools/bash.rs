@@ -208,6 +208,15 @@ async fn read_capped<R: tokio::io::AsyncRead + Unpin>(mut stream: R) -> (Vec<u8>
 
 #[async_trait]
 impl AgentTool for BashTool {
+    fn execute_timeout(&self, args: &Value) -> std::time::Duration {
+        Duration::from_millis(
+            args.get("timeout_ms")
+                .and_then(Value::as_u64)
+                .unwrap_or(120_000),
+        )
+        .saturating_add(Duration::from_secs(30))
+    }
+
     fn name(&self) -> &str {
         "bash"
     }

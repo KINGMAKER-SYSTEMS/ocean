@@ -2838,3 +2838,16 @@ catalog. Keep exact wire model IDs in requests and saved pins, recognize
 operator-configured models in the picker, and keep failed local turns from
 rerouting to a hosted provider. Validated with locked provider and protocol
 tests plus a daemon build.
+
+_________________________________________________________________________________
+time: [13:51] [20-11-26]
+agent: [Codex desktop]
+worktree: [codex/port-admission-reliability]
+type: [bug report]
+area: [backend]
+
+Ported the fork's turn admission, OAuth refresh, heartbeat ACK, tool deadline,
+and provider timeout fixes. Keep the admitted turn alive after disconnect and
+move session/project intake reads off async workers. Maintain Kingmaker's
+permission, catalog, and provider compatibility. Focused disconnect,
+refresh, heartbeat, hung-tool, and streaming timeout regressions passed.

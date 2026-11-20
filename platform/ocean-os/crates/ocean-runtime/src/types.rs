@@ -246,6 +246,17 @@ pub trait AgentTool: Send + Sync + Any {
     fn concurrency(&self) -> Concurrency {
         Concurrency::Exclusive
     }
+    /// Wall-clock limit on execution after permission is granted.
+    fn execute_timeout(&self, _args: &Value) -> std::time::Duration {
+        let raw = std::env::var("OCEAN_TOOL_TIMEOUT_SECS").ok();
+        std::time::Duration::from_secs(
+            raw.as_deref()
+                .and_then(|value| value.trim().parse().ok())
+                .filter(|seconds| *seconds > 0)
+                .unwrap_or(600),
+        )
+    }
+
     async fn execute(&self, tool_call_id: &str, args: Value) -> Result<AgentToolResult, String>;
 
     /// The agent loop's single execution entry point. The default runs
@@ -409,13 +420,14 @@ pub struct AgentConfig {
 impl AgentConfig {
     /// Default total per-turn deadline when `turn_timeout_secs` is `None`.
     pub const DEFAULT_TURN_TIMEOUT_SECS: u32 = 300;
+    pub const DEFAULT_MAX_TURNS: u32 = 32;
 
     pub fn new(model: Model, system_prompt: impl Into<String>) -> Self {
         Self {
             model,
             thinking_level: None,
             stream_options: StreamOptions::default(),
-            max_turns: 32,
+            max_turns: Self::DEFAULT_MAX_TURNS,
             turn_timeout_secs: None,
             tools: Vec::new(),
             system_prompt: system_prompt.into(),

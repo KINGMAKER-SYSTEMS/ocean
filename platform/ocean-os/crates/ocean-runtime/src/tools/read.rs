@@ -131,6 +131,10 @@ impl ReadTool {
 
 #[async_trait]
 impl AgentTool for ReadTool {
+    fn execute_timeout(&self, _args: &Value) -> std::time::Duration {
+        std::time::Duration::from_secs(120)
+    }
+
     fn name(&self) -> &str {
         "read"
     }

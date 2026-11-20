@@ -90,6 +90,8 @@ fn state() -> &'static tokio::sync::Mutex<RefreshState> {
     })
 }
 
+const REFRESH_CALL_DEADLINE: Duration = Duration::from_secs(20);
+
 /// Refresh every expiring refreshable block in `auth_file`. Cheap no-op when
 /// the file is absent or every block is fresh. Never returns an error — a
 /// refresh failure degrades to today's behavior (expired block → missing
@@ -105,12 +107,14 @@ pub async fn ensure_provider_fresh(auth_file: &Path, provider_block: &str) {
 }
 
 async fn ensure_fresh_blocks(auth_file: &Path, provider_block: Option<&str>) {
-    if !auth_file.exists() {
+    let Ok(mut guard) = state().try_lock() else {
+        tracing::debug!("OAuth refresh in flight; proceeding with on-disk credentials");
         return;
-    }
-    let mut guard = state().lock().await;
+    };
 
-    let Ok(raw) = std::fs::read_to_string(auth_file) else {
+    let path = auth_file.to_path_buf();
+    let Ok(Ok(raw)) = tokio::task::spawn_blocking(move || std::fs::read_to_string(path)).await
+    else {
         return;
     };
     let Ok(json) = serde_json::from_str::<Value>(&raw) else {
@@ -143,17 +147,26 @@ async fn ensure_fresh_blocks(auth_file: &Path, provider_block: Option<&str>) {
         if client_id.is_empty() {
             continue;
         }
-        let result = if def.block == "openai-chatgpt" {
-            ocean_protocol::oauth::refresh_token_with_resource(
-                &endpoint,
-                &client_id,
-                &refresh,
-                "https://api.openai.com/v1",
-            )
-            .await
-        } else {
-            ocean_protocol::oauth::refresh_token(&endpoint, &client_id, &refresh).await
+        let exchange = async {
+            if def.block == "openai-chatgpt" {
+                ocean_protocol::oauth::refresh_token_with_resource(
+                    &endpoint,
+                    &client_id,
+                    &refresh,
+                    "https://api.openai.com/v1",
+                )
+                .await
+            } else {
+                ocean_protocol::oauth::refresh_token(&endpoint, &client_id, &refresh).await
+            }
         };
+        let result = tokio::time::timeout(REFRESH_CALL_DEADLINE, exchange)
+            .await
+            .unwrap_or_else(|_| {
+                Err(ocean_protocol::Error::InvalidResponse(
+                    "token refresh exceeded its deadline".into(),
+                ))
+            });
         match result {
             Ok(fresh) => {
                 refreshed.push(Refreshed {
@@ -384,6 +397,18 @@ fn unix_secs() -> i64 {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn in_flight_refresh_never_queues_other_turns() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("auth.json");
+        std::fs::write(&path, "{}").unwrap();
+
+        let _held = state().lock().await;
+        tokio::time::timeout(Duration::from_millis(250), ensure_fresh(&path))
+            .await
+            .expect("a busy refresh must not delay another turn");
+    }
 
     #[test]
     fn needs_refresh_only_for_expiring_oauth_blocks_with_refresh_tokens() {

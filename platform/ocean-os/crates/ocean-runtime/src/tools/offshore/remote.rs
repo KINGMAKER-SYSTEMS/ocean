@@ -59,6 +59,10 @@ pub struct OffshoreDispatchTool {
 
 #[async_trait]
 impl AgentTool for OffshoreDispatchTool {
+    fn execute_timeout(&self, _args: &Value) -> std::time::Duration {
+        Duration::from_secs(self.ctx.cfg.turn_timeout_secs).saturating_add(Duration::from_secs(60))
+    }
+
     fn name(&self) -> &str {
         "offshore_dispatch"
     }
