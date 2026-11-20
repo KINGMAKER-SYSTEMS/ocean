@@ -12,6 +12,10 @@ This crate owns the multi-provider LLM wire protocol layer for Anthropic, OpenAI
 
 ## Local Contracts
 
+- GLM Chat Completions replay uses nonempty string content for text messages,
+  omits private reasoning and visible assistant text alongside tool calls, and
+  preserves image parts on vision routes. Add a user continuation if trimming
+  removed every user message.
 - Keep provider-specific behavior isolated behind protocol abstractions.
 - Do not leak provider quirks into shared `ocean-core` types unless the shared contract intentionally changes.
 - Treat streaming event shape changes as compatibility-sensitive.
