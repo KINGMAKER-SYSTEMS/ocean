@@ -62,6 +62,7 @@ The workspace currently contains 30 Rust packages.
 | `ocean-agent` | Sessions/history, prompt assembly, capability/runtime facade and opaque admitted Room memory/history/resource tools | Provider wire encoding; client UI; daemon admission and credentials | `ocean-agent/src/lib.rs`, `ocean-agent/src/session/mod.rs`, `ocean-agent/src/system_prompt.rs`, `ocean-agent/src/memory_tools.rs`, `ocean-agent/src/room_history.rs`, `ocean-agent/src/room_resources.rs` | `ocean-agent/AGENTS.md` | `cargo test -p ocean-agent` |
 | `ocean-agent-sdk` | Product session/turn/event/surface vocabulary (including revisioned session-config changes and provider-reported turn token footprints) and Ocean Buddy vocabulary plus strict duplicate-rejecting metadata-only `ocean.extension.service` v1 DTOs, bounded SemVer daemon identity, fixed parser diagnostics, and NDJSON allocation/byte bounds | Daemon execution, lifecycle adaptation, transport, and persistence | `ocean-agent-sdk/src/lib.rs`, `ocean-agent-sdk/src/buddy.rs`, `ocean-agent-sdk/src/extension_lifecycle.rs` | — | `cargo test -p ocean-agent-sdk && cargo clippy -p ocean-agent-sdk --all-targets -- -D warnings` |
 | `ocean-ast` | Standalone tree-sitter read-time structural summarization | Handoff extraction; hashline mutation; live runtime wiring | `ocean-ast/src/lib.rs::summarize_code` | — | `cargo test -p ocean-ast` |
+| `ocean-board` | Card envelope codec and deterministic transcript projection | Room authority and rendering | `ocean-board/src/lib.rs` | `ocean-board/AGENTS.md` | `cargo test -p ocean-board` |
 | `ocean-browser` | Legacy Chrome DevTools handle, launch, tabs, perception, network/downloads (feature-gated, default-off `legacy-chromium`; replaced by the OceanWebKit browser host) | Runtime permission policy and tool registration | `ocean-browser/src/lib.rs` | — | `cargo test -p ocean-browser --features legacy-chromium` |
 | `ocean-call` | PSTN/Twilio/LiveKit audio and call-intelligence pipeline | Daemon HTTP route ownership | `ocean-call/src/lib.rs`, `session_task.rs` | — | `cargo test -p ocean-call` |
 | `ocean-cli` | Thin daemon command/prompt/session client | Agent loop and session persistence | `ocean-cli/src/main.rs` | — | `cargo test -p ocean-cli` |
@@ -92,6 +93,7 @@ The workspace currently contains 30 Rust packages.
 ## Non-default Members
 
 - `ocean-ast` is standalone and not yet wired into the live runtime. It stays outside `default-members` to avoid adding its multi-grammar compile cost to ordinary default builds; validate it explicitly or through `--workspace`.
+- `ocean-board` is a pure transcript projector outside the default build until the room and TUI integration lands. Validate it with `cargo test -p ocean-board`.
 - `ocean-minimizer` is a standalone, dependency-free M1 library and is not yet wired into command capture or a harness profile. It stays outside `default-members` so ordinary builds do not imply live minimization; validate it explicitly or through `--workspace`.
 - `ocean-walker` is a standalone M1 traversal/cache library used by standalone `ocean-search` but not wired into live runtime grep/glob. It stays outside `default-members` so ordinary builds do not imply production filesystem-tool adoption; validate it explicitly or through `--workspace`.
 - `ocean-search` is a standalone M1 typed-search library over trusted roots and is not wired into runtime grep/glob, capabilities, profiles, or sessions. It stays outside `default-members` so ordinary builds do not imply live search adoption; validate it explicitly or through `--workspace`.
@@ -128,6 +130,7 @@ The workspace currently contains 30 Rust packages.
 
 ## Child devlog Index
 
+- `ocean-board/` — room transcript card projection → `ocean-board/AGENTS.md`
 - `ocean-agent/` — session/history layer and system prompt loading → `ocean-agent/AGENTS.md`
 - `ocean-core/` — shared protocol types → `ocean-core/AGENTS.md`
 - `ocean-daemon/` — long-running HTTP daemon and API surface → `ocean-daemon/AGENTS.md`

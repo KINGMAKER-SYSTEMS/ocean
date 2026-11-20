@@ -3420,6 +3420,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ocean-board"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ocean-browser"
 version = "0.1.0"
 dependencies = [
