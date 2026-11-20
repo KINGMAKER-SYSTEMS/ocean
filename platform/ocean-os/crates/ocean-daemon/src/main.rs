@@ -7224,6 +7224,9 @@ async fn agent_turn_admission(
         // this turn's wall_ms/ok into the metrics (OCEAN-303).
         drop(in_flight);
         bg_state.metrics.record_turn(res.wall_ms, res.ok);
+        if let Err(error) = bg_state.runtime.record_turn_completed_with_lease(&session_lease, &res) {
+            tracing::warn!(%session_id, %error, "could not persist the last turn outcome");
+        }
         // Wait for the bridge to drain (the sender has been dropped by now).
         let _ = bridge.await;
         // The bridge has drained, so every steer delivery relay for this turn
@@ -12523,6 +12526,8 @@ mod tests {
             reroute_reason: None,
             effective_model: None,
             effective_provider: None,
+            last_turn_status: None,
+            last_turn_error: None,
             config_revision: 0,
             turns: 2,
             title: "fix the thing".into(),
@@ -15011,7 +15016,11 @@ mod tests {
         use std::time::Duration;
 
         let state = capped_turn_state(1);
-        let mut handler = Box::pin(agent_turn(State(state.clone()), Json(sample_agent_turn())));
+        let mut turn = sample_agent_turn();
+        let (created, _, _) = state.runtime.create_session(&turn.cwd, None).unwrap();
+        let session_id = AgentSessionId(created);
+        turn.session_id = Some(session_id);
+        let mut handler = Box::pin(agent_turn(State(state.clone()), Json(turn)));
         poll_fn(|context| {
             assert!(handler.as_mut().poll(context).is_pending());
             Poll::Ready(())
@@ -15035,6 +15044,9 @@ mod tests {
         })
         .await
         .expect("an admitted turn must finish and release its permit after disconnect");
+        let detail = state.runtime.session_detail(core_sid(session_id)).unwrap();
+        assert_eq!(detail.last_turn_status.as_deref(), Some("completed"));
+        assert_eq!(detail.last_turn_error, None);
     }
 
     #[tokio::test]

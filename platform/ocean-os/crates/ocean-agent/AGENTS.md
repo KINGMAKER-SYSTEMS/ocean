@@ -19,6 +19,7 @@ transcripts by session id.
 
 ## Local Contracts
 
+- Persist the latest terminal turn outcome under the same session operation lease. Store the failure classification without retaining raw provider error text.
 - A terminal provider failure returns streamed partial output and accumulated checkpoint usage without replaying the turn.
 - OCEAN_AGENT_MAX_TURNS supplies the default round count. OCEAN_PROVIDER_ROUND_TIMEOUT_SECS takes precedence over the OCEAN_TURN_TIMEOUT_SECS alias.
 - OAuth refresh skips an in-flight refresh and bounds each exchange. Blocking auth-file reads and merge operations stay off async workers.
