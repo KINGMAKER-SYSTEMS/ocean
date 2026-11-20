@@ -297,8 +297,14 @@ async fn wake_once(daemon_url: &str, args: WakeArgs) -> Result<i32> {
     }
     // Per-seat model: the daemon treats an explicit model_id as a hard pin for
     // this turn (a bad alias fails cleanly rather than silently substituting).
-    if let Some(model) = args.model.as_ref() {
-        body["model_id"] = json!(model);
+    if let Some(model) = args.model.as_deref() {
+        match preflight_model(&client, base, model).await {
+            Ok(route) => body["model_id"] = json!(route),
+            Err(error) => {
+                eprintln!("wake: model preflight failed ({error})");
+                return Ok(WAKE_FAILED);
+            }
+        }
     }
 
     let url = format!("{base}/v1/agent/turns");
@@ -436,6 +442,122 @@ async fn wait_for_turn_finished(base: &str, session_id: &str, turn_id: &str) -> 
         }
     }
     anyhow::bail!("event stream ended before turn {turn_id} finished")
+}
+
+#[derive(Deserialize)]
+struct ModelCatalog {
+    #[serde(default)]
+    models: Vec<ModelCatalogEntry>,
+    #[serde(default)]
+    routes: Vec<ModelCatalogEntry>,
+}
+
+#[derive(Deserialize)]
+struct ModelCatalogEntry {
+    id: String,
+    #[serde(default)]
+    aliases: Vec<String>,
+    #[serde(default)]
+    ready: bool,
+}
+
+async fn preflight_model(client: &reqwest::Client, base: &str, model: &str) -> Result<String> {
+    let catalog = client
+        .get(format!("{base}/v1/models"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<ModelCatalog>()
+        .await?;
+    ready_model_route(&catalog, model)
+}
+
+fn ready_model_route(catalog: &ModelCatalog, model: &str) -> Result<String> {
+    let choices = if catalog.routes.is_empty() {
+        &catalog.models
+    } else {
+        &catalog.routes
+    };
+    let matched = choices.iter().find(|entry| entry.id == model).or_else(|| {
+        choices
+            .iter()
+            .find(|entry| entry.aliases.iter().any(|alias| alias == model))
+    });
+    if let Some(entry) = matched {
+        if entry.ready {
+            return Ok(entry.id.clone());
+        }
+        let ready: Vec<_> = choices
+            .iter()
+            .filter(|entry| entry.ready)
+            .map(|entry| entry.id.as_str())
+            .collect();
+        if ready.is_empty() {
+            anyhow::bail!("model `{model}` is unavailable and no models are ready");
+        }
+        anyhow::bail!(
+            "model `{model}` is unavailable. Ready models: {}",
+            ready.join(", ")
+        );
+    }
+    let valid: Vec<_> = choices.iter().map(|entry| entry.id.as_str()).collect();
+    if let Some(nearest) = nearest_model(model, &valid) {
+        anyhow::bail!("unknown model `{model}`. Did you mean `{nearest}`?");
+    }
+    if valid.is_empty() {
+        anyhow::bail!("model `{model}`: daemon returned an empty model catalog");
+    }
+    anyhow::bail!(
+        "unknown model `{model}`. Valid models: {}",
+        valid.join(", ")
+    );
+}
+
+fn nearest_model<'a>(query: &str, candidates: &[&'a str]) -> Option<&'a str> {
+    let q = query.to_lowercase();
+    candidates
+        .iter()
+        .filter_map(|c| {
+            let dist = levenshtein(&q, &c.to_lowercase());
+            let max_len = q.len().max(c.len());
+            // Only suggest if the distance is at most 3/4 the longer length.
+            if max_len > 0 && dist * 4 <= max_len * 3 {
+                Some((dist, *c))
+            } else {
+                None
+            }
+        })
+        .min_by_key(|(d, _)| *d)
+        .map(|(_, c)| c)
+}
+
+/// Levenshtein (edit) distance between two strings.
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    let n = a_chars.len();
+    let m = b_chars.len();
+    if n == 0 {
+        return m;
+    }
+    if m == 0 {
+        return n;
+    }
+    let mut prev: Vec<usize> = (0..=m).collect();
+    let mut curr = vec![0usize; m + 1];
+    for i in 1..=n {
+        curr[0] = i;
+        for j in 1..=m {
+            let cost = if a_chars[i - 1] == b_chars[j - 1] {
+                0
+            } else {
+                1
+            };
+            curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[m]
 }
 
 async fn run_once(daemon_url: &str, path: &Path) -> Result<()> {
@@ -686,6 +808,45 @@ fn launchd_plist(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preflight_prefers_qualified_routes_and_rejects_unready_or_unknown_models() {
+        let catalog: ModelCatalog = serde_json::from_value(json!({
+            "models": [{"id": "legacy-only", "ready": true}],
+            "routes": [
+                {"id": "ollama/example:tag", "ready": true},
+                {"id": "openai/example", "aliases": ["example"], "ready": false},
+                {"id": "kimi/example", "aliases": ["kimi-alias"], "ready": true}
+            ],
+        }))
+        .unwrap();
+        assert_eq!(
+            ready_model_route(&catalog, "ollama/example:tag").unwrap(),
+            "ollama/example:tag"
+        );
+        assert_eq!(
+            ready_model_route(&catalog, "kimi-alias").unwrap(),
+            "kimi/example"
+        );
+        assert!(ready_model_route(&catalog, "example")
+            .unwrap_err()
+            .to_string()
+            .contains("unavailable"));
+        assert!(ready_model_route(&catalog, "ollama/exampl:tag")
+            .unwrap_err()
+            .to_string()
+            .contains("ollama/example:tag"));
+        assert!(ready_model_route(&catalog, "legacy-only").is_err());
+
+        let legacy: ModelCatalog = serde_json::from_value(json!({
+            "models": [{"id": "legacy-only", "ready": true}]
+        }))
+        .unwrap();
+        assert_eq!(
+            ready_model_route(&legacy, "legacy-only").unwrap(),
+            "legacy-only"
+        );
+    }
 
     #[test]
     fn wake_ack_timeout_defaults_and_accepts_positive_overrides() {

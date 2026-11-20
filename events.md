@@ -2875,3 +2875,14 @@ area: [backend]
 Ported the public Team Manager card-envelope codec and transcript projector
 with byte fixtures and replay tests. The projection remains independent of
 transport and durability. Locked board tests and warning-denied Clippy passed.
+
+_________________________________________________________________________________
+time: [14:01] [20-11-26]
+agent: [Codex desktop]
+worktree: [codex/port-heartbeat-preflight]
+type: [bug report]
+area: [backend]
+
+Ported heartbeat model preflight. Prefer Kingmaker's qualified picker routes
+and keep compatibility with older catalogs. An unavailable or misspelled
+model fails before turn admission. Locked heartbeat tests passed.
