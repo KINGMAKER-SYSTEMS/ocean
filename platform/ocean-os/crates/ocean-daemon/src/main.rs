@@ -2059,6 +2059,14 @@ async fn events(
     Sse::new(stream).keep_alive(KeepAlive::new().interval(SSE_KEEPALIVE_INTERVAL))
 }
 
+fn prompt_timeout_from_env() -> Option<std::time::Duration> {
+    std::env::var("OCEAN_PROMPT_TIMEOUT_SECS")
+        .ok()
+        .and_then(|raw| raw.trim().parse().ok())
+        .filter(|seconds| *seconds > 0)
+        .map(std::time::Duration::from_secs)
+}
+
 async fn prompt(
     State(state): State<AppState>,
     Json(mut req): Json<PromptRequest>,
@@ -2177,13 +2185,42 @@ async fn prompt(
         request_id,
         req.session_id,
         permission_mode,
-        cancel,
+        cancel.clone(),
         req.decision_token.clone(),
     )
     .with_display_title(Some(display_title));
-    let res = match session_lease.as_ref() {
-        Some(lease) => state.runtime.prompt_with_lease(req, control, lease).await,
-        None => state.runtime.prompt(req, control).await,
+    let session_id = req.session_id;
+    let cwd = req.cwd.clone();
+    let started = std::time::Instant::now();
+    let run = async {
+        match session_lease.as_ref() {
+            Some(lease) => state.runtime.prompt_with_lease(req, control, lease).await,
+            None => state.runtime.prompt(req, control).await,
+        }
+    };
+    let (status, res) = if let Some(deadline) = prompt_timeout_from_env() {
+        match tokio::time::timeout(deadline, run).await {
+            Ok(res) => (StatusCode::OK, res),
+            Err(_) => {
+                cancel.cancel();
+                (
+                    StatusCode::REQUEST_TIMEOUT,
+                    ocean_core::PromptResponse {
+                        ok: false,
+                        request_id: Some(request_id),
+                        session_id,
+                        code: Some(408),
+                        wall_ms: started.elapsed().as_millis() as u64,
+                        stdout: String::new(),
+                        stderr: format!("prompt exceeded its {deadline:?} deadline"),
+                        cwd,
+                        usage: ocean_core::TokenUsage::default(),
+                    },
+                )
+            }
+        }
+    } else {
+        (StatusCode::OK, run.await)
     };
     // Legacy `/v1/prompt` turn: no agent-bus rail, so no agent-bus terminal frame.
     record_prompt_result(&state, request_id, &res, None, None).await;
@@ -2191,7 +2228,7 @@ async fn prompt(
         emit_session_changed(&state.agent_events, AgentSessionId(session_id));
     }
 
-    (StatusCode::OK, Json(res))
+    (status, Json(res))
 }
 
 async fn create_request(
@@ -6183,6 +6220,69 @@ async fn agent_turn(
     State(state): State<AppState>,
     Json(req): Json<AgentTurnRequest>,
 ) -> (StatusCode, Json<AgentTurnResponse>) {
+    // Reserve capacity before detaching admission. Disconnecting only drops
+    // the wait for the ACK; the daemon still owns admitted work.
+    let turn_permit = match state.turn_limiter.clone().try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            let turn_id = AgentTurnId::new_v4();
+            tracing::warn!(
+                limit = state.turn_limiter.available_permits(),
+                "agent_turn: at concurrency cap; rejecting turn with 429 (OCEAN-304)"
+            );
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(AgentTurnResponse {
+                    ok: false,
+                    turn_id,
+                    session_id: req.session_id.unwrap_or_else(AgentSessionId::new_v4),
+                    status: AgentTurnStatus::Failed,
+                    event_id_prefix: String::new(),
+                    error: Some(
+                        "daemon at concurrent-turn capacity; busy, try again shortly".to_string(),
+                    ),
+                    output_tokens: None,
+                    input_tokens: None,
+                    cache_read_tokens: None,
+                    tokens_per_second: None,
+                    context_usage: None,
+                    wall_ms: None,
+                }),
+            );
+        }
+    };
+
+    let session_id = req.session_id;
+    match tokio::spawn(agent_turn_admission(state, req, turn_permit)).await {
+        Ok(response) => response,
+        Err(error) => {
+            tracing::error!(%error, "turn admission task failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(AgentTurnResponse {
+                    ok: false,
+                    turn_id: AgentTurnId::new_v4(),
+                    session_id: session_id.unwrap_or_else(AgentSessionId::new_v4),
+                    status: AgentTurnStatus::Failed,
+                    event_id_prefix: String::new(),
+                    error: Some("turn admission failed".into()),
+                    output_tokens: None,
+                    input_tokens: None,
+                    cache_read_tokens: None,
+                    tokens_per_second: None,
+                    context_usage: None,
+                    wall_ms: None,
+                }),
+            )
+        }
+    }
+}
+
+async fn agent_turn_admission(
+    state: AppState,
+    req: AgentTurnRequest,
+    _turn_permit: tokio::sync::OwnedSemaphorePermit,
+) -> (StatusCode, Json<AgentTurnResponse>) {
     let AgentTurnRequest {
         session_id,
         prompt,
@@ -6205,46 +6305,6 @@ async fn agent_turn(
         advisor: advisor_ctl,
     } = req;
 
-    // OCEAN-304: backpressure. Take a turn permit BEFORE any work (cwd
-    // resolution, longhouse consult, the provider call). The pool caps
-    // concurrently-running turns; when it's exhausted we reject *immediately*
-    // with 429 instead of queueing or spawning, so a burst / runaway loop gets
-    // fast backpressure and can't fan out into unbounded concurrent provider
-    // calls. `_turn_permit` is held for the rest of the handler — `agent_turn`
-    // runs its turn inline (it `.await`s `runtime.prompt` directly), so the
-    // permit covers the whole turn and is released when this scope ends on EVERY
-    // path: success, the BAD_REQUEST/408 early returns below, an error, or a
-    // panic (dropping the owned permit always returns it to the pool).
-    let _turn_permit = match state.turn_limiter.clone().try_acquire_owned() {
-        Ok(permit) => permit,
-        Err(_) => {
-            let turn_id = AgentTurnId::new_v4();
-            tracing::warn!(
-                limit = state.turn_limiter.available_permits(),
-                "agent_turn: at concurrency cap; rejecting turn with 429 (OCEAN-304)"
-            );
-            return (
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(AgentTurnResponse {
-                    ok: false,
-                    turn_id,
-                    session_id: session_id.unwrap_or_else(AgentSessionId::new_v4),
-                    status: AgentTurnStatus::Failed,
-                    event_id_prefix: String::new(),
-                    error: Some(
-                        "daemon at concurrent-turn capacity; busy, try again shortly".to_string(),
-                    ),
-                    output_tokens: None,
-                    input_tokens: None,
-                    cache_read_tokens: None,
-                    tokens_per_second: None,
-                    context_usage: None,
-                    wall_ms: None,
-                }),
-            );
-        }
-    };
-
     // OCEAN-320: `TurnImage` is now `pub use ocean_core::PromptImage as TurnImage`
     // in ocean-agent-sdk, so the `images` binding from the destructured
     // `AgentTurnRequest` is already `Option<Vec<PromptImage>>` — no manual
@@ -6253,7 +6313,11 @@ async fn agent_turn(
     // Resolve the working directory: a non-empty cwd wins; else the project's
     // workspace_root; else an explicit error — never the daemon's own launch
     // dir. This is the fix for "every session reverts to ocean-os".
-    let cwd = match state.runtime.resolve_cwd_for_turn(project_id, &cwd) {
+    let runtime = state.runtime.clone();
+    let cwd = tokio::task::spawn_blocking(move || runtime.resolve_cwd_for_turn(project_id, &cwd))
+        .await
+        .unwrap_or_else(|_| Err(anyhow::anyhow!("workspace resolution failed")));
+    let cwd = match cwd {
         Ok(resolved) => resolved,
         Err(error) => {
             return (
@@ -6364,13 +6428,19 @@ async fn agent_turn(
     let session_model: Option<String> = if is_new_session {
         None
     } else {
-        state
-            .runtime
-            .session_model_config_optional(core_sid(session_id))
-            .ok()
-            .flatten()
-            .filter(|config| config.is_session_pinned(&global_model))
-            .map(|config| config.model_spec())
+        let runtime = state.runtime.clone();
+        let global_model = global_model.clone();
+        tokio::task::spawn_blocking(move || {
+            runtime
+                .session_model_config_optional(core_sid(session_id))
+                .ok()
+                .flatten()
+                .filter(|config| config.is_session_pinned(&global_model))
+                .map(|config| config.model_spec())
+        })
+        .await
+        .ok()
+        .flatten()
     };
 
     // Approval policy is daemon-owned and captured at turn start. The default
@@ -6469,7 +6539,14 @@ async fn agent_turn(
             );
         }
     };
-    let lifecycle_project_id = match resolved_lifecycle_project_id(&state, project_id, &cwd) {
+    let admission_state = state.clone();
+    let workspace = cwd.clone();
+    let lifecycle_project_id = tokio::task::spawn_blocking(move || {
+        resolved_lifecycle_project_id(&admission_state, project_id, &workspace)
+    })
+    .await
+    .unwrap_or_else(|_| Err("project resolution failed".into()));
+    let lifecycle_project_id = match lifecycle_project_id {
         Ok(project_id) => project_id,
         Err(error) => {
             return (
@@ -7841,18 +7918,19 @@ async fn agent_sessions(
     State(state): State<AppState>,
     Query(q): Query<SessionListQuery>,
 ) -> Json<AgentSessionsResponse> {
-    let scope = q.workspace_filter(&state.runtime);
-    // Bounded + paginated (OCEAN-250): page the session list rather than mapping
-    // every historical session into the response on each poll. `next_cursor`/
-    // `has_more` are additive; the `sessions` array shape is unchanged.
-    let page = state
-        .runtime
-        .list_sessions_page(scope.as_deref(), q.cursor.as_deref(), q.limit)
-        .unwrap_or_else(|_| ocean_agent::Page {
-            items: Vec::new(),
-            next_cursor: None,
-            has_more: false,
-        });
+    let runtime = state.runtime.clone();
+    let page = tokio::task::spawn_blocking(move || {
+        let scope = q.workspace_filter(&runtime);
+        runtime.list_sessions_page(scope.as_deref(), q.cursor.as_deref(), q.limit)
+    })
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .unwrap_or_else(|| ocean_agent::Page {
+        items: Vec::new(),
+        next_cursor: None,
+        has_more: false,
+    });
     // Snapshot the live request registry once, then derive each summary's
     // active_turn from it via the same helper the detail endpoint uses
     // (OCEAN-205). This is a cheap status peek — no per-session transcript load.
@@ -14919,6 +14997,40 @@ mod tests {
             client_context: None,
             advisor: None,
         }
+    }
+
+    #[tokio::test]
+    async fn agent_turn_survives_request_future_drop() {
+        use ocean_agent_sdk::extension_lifecycle::LifecycleEventKind;
+        use std::future::{poll_fn, Future};
+        use std::task::Poll;
+        use std::time::Duration;
+
+        let state = capped_turn_state(1);
+        let mut handler = Box::pin(agent_turn(State(state.clone()), Json(sample_agent_turn())));
+        poll_fn(|context| {
+            assert!(handler.as_mut().poll(context).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(handler);
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let finished = state
+                    .extension_lifecycle
+                    .attach()
+                    .retained
+                    .iter()
+                    .any(|event| event.kind == LifecycleEventKind::TurnFinished);
+                if finished && state.turn_limiter.available_permits() == 1 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("an admitted turn must finish and release its permit after disconnect");
     }
 
     #[tokio::test]

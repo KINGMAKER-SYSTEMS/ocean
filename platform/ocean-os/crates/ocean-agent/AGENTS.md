@@ -19,6 +19,8 @@ transcripts by session id.
 
 ## Local Contracts
 
+- OCEAN_AGENT_MAX_TURNS supplies the default round count. OCEAN_PROVIDER_ROUND_TIMEOUT_SECS takes precedence over the OCEAN_TURN_TIMEOUT_SECS alias.
+- OAuth refresh skips an in-flight refresh and bounds each exchange. Blocking auth-file reads and merge operations stay off async workers.
 - Turn-time OAuth refresh performs network work without auth-file custody, then
   fresh-reads under `ocean-providers::lock_auth_file` and merges only the exact
   original provider block/token identity. Removed or changed blocks/files are

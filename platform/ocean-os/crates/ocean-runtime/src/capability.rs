@@ -604,6 +604,10 @@ impl SpillingTool {
 
 #[async_trait]
 impl AgentTool for SpillingTool {
+    fn execute_timeout(&self, args: &Value) -> std::time::Duration {
+        self.inner.execute_timeout(args)
+    }
+
     fn name(&self) -> &str {
         self.inner.name()
     }

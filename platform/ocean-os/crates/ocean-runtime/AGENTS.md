@@ -12,6 +12,7 @@ This crate owns the Ocean agent loop and permission-gated tool execution runtime
 
 ## Local Contracts
 
+- Bound tool execution after permission resolves. A deadline produces an ordinary tool error so the session can continue. Bash, component waits and offshore dispatch preserve their own timeouts plus cleanup grace.
 - A turn that is waiting must say why. Both retry layers — the provider layer's
   request retry (via the `retry_observer` the loop installs on `StreamOptions`)
   and the loop's own clean-round replay — emit `AgentEvent::ProviderRetrying`

@@ -328,6 +328,15 @@ impl ComponentWaitTool {
 
 #[async_trait]
 impl AgentTool for ComponentWaitTool {
+    fn execute_timeout(&self, args: &Value) -> std::time::Duration {
+        std::time::Duration::from_millis(
+            args.get("timeout_ms")
+                .and_then(Value::as_u64)
+                .unwrap_or(60_000),
+        )
+        .saturating_add(std::time::Duration::from_secs(30))
+    }
+
     fn name(&self) -> &str {
         "component_wait"
     }

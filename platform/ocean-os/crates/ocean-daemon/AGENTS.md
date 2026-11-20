@@ -12,6 +12,8 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
 
 ## Local Contracts
 
+- A positive OCEAN_PROMPT_TIMEOUT_SECS bounds the legacy synchronous prompt execution and returns HTTP 408. Unset or invalid values retain the existing unbounded handler behavior.
+- Agent turn intake reserves concurrency capacity before moving admission to a daemon-owned task. A disconnected caller can lose the ACK while the admitted turn continues.
 - `provider_auth.rs` owns operator-only provider login/status/cancel/logout.
   Serialize start, cancel, and logout under an independent per-provider
   operation lease through cancel/bind/register or removal. Retain each attempt's
