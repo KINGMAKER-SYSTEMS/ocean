@@ -432,6 +432,36 @@ fn tool_wire(t: &crate::types::Tool) -> Value {
     })
 }
 
+/// Z.AI requires nonempty content for text messages and rejects visible
+/// assistant text alongside tool calls. Keep image parts for vision models.
+fn normalize_glm_messages(messages: &mut Vec<Value>) {
+    for message in messages.iter_mut() {
+        let Some(message) = message.as_object_mut() else {
+            continue;
+        };
+        message.remove("reasoning_content");
+        message.remove("reasoning");
+        let assistant_tool_call = message.get("role").and_then(Value::as_str) == Some("assistant")
+            && message
+                .get("tool_calls")
+                .and_then(Value::as_array)
+                .is_some_and(|calls| !calls.is_empty());
+        let has_content = match message.get("content") {
+            Some(Value::String(text)) => !text.is_empty(),
+            Some(Value::Array(parts)) => !parts.is_empty(),
+            _ => false,
+        };
+        if assistant_tool_call || !has_content {
+            message.insert("content".into(), json!(" "));
+        }
+    }
+
+    // A long tool loop can outlast the original user message after trimming.
+    if !messages.iter().any(|message| message["role"] == "user") {
+        messages.push(json!({"role": "user", "content": "Continue from the preceding context."}));
+    }
+}
+
 fn convert_messages(
     system_prompt: Option<&str>,
     messages: &[Message],
@@ -797,12 +827,15 @@ fn build_body(model: &Model, context: &Context, options: &StreamOptions) -> Resu
             "dynamic tool declarations exceed the 16-tool/512-KiB request bounds".into(),
         ));
     }
-    let messages = convert_messages(
+    let mut messages = convert_messages(
         context.system_prompt.as_deref(),
         &context.messages,
         model,
         &context.dynamic_tool_declarations,
     );
+    if model.provider == "glm" {
+        normalize_glm_messages(&mut messages);
+    }
     let mut body = json!({
         "model": model.id,
         "messages": messages,
@@ -2574,6 +2607,234 @@ mod tests {
             200_000,
             131_072,
         )
+    }
+
+    #[test]
+    fn glm_tool_history_is_normalized_to_strict_chat_completion_messages() {
+        let messages = vec![
+            Message::user_text("Read the project status and summarize it."),
+            Message::Assistant(AssistantMessage {
+                content: vec![
+                    Content::Thinking {
+                        thinking: "private planning must not be replayed".into(),
+                        thinking_signature: Some("private-signature".into()),
+                    },
+                    Content::text("I will inspect the files before summarizing them."),
+                    Content::ToolCall {
+                        id: "call-read".into(),
+                        name: "read_file".into(),
+                        arguments: serde_json::json!({"path": "STATUS.md"}),
+                    },
+                    Content::ToolCall {
+                        id: "call-git".into(),
+                        name: "git_status".into(),
+                        arguments: serde_json::json!({"short": true}),
+                    },
+                ],
+                api: "openai-completions".into(),
+                provider: "glm".into(),
+                model: "glm-5.3".into(),
+                usage: Usage::default(),
+                stop_reason: StopReason::ToolUse,
+                error_message: None,
+                timestamp: now_ms(),
+            }),
+            Message::ToolResult(crate::types::ToolResultMessage {
+                tool_call_id: "call-read".into(),
+                tool_name: "read_file".into(),
+                content: vec![Content::text("status: green")],
+                is_error: false,
+                timestamp: now_ms(),
+            }),
+            Message::ToolResult(crate::types::ToolResultMessage {
+                tool_call_id: "call-git".into(),
+                tool_name: "git_status".into(),
+                content: vec![Content::text(" M crates/ocean-protocol")],
+                is_error: false,
+                timestamp: now_ms(),
+            }),
+            Message::Assistant(AssistantMessage {
+                content: vec![Content::text("The project status is green.")],
+                api: "openai-completions".into(),
+                provider: "glm".into(),
+                model: "glm-5.3".into(),
+                usage: Usage::default(),
+                stop_reason: StopReason::Stop,
+                error_message: None,
+                timestamp: now_ms(),
+            }),
+        ];
+        let context = Context {
+            system_prompt: Some("You are a concise coding assistant.".into()),
+            messages,
+            ..Default::default()
+        };
+        let body = test_body(&glm_model(), &context, &StreamOptions::default());
+        let wire_messages = body["messages"].as_array().expect("messages array");
+
+        assert_eq!(wire_messages.len(), 6);
+        assert_eq!(wire_messages[0]["role"], "system");
+        assert_eq!(
+            wire_messages[0]["content"],
+            "You are a concise coding assistant."
+        );
+        assert!(
+            wire_messages
+                .iter()
+                .skip(1)
+                .all(|message| message["role"] != "system"),
+            "GLM system message must be first: {wire_messages:?}"
+        );
+
+        let mut previous_role = None;
+        for message in wire_messages {
+            let role = message["role"].as_str().expect("every message has a role");
+            assert!(
+                message["content"].is_string(),
+                "content must be a string: {message}"
+            );
+            assert!(
+                message.get("reasoning_content").is_none(),
+                "GLM must not receive reasoning_content: {message}"
+            );
+            assert!(
+                message.get("reasoning").is_none(),
+                "GLM must not receive reasoning: {message}"
+            );
+            if role != "tool" {
+                assert_ne!(
+                    previous_role,
+                    Some(role),
+                    "GLM must not receive consecutive non-tool roles: {wire_messages:?}"
+                );
+            }
+            previous_role = Some(role);
+
+            let keys: std::collections::BTreeSet<&str> = message
+                .as_object()
+                .expect("message object")
+                .keys()
+                .map(String::as_str)
+                .collect();
+            let expected_keys = match role {
+                "assistant" if message.get("tool_calls").is_some() => {
+                    std::collections::BTreeSet::from(["content", "role", "tool_calls"])
+                }
+                "assistant" | "system" | "user" => {
+                    std::collections::BTreeSet::from(["content", "role"])
+                }
+                "tool" => std::collections::BTreeSet::from(["content", "role", "tool_call_id"]),
+                other => panic!("unexpected role: {other}"),
+            };
+            assert_eq!(
+                keys, expected_keys,
+                "unexpected GLM message keys: {message}"
+            );
+            if role == "tool" {
+                assert!(message["tool_call_id"].is_string());
+                assert!(message.get("name").is_none());
+            }
+        }
+
+        let assistant = &wire_messages[2];
+        assert_eq!(
+            assistant["content"], " ",
+            "GLM assistant tool-call text must be removed and replaced with one space"
+        );
+        let tool_calls = assistant["tool_calls"]
+            .as_array()
+            .expect("assistant tool_calls array");
+        assert_eq!(tool_calls.len(), 2);
+        for (call, (id, name, arguments)) in tool_calls.iter().zip([
+            ("call-read", "read_file", r#"{"path":"STATUS.md"}"#),
+            ("call-git", "git_status", r#"{"short":true}"#),
+        ]) {
+            let call_keys: std::collections::BTreeSet<&str> = call
+                .as_object()
+                .expect("tool call object")
+                .keys()
+                .map(String::as_str)
+                .collect();
+            assert_eq!(
+                call_keys,
+                std::collections::BTreeSet::from(["function", "id", "type"])
+            );
+            assert_eq!(call["id"], id);
+            assert_eq!(call["type"], "function");
+            let function = &call["function"];
+            let function_keys: std::collections::BTreeSet<&str> = function
+                .as_object()
+                .expect("function object")
+                .keys()
+                .map(String::as_str)
+                .collect();
+            assert_eq!(
+                function_keys,
+                std::collections::BTreeSet::from(["arguments", "name"])
+            );
+            assert_eq!(function["name"], name);
+            assert_eq!(function["arguments"], arguments);
+            assert!(serde_json::from_str::<Value>(arguments).is_ok());
+        }
+
+        assert_eq!(wire_messages[3]["role"], "tool");
+        assert_eq!(wire_messages[3]["tool_call_id"], "call-read");
+        assert_eq!(wire_messages[4]["role"], "tool");
+        assert_eq!(wire_messages[4]["tool_call_id"], "call-git");
+        assert_eq!(wire_messages[5]["role"], "assistant");
+        assert_eq!(wire_messages[5]["content"], "The project status is green.");
+    }
+
+    #[test]
+    fn glm_history_without_user_gets_a_non_empty_user_turn() {
+        let messages = vec![Message::Assistant(AssistantMessage {
+            content: vec![Content::text("tool history without its original user turn")],
+            api: "openai-completions".into(),
+            provider: "glm".into(),
+            model: "glm-5.3".into(),
+            usage: Usage::default(),
+            stop_reason: StopReason::Stop,
+            error_message: None,
+            timestamp: now_ms(),
+        })];
+        let context = Context {
+            messages,
+            ..Default::default()
+        };
+        let body = test_body(&glm_model(), &context, &StreamOptions::default());
+        let wire_messages = body["messages"].as_array().expect("messages array");
+        let user = wire_messages
+            .iter()
+            .find(|message| message["role"] == "user")
+            .expect("GLM history must contain a user message");
+        assert_eq!(user["content"], "Continue from the preceding context.");
+        assert!(user["content"]
+            .as_str()
+            .is_some_and(|text| !text.is_empty()));
+    }
+
+    // OCEAN-131: tool-result image parity. OpenAI's `role:tool` message can only
+    // carry text, so a screenshot returned as a Content::Image tool result was
+    // silently dropped and never reached the model. The encoder must keep the
+    // textual `role:tool` message AND follow it with a `role:user` message
+    // carrying the image as an image_url data-URL part so the model sees it.
+    #[test]
+    fn glm_vision_history_preserves_image_parts() {
+        let mut model = glm_model();
+        model.supports_images = true;
+        let messages = vec![Message::User {
+            content: vec![Content::Image {
+                data: "AA==".into(),
+                mime_type: "image/png".into(),
+            }],
+            timestamp: now_ms(),
+        }];
+        let context = Context {
+            messages,
+            ..Default::default()
+        };
+        let body = test_body(&model, &context, &StreamOptions::default());
+        assert_eq!(body["messages"][0]["content"][0]["type"], "image_url");
     }
 
     // GLM takes a TOP-LEVEL reasoning_effort. The nested DeepSeek shape was
