@@ -308,7 +308,6 @@ impl Patch {
                     flush_pending(&mut pending, &mut cur, &mut sections)?;
                     // start a fresh section; close the previous one.
                     if let Some(prev) = cur.take() {
-                        validate_no_overlap(&prev)?;
                         sections.push(prev);
                     }
                     cur = Some(Section {
@@ -354,7 +353,6 @@ impl Patch {
 
         flush_pending(&mut pending, &mut cur, &mut sections)?;
         if let Some(prev) = cur.take() {
-            validate_no_overlap(&prev)?;
             sections.push(prev);
         }
 
@@ -511,31 +509,350 @@ fn flush_pending(
             }
         }
     };
+    validate_no_overlap(section, &op, line)?;
     section.ops.push(op);
     Ok(())
 }
 
-/// Reject two ops whose delete/replace ranges share any line.
-fn validate_no_overlap(section: &Section) -> Result<(), ParseError> {
-    let mut claimed: Vec<(usize, usize)> = Vec::new();
-    for op in &section.ops {
-        let range = match op {
+/// Reject an op whose delete/replace range shares any line with an op already
+/// accepted into the section. Fails with the source line of the offending hunk.
+fn validate_no_overlap(section: &Section, op: &Op, line: usize) -> Result<(), ParseError> {
+    let (Op::Swap {
+        start: s, end: e, ..
+    }
+    | Op::Del { start: s, end: e }) = op
+    else {
+        return Ok(());
+    };
+    for existing in &section.ops {
+        let range = match existing {
             Op::Swap { start, end, .. } | Op::Del { start, end } => Some((*start, *end)),
             Op::Ins { .. } => None,
         };
-        if let Some((s, e)) = range {
-            for &(cs, ce) in &claimed {
-                if s <= ce && cs <= e {
-                    return Err(err(
-                        0,
-                        format!(
-                            "overlapping ranges: {s}.={e} collides with {cs}.={ce}. Issue one hunk per range."
-                        ),
-                    ));
-                }
+        if let Some((cs, ce)) = range {
+            if *s <= ce && cs <= *e {
+                return Err(err(
+                    line,
+                    format!(
+                        "overlapping ranges: {s}.={e} collides with {cs}.={ce}. Issue one hunk per range."
+                    ),
+                ));
             }
-            claimed.push((s, e));
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PATH: &str = "src/main.rs";
+
+    fn single_op(input: &str) -> Op {
+        let mut sections = Patch::parse(input).unwrap().sections;
+        assert_eq!(sections.len(), 1, "expected exactly one section");
+        let mut section = sections.pop().unwrap();
+        assert_eq!(section.path, PATH);
+        assert_eq!(section.expected_hash, "AB12");
+        assert_eq!(section.ops.len(), 1, "expected exactly one op");
+        section.ops.pop().unwrap()
+    }
+
+    fn parse_err(input: &str) -> ParseError {
+        Patch::parse(input).unwrap_err()
+    }
+
+    #[test]
+    fn parses_swap_with_range_and_body() {
+        let op = single_op("[src/main.rs#AB12]\nSWAP 5.=7:\n+one\n+two\n");
+        assert_eq!(
+            op,
+            Op::Swap {
+                start: 5,
+                end: 7,
+                body: vec!["one".into(), "two".into()]
+            }
+        );
+    }
+
+    #[test]
+    fn swap_single_line_and_alternate_separators() {
+        // Bare single line: SWAP N
+        assert_eq!(
+            single_op("[src/main.rs#AB12]\nSWAP 5\n+x\n"),
+            Op::Swap {
+                start: 5,
+                end: 5,
+                body: vec!["x".into()]
+            }
+        );
+        // `..` and `-` separators.
+        for hdr in ["SWAP 5..7:", "SWAP 5-7:"] {
+            assert_eq!(
+                single_op(&format!("[src/main.rs#AB12]\n{hdr}\n+x\n")),
+                Op::Swap {
+                    start: 5,
+                    end: 7,
+                    body: vec!["x".into()]
+                },
+                "separator in `{hdr}`"
+            );
+        }
+        // Whitespace separator: `SWAP 5 7:`
+        assert_eq!(
+            single_op("[src/main.rs#AB12]\nSWAP 5 7:\n+x\n"),
+            Op::Swap {
+                start: 5,
+                end: 7,
+                body: vec!["x".into()]
+            }
+        );
+    }
+
+    #[test]
+    fn swap_without_body_degrades_to_del() {
+        // At end of input, with no body rows following.
+        let op = single_op("[src/main.rs#AB12]\nSWAP 5.=7");
+        assert_eq!(op, Op::Del { start: 5, end: 7 });
+        // Also when the next line is another hunk header.
+        let mut sections = Patch::parse("[src/main.rs#AB12]\nSWAP 5.=7\nINS.TAIL:\n+z\n")
+            .unwrap()
+            .sections;
+        assert_eq!(sections.remove(0).ops[0], Op::Del { start: 5, end: 7 });
+    }
+
+    #[test]
+    fn parses_del() {
+        assert_eq!(
+            single_op("[src/main.rs#AB12]\nDEL 5"),
+            Op::Del { start: 5, end: 5 }
+        );
+        assert_eq!(
+            single_op("[src/main.rs#AB12]\nDEL 5.=7"),
+            Op::Del { start: 5, end: 7 }
+        );
+    }
+
+    #[test]
+    fn parses_all_insert_positions() {
+        for (hdr, want) in [
+            ("INS.PRE 5:", InsertPos::Pre(5)),
+            ("INS.POST 5:", InsertPos::Post(5)),
+            ("INS.HEAD:", InsertPos::Head),
+            ("INS.TAIL:", InsertPos::Tail),
+        ] {
+            assert_eq!(
+                single_op(&format!("[src/main.rs#AB12]\n{hdr}\n+new\n")),
+                Op::Ins {
+                    pos: want,
+                    body: vec!["new".into()]
+                },
+                "header `{hdr}`"
+            );
+        }
+    }
+
+    #[test]
+    fn section_header_rules() {
+        // Lowercase hex tag is uppercased; `..` variant rejected; `#` in path rejected.
+        let op = single_op("[src/main.rs#ab12]\nSWAP 1\n+x\n");
+        assert_eq!(
+            op,
+            Op::Swap {
+                start: 1,
+                end: 1,
+                body: vec!["x".into()]
+            }
+        );
+
+        // A tag longer than 4 chars (`#AB12..34`) is not a valid header, so the
+        // line falls through to a stray body row.
+        let e = parse_err("[src/main.rs#AB12..34]\nSWAP 1\n+x\n");
+        assert_eq!(e.line, 1, "not a header: {e}");
+
+        // `#` inside the path is not a valid header either.
+        let e = parse_err("[src#main#AB12]\n");
+        assert_eq!(e.line, 1, "second `#` in path is not a header: {e}");
+    }
+
+    #[test]
+    fn bare_rows_auto_pipe_into_pending_body() {
+        // A bare (non-`+`) row after a hunk header joins the body verbatim.
+        assert_eq!(
+            single_op("[src/main.rs#AB12]\nSWAP 1:\nhello world\n+explicit\n"),
+            Op::Swap {
+                start: 1,
+                end: 1,
+                body: vec!["hello world".into(), "explicit".into()]
+            }
+        );
+    }
+
+    #[test]
+    fn interior_blank_rows_are_kept_and_trailing_dropped() {
+        // Blank rows between body rows are preserved; trailing blanks are not.
+        assert_eq!(
+            single_op("[src/main.rs#AB12]\nSWAP 1:\n+a\n\n+b\n"),
+            Op::Swap {
+                start: 1,
+                end: 1,
+                body: vec!["a".into(), String::new(), "b".into()]
+            }
+        );
+        let mut sections = Patch::parse("[src/main.rs#AB12]\nSWAP 1:\n+a\n\n\n")
+            .unwrap()
+            .sections;
+        let op = sections.pop().unwrap().ops.pop().unwrap();
+        assert_eq!(
+            op,
+            Op::Swap {
+                start: 1,
+                end: 1,
+                body: vec!["a".into()]
+            }
+        );
+    }
+
+    #[test]
+    fn overlap_error_reports_offending_hunk_line() {
+        // Regression: the overlap error used to report line 0.
+        let input = "[src/main.rs#AB12]\nSWAP 5.=7:\n+one\nDEL 6";
+        let e = parse_err(input);
+        assert_eq!(
+            e.line, 4,
+            "must name the line of the colliding `DEL 6` hunk: {e}"
+        );
+        assert!(e.message.contains("overlapping ranges"), "{e}");
+        assert!(e.message.contains("5.=7"), "{e}");
+
+        // Second section header flushes the pending op: overlap is still caught
+        // with the right line.
+        let input = "[src/main.rs#AB12]\nDEL 5.=7\nDEL 6\n[other.rs#CD34]\nDEL 1";
+        let e = parse_err(input);
+        assert_eq!(e.line, 3, "{e}");
+
+        // Same range in two different sections is fine.
+        let two = Patch::parse("[src/main.rs#AB12]\nDEL 5.=7\n[other.rs#CD34]\nDEL 5.=7\n")
+            .expect("disjoint sections must not collide");
+        assert_eq!(two.sections.len(), 2);
+        assert_eq!(two.sections[0].ops.len(), 1);
+        assert_eq!(two.sections[1].ops.len(), 1);
+    }
+
+    #[test]
+    fn inserts_do_not_participate_in_overlap() {
+        // An INS anchored inside a SWAP/DEL range is legal; only delete/replace
+        // ranges collide.
+        let ops = Patch::parse("[src/main.rs#AB12]\nSWAP 5.=7:\n+x\nINS.PRE 6:\n+y\n")
+            .unwrap()
+            .sections
+            .remove(0)
+            .ops;
+        assert_eq!(ops.len(), 2);
+    }
+
+    #[test]
+    fn bodyless_swap_degrading_to_del_still_collides() {
+        // A bodyless SWAP occupies its range as a Del; a later DEL inside it
+        // must be rejected with the later hunk's line.
+        let e = parse_err("[src/main.rs#AB12]\nSWAP 5.=7\nDEL 6");
+        assert_eq!(e.line, 3, "{e}");
+    }
+
+    #[test]
+    fn rejects_out_of_scope_verbs_with_line() {
+        for (verb, why) in [
+            ("SWAP.BLK 5", "tree-sitter block"),
+            ("DEL.BLK 5", "out of scope"),
+            ("INS.BLK.POST 5", "out of scope"),
+            ("REM", "whole-file delete"),
+            ("MV src/x.rs", "file move"),
+        ] {
+            let e = parse_err(&format!("[src/main.rs#AB12]\n{verb}\n"));
+            assert_eq!(e.line, 2, "verb `{verb}`: {e}");
+            assert!(
+                !e.message.is_empty(),
+                "verb `{verb}` ({why}) needs a reason"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_hunks() {
+        let cases: &[(&str, usize, &str)] = &[
+            // SWAP without a number.
+            ("[src/main.rs#AB12]\nSWAP:\n+x\n", 2, "needs a line number"),
+            // DEL with a body is rejected when the body arrives.
+            ("[src/main.rs#AB12]\nDEL 5.=7\n+x\n", 3, "takes no body"),
+            // DEL with trailing junk on the header.
+            ("[src/main.rs#AB12]\nDEL 5.=7:\n", 2, "takes no colon"),
+            // Range that ends before it starts.
+            (
+                "[src/main.rs#AB12]\nSWAP 7.=5:\n+x\n",
+                2,
+                "ends before it starts",
+            ),
+            // Zero is not a valid line number.
+            (
+                "[src/main.rs#AB12]\nSWAP 0:\n+x\n",
+                2,
+                "needs a line number",
+            ),
+            // INS without a position.
+            ("[src/main.rs#AB12]\nINS 5:\n+x\n", 2, "requires a position"),
+            // Unknown INS position.
+            (
+                "[src/main.rs#AB12]\nINS.MID 5:\n+x\n",
+                2,
+                "unknown `INS` position",
+            ),
+            // INS with no body rows.
+            ("[src/main.rs#AB12]\nINS.TAIL:\n", 2, "needs at least one"),
+            // Hunk before any section header.
+            ("SWAP 1:\n+x\n", 1, "before any `[path#hash]`"),
+            // Payload row before any hunk header.
+            ("[src/main.rs#AB12]\n+x\n", 2, "no preceding hunk header"),
+            // Bare `-` rows are rejected with guidance.
+            (
+                "[src/main.rs#AB12]\nSWAP 1:\n-old line\n",
+                3,
+                "`-` rows are not valid",
+            ),
+        ];
+        for (input, line, needle) in cases {
+            let e = parse_err(input);
+            assert_eq!(e.line, *line, "input {input:?}: {e}");
+            assert!(e.message.contains(needle), "input {input:?}: {e}");
+        }
+    }
+
+    #[test]
+    fn crlf_lines_are_tolerated() {
+        assert_eq!(
+            single_op("[src/main.rs#AB12]\r\nSWAP 5.=7:\r\n+one\r\n+two\r\n"),
+            Op::Swap {
+                start: 5,
+                end: 7,
+                body: vec!["one".into(), "two".into()]
+            }
+        );
+    }
+
+    #[test]
+    fn verbs_embedded_in_words_are_body_not_hunks() {
+        // `SWAPPED` / `DELETE` start with the verb keywords but do not begin a
+        // hunk; inside a body they are plain rows.
+        let e = parse_err("SWAPPED 1:\n+x\n");
+        assert_eq!(e.line, 1, "{e}");
+        let op = single_op("[src/main.rs#AB12]\nSWAP 1:\nDELETED CONTEXT\n+keep\n");
+        assert_eq!(
+            op,
+            Op::Swap {
+                start: 1,
+                end: 1,
+                body: vec!["DELETED CONTEXT".into(), "keep".into()]
+            }
+        );
+    }
 }
