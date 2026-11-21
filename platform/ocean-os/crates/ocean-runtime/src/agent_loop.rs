@@ -1652,7 +1652,12 @@ fn tool_limit_fallback_reply(messages: &[Message]) -> String {
         .join("\n");
     const PREVIEW_LIMIT: usize = 2000;
     if text.len() > PREVIEW_LIMIT {
-        text.truncate(PREVIEW_LIMIT);
+        // `String::truncate` panics off a char boundary; back up to one.
+        let mut end = PREVIEW_LIMIT;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
         text.push('…');
     }
     if text.trim().is_empty() {
@@ -2047,6 +2052,16 @@ mod tests {
             is_error: false,
             timestamp: 0,
         })
+    }
+
+    #[test]
+    fn tool_limit_fallback_preview_truncates_on_a_char_boundary() {
+        // 1999 ASCII bytes then a 3-byte char straddling the 2000-byte limit.
+        let text = format!("{}€tail", "a".repeat(1999));
+        let messages = vec![user("go"), tool_result("t1", &text)];
+        let reply = tool_limit_fallback_reply(&messages);
+        let preview = reply.split_once(":\n").expect("preview follows header").1;
+        assert_eq!(preview, format!("{}…", "a".repeat(1999)));
     }
 
     #[tokio::test]
