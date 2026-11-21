@@ -1480,7 +1480,7 @@ pub fn decision_token_matches(expected: Option<&str>, presented: Option<&str>) -
     let b = presented.as_bytes();
     // Fold the length difference into the accumulator so mismatched lengths
     // still run a full constant-time-ish compare and never early-return.
-    let mut diff = (a.len() ^ b.len()) as u8;
+    let mut diff = u8::from(a.len() != b.len());
     let n = a.len().max(b.len());
     for i in 0..n {
         let x = a.get(i).copied().unwrap_or(0);
@@ -1763,6 +1763,18 @@ impl EventEnvelope {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decision_token_rejects_zero_padding_that_aliases_the_length_xor() {
+        // The length XOR used to be truncated to u8, so a presented token that
+        // is the expected token plus 256 NUL bytes folded to a zero difference.
+        let expected = "tok";
+        let padded = format!("{expected}{}", "\0".repeat(256));
+        assert!(!decision_token_matches(Some(expected), Some(&padded)));
+        assert!(!decision_token_matches(Some(&padded), Some(expected)));
+        assert!(decision_token_matches(Some(expected), Some("tok")));
+        assert!(!decision_token_matches(Some(expected), Some("tox")));
+    }
 
     #[test]
     fn prompt_response_reports_terminal_fields_and_accepts_older_daemons() {
