@@ -63,6 +63,21 @@ fn try_take_line(pending: &mut Vec<u8>) -> Option<Result<String>> {
     Some(String::from_utf8(line).context("plugin sent invalid UTF-8"))
 }
 
+/// Reject an oversized frame before `try_take_line` drains it. A newline at
+/// index `MAX_MESSAGE_BYTES` is valid because the index counts only payload
+/// bytes; a newline after that is an oversized message even though it is
+/// already complete.
+fn check_pending_size(pending: &[u8]) -> Result<()> {
+    let payload_len = pending
+        .iter()
+        .position(|&byte| byte == b'\n')
+        .unwrap_or(pending.len());
+    if payload_len as u64 > MAX_MESSAGE_BYTES {
+        bail!("plugin message exceeded {MAX_MESSAGE_BYTES} bytes; dropping connection");
+    }
+    Ok(())
+}
+
 /// Spawn the child, retrying a small bounded number of times on `ETXTBSY`
 /// (os error 26 — "text file busy"). Under parallel `cargo test`, a sibling
 /// process can briefly inherit the write fd of a just-written plugin script, so
@@ -163,8 +178,9 @@ impl Transport for StdioTransport {
 
     async fn recv(&mut self) -> Result<Option<String>> {
         loop {
-            // A complete line already buffered (e.g. the tail of a previous read
-            // that also pulled in the start of this one)? Hand it back.
+            // Check before extracting a complete line: otherwise a newline at
+            // MAX_MESSAGE_BYTES + 1 would bypass the partial-buffer bound.
+            check_pending_size(&self.pending)?;
             if let Some(line) = try_take_line(&mut self.pending) {
                 return Ok(Some(line?));
             }
@@ -186,6 +202,7 @@ impl Transport for StdioTransport {
                 .await?;
             if n == 0 {
                 // EOF. Surface a trailing newline-less line once, then None.
+                check_pending_size(&self.pending)?;
                 if self.pending.is_empty() {
                     return Ok(None);
                 }
@@ -225,6 +242,20 @@ mod tests {
         assert_eq!(partial, b"half", "no newline -> buffer untouched");
         let mut crlf = b"x\r\n".to_vec();
         assert_eq!(try_take_line(&mut crlf).unwrap().unwrap(), "x");
+    }
+
+    #[test]
+    fn message_size_check_rejects_complete_and_partial_oversize_frames() {
+        let mut complete = vec![b'x'; MAX_MESSAGE_BYTES as usize + 1];
+        complete.push(b'\n');
+        assert!(check_pending_size(&complete).is_err());
+
+        let partial = vec![b'x'; MAX_MESSAGE_BYTES as usize + 1];
+        assert!(check_pending_size(&partial).is_err());
+
+        let mut exact = vec![b'x'; MAX_MESSAGE_BYTES as usize];
+        exact.push(b'\n');
+        assert!(check_pending_size(&exact).is_ok());
     }
 
     #[test]
