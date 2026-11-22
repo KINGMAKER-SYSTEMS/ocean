@@ -2911,3 +2911,13 @@ area: [backend]
 Completed the fork's DeepSeek Flash route migration. Forward retired aliases
 and qualified session pins to deepseek-flash, and show the current Flash route
 in the picker. Locked ocean-providers tests passed.
+
+_________________________________________________________________________________
+time: [15:32] [22-11-26]
+agent: [Ocean finish-ocean-prs]
+worktree: [swarm200/lead/preview-truncate-char-boundary]
+type: [bug fix]
+area: [docs]
+
+Completed PR #224 devlog receipt. Tool-limit fallback previews back up to a UTF-8 character boundary before truncation; regression: `tool_limit_fallback_preview_truncates_on_a_char_boundary`.
+validation: Reviewed PR diff against main and existing successful applicable CI; git diff --check passed. Documentation-only follow-up; no runtime code changed.
