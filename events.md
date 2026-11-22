@@ -2925,3 +2925,13 @@ parser's first test module (28 tests) covering section headers, range
 separators, bodyless SWAP degradation, insert positions, blank-row handling,
 out-of-scope verbs, malformed hunks, and CRLF input. Locked ocean-hashline
 tests and rustfmt passed.
+
+_________________________________________________________________________________
+time: [15:32] [22-11-26]
+agent: [Ocean finish-ocean-prs]
+worktree: [swarm200/tests/hashline-tokenizer-tests]
+type: [bug fix]
+area: [docs]
+
+Completed PR #227 devlog receipt. Hashline overlap validation runs when each pending operation is flushed and reports the offending hunk source line, never line zero. Validate with `cargo test --locked -p ocean-hashline`.
+validation: Reviewed PR diff against main and existing successful applicable CI; git diff --check passed. Documentation-only follow-up; no runtime code changed.
