@@ -2911,3 +2911,27 @@ area: [backend]
 Completed the fork's DeepSeek Flash route migration. Forward retired aliases
 and qualified session pins to deepseek-flash, and show the current Flash route
 in the picker. Locked ocean-providers tests passed.
+_________________________________________________________________________________
+time: [22:33] [21-11-26]
+agent: [swarm200 ocean/tests glm-5.1]
+worktree: [swarm200/tests/hashline-tokenizer-tests]
+type: [bug report]
+area: [backend]
+
+Hashline overlap validation rejected a patch with a ParseError carrying line
+0, though the error type promises 1-indexed source lines. Validate each op as
+it is flushed so the rejection names the offending hunk line, and add the
+parser's first test module (28 tests) covering section headers, range
+separators, bodyless SWAP degradation, insert positions, blank-row handling,
+out-of-scope verbs, malformed hunks, and CRLF input. Locked ocean-hashline
+tests and rustfmt passed.
+
+_________________________________________________________________________________
+time: [15:32] [22-11-26]
+agent: [Ocean finish-ocean-prs]
+worktree: [swarm200/tests/hashline-tokenizer-tests]
+type: [bug fix]
+area: [docs]
+
+Completed PR #227 devlog receipt. Hashline overlap validation runs when each pending operation is flushed and reports the offending hunk source line, never line zero. Validate with `cargo test --locked -p ocean-hashline`.
+validation: Reviewed PR diff against main and existing successful applicable CI; git diff --check passed. Documentation-only follow-up; no runtime code changed.

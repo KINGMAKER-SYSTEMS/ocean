@@ -147,3 +147,7 @@ The workspace currently contains 30 Rust packages.
 - `ocean-store/` — SQLite durable Rooms, federation, authority decisions, attachments, profiles/resources and retirement → `ocean-store/AGENTS.md`
 - `ocean-tui/` — terminal steering cockpit → `ocean-tui/AGENTS.md`
 - `ocean-walker/` — standalone native filesystem traversal and scan caching → `ocean-walker/AGENTS.md`
+
+## PR completion note
+
+- Hashline overlap validation runs when each pending operation is flushed and reports the offending hunk source line, never line zero. Validate with `cargo test --locked -p ocean-hashline`.
