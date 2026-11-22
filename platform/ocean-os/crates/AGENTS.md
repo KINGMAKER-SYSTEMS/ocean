@@ -147,3 +147,7 @@ The workspace currently contains 30 Rust packages.
 - `ocean-store/` — SQLite durable Rooms, federation, authority decisions, attachments, profiles/resources and retirement → `ocean-store/AGENTS.md`
 - `ocean-tui/` — terminal steering cockpit → `ocean-tui/AGENTS.md`
 - `ocean-walker/` — standalone native filesystem traversal and scan caching → `ocean-walker/AGENTS.md`
+
+## PR completion note
+
+- Plugin stdio transport checks the first buffered frame before extracting a complete line, including EOF-delimited frames; the payload cap is 16 MiB. Validate with `cargo test --locked -p ocean-plugin transport::tests`.

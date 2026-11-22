@@ -2911,3 +2911,23 @@ area: [backend]
 Completed the fork's DeepSeek Flash route migration. Forward retired aliases
 and qualified session pins to deepseek-flash, and show the current Flash route
 in the picker. Locked ocean-providers tests passed.
+
+_________________________________________________________________________________
+time: [18:49] [21-11-26]
+agent: [swarm200 bugs]
+worktree: [swarm200/bugs/agent-tool-result-validation]
+type: [bug fix]
+area: [backend]
+
+Bound ocean-plugin stdio frames before extracting complete lines, preventing an oversized newline-terminated or EOF-delimited message from bypassing the 16 MiB limit. Added regression coverage for complete, partial, and exact-limit frames.
+validation: cargo test -p ocean-plugin transport::tests (3 passed); cargo test -p ocean-plugin (unit tests passed; example e2e blocked by pre-existing target-path lookup)
+
+_________________________________________________________________________________
+time: [15:32] [22-11-26]
+agent: [Ocean finish-ocean-prs]
+worktree: [swarm200/bugs/agent-tool-result-validation]
+type: [bug fix]
+area: [docs]
+
+Completed PR #228 devlog receipt. Plugin stdio transport checks the first buffered frame before extracting a complete line, including EOF-delimited frames; the payload cap is 16 MiB. Validate with `cargo test --locked -p ocean-plugin transport::tests`.
+validation: Reviewed PR diff against main and existing successful applicable CI; git diff --check passed. Documentation-only follow-up; no runtime code changed.
