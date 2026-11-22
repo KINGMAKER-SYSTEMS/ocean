@@ -2911,3 +2911,13 @@ area: [backend]
 Completed the fork's DeepSeek Flash route migration. Forward retired aliases
 and qualified session pins to deepseek-flash, and show the current Flash route
 in the picker. Locked ocean-providers tests passed.
+
+_________________________________________________________________________________
+time: [15:32] [22-11-26]
+agent: [Ocean finish-ocean-prs]
+worktree: [swarm200/lead/decision-token-length-fold]
+type: [bug fix]
+area: [docs]
+
+Completed PR #225 devlog receipt. Decision-token comparison folds length inequality without narrowing the length XOR; 256-byte NUL padding must never authenticate. Regression: `decision_token_rejects_zero_padding_that_aliases_the_length_xor`.
+validation: Reviewed PR diff against main and existing successful applicable CI; git diff --check passed. Documentation-only follow-up; no runtime code changed.

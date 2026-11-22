@@ -97,3 +97,7 @@ This crate owns shared protocol types used across Ocean clients, daemon, runtime
 ## Child devlog Index
 
 No child boundaries defined within `ocean-core/` at this time.
+
+## PR completion note
+
+- Decision-token comparison folds length inequality without narrowing the length XOR; 256-byte NUL padding must never authenticate. Regression: `decision_token_rejects_zero_padding_that_aliases_the_length_xor`.
