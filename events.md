@@ -2911,3 +2911,13 @@ area: [backend]
 Completed the fork's DeepSeek Flash route migration. Forward retired aliases
 and qualified session pins to deepseek-flash, and show the current Flash route
 in the picker. Locked ocean-providers tests passed.
+
+_________________________________________________________________________________
+time: [15:32] [22-11-26]
+agent: [Ocean finish-ocean-prs]
+worktree: [swarm200/issues/mcp-http-body-bound]
+type: [bug fix]
+area: [docs]
+
+Completed PR #226 devlog receipt. MCP HTTP replies are capped at 16 MiB, including error bodies and cumulative POST SSE bytes. Content-Length is an early rejection only; streamed bytes are counted before buffering.
+validation: Reviewed PR diff against main and existing successful applicable CI; git diff --check passed. Documentation-only follow-up; no runtime code changed.

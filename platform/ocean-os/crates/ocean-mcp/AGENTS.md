@@ -55,3 +55,7 @@ Connect Ocean to external MCP servers, and expose the local daemon to MCP hosts.
 ## Child devlog Index
 
 - None.
+
+## PR completion note
+
+- MCP HTTP replies are capped at 16 MiB, including error bodies and cumulative POST SSE bytes. Content-Length is an early rejection only; streamed bytes are counted before buffering.

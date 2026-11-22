@@ -56,6 +56,33 @@ impl std::error::Error for McpTransportError {}
 /// past this cap fails the read, which folds into the non-fatal provider path.
 const MAX_MESSAGE_BYTES: u64 = 16 * 1024 * 1024;
 
+/// Read one non-streaming HTTP reply without allowing an MCP peer to grow the
+/// daemon's heap without bound. Checking `Content-Length` is only an early
+/// rejection: chunked responses are counted as they arrive as well.
+async fn read_bounded_body(resp: reqwest::Response, label: &str) -> Result<String> {
+    if resp
+        .content_length()
+        .is_some_and(|len| len > MAX_MESSAGE_BYTES)
+    {
+        bail!("{label} exceeded {MAX_MESSAGE_BYTES} bytes");
+    }
+
+    let mut body = Vec::new();
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.with_context(|| format!("reading {label}"))?;
+        let next_len = body
+            .len()
+            .checked_add(chunk.len())
+            .context("MCP HTTP response size overflow")?;
+        if next_len as u64 > MAX_MESSAGE_BYTES {
+            bail!("{label} exceeded {MAX_MESSAGE_BYTES} bytes");
+        }
+        body.extend_from_slice(&chunk);
+    }
+    String::from_utf8(body).with_context(|| format!("{label} was not valid UTF-8"))
+}
+
 /// A bidirectional line-delimited JSON channel to an MCP server.
 #[async_trait]
 pub trait Transport: Send + Sync {
@@ -313,7 +340,7 @@ impl HttpTransport {
             bail!("MCP HTTP session was terminated by the server (404); connection closed");
         }
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
+            let body = read_bounded_body(resp, "MCP HTTP error response").await?;
             bail!("MCP HTTP request failed with status {status}: {body}");
         }
 
@@ -347,12 +374,26 @@ impl HttpTransport {
             // the inbound queue as they arrive. The stream ends when the server
             // closes it (it does so once it has sent the response to our
             // request, per spec).
-            let mut events = resp.bytes_stream().eventsource();
+            let mut received = 0u64;
+            let bounded_stream = resp.bytes_stream().map(move |chunk| {
+                let bytes = chunk.map_err(anyhow::Error::from)?;
+                received = received
+                    .checked_add(bytes.len() as u64)
+                    .context("MCP HTTP SSE response size overflow")?;
+                if received > MAX_MESSAGE_BYTES {
+                    bail!("MCP HTTP SSE response exceeded {MAX_MESSAGE_BYTES} bytes");
+                }
+                Ok::<_, anyhow::Error>(bytes)
+            });
+            let mut events = bounded_stream.eventsource();
             while let Some(event) = events.next().await {
                 let event = event.context("reading MCP SSE event")?;
                 let data = event.data;
                 if data.trim().is_empty() {
                     continue;
+                }
+                if data.len() as u64 > MAX_MESSAGE_BYTES {
+                    bail!("MCP HTTP SSE message exceeded {MAX_MESSAGE_BYTES} bytes");
                 }
                 // Drop only if the client (and its inbound queue) is gone.
                 if self.inbound_tx.send(data).is_err() {
@@ -361,10 +402,7 @@ impl HttpTransport {
             }
         } else {
             // Single JSON body (the common case for a stateless server).
-            let body = resp
-                .text()
-                .await
-                .context("reading MCP HTTP response body")?;
+            let body = read_bounded_body(resp, "MCP HTTP response body").await?;
             if !body.trim().is_empty() {
                 let _ = self.inbound_tx.send(body);
             }
@@ -577,6 +615,35 @@ mod tests {
         let line = t.recv().await.unwrap().expect("a tools/list response");
         let v: serde_json::Value = serde_json::from_str(&line).unwrap();
         assert_eq!(v["result"]["tools"][0]["name"], "echo");
+    }
+
+    #[tokio::test]
+    async fn http_transport_rejects_oversized_json_reply_from_content_length() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut request = vec![0u8; 4096];
+                let _ = tokio::io::AsyncReadExt::read(&mut sock, &mut request).await;
+                let advertised = MAX_MESSAGE_BYTES + 1;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {advertised}\r\nConnection: close\r\n\r\n"
+                );
+                let _ = sock.write_all(response.as_bytes()).await;
+            }
+        });
+
+        let mut transport = HttpTransport::connect(&format!("http://{addr}/mcp"))
+            .await
+            .unwrap();
+        let err = transport
+            .send(r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("response body exceeded"),
+            "got: {err}"
+        );
     }
 
     #[tokio::test]
