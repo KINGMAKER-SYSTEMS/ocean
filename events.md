@@ -2924,3 +2924,13 @@ code: surface-tauri maps to TAURI (no surface-gpui/surface-native to GUI
 mapping in surface_flag), AgentTurnRequest has no room_id, and the courier
 router posts prompt plus client_type and session fields rather than text.
 Checked against system_prompt.rs, ocean-agent-sdk and router.py; docs only.
+
+_________________________________________________________________________________
+time: [15:32] [22-11-26]
+agent: [Ocean finish-ocean-prs]
+worktree: [swarm200/dx/docs-daemon-interaction]
+type: [bug fix]
+area: [docs]
+
+Completed PR #229 devlog receipt. Daemon interaction guidance follows `surface_flag`, SDK request types and the courier router: `surface-tauri` maps to `TAURI` (seed fallback without a packaged profile), and couriers send `prompt` with stable session fields.
+validation: Reviewed PR diff against main and existing successful applicable CI; git diff --check passed. Documentation-only follow-up; no runtime code changed.
