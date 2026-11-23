@@ -118,3 +118,7 @@ This crate owns the Ocean agent loop and permission-gated tool execution runtime
 ## Child devlog Index
 
 No child boundaries defined within `ocean-runtime/` at this time.
+
+## PR completion note
+
+- Tool-limit fallback previews back up to a UTF-8 character boundary before truncation; regression: `tool_limit_fallback_preview_truncates_on_a_char_boundary`.

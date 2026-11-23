@@ -2934,3 +2934,13 @@ area: [docs]
 
 Completed PR #229 devlog receipt. Daemon interaction guidance follows `surface_flag`, SDK request types and the courier router: `surface-tauri` maps to `TAURI` (seed fallback without a packaged profile), and couriers send `prompt` with stable session fields.
 validation: Reviewed PR diff against main and existing successful applicable CI; git diff --check passed. Documentation-only follow-up; no runtime code changed.
+
+_________________________________________________________________________________
+time: [15:32] [22-11-26]
+agent: [Ocean finish-ocean-prs]
+worktree: [swarm200/lead/preview-truncate-char-boundary]
+type: [bug fix]
+area: [docs]
+
+Completed PR #224 devlog receipt. Tool-limit fallback previews back up to a UTF-8 character boundary before truncation; regression: `tool_limit_fallback_preview_truncates_on_a_char_boundary`.
+validation: Reviewed PR diff against main and existing successful applicable CI; git diff --check passed. Documentation-only follow-up; no runtime code changed.
