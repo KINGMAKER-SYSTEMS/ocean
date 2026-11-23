@@ -44,7 +44,7 @@ to the directory name the daemon looks up under the assistants root:
 | `surface-extension`               | `BRWSR`            | `assistants/BRWSR/system.md`   |
 | `tui`                             | `TUI`              | `assistants/TUI/system.md`     |
 | `surface-web`                     | `WEB`              | `assistants/WEB/system.md`     |
-| `surface-gpui` / `surface-native` | `GUI`              | `assistants/GUI/system.md`     |
+| `surface-tauri`                   | `TAURI`            | `assistants/TAURI/system.md`   |
 | `cli`                             | `CLI`              | `assistants/CLI/system.md`     |
 | `leo-voice`                       | `VOX`              | `assistants/VOX/system.md`     |
 | `acp-zed`                         | `ACP`              | `assistants/ACP/system.md`     |
@@ -53,7 +53,10 @@ to the directory name the daemon looks up under the assistants root:
 | `surface-mobile`                  | `MOBL`             | `assistants/MOBL/system.md`    |
 | *(anything else)*                 | `?`                | *(no lookup; seed const used)* |
 
-An unknown `client_type` resolves to `"?"`, for which the daemon skips the file
+No `client_type` resolves to `GUI`: `surface-gpui` and `surface-native` are not
+in `surface_flag`, so they resolve to `"?"` like any other unknown value. This package
+publishes no `assistants/TAURI/` profile, so `surface-tauri` uses the seed. An
+unknown `client_type` resolves to `"?"`, for which the daemon skips the file
 lookup entirely and falls back to its seed prompt.
 
 ### Where the daemon reads from
@@ -102,7 +105,6 @@ session first, then post turns scoped to that `session_id`. Body
 | `project_id`     | `string?`  | When set, the daemon binds the turn to the project's `workspace_root`. |
 | `client_type`    | `string?`  | The originating surface — drives the surface flag and profile lookup in §1. |
 | `guidance`       | `string[]?`| Optional guidance hints (e.g. active-tab context).                  |
-| `room_id`        | `string?`  | Optional Track-0 room-scoped turn id.                               |
 | `thinking_level` | `string?`  | Per-turn reasoning-effort override.                                 |
 | `model_id`       | `string?`  | Per-session / per-turn model override.                              |
 
@@ -117,16 +119,18 @@ text, tool calls, and ids arrive over the SSE stream (§3).
 
 The courier router (`couriers/hub/router.py`) uses this for **agentic** couriers:
 it POSTs a prompt scoped to the courier's directory and lets the daemon run it.
-The router builds its payload as `{ "cwd": <courier dir>, "text": <prompt> }` and
-sends it to `$OCEAN_DAEMON_URL/v1/prompt`.
+The router builds its payload as `{ "cwd": <courier dir>, "prompt": <prompt>,
+"client_type": "surface-slack", "session_id": <stable UUID per Slack thread>,
+"create_if_missing": true }` and sends it to `$OCEAN_DAEMON_URL/v1/prompt`. The
+call is synchronous: the reply is in the response body, not the SSE stream.
 
 The daemon's `PromptRequest` carries `prompt`, `cwd`, optional `session_id`,
 `project_id`, `client_type`, plus run-policy flags (`create_if_missing`,
 `max_turns`, `yolo`). Note two things when using this path:
 
 - The canonical field is **`prompt`**, not `text`; the daemon does not declare a
-  serde alias for `text`. Align the payload to `prompt` (and supply
-  `client_type`) if you want surface-aware behavior on this route.
+  serde alias for `text`. Callers must send `prompt`, and supply `client_type`
+  for surface-aware behavior on this route (the router does both).
 - `/v1/prompt` is the older steering API; new conversational surfaces should
   prefer `/v1/agent/turns` with an explicit session.
 
@@ -161,7 +165,7 @@ client_type ──► surface_dir ──► load_surface_profile ──► syste
      │
      ▼
 POST /v1/agent/turns { prompt, cwd, session_id, client_type, ... }
-     │  (or router → POST /v1/prompt { cwd, prompt, client_type })
+     │  (or router → POST /v1/prompt { cwd, prompt, client_type, session_id, ... })
      ▼
    daemon runs the turn on the Ocean runtime
      │
