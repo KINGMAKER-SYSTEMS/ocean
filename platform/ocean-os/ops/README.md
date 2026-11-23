@@ -24,6 +24,31 @@ export OCEAN_LLAMA_CPP_MODELS=local-model
 export OCEAN_LLAMA_CPP_BASE_URL=http://127.0.0.1:8080/v1
 ```
 
+### Discovered models
+
+The daemon also asks each configured endpoint which models it serves
+(`GET {base}/models`) and adds them to the picker, so a model pulled later
+appears without a restart. An endpoint is asked only when it is configured:
+`OCEAN_OPENAI_BASE_URL` (listed as `openai-compatible/<id>`), or a base URL or
+model list for Ollama or llama.cpp above (`ollama/<id>`, `llama-cpp/<id>`).
+
+- Ollama backends list only models whose `/api/show` capabilities include
+  `tools`, so embedding models stay out. llama.cpp and other backends with no
+  capability endpoint list everything they serve.
+- Listings are cached for 30 seconds, each request has a 1.5 second budget,
+  and an endpoint that is down adds nothing: the bundled catalog is still
+  returned. The last good listing is kept for five minutes.
+- `POST /v1/model` and a session model change refuse an id that the endpoint
+  answered and does not serve. Models named in `OCEAN_OLLAMA_MODELS` or
+  `OCEAN_LLAMA_CPP_MODELS` stay selectable regardless.
+- One daemon can list several backends. For example, Ollama plus a llama.cpp
+  server on another port:
+
+```sh
+export OCEAN_OLLAMA_BASE_URL=http://127.0.0.1:11434/v1
+export OCEAN_LLAMA_CPP_BASE_URL=http://127.0.0.1:8103/v1
+```
+
 ## Run from source
 
 From the Ocean OS component directory, run `./ocean` to build missing local

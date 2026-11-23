@@ -222,6 +222,254 @@ fn local_model_routes(env: &ProviderEnv) -> Vec<ModelRoute> {
     routes
 }
 
+/// Provider id of the operator-configured OpenAI-compatible endpoint.
+const OPENAI_COMPATIBLE: &str = "openai-compatible";
+
+/// Whether `name` can be a wire model id on a local or OpenAI-compatible
+/// backend. Ids are otherwise opaque: case, tags and slashes are preserved.
+pub fn is_local_model_name(name: &str) -> bool {
+    local_model_name(name)
+}
+
+/// The model name of a qualified `openai-compatible/<name>` selection.
+fn qualified_openai_compatible_model(spec: &str) -> Option<&str> {
+    spec.strip_prefix(OPENAI_COMPATIBLE)?.strip_prefix('/')
+}
+
+/// One endpoint whose served models the daemon may discover for the picker.
+/// `Debug` never prints the bearer secret.
+#[derive(Debug, Clone)]
+pub struct LocalModelSource {
+    pub provider: ProviderId,
+    /// OpenAI-compatible base URL (`GET {base_url}/models` lists its models).
+    pub base_url: String,
+    /// Bearer credential for the listing request, when the route uses one.
+    pub bearer: Option<SecretString>,
+}
+
+/// Endpoints this environment is configured to route to and whose model lists
+/// can be discovered: the `OCEAN_OPENAI_BASE_URL` endpoint, plus Ollama and
+/// llama.cpp once the operator has named a base URL or a model list for them.
+/// An unconfigured local provider is never probed at its default address.
+pub fn local_model_sources(env: &ProviderEnv) -> Vec<LocalModelSource> {
+    let set = |name: &str| {
+        env.get(name)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    };
+    let mut sources = Vec::new();
+    if let Some(base_url) = set("OCEAN_OPENAI_BASE_URL") {
+        sources.push(LocalModelSource {
+            provider: ProviderId::OpenAiCompatible,
+            base_url: base_url.to_string(),
+            bearer: resolve_credential(env, &ProviderId::OpenAiCompatible)
+                .ok()
+                .flatten()
+                .map(|credential| credential.secret),
+        });
+    }
+    for (provider, models_var, url_var, default_url) in LOCAL_PROVIDERS {
+        if set(url_var).is_none() && set(models_var).is_none() {
+            continue;
+        }
+        sources.push(LocalModelSource {
+            provider,
+            base_url: set(url_var).unwrap_or(default_url).to_string(),
+            bearer: None,
+        });
+    }
+    sources
+}
+
+/// Models one [`LocalModelSource`] reported as served and able to call tools.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DiscoveredLocalModels {
+    pub provider: String,
+    pub base_url: String,
+    pub models: Vec<String>,
+}
+
+fn same_base_url(left: &str, right: &str) -> bool {
+    left.trim().trim_end_matches('/') == right.trim().trim_end_matches('/')
+}
+
+/// The selection `spec` resolves to in `env`, when that is exactly `model` on
+/// `provider` at `base_url`.
+fn resolves_to(env: &ProviderEnv, spec: &str, provider: &str, base_url: &str, model: &str) -> bool {
+    let mut probe = env.clone();
+    probe.vars.insert("OCEAN_MODEL".into(), spec.into());
+    resolve_model_selection(&probe).is_ok_and(|selection| {
+        selection.provider.as_str() == provider
+            && selection.model == model
+            && same_base_url(&selection.base_url, base_url)
+    })
+}
+
+fn provider_ready(env: &ProviderEnv, spec: &str) -> (bool, Option<CredentialSource>) {
+    let mut probe = env.clone();
+    probe.vars.insert("OCEAN_MODEL".into(), spec.into());
+    match resolve_provider_config(&probe) {
+        Ok(config) => {
+            let readiness = config.readiness();
+            (readiness.ok, readiness.credential_source)
+        }
+        Err(_) => (false, None),
+    }
+}
+
+/// Picker routes for discovered models, as `<provider>/<wire id>`. A route is
+/// emitted only when that id resolves back to the discovering provider and
+/// base URL in `env`, so every listed route is selectable as listed.
+pub fn discovered_model_routes(
+    env: &ProviderEnv,
+    discovered: &[DiscoveredLocalModels],
+) -> Vec<ModelRoute> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut routes = Vec::new();
+    for source in discovered {
+        let mut ready = None;
+        for name in &source.models {
+            let id = format!("{}/{name}", source.provider);
+            if !local_model_name(name)
+                || !resolves_to(env, &id, &source.provider, &source.base_url, name)
+                || !seen.insert(id.clone())
+            {
+                continue;
+            }
+            let ready = *ready.get_or_insert_with(|| provider_ready(env, &id).0);
+            routes.push(ModelRoute {
+                id,
+                model_id: name.clone(),
+                provider: source.provider.clone(),
+                label: format!("{name} ({})", source.provider),
+                ready,
+                effort_levels: Vec::new(),
+                aliases: Vec::new(),
+            });
+        }
+    }
+    routes
+}
+
+/// Legacy bare-id picker entries for discovered models. The legacy list
+/// promises that selecting `id` yields `current.model == id` on the declared
+/// provider, so a discovered model is listed here only when its bare wire id
+/// resolves to the discovering provider and base URL in `env` (for example
+/// under an ambient `OCEAN_PROVIDER`). Every discovered model is still
+/// selectable through its qualified [`discovered_model_routes`] id.
+pub fn discovered_ready_models(
+    env: &ProviderEnv,
+    discovered: &[DiscoveredLocalModels],
+) -> Vec<ReadyModel> {
+    let mut seen: std::collections::BTreeSet<String> =
+        known_models().into_iter().map(|model| model.id).collect();
+    let mut models = Vec::new();
+    for source in discovered {
+        let mut ready = None;
+        for name in &source.models {
+            if !local_model_name(name)
+                || !resolves_to(env, name, &source.provider, &source.base_url, name)
+                || !seen.insert(name.clone())
+            {
+                continue;
+            }
+            let (ready, credential_source) = ready
+                .get_or_insert_with(|| provider_ready(env, name))
+                .clone();
+            models.push(ReadyModel {
+                model: KnownModel {
+                    id: name.clone(),
+                    provider: source.provider.clone(),
+                    label: format!("{name} ({})", source.provider),
+                },
+                ready,
+                effort_levels: Vec::new(),
+                credential_source,
+            });
+        }
+    }
+    models
+}
+
+/// Outcome of checking a requested selection against discovered local models.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LocalSelectionCheck {
+    /// The selection does not route to a discovered endpoint (a catalog model,
+    /// or one that fails to resolve); the normal resolver decides.
+    NotLocal,
+    /// Served by its endpoint, or named explicitly by the operator.
+    Served,
+    /// The endpoint answered and does not serve this model with tool calls.
+    NotServed {
+        provider: String,
+        base_url: String,
+        model: String,
+    },
+    /// The endpoint has no usable discovery result, so nothing can be said.
+    Unverified,
+}
+
+/// Check whether selecting `spec` would route to a discovered endpoint that
+/// does not actually serve it. `discovered` holds one entry per endpoint that
+/// has a usable model list; an endpoint that is down has none and yields
+/// [`LocalSelectionCheck::Unverified`].
+pub fn check_local_selection(
+    env: &ProviderEnv,
+    spec: &str,
+    discovered: &[DiscoveredLocalModels],
+) -> LocalSelectionCheck {
+    let mut probe = env.clone();
+    probe.vars.insert("OCEAN_MODEL".into(), spec.trim().into());
+    let Ok(selection) = resolve_model_selection(&probe) else {
+        return LocalSelectionCheck::NotLocal;
+    };
+    let provider = selection.provider.as_str();
+    let configured_var = match selection.provider {
+        ProviderId::OpenAiCompatible => None,
+        ProviderId::Ollama | ProviderId::LlamaCpp => LOCAL_PROVIDERS
+            .iter()
+            .find(|(id, _, _, _)| *id == selection.provider)
+            .map(|(_, models_var, _, _)| *models_var),
+        _ => return LocalSelectionCheck::NotLocal,
+    };
+    let Some(source) = discovered.iter().find(|source| {
+        source.provider == provider && same_base_url(&source.base_url, &selection.base_url)
+    }) else {
+        return LocalSelectionCheck::Unverified;
+    };
+    let operator_named = configured_var.is_some_and(|models_var| {
+        env.get(models_var)
+            .unwrap_or_default()
+            .split(',')
+            .any(|name| name.trim() == selection.model)
+    });
+    if operator_named || source.models.contains(&selection.model) {
+        LocalSelectionCheck::Served
+    } else {
+        LocalSelectionCheck::NotServed {
+            provider: provider.into(),
+            base_url: selection.base_url,
+            model: selection.model,
+        }
+    }
+}
+
+/// An env OpenAI key on a daemon whose `OCEAN_OPENAI_BASE_URL` names another
+/// host is that endpoint's key (often a placeholder such as `ollama`). It is
+/// not evidence of an api.openai.com credential, which is where `openai`
+/// routes are sent.
+fn openai_env_key_belongs_to_compatible_endpoint(
+    env: &ProviderEnv,
+    source: Option<&CredentialSource>,
+) -> bool {
+    matches!(source, Some(CredentialSource::Env { .. }))
+        && env
+            .get("OCEAN_OPENAI_BASE_URL")
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .is_some_and(|url| base_url_host(url) != base_url_host(OPENAI_BASE_URL))
+}
+
 /// Source label for a resolved credential. Never contains the credential value.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -994,7 +1242,16 @@ pub fn known_models_with_readiness(env: &ProviderEnv) -> Vec<ReadyModel> {
                     match resolve_provider_config(&probe) {
                         Ok(cfg) => {
                             let r = cfg.readiness();
-                            (r.ok, r.credential_source)
+                            if cfg.selection.provider == ProviderId::OpenAi
+                                && openai_env_key_belongs_to_compatible_endpoint(
+                                    env,
+                                    r.credential_source.as_ref(),
+                                )
+                            {
+                                (false, None)
+                            } else {
+                                (r.ok, r.credential_source)
+                            }
                         }
                         Err(_) => (false, None),
                     }
@@ -1121,8 +1378,9 @@ pub fn catalog_model(spec: &str) -> Option<KnownModel> {
         })
         .or_else(|| chatgpt_account_model(spec))
         .or_else(|| {
-            let (provider, name) =
-                qualified_local_model(spec).filter(|(_, name)| local_model_name(name))?;
+            let (provider, name) = qualified_local_model(spec)
+                .or_else(|| Some((OPENAI_COMPATIBLE, qualified_openai_compatible_model(spec)?)))
+                .filter(|(_, name)| local_model_name(name))?;
             Some(KnownModel {
                 id: name.into(),
                 provider: provider.into(),
@@ -1158,7 +1416,15 @@ pub fn model_routes_with_readiness(env: &ProviderEnv) -> Vec<ModelRoute> {
             route.ready = *readiness.entry(route.provider.clone()).or_insert_with(|| {
                 let mut probe = env.clone();
                 probe.vars.insert("OCEAN_MODEL".into(), route.id.clone());
-                resolve_provider_config(&probe).is_ok_and(|config| config.readiness().ok)
+                resolve_provider_config(&probe).is_ok_and(|config| {
+                    let readiness = config.readiness();
+                    readiness.ok
+                        && !(config.selection.provider == ProviderId::OpenAi
+                            && openai_env_key_belongs_to_compatible_endpoint(
+                                env,
+                                readiness.credential_source.as_ref(),
+                            ))
+                })
             });
             route
         })
@@ -1195,12 +1461,25 @@ pub fn resolve_model_selection(env: &ProviderEnv) -> Result<ModelSelection, Prov
     if let Some((provider, model)) = qualified_local_model(chosen) {
         return model_for_explicit_provider(provider, model, env);
     }
+    // A qualified OpenAI-compatible route names the endpoint's own model id.
+    // Like the local providers it is sent as written: these ids are
+    // case-sensitive and may contain underscores and slashes.
+    if let Some(model) = qualified_openai_compatible_model(chosen) {
+        if !local_model_name(model) {
+            return Err(ProviderConfigError::UnknownModel {
+                model: chosen.to_string(),
+            });
+        }
+        return model_for_explicit_provider(OPENAI_COMPATIBLE, model, env);
+    }
     // Model ids are case-sensitive in local backends and may contain slashes.
     if let Some(provider) = env.get("OCEAN_PROVIDER").map(str::trim) {
         if !chosen.contains('/')
-            && LOCAL_PROVIDERS
-                .iter()
-                .any(|(id, _, _, _)| id.as_str() == provider)
+            && local_model_name(chosen)
+            && (provider == OPENAI_COMPATIBLE
+                || LOCAL_PROVIDERS
+                    .iter()
+                    .any(|(id, _, _, _)| id.as_str() == provider))
         {
             return model_for_explicit_provider(provider, chosen, env);
         }
@@ -2890,6 +3169,280 @@ mod tests {
             .unwrap();
         assert!(sol.effort_levels.iter().any(|level| level == "max"));
         assert!(!sol.ready);
+    }
+
+    const STUDIO_OLLAMA: &str = "http://127.0.0.1:11434/v1";
+
+    fn studio_seat_env() -> ProviderEnv {
+        env(&[
+            ("OCEAN_PROVIDER", "openai-compatible"),
+            ("OCEAN_OPENAI_BASE_URL", STUDIO_OLLAMA),
+            ("OCEAN_OPENAI_API_KEY", "ollama"),
+        ])
+    }
+
+    fn discovered(provider: &str, base_url: &str, models: &[&str]) -> Vec<DiscoveredLocalModels> {
+        vec![DiscoveredLocalModels {
+            provider: provider.into(),
+            base_url: base_url.into(),
+            models: models.iter().map(|model| (*model).into()).collect(),
+        }]
+    }
+
+    #[test]
+    fn discovery_sources_follow_operator_configuration_only() {
+        assert!(
+            local_model_sources(&env(&[])).is_empty(),
+            "an unconfigured daemon must not probe default local addresses"
+        );
+
+        let sources = local_model_sources(&studio_seat_env());
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].provider, ProviderId::OpenAiCompatible);
+        assert_eq!(sources[0].base_url, STUDIO_OLLAMA);
+        assert_eq!(
+            sources[0].bearer.as_ref().map(SecretString::expose),
+            Some("ollama")
+        );
+        assert!(!format!("{sources:?}").contains("\"ollama\""));
+
+        let sources = local_model_sources(&env(&[
+            ("OCEAN_OLLAMA_MODELS", "mimo:9b"),
+            ("OCEAN_LLAMA_CPP_BASE_URL", "http://127.0.0.1:8103/v1"),
+        ]));
+        let listed: Vec<_> = sources
+            .iter()
+            .map(|source| (source.provider.as_str(), source.base_url.as_str()))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("ollama", "http://127.0.0.1:11434/v1"),
+                ("llama-cpp", "http://127.0.0.1:8103/v1"),
+            ]
+        );
+        assert!(sources.iter().all(|source| source.bearer.is_none()));
+    }
+
+    #[test]
+    fn discovered_routes_resolve_back_to_their_provider_and_base_url() {
+        let env = studio_seat_env();
+        let names = [
+            "qwen3.8:27b-nvfp4",
+            "seatC",
+            "hf.co/Org/Model_GGUF:Q4_K_M",
+            "has space",
+        ];
+        let found = discovered("openai-compatible", STUDIO_OLLAMA, &names);
+        let routes = discovered_model_routes(&env, &found);
+        let ids: Vec<_> = routes.iter().map(|route| route.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "openai-compatible/qwen3.8:27b-nvfp4",
+                "openai-compatible/seatC",
+                "openai-compatible/hf.co/Org/Model_GGUF:Q4_K_M",
+            ],
+            "an id the resolver cannot send verbatim is not listed"
+        );
+        for route in &routes {
+            assert!(route.ready);
+            assert_eq!(route.provider, "openai-compatible");
+            assert!(route.effort_levels.is_empty());
+            // The picker id, and the id a session pin stores, both round-trip.
+            let known = catalog_model(&route.id).expect("discovered route is a catalog id");
+            assert_eq!(known.id, route.model_id);
+            assert_eq!(known.provider, "openai-compatible");
+            let mut probe = env.clone();
+            probe.vars.insert("OCEAN_MODEL".into(), route.id.clone());
+            // A session pin is resolved without the daemon's ambient provider.
+            for ambient in [true, false] {
+                if !ambient {
+                    probe.vars.remove("OCEAN_PROVIDER");
+                }
+                let selection = resolve_model_selection(&probe).unwrap();
+                assert_eq!(selection.provider, ProviderId::OpenAiCompatible);
+                assert_eq!(selection.model, route.model_id);
+                assert_eq!(selection.base_url, STUDIO_OLLAMA);
+            }
+        }
+
+        // No credential: still listed, but not ready.
+        let mut keyless = env.clone();
+        keyless.vars.remove("OCEAN_OPENAI_API_KEY");
+        let routes = discovered_model_routes(&keyless, &found);
+        assert_eq!(routes.len(), 3);
+        assert!(routes.iter().all(|route| !route.ready));
+
+        // A list discovered at another base URL does not describe this daemon.
+        let elsewhere = discovered("openai-compatible", "http://127.0.0.1:1/v1", &names);
+        assert!(discovered_model_routes(&env, &elsewhere).is_empty());
+
+        // Keyless local providers are ready as discovered.
+        let local = env_local();
+        let routes = discovered_model_routes(
+            &local,
+            &discovered("llama-cpp", "http://127.0.0.1:8103/v1", &["seatC"]),
+        );
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].id, "llama-cpp/seatC");
+        assert!(routes[0].ready);
+    }
+
+    fn env_local() -> ProviderEnv {
+        env(&[
+            ("OCEAN_OLLAMA_MODELS", "pinned:1b"),
+            ("OCEAN_LLAMA_CPP_BASE_URL", "http://127.0.0.1:8103/v1"),
+        ])
+    }
+
+    #[test]
+    fn discovered_legacy_entries_keep_the_bare_id_contract() {
+        let found = discovered(
+            "openai-compatible",
+            STUDIO_OLLAMA,
+            &["qwen3.8:27b-nvfp4", "seatC", "hf.co/Org/Model:Q4", "gpt-4o"],
+        );
+        // Under the ambient provider pin a bare id is sent verbatim, so it is
+        // listed; a slashed id is reachable only through its qualified route,
+        // and a static catalog id is never shadowed.
+        let env = studio_seat_env();
+        let models = discovered_ready_models(&env, &found);
+        let ids: Vec<_> = models.iter().map(|model| model.model.id.as_str()).collect();
+        assert_eq!(ids, ["qwen3.8:27b-nvfp4", "seatC"]);
+        for model in &models {
+            assert!(model.ready);
+            assert_eq!(model.model.provider, "openai-compatible");
+            assert_eq!(
+                model.credential_source,
+                Some(CredentialSource::Env {
+                    name: "OCEAN_OPENAI_API_KEY".into()
+                })
+            );
+            let mut probe = env.clone();
+            probe
+                .vars
+                .insert("OCEAN_MODEL".into(), model.model.id.clone());
+            let selection = resolve_model_selection(&probe).unwrap();
+            assert_eq!(selection.model, model.model.id);
+            assert_eq!(selection.provider.as_str(), model.model.provider);
+        }
+
+        // Without the pin the catch-all normalizes ids, so only an id that
+        // survives normalization unchanged keeps the contract.
+        let mut unpinned = env.clone();
+        unpinned.vars.remove("OCEAN_PROVIDER");
+        let models = discovered_ready_models(&unpinned, &found);
+        let ids: Vec<_> = models.iter().map(|model| model.model.id.as_str()).collect();
+        assert_eq!(ids, ["qwen3.8:27b-nvfp4"]);
+    }
+
+    #[test]
+    fn local_selection_check_rejects_only_what_a_live_endpoint_does_not_serve() {
+        let env = studio_seat_env();
+        let found = discovered(
+            "openai-compatible",
+            STUDIO_OLLAMA,
+            &["qwen3.8:27b-nvfp4", "hf.co/Org/Model:Q4"],
+        );
+        for served in [
+            "qwen3.8:27b-nvfp4",
+            "openai-compatible/qwen3.8:27b-nvfp4",
+            "openai-compatible/hf.co/Org/Model:Q4",
+        ] {
+            assert_eq!(
+                check_local_selection(&env, served, &found),
+                LocalSelectionCheck::Served,
+                "{served}"
+            );
+        }
+        // An embedding model, a typo, and a hosted id the ambient pin would
+        // send to the local endpoint are all absent from the discovered list.
+        for missing in [
+            "embeddinggemma-2:740m",
+            "definitely-not-a-model",
+            "gpt-4o",
+            "openai-compatible/nope",
+        ] {
+            assert!(
+                matches!(
+                    check_local_selection(&env, missing, &found),
+                    LocalSelectionCheck::NotServed { .. }
+                ),
+                "{missing}"
+            );
+        }
+        // Explicit hosted routes and unresolvable ids are the resolver's call.
+        assert_eq!(
+            check_local_selection(&env, "openai/gpt-4o", &found),
+            LocalSelectionCheck::NotLocal
+        );
+        assert_eq!(
+            check_local_selection(&env, "bad provider/x y", &found),
+            LocalSelectionCheck::NotLocal
+        );
+        // An endpoint with no usable list cannot veto a selection.
+        assert_eq!(
+            check_local_selection(&env, "definitely-not-a-model", &[]),
+            LocalSelectionCheck::Unverified
+        );
+
+        // Operator-named local models stay selectable even when undiscovered.
+        let local = env_local();
+        let ollama = discovered("ollama", "http://127.0.0.1:11434/v1", &["mimo:9b"]);
+        assert_eq!(
+            check_local_selection(&local, "ollama/mimo:9b", &ollama),
+            LocalSelectionCheck::Served
+        );
+        assert_eq!(
+            check_local_selection(&local, "ollama/pinned:1b", &ollama),
+            LocalSelectionCheck::Served
+        );
+        assert!(matches!(
+            check_local_selection(&local, "ollama/other:1b", &ollama),
+            LocalSelectionCheck::NotServed { .. }
+        ));
+        assert_eq!(
+            check_local_selection(&local, "deepseek-v4-pro", &ollama),
+            LocalSelectionCheck::NotLocal
+        );
+    }
+
+    #[test]
+    fn openai_routes_are_not_ready_on_a_compatible_endpoint_placeholder_key() {
+        let ready_openai = |env: &ProviderEnv| {
+            let models = known_models_with_readiness(env);
+            let legacy = models
+                .iter()
+                .filter(|model| model.model.provider == "openai")
+                .map(|model| (model.ready, model.credential_source.is_some()))
+                .collect::<Vec<_>>();
+            let routes = model_routes_with_readiness(env)
+                .into_iter()
+                .filter(|route| route.provider == "openai")
+                .map(|route| route.ready)
+                .collect::<Vec<_>>();
+            assert!(!legacy.is_empty() && !routes.is_empty());
+            (legacy, routes)
+        };
+
+        // A real OpenAI key with no override: ready, as before.
+        let (legacy, routes) = ready_openai(&env(&[("OPENAI_API_KEY", "sk-real")]));
+        assert!(legacy.iter().all(|entry| *entry == (true, true)));
+        assert!(routes.iter().all(|ready| *ready));
+
+        // The Studio seat shape: the key is the local endpoint's placeholder.
+        let (legacy, routes) = ready_openai(&studio_seat_env());
+        assert!(legacy.iter().all(|entry| *entry == (false, false)));
+        assert!(routes.iter().all(|ready| !*ready));
+
+        // An override that still names api.openai.com changes nothing.
+        let (legacy, routes) = ready_openai(&env(&[
+            ("OPENAI_API_KEY", "sk-real"),
+            ("OCEAN_OPENAI_BASE_URL", "https://api.openai.com/v1"),
+        ]));
+        assert!(legacy.iter().all(|entry| *entry == (true, true)));
+        assert!(routes.iter().all(|ready| *ready));
     }
 
     #[test]

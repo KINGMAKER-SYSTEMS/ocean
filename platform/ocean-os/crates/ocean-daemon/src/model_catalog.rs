@@ -31,6 +31,17 @@ pub(super) async fn models_list(State(state): State<AppState>) -> Json<serde_jso
     })
     .await
     .unwrap_or_default();
+    // Models the configured local / OpenAI-compatible endpoints actually
+    // serve. Additive and best-effort: an endpoint that is down or slow adds
+    // nothing, and the static catalog above is returned as it always was.
+    let (local_models, local_routes) = discovered_local_entries().await;
+    models.extend(local_models);
+    for route in local_routes {
+        // An operator-named local route is already listed under the same id.
+        if !routes.iter().any(|listed| listed.id == route.id) {
+            routes.push(route);
+        }
+    }
     if let Some(auth_file) = auth_file {
         // The normal turn path refreshes OAuth before resolving a credential.
         // Model discovery has its own request path, so refresh this block first
@@ -74,6 +85,76 @@ pub(super) async fn models_list(State(state): State<AppState>) -> Json<serde_jso
         "models": models,
         "routes": routes,
     }))
+}
+
+/// The process environment and the tool-capable models its configured local
+/// endpoints currently serve. Blocking reads ride `spawn_blocking`.
+async fn discovered_local_models() -> (
+    ocean_providers::ProviderEnv,
+    Vec<ocean_providers::DiscoveredLocalModels>,
+) {
+    let (env, sources) = tokio::task::spawn_blocking(|| {
+        let env = ocean_providers::ProviderEnv::from_process();
+        let sources = ocean_providers::local_model_sources(&env);
+        (env, sources)
+    })
+    .await
+    .unwrap_or_default();
+    if sources.is_empty() {
+        return (env, Vec::new());
+    }
+    let discovered = super::local_model_discovery::shared()
+        .discovered(&sources)
+        .await;
+    (env, discovered)
+}
+
+/// Picker entries (legacy bare ids, qualified routes) for discovered models.
+async fn discovered_local_entries() -> (
+    Vec<ocean_providers::ReadyModel>,
+    Vec<ocean_providers::ModelRoute>,
+) {
+    let (env, discovered) = discovered_local_models().await;
+    if discovered.is_empty() {
+        return Default::default();
+    }
+    tokio::task::spawn_blocking(move || {
+        (
+            ocean_providers::discovered_ready_models(&env, &discovered),
+            ocean_providers::discovered_model_routes(&env, &discovered),
+        )
+    })
+    .await
+    .unwrap_or_default()
+}
+
+/// Qualified ids of the discovered models, for "valid ids" error listings.
+pub(super) async fn discovered_local_route_ids() -> Vec<String> {
+    discovered_local_entries()
+        .await
+        .1
+        .into_iter()
+        .map(|route| route.id)
+        .collect()
+}
+
+/// Why `spec` cannot be selected, when it routes to a configured local or
+/// OpenAI-compatible endpoint that answered and does not serve it as a
+/// tool-capable model. `None` for every other selection, including one whose
+/// endpoint has no usable listing: discovery can veto, never invent, a route.
+pub(super) async fn unserved_local_model(spec: &str) -> Option<String> {
+    let (env, discovered) = discovered_local_models().await;
+    match ocean_providers::check_local_selection(&env, spec, &discovered) {
+        ocean_providers::LocalSelectionCheck::NotServed {
+            provider,
+            base_url,
+            model,
+        } => Some(format!(
+            "model `{model}` is not a tool-capable model served by the {provider} endpoint at \
+             {base_url}; GET /v1/models lists the models it serves"
+        )),
+        _ => None,
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -206,6 +287,11 @@ pub(super) async fn model_set(
     State(state): State<AppState>,
     Json(req): Json<ModelSetRequest>,
 ) -> Json<serde_json::Value> {
+    // Without this an OpenAI-compatible daemon accepts any string at all,
+    // because the endpoint is the resolver's catch-all for unknown ids.
+    if let Some(error) = unserved_local_model(&req.model).await {
+        return Json(json!({"ok": false, "error": error}));
+    }
     match state.runtime.set_model(&req.model) {
         Ok((provider, model)) => {
             tracing::info!(provider, model, "model swapped");

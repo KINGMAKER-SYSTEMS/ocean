@@ -66,6 +66,16 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   selections. Session creation/config accept both legacy ids and qualified
   catalog routes, persist the wire model/provider pair, and reconstruct the
   qualified route for resumed turns through `SessionModelConfig::model_spec`.
+- `local_model_discovery.rs` adds the models a configured local or
+  OpenAI-compatible endpoint serves (`ocean_providers::local_model_sources`)
+  to `/v1/models` as `<provider>/<wire id>` routes, plus legacy entries only
+  for bare ids that resolve back to that endpoint. Ollama backends are
+  narrowed to models whose `/api/show` capabilities include `tools`; a
+  backend with no capability endpoint lists what it serves. Discovery is
+  cached, time-bounded and advisory: a dead endpoint adds nothing and never
+  fails the listing. `POST /v1/model` and session-config `PATCH` refuse a
+  selection whose endpoint answered and does not serve it; with no usable
+  listing they resolve as before.
 - ChatGPT-plan choices are account-specific: query public `/v1/models` with
   the `openai-chatgpt` bearer token, preserve the response's listed order and
   `display_name`, and expose only `models[]` entries with

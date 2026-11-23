@@ -129,6 +129,8 @@ mod history_search;
 mod host_guard;
 /// Rooms S0 — `GET /v1/identity`: who this daemon says its human is.
 mod identity;
+/// Model catalog, current-selection, and persisted-selection HTTP adapters.
+mod local_model_discovery;
 /// Real Longhouse convene: ready-model admission, awaited council orchestration,
 /// registry-first projection, durable title grant/bind, and raw-token delivery.
 mod longhouse_convene;
@@ -142,7 +144,6 @@ mod longhouse_topics;
 mod longhouse_turn_preparation;
 /// In-process turn counters, Prometheus rendering, and in-flight RAII guard.
 mod metrics;
-/// Model catalog, current-selection, and persisted-selection HTTP adapters.
 mod model_catalog;
 /// Immutable startup model-role loading and pure turn/advisor role resolution.
 mod model_roles;
@@ -8321,6 +8322,7 @@ async fn agent_session_config_patch(
                     .into_iter()
                     .map(|model| model.id),
             )
+            .chain(model_catalog::discovered_local_route_ids().await)
             .collect();
         return (
             StatusCode::BAD_REQUEST,
@@ -8334,6 +8336,14 @@ async fn agent_session_config_patch(
             })),
         );
     };
+    // A qualified local route is a catalog id by shape alone; refuse one its
+    // endpoint reports it does not serve, the same as `POST /v1/model`.
+    if let Some(error) = model_catalog::unserved_local_model(requested).await {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": error })),
+        );
+    }
     let session_lease = match state.runtime.try_session_operation(core_sid(session_id)) {
         Ok(lease) => lease,
         Err(_) => {
@@ -14934,6 +14944,9 @@ mod tests {
 
     #[tokio::test]
     async fn model_catalog_set_reports_success_and_updates_current_selection() {
+        // Model resolution reads the process env; serialize with tests that
+        // point it at a local endpoint.
+        let _env_guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let state = permission_test_state();
 
         let Json(body) = model_set(
@@ -14956,6 +14969,9 @@ mod tests {
 
     #[tokio::test]
     async fn model_catalog_set_rejects_invalid_selection_without_mutation() {
+        // Model resolution reads the process env; serialize with tests that
+        // point it at a local endpoint.
+        let _env_guard = AUTO_CONVENE_ENV_LOCK.lock().await;
         let state = permission_test_state();
         let before = state.runtime.current_model();
 
@@ -14979,6 +14995,282 @@ mod tests {
             "rejection must preserve the resolver error: {body:?}"
         );
         assert_eq!(state.runtime.current_model(), before);
+    }
+
+    // --- Local model discovery in the picker ---------------------------------
+
+    const LOCAL_ENDPOINT_ENV: [&str; 5] = [
+        "OCEAN_MODEL",
+        "OCEAN_PROVIDER",
+        "OCEAN_OPENAI_BASE_URL",
+        "OCEAN_OPENAI_API_KEY",
+        "OPENAI_API_KEY",
+    ];
+
+    /// Point this process at an OpenAI-compatible endpoint the way a local
+    /// seat is started, minus the ambient provider pin (which would reroute
+    /// unrelated tests' bare ids while they run in parallel).
+    fn use_local_endpoint(base_url: &str) {
+        std::env::remove_var("OCEAN_PROVIDER");
+        std::env::remove_var("OPENAI_API_KEY");
+        std::env::set_var("OCEAN_OPENAI_BASE_URL", base_url);
+        std::env::set_var("OCEAN_OPENAI_API_KEY", "stub-endpoint-key");
+    }
+
+    #[tokio::test]
+    async fn model_catalog_lists_discovered_tool_models_and_round_trips_selection() {
+        use local_model_discovery::tests::{stub_endpoint, OLLAMA_CAPABILITIES, OLLAMA_MODELS};
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _env = TestEnvRestore::capture(&LOCAL_ENDPOINT_ENV);
+        let state = permission_test_state();
+        let stub = stub_endpoint(&OLLAMA_MODELS, Some(&OLLAMA_CAPABILITIES)).await;
+        use_local_endpoint(&stub.base_url);
+
+        let Json(body) = models_list(State(state.clone())).await;
+
+        // The static catalog is still there, in order, ahead of the additions.
+        let expected_static = tokio::task::spawn_blocking(|| {
+            let env = ocean_agent::ProviderEnv::from_process();
+            serde_json::to_value(ocean_agent::known_models_with_readiness(&env)).unwrap()
+        })
+        .await
+        .unwrap();
+        let expected_static = expected_static.as_array().unwrap();
+        let models = body["models"].as_array().expect("models array");
+        assert_eq!(&models[..expected_static.len()], &expected_static[..]);
+        assert_eq!(
+            body.as_object().unwrap().len(),
+            4,
+            "response keys unchanged"
+        );
+
+        // Tool-capable models are listed; the embedder and the model without
+        // tools are not. A bare id that the resolver would rewrite (the
+        // slashed one) could only ever be a route, never a legacy entry.
+        let added: Vec<_> = models[expected_static.len()..].iter().collect();
+        let added_ids: Vec<_> = added.iter().map(|m| m["id"].as_str().unwrap()).collect();
+        assert_eq!(added_ids, ["qwen3.8:27b-nvfp4", "mimo-v2.6:9b-nvfp4"]);
+        for entry in &added {
+            assert_eq!(entry["provider"], "openai-compatible");
+            assert_eq!(entry["ready"], true);
+            assert_eq!(entry["effort_levels"], json!([]));
+            assert_eq!(entry.as_object().unwrap().len(), 6, "same entry shape");
+        }
+        let routes = body["routes"].as_array().expect("routes array");
+        let local_routes: Vec<_> = routes
+            .iter()
+            .filter(|route| route["provider"] == "openai-compatible")
+            .collect();
+        let local_route_ids: Vec<_> = local_routes
+            .iter()
+            .map(|route| route["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            local_route_ids,
+            [
+                "openai-compatible/qwen3.8:27b-nvfp4",
+                "openai-compatible/mimo-v2.6:9b-nvfp4"
+            ]
+        );
+        assert!(local_routes.iter().all(|route| route["ready"] == true));
+        let listed = body.to_string();
+        assert!(!listed.contains("embeddinggemma"));
+        assert!(!listed.contains("hf.co/Org"));
+        assert!(!listed.contains("stub-endpoint-key"));
+
+        // The endpoint's placeholder key does not make api.openai.com ready.
+        for entry in models.iter().filter(|m| m["provider"] == "openai") {
+            assert_eq!(entry["ready"], false, "{entry}");
+        }
+        for route in routes.iter().filter(|r| r["provider"] == "openai") {
+            assert_eq!(route["ready"], false, "{route}");
+        }
+
+        // A discovered id round-trips through set and get, by route and bare.
+        for (spec, model) in [
+            ("openai-compatible/mimo-v2.6:9b-nvfp4", "mimo-v2.6:9b-nvfp4"),
+            ("qwen3.8:27b-nvfp4", "qwen3.8:27b-nvfp4"),
+        ] {
+            let Json(set) = model_set(
+                State(state.clone()),
+                Json(ModelSetRequest { model: spec.into() }),
+            )
+            .await;
+            let selected = json!({"ok": true, "provider": "openai-compatible", "model": model});
+            assert_eq!(set, selected);
+            let Json(got) = model_get(State(state.clone())).await;
+            assert_eq!(got, selected);
+            let Json(body) = models_list(State(state.clone())).await;
+            assert_eq!(
+                body["current"]["route"],
+                format!("openai-compatible/{model}")
+            );
+        }
+
+        // An id that is neither in the catalog nor served is refused, and so
+        // are the two served models that cannot call tools.
+        let before = state.runtime.current_model();
+        for refused in [
+            "definitely-not-a-model",
+            "openai-compatible/definitely-not-a-model",
+            "embeddinggemma-2:740m",
+            "openai-compatible/hf.co/Org/Model_GGUF:Q4_K_M",
+        ] {
+            let Json(body) = model_set(
+                State(state.clone()),
+                Json(ModelSetRequest {
+                    model: refused.into(),
+                }),
+            )
+            .await;
+            assert_eq!(body["ok"], false, "{refused}: {body}");
+            assert_eq!(body.as_object().unwrap().len(), 2);
+            assert!(
+                body["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("is not a tool-capable model served by"),
+                "{body}"
+            );
+            assert_eq!(state.runtime.current_model(), before);
+        }
+        // A catalog id is not the endpoint's business.
+        let Json(body) = model_set(
+            State(state.clone()),
+            Json(ModelSetRequest {
+                model: "fake-tool".into(),
+            }),
+        )
+        .await;
+        assert_eq!(
+            body,
+            json!({"ok": true, "provider": "fake", "model": "fake-tool"})
+        );
+    }
+
+    #[tokio::test]
+    async fn model_catalog_keeps_the_static_list_when_the_local_endpoint_is_down() {
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _env = TestEnvRestore::capture(&LOCAL_ENDPOINT_ENV);
+        let state = permission_test_state();
+        let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_url = format!("http://{}/v1", closed.local_addr().unwrap());
+        drop(closed);
+        use_local_endpoint(&dead_url);
+
+        let started = std::time::Instant::now();
+        let Json(body) = models_list(State(state.clone())).await;
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "a dead endpoint must not hold the picker"
+        );
+
+        let expected_static = tokio::task::spawn_blocking(|| {
+            let env = ocean_agent::ProviderEnv::from_process();
+            (
+                serde_json::to_value(ocean_agent::known_models_with_readiness(&env)).unwrap(),
+                serde_json::to_value(ocean_providers::model_routes_with_readiness(&env)).unwrap(),
+            )
+        })
+        .await
+        .unwrap();
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["models"], expected_static.0);
+        assert_eq!(body["routes"], expected_static.1);
+
+        // With no listing to check against, selection behaves as it did
+        // before discovery existed: the endpoint is the catch-all.
+        let Json(body) = model_set(
+            State(state.clone()),
+            Json(ModelSetRequest {
+                model: "openai-compatible/whatever-is-loaded".into(),
+            }),
+        )
+        .await;
+        assert_eq!(
+            body,
+            json!({"ok": true, "provider": "openai-compatible", "model": "whatever-is-loaded"})
+        );
+    }
+
+    #[tokio::test]
+    async fn session_config_http_pins_a_discovered_model_and_refuses_an_unserved_one() {
+        use local_model_discovery::tests::{stub_endpoint, OLLAMA_CAPABILITIES, OLLAMA_MODELS};
+        let _guard = AUTO_CONVENE_ENV_LOCK.lock().await;
+        let _env = TestEnvRestore::capture(&[
+            "OCEAN_CONFIG_DIR",
+            "OCEAN_MODEL",
+            "OCEAN_YOLO",
+            "OCEAN_LONGHOUSE_PREPARE",
+            "OCEAN_PROVIDER",
+            "OCEAN_OPENAI_BASE_URL",
+            "OCEAN_OPENAI_API_KEY",
+            "OPENAI_API_KEY",
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let state = fake_convene_state(&tmp);
+        let stub = stub_endpoint(&OLLAMA_MODELS, Some(&OLLAMA_CAPABILITIES)).await;
+        use_local_endpoint(&stub.base_url);
+        let (session_id, _, _) = state
+            .runtime
+            .create_session(tmp.path().to_str().unwrap(), None)
+            .unwrap();
+        let uri = format!("/v1/agent/sessions/{}/config", sdk_sid(session_id));
+        let app = app_router(BrowserOrigins::default(), AllowedHosts::default())
+            .with_state(state.clone());
+
+        for refused in [
+            "openai-compatible/embeddinggemma-2:740m",
+            "openai-compatible/definitely-not-a-model",
+        ] {
+            let (status, raw) = session_config_http_request(
+                app.clone(),
+                Method::PATCH,
+                uri.clone(),
+                Some(json!({ "model": refused })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}: {raw}");
+            let rejected = session_config_response_json(&raw);
+            assert_eq!(rejected["ok"], false);
+            assert!(rejected["error"]
+                .as_str()
+                .unwrap()
+                .contains("is not a tool-capable model served by"));
+        }
+        let (status, raw) = session_config_http_request(
+            app.clone(),
+            Method::PATCH,
+            uri.clone(),
+            Some(json!({ "model": "not-a-real-model" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let valid = session_config_response_json(&raw)["valid_models"].clone();
+        assert!(valid
+            .as_array()
+            .unwrap()
+            .contains(&json!("openai-compatible/qwen3.8:27b-nvfp4")));
+        let unchanged = state.runtime.session_detail(session_id).unwrap();
+        assert_eq!(unchanged.model, "fake-ok");
+
+        let (status, raw) = session_config_http_request(
+            app,
+            Method::PATCH,
+            uri,
+            Some(json!({ "model": "openai-compatible/qwen3.8:27b-nvfp4" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        let pinned = state.runtime.session_detail(session_id).unwrap();
+        assert_eq!(pinned.model, "qwen3.8:27b-nvfp4");
+        assert_eq!(pinned.provider, "openai-compatible");
+        // The stored pin resolves back to the same qualified route.
+        assert_eq!(
+            ocean_providers::catalog_model("openai-compatible/qwen3.8:27b-nvfp4")
+                .map(|known| (known.id, known.provider)),
+            Some((pinned.model.clone(), pinned.provider.clone()))
+        );
     }
 
     // --- OCEAN-304: turn-intake backpressure ---------------------------------
@@ -17108,8 +17400,8 @@ mod tests {
         ]);
         let tmp = tempfile::tempdir().unwrap();
         let state = isolated_room_fixture_state(&tmp);
-        let app =
-            app_router(BrowserOrigins::default(), AllowedHosts::default()).with_state(state.clone());
+        let app = app_router(BrowserOrigins::default(), AllowedHosts::default())
+            .with_state(state.clone());
         let bucket = tmp.path().join("sessions").join("legacy");
         std::fs::create_dir_all(&bucket).unwrap();
 
@@ -17197,8 +17489,8 @@ mod tests {
         let mut control = status(request_id, RequestState::Running);
         control.status.session_id = Some(core_sid(id));
         state.requests.write().await.insert(request_id, control);
-        let app =
-            app_router(BrowserOrigins::default(), AllowedHosts::default()).with_state(state.clone());
+        let app = app_router(BrowserOrigins::default(), AllowedHosts::default())
+            .with_state(state.clone());
 
         for suffix in ["", "?workspace=/fixture/project"] {
             let (status, raw) = session_config_http_request(

@@ -2911,3 +2911,17 @@ area: [backend]
 Completed the fork's DeepSeek Flash route migration. Forward retired aliases
 and qualified session pins to deepseek-flash, and show the current Flash route
 in the picker. Locked ocean-providers tests passed.
+
+_________________________________________________________________________________
+time: [13:14] [23-11-26]
+agent: [Claude Code]
+worktree: [jake/local-model-discovery]
+type: [feature-request]
+area: [backend]
+
+List the models a configured local or OpenAI-compatible endpoint serves in the
+daemon model picker. Ollama backends are narrowed to tool-capable models;
+discovery is cached and time-bounded, and a dead endpoint leaves the bundled
+catalog intact. Model selection refuses an id its endpoint does not serve, and
+sends OpenAI-compatible ids verbatim. Validated with ocean-providers and
+ocean-daemon tests against a stub endpoint and a live daemon on Ollama.
