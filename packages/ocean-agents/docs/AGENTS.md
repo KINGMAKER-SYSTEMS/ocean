@@ -32,3 +32,7 @@ and daemon interaction guidance aligned with executable manifests and profiles.
 ## Child devlog index
 
 - None.
+
+## PR completion note
+
+- Daemon interaction guidance follows `surface_flag`, SDK request types and the courier router: `surface-tauri` maps to `TAURI` (seed fallback without a packaged profile), and couriers send `prompt` with stable session fields.
