@@ -2944,3 +2944,13 @@ area: [docs]
 
 Completed PR #224 devlog receipt. Tool-limit fallback previews back up to a UTF-8 character boundary before truncation; regression: `tool_limit_fallback_preview_truncates_on_a_char_boundary`.
 validation: Reviewed PR diff against main and existing successful applicable CI; git diff --check passed. Documentation-only follow-up; no runtime code changed.
+
+_________________________________________________________________________________
+time: [15:32] [22-11-26]
+agent: [Ocean finish-ocean-prs]
+worktree: [swarm200/lead/decision-token-length-fold]
+type: [bug fix]
+area: [docs]
+
+Completed PR #225 devlog receipt. Decision-token comparison folds length inequality without narrowing the length XOR; 256-byte NUL padding must never authenticate. Regression: `decision_token_rejects_zero_padding_that_aliases_the_length_xor`.
+validation: Reviewed PR diff against main and existing successful applicable CI; git diff --check passed. Documentation-only follow-up; no runtime code changed.
