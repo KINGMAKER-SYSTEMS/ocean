@@ -881,6 +881,7 @@ pub fn known_models() -> Vec<KnownModel> {
         m("kimi-k3", "kimi", "Kimi K3"),
         m("kimi-k2.6", "kimi", "Kimi K2.6"),
         m("kimi-k2", "kimi", "Kimi K2"),
+        m("glm-5.4", "glm", "GLM 5.4"),
         m("glm-5.3-flash", "glm", "GLM 5.3 Flash"),
         m("glm-5.3", "glm", "GLM 5.3"),
         m("glm-5.2", "glm", "GLM 5.2"),
@@ -1617,6 +1618,15 @@ pub fn resolve_model_selection(env: &ProviderEnv) -> Result<ModelSelection, Prov
             200_000,
             8_192,
         )),
+        // GLM 5.4: newest GLM (verified live 2026-11-26: z.ai answers model
+        // "glm-5.4"; there is no 5.4 flash or air tier). Same base and limits as 5.3.
+        "glm-5.4" | "glm-5-4" => Ok(model_selection(
+            ProviderId::Glm,
+            "glm-5.4",
+            glm_base_url(env),
+            1_000_000,
+            128_000,
+        )),
         "glm-5.3" | "glm-5-3" => Ok(model_selection(
             ProviderId::Glm,
             "glm-5.3",
@@ -1920,7 +1930,7 @@ fn model_for_explicit_provider(
         }
         "glm" | "zhipu" | "zhipuai" => {
             let (context_window, max_output_tokens) = match model {
-                "glm-5.3" | "glm-5.3-flash" => (1_000_000, 128_000),
+                "glm-5.4" | "glm-5.3" | "glm-5.3-flash" => (1_000_000, 128_000),
                 _ => (200_000, 8_192),
             };
             Ok(model_selection(
@@ -2869,7 +2879,13 @@ mod tests {
             );
         }
         // GLM offers exactly the three settings that behave differently.
-        for id in ["glm-5.3", "glm-5.3-flash", "glm-4.6", "glm-4.5-flash"] {
+        for id in [
+            "glm-5.4",
+            "glm-5.3",
+            "glm-5.3-flash",
+            "glm-4.6",
+            "glm-4.5-flash",
+        ] {
             assert_eq!(model_effort_levels(id), ["off", "medium", "high"], "{id}");
         }
         // Routes whose encoder sends no effort parameter offer no control.
@@ -3075,6 +3091,7 @@ mod tests {
             "kimi-k3",
             "kimi-k2.6",
             "kimi-k2",
+            "glm-5.4",
             "glm-5.3-flash",
             "glm-5.3",
             "glm-5.2",
@@ -3376,6 +3393,7 @@ mod tests {
         for (id, hyphen, context, output) in [
             ("glm-4.7", "glm-4-7", 200_000, 8_192),
             ("glm-5.2", "glm-5-2", 200_000, 8_192),
+            ("glm-5.4", "glm-5-4", 1_000_000, 128_000),
             ("glm-5.3", "glm-5-3", 1_000_000, 128_000),
             ("glm-5.3-flash", "glm-5-3-flash", 1_000_000, 128_000),
         ] {
@@ -3395,6 +3413,7 @@ mod tests {
             known_models().into_iter().map(|m| m.id).collect();
         assert!(listed.contains("glm-4.7"), "glm-4.7 must be in the picker");
         assert!(listed.contains("glm-5.2"), "glm-5.2 must be in the picker");
+        assert!(listed.contains("glm-5.4"), "glm-5.4 must be in the picker");
         assert!(listed.contains("glm-5.3"), "glm-5.3 must be in the picker");
         assert!(
             listed.contains("glm-5.3-flash"),
