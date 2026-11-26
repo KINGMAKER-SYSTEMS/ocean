@@ -2879,7 +2879,13 @@ mod tests {
             );
         }
         // GLM offers exactly the three settings that behave differently.
-        for id in ["glm-5.4", "glm-5.3", "glm-5.3-flash", "glm-4.6", "glm-4.5-flash"] {
+        for id in [
+            "glm-5.4",
+            "glm-5.3",
+            "glm-5.3-flash",
+            "glm-4.6",
+            "glm-4.5-flash",
+        ] {
             assert_eq!(model_effort_levels(id), ["off", "medium", "high"], "{id}");
         }
         // Routes whose encoder sends no effort parameter offer no control.
